@@ -56,6 +56,7 @@ mod plugin_cmd;
 mod remote_control_cmd;
 #[cfg(target_os = "windows")]
 mod sandbox_setup;
+mod state_cmd;
 mod state_db_recovery;
 #[cfg(not(windows))]
 mod wsl_paths;
@@ -64,6 +65,7 @@ use crate::mcp_cmd::McpCli;
 use crate::plugin_cmd::PluginCli;
 use crate::plugin_cmd::PluginSubcommand;
 use crate::remote_control_cmd::RemoteControlCommand;
+use crate::state_cmd::StateCommand;
 use doctor::DoctorCommand;
 use state_db_recovery as local_state_db;
 
@@ -162,6 +164,9 @@ enum Subcommand {
 
     /// Diagnose local Codex installation, config, auth, and runtime health.
     Doctor(DoctorCommand),
+
+    /// Manage the Runtime State Store.
+    State(StateCommand),
 
     /// Run commands within a Codex-provided sandbox.
     Sandbox(HostSandboxArgs),
@@ -1431,6 +1436,14 @@ async fn cli_main(
             )
             .await?;
         }
+        Some(Subcommand::State(state_command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "state",
+            )?;
+            state_cmd::run(state_command).await?;
+        }
         Some(Subcommand::Cloud(mut cloud_cli)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -2139,6 +2152,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Logout(_)) => Some("logout"),
         Some(Subcommand::Completion(_)) => Some("completion"),
         Some(Subcommand::Update) => Some("update"),
+        Some(Subcommand::State(_)) => Some("state"),
         Some(Subcommand::Cloud(_)) => Some("cloud"),
         Some(Subcommand::Sandbox(_)) => Some("sandbox"),
         Some(Subcommand::Debug(_)) => Some("debug"),
