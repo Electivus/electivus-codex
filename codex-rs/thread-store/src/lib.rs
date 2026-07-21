@@ -18,6 +18,9 @@ mod postgres;
 #[cfg(test)]
 #[path = "postgres_contract_tests.rs"]
 mod postgres_contract_tests;
+#[cfg(test)]
+#[path = "postgres_item_projection_contract_tests.rs"]
+mod postgres_item_projection_contract_tests;
 mod store;
 mod thread_metadata_sync;
 mod types;

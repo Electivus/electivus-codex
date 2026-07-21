@@ -17,15 +17,18 @@ use config::connection_failed;
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
 const MINIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
-const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 4;
+const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 5;
 const BASELINE_SCHEMA_VERSION: i64 = 1;
 const LOGS_SCHEMA_VERSION: i64 = 2;
 const REMOTE_CONTROL_SCHEMA_VERSION: i64 = 3;
 const THREADS_SCHEMA_VERSION: i64 = 4;
+const THREAD_ITEM_PROJECTIONS_SCHEMA_VERSION: i64 = 5;
 const LOGS_MIGRATION_SQL: &str = include_str!("../postgres_migrations/0002_logs.sql");
 const REMOTE_CONTROL_MIGRATION_SQL: &str =
     include_str!("../postgres_migrations/0003_remote_control_enrollments.sql");
 const THREADS_MIGRATION_SQL: &str = include_str!("../postgres_migrations/0004_threads.sql");
+const THREAD_ITEM_PROJECTIONS_MIGRATION_SQL: &str =
+    include_str!("../postgres_migrations/0005_thread_item_projections.sql");
 
 /// Explicit operation to perform on a PostgreSQL Runtime State Namespace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -202,16 +205,48 @@ async fn migrate_namespace(
         }
     };
     if current_version < LOGS_SCHEMA_VERSION {
-        apply_logs_migration(&mut transaction, schema).await?;
+        apply_namespace_migration(
+            &mut transaction,
+            schema,
+            LOGS_MIGRATION_SQL,
+            LOGS_SCHEMA_VERSION,
+            "create logs storage",
+        )
+        .await?;
         current_version = LOGS_SCHEMA_VERSION;
     }
     if current_version < REMOTE_CONTROL_SCHEMA_VERSION {
-        apply_remote_control_migration(&mut transaction, schema).await?;
+        apply_namespace_migration(
+            &mut transaction,
+            schema,
+            REMOTE_CONTROL_MIGRATION_SQL,
+            REMOTE_CONTROL_SCHEMA_VERSION,
+            "create remote control storage",
+        )
+        .await?;
         current_version = REMOTE_CONTROL_SCHEMA_VERSION;
     }
     if current_version < THREADS_SCHEMA_VERSION {
-        apply_threads_migration(&mut transaction, schema).await?;
+        apply_namespace_migration(
+            &mut transaction,
+            schema,
+            THREADS_MIGRATION_SQL,
+            THREADS_SCHEMA_VERSION,
+            "create thread storage",
+        )
+        .await?;
         current_version = THREADS_SCHEMA_VERSION;
+    }
+    if current_version < THREAD_ITEM_PROJECTIONS_SCHEMA_VERSION {
+        apply_namespace_migration(
+            &mut transaction,
+            schema,
+            THREAD_ITEM_PROJECTIONS_MIGRATION_SQL,
+            THREAD_ITEM_PROJECTIONS_SCHEMA_VERSION,
+            "create thread item projections",
+        )
+        .await?;
+        current_version = THREAD_ITEM_PROJECTIONS_SCHEMA_VERSION;
     }
     transaction
         .commit()
@@ -302,52 +337,23 @@ async fn create_migration_table(
     Ok(())
 }
 
-async fn apply_logs_migration(
+async fn apply_namespace_migration(
     transaction: &mut Transaction<'_, Postgres>,
     schema: &str,
+    sql: &'static str,
+    version: i64,
+    operation: &'static str,
 ) -> anyhow::Result<()> {
     sqlx::query("SELECT set_config('search_path', $1, true)")
         .bind(quote_identifier(schema))
         .execute(transaction.as_mut())
         .await
         .map_err(|error| map_sql_error(schema, "select migration schema", error))?;
-    sqlx::raw_sql(LOGS_MIGRATION_SQL)
+    sqlx::raw_sql(sql)
         .execute(transaction.as_mut())
         .await
-        .map_err(|error| map_sql_error(schema, "create logs storage", error))?;
-    record_migration_version(transaction, schema, LOGS_SCHEMA_VERSION).await
-}
-
-async fn apply_remote_control_migration(
-    transaction: &mut Transaction<'_, Postgres>,
-    schema: &str,
-) -> anyhow::Result<()> {
-    sqlx::query("SELECT set_config('search_path', $1, true)")
-        .bind(quote_identifier(schema))
-        .execute(transaction.as_mut())
-        .await
-        .map_err(|error| map_sql_error(schema, "select migration schema", error))?;
-    sqlx::raw_sql(REMOTE_CONTROL_MIGRATION_SQL)
-        .execute(transaction.as_mut())
-        .await
-        .map_err(|error| map_sql_error(schema, "create remote control storage", error))?;
-    record_migration_version(transaction, schema, REMOTE_CONTROL_SCHEMA_VERSION).await
-}
-
-async fn apply_threads_migration(
-    transaction: &mut Transaction<'_, Postgres>,
-    schema: &str,
-) -> anyhow::Result<()> {
-    sqlx::query("SELECT set_config('search_path', $1, true)")
-        .bind(quote_identifier(schema))
-        .execute(transaction.as_mut())
-        .await
-        .map_err(|error| map_sql_error(schema, "select migration schema", error))?;
-    sqlx::raw_sql(THREADS_MIGRATION_SQL)
-        .execute(transaction.as_mut())
-        .await
-        .map_err(|error| map_sql_error(schema, "create thread storage", error))?;
-    record_migration_version(transaction, schema, THREADS_SCHEMA_VERSION).await
+        .map_err(|error| map_sql_error(schema, operation, error))?;
+    record_migration_version(transaction, schema, version).await
 }
 
 async fn record_migration_version(

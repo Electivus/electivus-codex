@@ -22,7 +22,7 @@ pub(super) async fn resume_thread(
         .await
         .map_err(|error| database_error("resume thread", error))?;
     let row = sqlx::query(AssertSqlSafe(format!(
-        "SELECT projection, stream_version, fencing_token, \
+        "SELECT projection, stream_version, fencing_token, history_projection_start_ordinal, \
          writer_lease_expires_at > CURRENT_TIMESTAMP AS lease_active \
          FROM {} WHERE thread_id = $1 FOR UPDATE",
         store.tables.threads
@@ -92,6 +92,9 @@ pub(super) async fn resume_thread(
         fencing_token: next_fencing_token,
         expected_stream_version: stream_version,
         history_mode: projection.history_mode,
+        history_projection_start_ordinal: row
+            .try_get("history_projection_start_ordinal")
+            .map_err(|error| database_error("resume thread", error))?,
         metadata_sync: ThreadMetadataSync::from_stored_thread(&projection),
     };
     store

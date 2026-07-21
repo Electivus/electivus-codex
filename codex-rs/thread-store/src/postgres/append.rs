@@ -1,3 +1,4 @@
+use chrono::Utc;
 use codex_rollout::persisted_rollout_items;
 use serde_json::Value;
 use sqlx::AssertSqlSafe;
@@ -63,6 +64,7 @@ pub(super) async fn append_batch(
         });
     }
     let content_identity = canonical_content_identity(items.as_slice())?;
+    let recorded_at = super::metadata::postgres_timestamp(Utc::now());
     let item_values = items
         .iter()
         .map(serde_json::to_value)
@@ -169,24 +171,35 @@ pub(super) async fn append_batch(
             let ordinal = first_ordinal
                 .checked_add(offset)
                 .ok_or_else(|| history_too_large(()))?;
-            Ok((ordinal, item))
+            Ok((ordinal, item, recorded_at))
         })
         .collect::<ThreadStoreResult<Vec<_>>>()?;
     let mut insert = QueryBuilder::<Postgres>::new(format!(
-        "INSERT INTO {} (thread_id, ordinal, item) ",
+        "INSERT INTO {} (thread_id, ordinal, item, recorded_at) ",
         store.tables.history
     ));
-    insert.push_values(item_rows, |mut values, (ordinal, item)| {
+    insert.push_values(item_rows, |mut values, (ordinal, item, recorded_at)| {
         values
             .push_bind(batch.thread_id.to_string())
             .push_bind(ordinal)
-            .push_bind(item);
+            .push_bind(item)
+            .push_bind(recorded_at);
     });
     insert
         .build()
         .execute(transaction.as_mut())
         .await
         .map_err(|error| database_error("append thread history", error))?;
+    super::projection::apply_item_projections(
+        store,
+        &mut transaction,
+        batch.thread_id,
+        first_ordinal,
+        recorded_at,
+        writer.history_projection_start_ordinal,
+        items.as_slice(),
+    )
+    .await?;
     let projection_json = serde_json::to_value(&projection).map_err(serialization_error)?;
     let lease_millis =
         i64::try_from(WRITER_LEASE_DURATION.as_millis()).map_err(history_too_large)?;

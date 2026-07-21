@@ -777,7 +777,7 @@ async fn postgres_contract_create_is_readable_across_replicas_without_rollout()
     fixture.cleanup().await
 }
 
-fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
+pub(super) fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
     CreateThreadParams {
         session_id: thread_id.into(),
         thread_id,
@@ -842,8 +842,8 @@ fn append_items() -> Vec<RolloutItem> {
 
 pub(super) struct PostgresThreadStoreFixture {
     pub(super) config: PostgresNamespaceConfig,
-    database_url: String,
-    schema: String,
+    pub(super) database_url: String,
+    pub(super) schema: String,
 }
 
 impl PostgresThreadStoreFixture {

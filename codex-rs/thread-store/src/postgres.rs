@@ -45,8 +45,10 @@ use crate::thread_metadata_sync::ThreadMetadataSync;
 use crate::types::initial_session_meta_item;
 
 mod append;
+mod items;
 mod lifecycle;
 mod metadata;
+mod projection;
 mod resume;
 
 pub(super) const WRITER_LEASE_DURATION: Duration = Duration::from_secs(30);
@@ -69,6 +71,7 @@ pub(super) struct PostgresThreadTables {
     pub(super) threads: String,
     pub(super) history: String,
     pub(super) append_batches: String,
+    pub(super) items: String,
 }
 
 #[derive(Clone)]
@@ -76,6 +79,7 @@ pub(super) struct ActiveWriter {
     pub(super) fencing_token: i64,
     pub(super) expected_stream_version: i64,
     pub(super) history_mode: codex_protocol::protocol::ThreadHistoryMode,
+    pub(super) history_projection_start_ordinal: Option<i64>,
     pub(super) metadata_sync: ThreadMetadataSync,
 }
 
@@ -89,6 +93,7 @@ impl PostgresThreadStore {
                 threads: format!("{schema}.threads"),
                 history: format!("{schema}.thread_history"),
                 append_batches: format!("{schema}.thread_append_batches"),
+                items: format!("{schema}.thread_items"),
             },
             writer_id: Uuid::now_v7().to_string(),
             live_writers: Arc::new(Mutex::new(HashMap::new())),
@@ -152,14 +157,21 @@ impl PostgresThreadStore {
                 message: "thread writer lease duration is out of range".to_string(),
             }
         })?;
+        let history_projection_start_ordinal = params
+            .subagent_history_start_ordinal
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| ThreadStoreError::InvalidRequest {
+                message: "subagent history start ordinal is too large".to_string(),
+            })?;
         let mut transaction = self
             .pool
             .begin()
             .await
             .map_err(|error| database_error("create", error))?;
         let insert_thread = sqlx::query(AssertSqlSafe(format!(
-            "INSERT INTO {} (thread_id, projection, stream_version, fencing_token, writer_id, writer_lease_expires_at, created_at, updated_at, recency_at) \
-             VALUES ($1, $2, 1, 1, $3, CURRENT_TIMESTAMP + $4 * INTERVAL '1 millisecond', $5, $5, $5)",
+            "INSERT INTO {} (thread_id, projection, stream_version, fencing_token, writer_id, writer_lease_expires_at, created_at, updated_at, recency_at, history_projection_start_ordinal) \
+             VALUES ($1, $2, 1, 1, $3, CURRENT_TIMESTAMP + $4 * INTERVAL '1 millisecond', $5, $5, $5, $6)",
             self.tables.threads
         )))
         .bind(params.thread_id.to_string())
@@ -167,6 +179,7 @@ impl PostgresThreadStore {
         .bind(&self.writer_id)
         .bind(lease_millis)
         .bind(created_at)
+        .bind(history_projection_start_ordinal)
         .execute(transaction.as_mut())
         .await;
         if let Err(error) = insert_thread {
@@ -183,11 +196,12 @@ impl PostgresThreadStore {
             return Err(database_error("create", error));
         }
         sqlx::query(AssertSqlSafe(format!(
-            "INSERT INTO {} (thread_id, ordinal, item) VALUES ($1, 0, $2)",
+            "INSERT INTO {} (thread_id, ordinal, item, recorded_at) VALUES ($1, 0, $2, $3)",
             self.tables.history
         )))
         .bind(params.thread_id.to_string())
         .bind(session_meta)
+        .bind(created_at)
         .execute(transaction.as_mut())
         .await
         .map_err(|error| database_error("create", error))?;
@@ -201,6 +215,7 @@ impl PostgresThreadStore {
                 fencing_token: 1,
                 expected_stream_version: 1,
                 history_mode: params.history_mode,
+                history_projection_start_ordinal,
                 metadata_sync,
             },
         );
@@ -363,8 +378,8 @@ impl ThreadStore for PostgresThreadStore {
     fn list_turns(&self, _params: ListTurnsParams) -> ThreadStoreFuture<'_, TurnPage> {
         unsupported("list_turns")
     }
-    fn list_items(&self, _params: ListItemsParams) -> ThreadStoreFuture<'_, ItemPage> {
-        unsupported("list_items")
+    fn list_items(&self, params: ListItemsParams) -> ThreadStoreFuture<'_, ItemPage> {
+        Box::pin(items::list_items(self, params))
     }
     fn update_thread_metadata(
         &self,
