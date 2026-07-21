@@ -45,6 +45,7 @@ use crate::types::initial_session_meta_item;
 
 mod append;
 mod lifecycle;
+mod resume;
 
 pub(super) const WRITER_LEASE_DURATION: Duration = Duration::from_secs(30);
 
@@ -249,8 +250,8 @@ impl ThreadStore for PostgresThreadStore {
         Box::pin(self.create(params))
     }
 
-    fn resume_thread(&self, _params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()> {
-        unsupported("resume_thread")
+    fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(resume::resume_thread(self, params))
     }
 
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {

@@ -71,7 +71,7 @@ pub(super) async fn release_writer(
     Ok(())
 }
 
-fn lease_millis() -> ThreadStoreResult<i64> {
+pub(super) fn lease_millis() -> ThreadStoreResult<i64> {
     i64::try_from(WRITER_LEASE_DURATION.as_millis()).map_err(|_| ThreadStoreError::Internal {
         message: "thread writer lease duration is out of range".to_string(),
     })

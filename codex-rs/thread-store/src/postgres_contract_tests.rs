@@ -25,11 +25,272 @@ use crate::AppendThreadItemsBatch;
 use crate::CreateThreadParams;
 use crate::PostgresThreadStore;
 use crate::ReadThreadParams;
+use crate::ResumeThreadParams;
 use crate::ThreadPersistenceMetadata;
 use crate::ThreadStore;
 
 const TEST_DATABASE_URL_ENV: &str = "CODEX_TEST_POSTGRES_URL";
 static NEXT_SCHEMA_ID: AtomicU64 = AtomicU64::new(0);
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_concurrent_resume_acquires_exactly_one_writer()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = PostgresThreadStoreFixture::new("thread_resume_concurrent")?;
+    fixture.migrate().await?;
+    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let first = PostgresThreadStore::new(&first_pool);
+    let second = PostgresThreadStore::new(&second_pool);
+    let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f009")?;
+    first.create_thread(create_thread_params(thread_id)).await?;
+    first.shutdown_thread(thread_id).await?;
+
+    let (first_result, second_result) = tokio::join!(
+        first.resume_thread(resume_thread_params(thread_id)),
+        second.resume_thread(resume_thread_params(thread_id)),
+    );
+    let acquired = match (first_result, second_result) {
+        (Ok(()), Err(crate::ThreadStoreError::Conflict { .. })) => &first,
+        (Err(crate::ThreadStoreError::Conflict { .. }), Ok(())) => &second,
+        results => panic!("exactly one resume must acquire the writer, got {results:?}"),
+    };
+    acquired
+        .append_batch(AppendThreadItemsBatch::new(
+            thread_id,
+            AppendBatchId::new(),
+            append_items(),
+        ))
+        .await?;
+
+    first_pool.close().await;
+    second_pool.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_ambiguous_append_retry_requires_current_writer_fence()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = PostgresThreadStoreFixture::new("thread_resume_retry")?;
+    fixture.migrate().await?;
+    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let superseded = PostgresThreadStore::new(&first_pool);
+    let current = PostgresThreadStore::new(&second_pool);
+    let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f008")?;
+    superseded
+        .create_thread(create_thread_params(thread_id))
+        .await?;
+    let batch_id = AppendBatchId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331ba04")?;
+    let batch = AppendThreadItemsBatch::new(thread_id, batch_id, append_items());
+    let original = superseded.append_batch(batch.clone()).await?;
+    fixture.expire_writer_lease(thread_id).await?;
+    current
+        .resume_thread(resume_thread_params(thread_id))
+        .await?;
+
+    let stale_retry = superseded
+        .append_batch(batch.clone())
+        .await
+        .expect_err("an old fence cannot replay even an identical append batch");
+    assert!(matches!(
+        stale_retry,
+        crate::ThreadStoreError::Conflict { .. }
+    ));
+    assert_eq!(current.append_batch(batch.clone()).await?, original);
+    let divergent_retry = current
+        .append_batch(AppendThreadItemsBatch::new(
+            thread_id,
+            batch_id,
+            vec![RolloutItem::Compacted(CompactedItem {
+                message: "different retry content".to_string(),
+                replacement_history: None,
+                window_number: None,
+                first_window_id: None,
+                previous_window_id: None,
+                window_id: None,
+            })],
+        ))
+        .await
+        .expect_err("a current writer cannot reuse the key with divergent content");
+    assert!(matches!(
+        divergent_retry,
+        crate::ThreadStoreError::Conflict { .. }
+    ));
+    let next = current
+        .append_batch(AppendThreadItemsBatch::new(
+            thread_id,
+            AppendBatchId::new(),
+            append_items(),
+        ))
+        .await?;
+    assert_eq!(
+        next,
+        crate::AppendBatchCommit {
+            first_ordinal: 4,
+            persisted_item_count: 3,
+            committed_stream_version: 7,
+        }
+    );
+
+    first_pool.close().await;
+    second_pool.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_expired_writer_is_fenced_after_takeover()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = PostgresThreadStoreFixture::new("thread_resume_expired")?;
+    fixture.migrate().await?;
+    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let expired = PostgresThreadStore::new(&first_pool);
+    let takeover = PostgresThreadStore::new(&second_pool);
+    let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f007")?;
+    expired
+        .create_thread(create_thread_params(thread_id))
+        .await?;
+    fixture.expire_writer_lease(thread_id).await?;
+
+    takeover
+        .resume_thread(resume_thread_params(thread_id))
+        .await?;
+    let stale_append = expired
+        .append_batch(AppendThreadItemsBatch::new(
+            thread_id,
+            AppendBatchId::new(),
+            append_items(),
+        ))
+        .await
+        .expect_err("a superseded writer must not append");
+    let stale_renew = expired
+        .flush_thread(thread_id)
+        .await
+        .expect_err("a superseded writer must not renew");
+    let stale_release = expired
+        .shutdown_thread(thread_id)
+        .await
+        .expect_err("a superseded writer must not release the new lease");
+    assert!(matches!(
+        (stale_append, stale_renew, stale_release),
+        (
+            crate::ThreadStoreError::Conflict { .. },
+            crate::ThreadStoreError::Conflict { .. },
+            crate::ThreadStoreError::Conflict { .. }
+        )
+    ));
+    let committed = takeover
+        .append_batch(AppendThreadItemsBatch::new(
+            thread_id,
+            AppendBatchId::new(),
+            append_items(),
+        ))
+        .await?;
+    assert_eq!(
+        committed,
+        crate::AppendBatchCommit {
+            first_ordinal: 1,
+            persisted_item_count: 3,
+            committed_stream_version: 4,
+        }
+    );
+
+    first_pool.close().await;
+    second_pool.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_resume_after_shutdown_uses_durable_stream_version()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = PostgresThreadStoreFixture::new("thread_resume_shutdown")?;
+    fixture.migrate().await?;
+    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let first = PostgresThreadStore::new(&first_pool);
+    let resumed = PostgresThreadStore::new(&second_pool);
+    let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f006")?;
+    first.create_thread(create_thread_params(thread_id)).await?;
+    first
+        .append_batch(AppendThreadItemsBatch::new(
+            thread_id,
+            AppendBatchId::new(),
+            append_items(),
+        ))
+        .await?;
+    first.shutdown_thread(thread_id).await?;
+
+    resumed
+        .resume_thread(resume_thread_params(thread_id))
+        .await?;
+    let committed = resumed
+        .append_batch(AppendThreadItemsBatch::new(
+            thread_id,
+            AppendBatchId::new(),
+            append_items(),
+        ))
+        .await?;
+    assert_eq!(
+        committed,
+        crate::AppendBatchCommit {
+            first_ordinal: 4,
+            persisted_item_count: 3,
+            committed_stream_version: 7,
+        }
+    );
+    assert_eq!(
+        first
+            .load_history(crate::LoadThreadHistoryParams {
+                thread_id,
+                include_archived: false,
+            })
+            .await?
+            .items
+            .len(),
+        7
+    );
+
+    first_pool.close().await;
+    second_pool.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_resume_conflicts_while_another_writer_lease_is_active()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = PostgresThreadStoreFixture::new("thread_resume_conflict")?;
+    fixture.migrate().await?;
+    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let writer = PostgresThreadStore::new(&first_pool);
+    let contender = PostgresThreadStore::new(&second_pool);
+    let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f005")?;
+    writer
+        .create_thread(create_thread_params(thread_id))
+        .await?;
+
+    let error = contender
+        .resume_thread(resume_thread_params(thread_id))
+        .await
+        .expect_err("a live writer lease must reject a second writer");
+    assert!(matches!(error, crate::ThreadStoreError::Conflict { .. }));
+    writer
+        .append_batch(AppendThreadItemsBatch::new(
+            thread_id,
+            AppendBatchId::new(),
+            append_items(),
+        ))
+        .await?;
+
+    first_pool.close().await;
+    second_pool.close().await;
+    fixture.cleanup().await
+}
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
@@ -266,6 +527,20 @@ fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
     }
 }
 
+fn resume_thread_params(thread_id: ThreadId) -> ResumeThreadParams {
+    ResumeThreadParams {
+        thread_id,
+        rollout_path: None,
+        history: None,
+        include_archived: false,
+        metadata: ThreadPersistenceMetadata {
+            cwd: None,
+            model_provider: "postgres-test-provider".to_string(),
+            memory_mode: ThreadMemoryMode::Enabled,
+        },
+    }
+}
+
 fn append_items() -> Vec<RolloutItem> {
     vec![
         RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
@@ -320,6 +595,24 @@ impl PostgresThreadStoreFixture {
             PostgresNamespaceAction::Migrate,
         )
         .await?;
+        Ok(())
+    }
+
+    async fn expire_writer_lease(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let pool = sqlx::PgPool::connect(&self.database_url).await?;
+        let schema = &self.schema;
+        sqlx::query(AssertSqlSafe(format!(
+            "UPDATE \"{schema}\".threads \
+             SET writer_lease_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second' \
+             WHERE thread_id = $1"
+        )))
+        .bind(thread_id.to_string())
+        .execute(&pool)
+        .await?;
+        pool.close().await;
         Ok(())
     }
 
