@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(test)]
+use crate::LogQuery;
 use crate::SortDirection;
 use codex_protocol::protocol::SessionSource;
 use std::sync::atomic::AtomicI64;
@@ -1032,10 +1034,7 @@ ON CONFLICT(id) DO UPDATE SET
             .map(ThreadId::to_string)
             .collect::<Vec<_>>();
         for (thread_id, thread_id_string) in thread_ids.iter().zip(&thread_id_strings) {
-            sqlx::query("DELETE FROM logs WHERE thread_id = ?")
-                .bind(thread_id_string)
-                .execute(self.logs_pool.as_ref())
-                .await?;
+            self.logs.delete_logs_for_thread(thread_id_string).await?;
             self.memories.delete_thread_memory(*thread_id).await?;
             self.thread_goals.delete_thread_goal(*thread_id).await?;
         }
@@ -1516,7 +1515,7 @@ mod tests {
             .await?;
         seed_thread_cleanup_state(&runtime, thread_id, child_thread_id).await?;
 
-        runtime.logs_pool.close().await;
+        runtime.logs.close().await;
         runtime
             .delete_thread(thread_id)
             .await
@@ -1551,9 +1550,20 @@ mod tests {
                 /*token_budget*/ None,
             )
             .await?;
-        sqlx::query("INSERT INTO logs (ts, ts_nanos, level, target, feedback_log_body, thread_id) VALUES (1, 0, 'INFO', 'test', 'feedback log', ?)")
-            .bind(thread_id.to_string())
-            .execute(runtime.logs_pool.as_ref())
+        runtime
+            .insert_log(&crate::LogEntry {
+                ts: 1,
+                ts_nanos: 0,
+                level: "INFO".to_string(),
+                target: "test".to_string(),
+                message: None,
+                feedback_log_body: Some("feedback log".to_string()),
+                thread_id: Some(thread_id.to_string()),
+                process_uuid: None,
+                module_path: None,
+                file: None,
+                line: None,
+            })
             .await?;
         Ok(())
     }

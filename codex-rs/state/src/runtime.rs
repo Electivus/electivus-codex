@@ -1,8 +1,5 @@
 use crate::GOALS_DB_FILENAME;
 use crate::LOGS_DB_FILENAME;
-use crate::LogEntry;
-use crate::LogQuery;
-use crate::LogRow;
 use crate::MEMORIES_DB_FILENAME;
 use crate::STATE_DB_FILENAME;
 use crate::SortKey;
@@ -35,10 +32,8 @@ use serde_json::Value;
 use sqlx::QueryBuilder;
 use sqlx::Row;
 use sqlx::Sqlite;
-use sqlx::SqliteConnection;
 use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -53,7 +48,10 @@ mod backend_contract_tests;
 mod backfill;
 mod external_agent_config_imports;
 mod goals;
-mod logs;
+mod log_store;
+#[cfg(test)]
+#[path = "runtime/logs_contract_tests.rs"]
+mod logs_contract_tests;
 mod memories;
 mod recovery;
 mod remote_control;
@@ -70,6 +68,7 @@ pub use goals::GoalAccountingMode;
 pub use goals::GoalAccountingOutcome;
 pub use goals::GoalStore;
 pub use goals::GoalUpdate;
+pub(crate) use log_store::LogStore;
 pub use memories::MemoryStore;
 pub use recovery::RuntimeDbBackup;
 pub use recovery::backup_runtime_db_for_fresh_start;
@@ -158,7 +157,7 @@ pub struct StateRuntime {
     codex_home: PathBuf,
     default_provider: String,
     pool: Arc<sqlx::SqlitePool>,
-    logs_pool: Arc<sqlx::SqlitePool>,
+    logs: LogStore,
     thread_goals: GoalStore,
     memories: MemoryStore,
     thread_updated_at_millis: Arc<AtomicI64>,
@@ -336,7 +335,7 @@ impl StateRuntime {
             thread_goals: GoalStore::new(Arc::clone(&goals_pool)),
             memories: MemoryStore::new(Arc::clone(&memories_pool), Arc::clone(&pool)),
             pool,
-            logs_pool,
+            logs: LogStore::from_sqlite(logs_pool),
             codex_home,
             default_provider,
             thread_updated_at_millis: Arc::new(AtomicI64::new(thread_updated_at_millis)),
@@ -368,7 +367,7 @@ impl StateRuntime {
     pub async fn close(&self) {
         self.memories.close().await;
         self.thread_goals.close().await;
-        self.logs_pool.close().await;
+        self.logs.close().await;
         self.pool.close().await;
     }
 
