@@ -48,6 +48,7 @@ use crate::types::initial_session_meta_item;
 mod append;
 mod items;
 mod lifecycle;
+mod list_threads;
 mod metadata;
 mod model_context;
 mod projection;
@@ -372,8 +373,8 @@ impl ThreadStore for PostgresThreadStore {
     ) -> ThreadStoreFuture<'_, StoredThread> {
         unsupported("read_thread_by_rollout_path")
     }
-    fn list_threads(&self, _params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
-        unsupported("list_threads")
+    fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
+        Box::pin(list_threads::list_threads(self, params))
     }
     fn search_threads(
         &self,

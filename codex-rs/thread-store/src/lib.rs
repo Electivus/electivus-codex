@@ -9,6 +9,9 @@ mod in_memory;
 #[cfg(test)]
 #[path = "lifecycle_contract_tests.rs"]
 mod lifecycle_contract_tests;
+#[cfg(test)]
+#[path = "list_threads_contract_tests.rs"]
+mod list_threads_contract_tests;
 mod live_thread;
 mod local;
 #[cfg(test)]
