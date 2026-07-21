@@ -20,9 +20,9 @@ use crate::ThreadSortKey;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
-struct ListCursor {
-    timestamp: DateTime<Utc>,
-    thread_id: Option<ThreadId>,
+pub(super) struct ListCursor {
+    pub(super) timestamp: DateTime<Utc>,
+    pub(super) thread_id: Option<ThreadId>,
 }
 
 pub(super) async fn list_threads(
@@ -186,7 +186,7 @@ pub(super) async fn list_threads(
     })
 }
 
-fn parse_cursor(cursor: &str) -> ThreadStoreResult<ListCursor> {
+pub(super) fn parse_cursor(cursor: &str) -> ThreadStoreResult<ListCursor> {
     let (timestamp, thread_id) = match cursor.rsplit_once('|') {
         Some((timestamp, thread_id)) => (
             timestamp,
@@ -207,7 +207,7 @@ fn parse_cursor(cursor: &str) -> ThreadStoreResult<ListCursor> {
     })
 }
 
-fn format_cursor(timestamp: DateTime<Utc>, thread_id: Option<ThreadId>) -> String {
+pub(super) fn format_cursor(timestamp: DateTime<Utc>, thread_id: Option<ThreadId>) -> String {
     let timestamp = timestamp.to_rfc3339_opts(SecondsFormat::AutoSi, true);
     match thread_id {
         Some(thread_id) => format!("{timestamp}|{thread_id}"),

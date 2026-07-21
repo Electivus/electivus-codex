@@ -53,6 +53,7 @@ mod metadata;
 mod model_context;
 mod projection;
 mod resume;
+mod search_threads;
 mod turns;
 
 pub(super) const WRITER_LEASE_DURATION: Duration = Duration::from_secs(30);
@@ -77,6 +78,7 @@ pub(super) struct PostgresThreadTables {
     pub(super) append_batches: String,
     pub(super) items: String,
     pub(super) turns: String,
+    pub(super) search_content: String,
 }
 
 #[derive(Clone)]
@@ -100,6 +102,7 @@ impl PostgresThreadStore {
                 append_batches: format!("{schema}.thread_append_batches"),
                 items: format!("{schema}.thread_items"),
                 turns: format!("{schema}.thread_turns"),
+                search_content: format!("{schema}.thread_search_content"),
             },
             writer_id: Uuid::now_v7().to_string(),
             live_writers: Arc::new(Mutex::new(HashMap::new())),
@@ -378,9 +381,9 @@ impl ThreadStore for PostgresThreadStore {
     }
     fn search_threads(
         &self,
-        _params: SearchThreadsParams,
+        params: SearchThreadsParams,
     ) -> ThreadStoreFuture<'_, ThreadSearchPage> {
-        unsupported("thread/search")
+        Box::pin(search_threads::search_threads(self, params))
     }
     fn search_thread_occurrences(
         &self,

@@ -76,6 +76,8 @@ pub use reverse_jsonl_scanner::ScanOutcome;
 pub use search::first_rollout_content_match_snippet;
 pub use search::search_rollout_matches;
 pub use search::search_rollout_paths;
+pub use search::thread_search_match_snippet;
+pub use search::thread_searchable_content;
 pub use session_index::append_thread_name;
 pub use session_index::find_thread_meta_by_name_str;
 pub use session_index::find_thread_name_by_id;

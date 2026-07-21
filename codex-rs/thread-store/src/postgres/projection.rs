@@ -81,7 +81,11 @@ pub(super) async fn rebuild_history_projections(
     stream_version: i64,
     history_projection_start_ordinal: Option<i64>,
 ) -> ThreadStoreResult<()> {
-    for table in [&store.tables.items, &store.tables.turns] {
+    for table in [
+        &store.tables.items,
+        &store.tables.turns,
+        &store.tables.search_content,
+    ] {
         sqlx::query(AssertSqlSafe(format!(
             "DELETE FROM {table} WHERE thread_id = $1"
         )))
@@ -152,6 +156,14 @@ pub(super) async fn apply_history_projections(
         let rollout_ordinal = first_ordinal
             .checked_add(offset)
             .ok_or_else(|| projection_too_large(()))?;
+        super::search_threads::apply_projection(
+            store,
+            transaction,
+            thread_id,
+            rollout_ordinal,
+            item,
+        )
+        .await?;
         if history_projection_start_ordinal
             .is_some_and(|start_ordinal| rollout_ordinal < start_ordinal)
         {

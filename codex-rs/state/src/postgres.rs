@@ -17,7 +17,7 @@ use config::connection_failed;
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
 const MINIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
-const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 7;
+const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 8;
 const BASELINE_SCHEMA_VERSION: i64 = 1;
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
@@ -49,6 +49,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         7,
         include_str!("../postgres_migrations/0007_thread_history_projection_state.sql"),
         "track thread history projection state",
+    ),
+    (
+        8,
+        include_str!("../postgres_migrations/0008_thread_search_projection.sql"),
+        "create thread search projection",
     ),
 ];
 

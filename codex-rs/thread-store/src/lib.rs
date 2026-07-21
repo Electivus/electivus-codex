@@ -30,6 +30,9 @@ mod postgres_item_projection_contract_tests;
 #[cfg(test)]
 #[path = "postgres_turn_projection_contract_tests.rs"]
 mod postgres_turn_projection_contract_tests;
+#[cfg(test)]
+#[path = "search_threads_contract_tests.rs"]
+mod search_threads_contract_tests;
 mod store;
 mod thread_metadata_sync;
 mod types;

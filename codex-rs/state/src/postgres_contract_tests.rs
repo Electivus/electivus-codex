@@ -245,7 +245,7 @@ async fn postgres_contract_creates_migrates_validates_and_cleans_up_namespace() 
 
     assert_eq!(validated, migrated);
     assert_eq!(migrated.schema(), fixture.schema());
-    assert_eq!(migrated.version(), 7);
+    assert_eq!(migrated.version(), 8);
 
     fixture.cleanup().await?;
     assert!(!fixture.schema_exists().await?);
@@ -266,8 +266,8 @@ async fn postgres_contract_migration_is_idempotent() -> Result<()> {
         fixture.migration_history().await?,
         MigrationHistory {
             minimum: Some(1),
-            maximum: Some(7),
-            count: 7,
+            maximum: Some(8),
+            count: 8,
         }
     );
     fixture.cleanup().await?;
@@ -328,8 +328,8 @@ async fn postgres_contract_migration_uses_namespace_advisory_lock() -> Result<()
         fixture.migration_history().await?,
         MigrationHistory {
             minimum: Some(1),
-            maximum: Some(7),
-            count: 7,
+            maximum: Some(8),
+            count: 8,
         }
     );
     drop(contending_migration);

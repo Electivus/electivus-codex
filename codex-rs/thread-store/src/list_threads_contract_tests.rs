@@ -4,6 +4,7 @@ use chrono::DateTime;
 use chrono::Utc;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -12,6 +13,7 @@ use codex_state::PostgresRuntimeStatePool;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
+use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
 use crate::CreateThreadParams;
 use crate::ListThreadsParams;
@@ -114,6 +116,8 @@ async fn postgres_list_threads_keeps_tied_cursor_stable_across_replicas()
                 parent_thread_id: None,
                 preview: "replica preview",
                 name: None,
+                history_mode: ThreadHistoryMode::Legacy,
+                items: Vec::new(),
             },
         )
         .await?;
@@ -140,6 +144,8 @@ async fn postgres_list_threads_keeps_tied_cursor_stable_across_replicas()
             parent_thread_id: None,
             preview: "replica preview",
             name: None,
+            history_mode: ThreadHistoryMode::Legacy,
+            items: Vec::new(),
         },
     )
     .await?;
@@ -183,6 +189,8 @@ async fn assert_list_threads_contract(
                 parent_thread_id: None,
                 preview: &format!("visible {thread_id}"),
                 name: None,
+                history_mode: ThreadHistoryMode::Legacy,
+                items: Vec::new(),
             },
         )
         .await?;
@@ -401,6 +409,8 @@ async fn assert_relation_filters(
                 parent_thread_id: Some(parent_thread_id),
                 preview: "relation preview",
                 name: None,
+                history_mode: ThreadHistoryMode::Legacy,
+                items: Vec::new(),
             },
         )
         .await?;
@@ -438,18 +448,20 @@ async fn assert_relation_filters(
     Ok(())
 }
 
-struct ListedThread<'a> {
-    thread_id: ThreadId,
-    cwd: &'a Path,
-    timestamp: &'a str,
-    source: SessionSource,
-    model_provider: &'a str,
-    parent_thread_id: Option<ThreadId>,
-    preview: &'a str,
-    name: Option<&'a str>,
+pub(super) struct ListedThread<'a> {
+    pub(super) thread_id: ThreadId,
+    pub(super) cwd: &'a Path,
+    pub(super) timestamp: &'a str,
+    pub(super) source: SessionSource,
+    pub(super) model_provider: &'a str,
+    pub(super) parent_thread_id: Option<ThreadId>,
+    pub(super) preview: &'a str,
+    pub(super) name: Option<&'a str>,
+    pub(super) history_mode: ThreadHistoryMode,
+    pub(super) items: Vec<RolloutItem>,
 }
 
-async fn create_listed_thread(
+pub(super) async fn create_listed_thread(
     store: &dyn ThreadStore,
     thread: ListedThread<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -462,6 +474,8 @@ async fn create_listed_thread(
         parent_thread_id,
         preview,
         name,
+        history_mode,
+        items,
     } = thread;
     store
         .create_thread(CreateThreadParams {
@@ -470,14 +484,14 @@ async fn create_listed_thread(
             extra_config: None,
             forked_from_id: None,
             parent_thread_id,
-            source,
+            source: source.clone(),
             thread_source: None,
             originator: "list-threads-contract".to_string(),
             base_instructions: BaseInstructions::default(),
             dynamic_tools: Vec::new(),
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
-            history_mode: ThreadHistoryMode::Legacy,
+            history_mode,
             subagent_history_start_ordinal: None,
             initial_window_id: "list-threads-window".to_string(),
             metadata: ThreadPersistenceMetadata {
@@ -487,6 +501,11 @@ async fn create_listed_thread(
             },
         })
         .await?;
+    if !items.is_empty() {
+        store
+            .append_items(AppendThreadItemsParams { thread_id, items })
+            .await?;
+    }
     store.persist_thread(thread_id).await?;
     store.shutdown_thread(thread_id).await?;
     let timestamp = DateTime::parse_from_rfc3339(timestamp)?.with_timezone(&Utc);
@@ -500,6 +519,7 @@ async fn create_listed_thread(
                 created_at: Some(timestamp),
                 updated_at: Some(timestamp),
                 advance_recency_at: Some(timestamp),
+                source: Some(source),
                 ..Default::default()
             },
             include_archived: false,
