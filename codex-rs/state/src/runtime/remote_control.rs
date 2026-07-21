@@ -58,13 +58,6 @@ impl RemoteControlEnrollmentStore {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "PostgreSQL runtime state selection lands in issue #31"
-        )
-    )]
     pub(crate) fn from_postgres(pool: PgPool, schema: String) -> Self {
         Self {
             backend: RemoteControlEnrollmentStoreBackend::Postgres(
@@ -79,7 +72,7 @@ impl RemoteControlEnrollmentStore {
         account_id: &str,
         app_server_client_name: Option<&str>,
     ) -> anyhow::Result<Option<RemoteControlEnrollmentRecord>> {
-        match &self.backend {
+        let result = match &self.backend {
             RemoteControlEnrollmentStoreBackend::Postgres(store) => {
                 store
                     .get(websocket_url, account_id, app_server_client_name)
@@ -90,14 +83,16 @@ impl RemoteControlEnrollmentStore {
                     .get(websocket_url, account_id, app_server_client_name)
                     .await
             }
-        }
+        };
+        result.map_err(|_| enrollment_persistence_error("get remote control enrollment"))
     }
 
     pub async fn upsert(&self, enrollment: &RemoteControlEnrollmentRecord) -> anyhow::Result<()> {
-        match &self.backend {
+        let result = match &self.backend {
             RemoteControlEnrollmentStoreBackend::Postgres(store) => store.upsert(enrollment).await,
             RemoteControlEnrollmentStoreBackend::Sqlite(store) => store.upsert(enrollment).await,
-        }
+        };
+        result.map_err(|_| enrollment_persistence_error("upsert remote control enrollment"))
     }
 
     pub async fn set_enabled(
@@ -107,7 +102,7 @@ impl RemoteControlEnrollmentStore {
         app_server_client_name: Option<&str>,
         remote_control_enabled: bool,
     ) -> anyhow::Result<u64> {
-        match &self.backend {
+        let result = match &self.backend {
             RemoteControlEnrollmentStoreBackend::Postgres(store) => {
                 store
                     .set_enabled(
@@ -128,7 +123,8 @@ impl RemoteControlEnrollmentStore {
                     )
                     .await
             }
-        }
+        };
+        result.map_err(|_| enrollment_persistence_error("set remote control enabled"))
     }
 
     pub async fn delete(
@@ -137,7 +133,7 @@ impl RemoteControlEnrollmentStore {
         account_id: &str,
         app_server_client_name: Option<&str>,
     ) -> anyhow::Result<u64> {
-        match &self.backend {
+        let result = match &self.backend {
             RemoteControlEnrollmentStoreBackend::Postgres(store) => {
                 store
                     .delete(websocket_url, account_id, app_server_client_name)
@@ -148,16 +144,23 @@ impl RemoteControlEnrollmentStore {
                     .delete(websocket_url, account_id, app_server_client_name)
                     .await
             }
-        }
+        };
+        result.map_err(|_| enrollment_persistence_error("delete remote control enrollment"))
     }
 
     #[cfg(test)]
     pub(crate) async fn close(&self) {
         match &self.backend {
             RemoteControlEnrollmentStoreBackend::Postgres(store) => store.close().await,
-            RemoteControlEnrollmentStoreBackend::Sqlite(_) => {}
+            RemoteControlEnrollmentStoreBackend::Sqlite(store) => store.close().await,
         }
     }
+}
+
+fn enrollment_persistence_error(operation: &'static str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Runtime State could not complete the `{operation}` operation; verify enrollment persistence health, then retry"
+    )
 }
 
 impl StateRuntime {
@@ -382,6 +385,33 @@ mod tests {
         );
 
         let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn remote_control_facade_errors_are_backend_independent_and_sanitized() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home, "test-provider".to_string())
+            .await
+            .expect("initialize runtime");
+        let store = runtime.remote_control_enrollment_store();
+        store.close().await;
+
+        let error = store
+            .get(
+                "wss://example.com/backend-api/wham/remote/control/server",
+                "account-a",
+                /*app_server_client_name*/ None,
+            )
+            .await
+            .expect_err("closed enrollment persistence should fail without backend details");
+        let message = error.to_string();
+        assert_eq!(
+            message,
+            "Runtime State could not complete the `get remote control enrollment` operation; verify enrollment persistence health, then retry"
+        );
+        for backend_term in ["postgres", "sqlite", "sql"] {
+            assert!(!message.to_ascii_lowercase().contains(backend_term));
+        }
     }
 
     #[tokio::test]

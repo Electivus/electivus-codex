@@ -1,7 +1,6 @@
 use super::RemoteControlEnrollmentRecord;
 use super::app_server_client_name_from_key;
 use super::app_server_client_name_key;
-use crate::postgres::map_sql_error;
 use crate::postgres::qualified_table;
 use chrono::Utc;
 use sqlx::AssertSqlSafe;
@@ -11,18 +10,13 @@ use sqlx::Row;
 #[derive(Clone)]
 pub(super) struct PostgresRemoteControlEnrollmentStore {
     pool: PgPool,
-    schema: String,
     table: String,
 }
 
 impl PostgresRemoteControlEnrollmentStore {
     pub(super) fn new(pool: PgPool, schema: String) -> Self {
         let table = qualified_table(&schema, "remote_control_enrollments");
-        Self {
-            pool,
-            schema,
-            table,
-        }
+        Self { pool, table }
     }
 
     pub(super) async fn get(
@@ -41,22 +35,18 @@ impl PostgresRemoteControlEnrollmentStore {
         .bind(account_id)
         .bind(app_server_client_name_key(app_server_client_name))
         .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| map_sql_error(&self.schema, "get remote control enrollment", error))?;
+        .await?;
 
         row.map(|row| {
-            let decode =
-                |error| map_sql_error(&self.schema, "decode remote control enrollment", error);
-            let app_server_client_name: String =
-                row.try_get("app_server_client_name").map_err(decode)?;
+            let app_server_client_name: String = row.try_get("app_server_client_name")?;
             Ok(RemoteControlEnrollmentRecord {
-                websocket_url: row.try_get("websocket_url").map_err(decode)?,
-                account_id: row.try_get("account_id").map_err(decode)?,
+                websocket_url: row.try_get("websocket_url")?,
+                account_id: row.try_get("account_id")?,
                 app_server_client_name: app_server_client_name_from_key(app_server_client_name),
-                server_id: row.try_get("server_id").map_err(decode)?,
-                environment_id: row.try_get("environment_id").map_err(decode)?,
-                server_name: row.try_get("server_name").map_err(decode)?,
-                remote_control_enabled: row.try_get("remote_control_enabled").map_err(decode)?,
+                server_id: row.try_get("server_id")?,
+                environment_id: row.try_get("environment_id")?,
+                server_name: row.try_get("server_name")?,
+                remote_control_enabled: row.try_get("remote_control_enabled")?,
             })
         })
         .transpose()
@@ -86,8 +76,7 @@ impl PostgresRemoteControlEnrollmentStore {
         .bind(enrollment.remote_control_enabled)
         .bind(Utc::now().timestamp())
         .execute(&self.pool)
-        .await
-        .map_err(|error| map_sql_error(&self.schema, "upsert remote control enrollment", error))?;
+        .await?;
         Ok(())
     }
 
@@ -109,8 +98,7 @@ impl PostgresRemoteControlEnrollmentStore {
         .bind(account_id)
         .bind(app_server_client_name_key(app_server_client_name))
         .execute(&self.pool)
-        .await
-        .map_err(|error| map_sql_error(&self.schema, "set remote control enabled", error))?;
+        .await?;
         Ok(result.rows_affected())
     }
 
@@ -129,8 +117,7 @@ impl PostgresRemoteControlEnrollmentStore {
         .bind(account_id)
         .bind(app_server_client_name_key(app_server_client_name))
         .execute(&self.pool)
-        .await
-        .map_err(|error| map_sql_error(&self.schema, "delete remote control enrollment", error))?;
+        .await?;
         Ok(result.rows_affected())
     }
 

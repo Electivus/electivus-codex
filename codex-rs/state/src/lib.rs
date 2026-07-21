@@ -28,6 +28,7 @@ pub use postgres::PostgresNamespaceAction;
 pub use postgres::PostgresNamespaceConfig;
 pub use postgres::PostgresNamespaceStatus;
 pub use postgres::PostgresPoolConfig;
+pub use postgres::PostgresRuntimeStatePool;
 pub use postgres::manage_postgres_namespace;
 pub use runtime::RuntimeStateBackendConfig;
 /// Preferred entrypoint: owns configuration and metrics.

@@ -55,6 +55,55 @@ impl PostgresNamespaceStatus {
     }
 }
 
+/// Owns the shared connection pool for one pre-migrated PostgreSQL Runtime State Namespace.
+///
+/// Construct this once for each runtime replica and derive storage facades from it. Connecting
+/// validates the namespace without executing DDL; migrations remain an explicit
+/// [`manage_postgres_namespace`] operation.
+#[derive(Clone)]
+pub struct PostgresRuntimeStatePool {
+    pool: sqlx::PgPool,
+    schema: String,
+}
+
+impl PostgresRuntimeStatePool {
+    /// Connects one pool and validates that its namespace is already compatible.
+    pub async fn connect(config: PostgresNamespaceConfig) -> anyhow::Result<Self> {
+        let pool = connect_pool(&config).await?;
+        let validation = async {
+            let mut connection = pool
+                .acquire()
+                .await
+                .map_err(|_| connection_failed(&config.url_env))?;
+            manage_postgres_namespace_with_connection(
+                &config,
+                &mut connection,
+                PostgresNamespaceAction::Validate,
+            )
+            .await
+        }
+        .await;
+        if let Err(error) = validation {
+            pool.close().await;
+            return Err(error);
+        }
+        Ok(Self {
+            pool,
+            schema: config.schema,
+        })
+    }
+
+    /// Derives an enrollment facade that shares this owner's pool.
+    pub fn remote_control_enrollment_store(&self) -> crate::RemoteControlEnrollmentStore {
+        crate::RemoteControlEnrollmentStore::from_postgres(self.pool.clone(), self.schema.clone())
+    }
+
+    /// Closes the shared pool and waits for checked-out connections to return.
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
+}
+
 /// Explicitly migrate or validate one PostgreSQL Runtime State Namespace.
 ///
 /// This function is separate from [`crate::StateRuntime`] so normal runtime

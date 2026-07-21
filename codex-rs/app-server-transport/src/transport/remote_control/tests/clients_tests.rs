@@ -27,7 +27,7 @@ fn client_management_handle(
         desired_state_rpc_lock: Arc::new(Semaphore::new(1)),
         desired_state_persistence_lock: Arc::new(Semaphore::new(1)),
         status_tx: Arc::new(status_tx),
-        state_db: None,
+        enrollment_store: None,
         remote_control_url,
         current_enrollment: Arc::new(RemoteControlEnrollmentState::new(/*enrollment*/ None)),
         pairing_persistence_key: watch::channel(None).0,

@@ -113,4 +113,9 @@ impl SqliteRemoteControlEnrollmentStore {
         .await?;
         Ok(result.rows_affected())
     }
+
+    #[cfg(test)]
+    pub(super) async fn close(&self) {
+        self.pool.close().await;
+    }
 }

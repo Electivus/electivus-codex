@@ -59,5 +59,6 @@ chrono = { workspace = true }
 codex-config = { workspace = true }
 codex-protocol = { workspace = true }
 pretty_assertions = { workspace = true }
+sqlx = { workspace = true, features = ["postgres"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

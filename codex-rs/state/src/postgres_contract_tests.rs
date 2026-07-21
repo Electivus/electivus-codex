@@ -120,14 +120,13 @@ async fn postgres_contract_remote_control_failures_are_backend_independent_and_s
     let rendered = format!("{error:?} {error}");
     assert_eq!(
         message,
-        format!(
-            "PostgreSQL could not complete the `get remote control enrollment` operation for schema `{}`; verify the namespace and server health, then retry",
-            fixture.schema()
-        )
+        "Runtime State could not complete the `get remote control enrollment` operation; verify enrollment persistence health, then retry"
     );
     assert!(!rendered.contains(&secret));
     assert!(!rendered.contains("SELECT "));
-    assert!(!message.to_ascii_lowercase().contains("sqlite"));
+    for backend_term in ["postgres", "sqlite", "sql"] {
+        assert!(!message.to_ascii_lowercase().contains(backend_term));
+    }
 
     fixture.cleanup().await
 }

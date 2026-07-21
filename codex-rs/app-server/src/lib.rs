@@ -723,7 +723,7 @@ pub async fn run_main_with_transport_options(
         && remote_control_explicitly_requested
         && state_db.is_some();
     if remote_control_explicitly_requested && state_db.is_none() {
-        error!("remote control disabled because sqlite state db is unavailable");
+        error!("remote control disabled because enrollment persistence is unavailable");
     }
     let no_local_transport = transport_accept_handles.is_empty();
     if no_local_transport
@@ -735,7 +735,7 @@ pub async fn run_main_with_transport_options(
             if remote_control_policy == RemoteControlPolicy::DisabledByRequirements {
                 "no transport configured; remote control disabled by managed requirements"
             } else if remote_control_explicitly_requested && state_db.is_none() {
-                "no transport configured; remote control disabled because sqlite state db is unavailable"
+                "no transport configured; remote control disabled because enrollment persistence is unavailable"
             } else {
                 "no transport configured; use --listen or enable remote control"
             },
