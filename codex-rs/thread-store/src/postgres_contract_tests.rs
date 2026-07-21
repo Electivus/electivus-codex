@@ -222,94 +222,88 @@ async fn postgres_contract_metadata_updates_and_repairs_from_canonical_history()
     fixture.cleanup().await
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_contract_title_and_name_precedence_matches_history_mode()
+async fn postgres_contract_concurrent_metadata_updates_do_not_regress_timestamps()
 -> Result<(), Box<dyn std::error::Error>> {
-    let fixture = PostgresThreadStoreFixture::new("thread_title")?;
+    let fixture = PostgresThreadStoreFixture::new("thread_metadata_concurrent")?;
     fixture.migrate().await?;
-    let pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let store = PostgresThreadStore::new(&pool);
-    let legacy_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f011")?;
-    store.create_thread(create_thread_params(legacy_id)).await?;
-    store
-        .append_batch(AppendThreadItemsBatch::new(
-            legacy_id,
-            AppendBatchId::new(),
-            append_items(),
-        ))
+    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let first = PostgresThreadStore::new(&first_pool);
+    let second = PostgresThreadStore::new(&second_pool);
+    let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f013")?;
+    first.create_thread(create_thread_params(thread_id)).await?;
+    first.shutdown_thread(thread_id).await?;
+    let initial = first
+        .read_thread(ReadThreadParams {
+            thread_id,
+            include_archived: false,
+            include_history: false,
+        })
         .await?;
-
-    let distinct_title = store
+    let updated_at = initial.updated_at + chrono::Duration::days(1);
+    let earlier_recency_at = initial.recency_at + chrono::Duration::days(1);
+    let recency_at = initial.recency_at + chrono::Duration::days(2);
+    first
         .update_thread_metadata(UpdateThreadMetadataParams {
-            thread_id: legacy_id,
+            thread_id,
             patch: ThreadMetadataPatch {
-                title: Some("Distinct derived title".to_string()),
+                updated_at: Some(updated_at),
                 ..Default::default()
             },
             include_archived: false,
         })
         .await?;
-    assert_eq!(
-        distinct_title.name.as_deref(),
-        Some("Distinct derived title")
+
+    let (sha_result, branch_result) = tokio::join!(
+        first.update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id,
+            patch: ThreadMetadataPatch {
+                git_info: Some(GitInfoPatch {
+                    sha: Some(Some("concurrent-sha".to_string())),
+                    ..Default::default()
+                }),
+                advance_recency_at: Some(earlier_recency_at),
+                ..Default::default()
+            },
+            include_archived: false,
+        }),
+        second.update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id,
+            patch: ThreadMetadataPatch {
+                git_info: Some(GitInfoPatch {
+                    branch: Some(Some("concurrent-branch".to_string())),
+                    ..Default::default()
+                }),
+                advance_recency_at: Some(recency_at),
+                ..Default::default()
+            },
+            include_archived: false,
+        }),
     );
-    let matching_title = store
-        .update_thread_metadata(UpdateThreadMetadataParams {
-            thread_id: legacy_id,
-            patch: ThreadMetadataPatch {
-                title: Some("full fidelity user message".to_string()),
-                ..Default::default()
-            },
-            include_archived: false,
-        })
-        .await?;
-    assert_eq!(matching_title.name, None);
-    let explicit_name = store
-        .update_thread_metadata(UpdateThreadMetadataParams {
-            thread_id: legacy_id,
-            patch: ThreadMetadataPatch {
-                name: Some(Some("Explicit legacy name".to_string())),
-                title: Some("Ignored derived title".to_string()),
-                ..Default::default()
-            },
-            include_archived: false,
-        })
-        .await?;
-    assert_eq!(explicit_name.name.as_deref(), Some("Explicit legacy name"));
+    sha_result?;
+    branch_result?;
 
-    let paginated_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f012")?;
-    let mut paginated_params = create_thread_params(paginated_id);
-    paginated_params.history_mode = ThreadHistoryMode::Paginated;
-    store.create_thread(paginated_params).await?;
-    let paginated = store
-        .update_thread_metadata(UpdateThreadMetadataParams {
-            thread_id: paginated_id,
-            patch: ThreadMetadataPatch {
-                title: Some("Paginated derived title".to_string()),
-                ..Default::default()
-            },
+    let final_thread = first
+        .read_thread(ReadThreadParams {
+            thread_id,
             include_archived: false,
+            include_history: false,
         })
         .await?;
-    assert_eq!(paginated.name, None);
-    let paginated_named = store
-        .update_thread_metadata(UpdateThreadMetadataParams {
-            thread_id: paginated_id,
-            patch: ThreadMetadataPatch {
-                name: Some(Some("Explicit paginated name".to_string())),
-                title: Some("Ignored paginated title".to_string()),
-                ..Default::default()
-            },
-            include_archived: false,
-        })
-        .await?;
+    assert_eq!(final_thread.updated_at, updated_at);
+    assert_eq!(final_thread.recency_at, recency_at);
     assert_eq!(
-        paginated_named.name.as_deref(),
-        Some("Explicit paginated name")
+        serde_json::to_value(final_thread.git_info)?,
+        serde_json::json!({
+            "commit_hash": "concurrent-sha",
+            "branch": "concurrent-branch",
+        })
     );
 
-    pool.close().await;
+    first_pool.close().await;
+    second_pool.close().await;
     fixture.cleanup().await
 }
 
@@ -846,14 +840,14 @@ fn append_items() -> Vec<RolloutItem> {
     ]
 }
 
-struct PostgresThreadStoreFixture {
-    config: PostgresNamespaceConfig,
+pub(super) struct PostgresThreadStoreFixture {
+    pub(super) config: PostgresNamespaceConfig,
     database_url: String,
     schema: String,
 }
 
 impl PostgresThreadStoreFixture {
-    fn new(group: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(super) fn new(group: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let database_url = std::env::var(TEST_DATABASE_URL_ENV)?;
         let process_id = std::process::id();
         let sequence = NEXT_SCHEMA_ID.fetch_add(1, Ordering::Relaxed);
@@ -870,7 +864,7 @@ impl PostgresThreadStoreFixture {
         })
     }
 
-    async fn migrate(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) async fn migrate(&self) -> Result<(), Box<dyn std::error::Error>> {
         codex_state::manage_postgres_namespace(
             self.config.clone(),
             PostgresNamespaceAction::Migrate,
@@ -913,7 +907,7 @@ impl PostgresThreadStoreFixture {
         Ok(())
     }
 
-    async fn cleanup(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) async fn cleanup(&self) -> Result<(), Box<dyn std::error::Error>> {
         let pool = sqlx::PgPool::connect(&self.database_url).await?;
         let schema = &self.schema;
         sqlx::query(AssertSqlSafe(format!("DROP SCHEMA \"{schema}\" CASCADE")))

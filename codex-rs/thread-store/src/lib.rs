@@ -11,6 +11,9 @@ mod in_memory;
 mod lifecycle_contract_tests;
 mod live_thread;
 mod local;
+#[cfg(test)]
+#[path = "metadata_contract_tests.rs"]
+mod metadata_contract_tests;
 mod postgres;
 #[cfg(test)]
 #[path = "postgres_contract_tests.rs"]

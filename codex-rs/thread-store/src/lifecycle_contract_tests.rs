@@ -30,9 +30,11 @@ use crate::PostgresThreadStore;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
 use crate::StoredThread;
+use crate::ThreadMetadataPatch;
 use crate::ThreadPersistenceMetadata;
 use crate::ThreadStore;
 use crate::ThreadStoreError;
+use crate::UpdateThreadMetadataParams;
 
 const TEST_DATABASE_URL_ENV: &str = "CODEX_TEST_POSTGRES_URL";
 static NEXT_SCHEMA_ID: AtomicU64 = AtomicU64::new(0);
@@ -234,7 +236,19 @@ async fn postgres_lifecycle_contract_concurrent_transitions_have_one_winner()
     let first = PostgresThreadStore::new(&first_pool);
     let second = PostgresThreadStore::new(&second_pool);
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f104")?;
-    create_inactive_thread(&first, thread_id, Path::new("/postgres-contract")).await?;
+    let initial =
+        create_inactive_thread(&first, thread_id, Path::new("/postgres-contract")).await?;
+    let updated_at = initial.updated_at + chrono::Duration::days(1);
+    first
+        .update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id,
+            patch: ThreadMetadataPatch {
+                updated_at: Some(updated_at),
+                ..Default::default()
+            },
+            include_archived: false,
+        })
+        .await?;
 
     let (first_archive, second_archive) = tokio::join!(
         first.archive_thread(ArchiveThreadParams { thread_id }),
@@ -268,6 +282,8 @@ async fn postgres_lifecycle_contract_concurrent_transitions_have_one_winner()
         .flatten()
         .all(|error| matches!(error, ThreadStoreError::InvalidRequest { .. }))
     );
+    let active = read_thread(&first, thread_id, /*include_archived*/ false).await?;
+    assert_eq!(active.updated_at, updated_at);
 
     let (first_delete, second_delete) = tokio::join!(
         first.delete_thread(DeleteThreadParams { thread_id }),

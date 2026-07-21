@@ -26,7 +26,7 @@ pub(super) async fn archive_thread(
         .await
         .map_err(|error| database_error("archive thread", error))?;
     let row = sqlx::query(AssertSqlSafe(format!(
-        "SELECT projection, fencing_token, archived_at FROM {} \
+        "SELECT projection, fencing_token, archived_at, CURRENT_TIMESTAMP AS database_now FROM {} \
          WHERE thread_id = $1 FOR UPDATE",
         store.tables.threads
     )))
@@ -50,7 +50,10 @@ pub(super) async fn archive_thread(
         .map_err(|error| database_error("archive thread", error))?;
     let mut projection: StoredThread =
         serde_json::from_value(projection).map_err(serialization_error)?;
-    let archived_at = postgres_timestamp(Utc::now());
+    let database_now = row
+        .try_get("database_now")
+        .map_err(|error| database_error("archive thread", error))?;
+    let archived_at = postgres_timestamp(database_now);
     projection.archived_at = Some(archived_at);
     let fencing_token: i64 = row
         .try_get("fencing_token")
@@ -92,7 +95,8 @@ pub(super) async fn unarchive_thread(
         .await
         .map_err(|error| database_error("unarchive thread", error))?;
     let row = sqlx::query(AssertSqlSafe(format!(
-        "SELECT projection, archived_at FROM {} WHERE thread_id = $1 FOR UPDATE",
+        "SELECT projection, archived_at, CURRENT_TIMESTAMP AS database_now FROM {} \
+         WHERE thread_id = $1 FOR UPDATE",
         store.tables.threads
     )))
     .bind(params.thread_id.to_string())
@@ -122,7 +126,10 @@ pub(super) async fn unarchive_thread(
     let mut projection: StoredThread =
         serde_json::from_value(projection).map_err(serialization_error)?;
     projection.archived_at = None;
-    projection.updated_at = postgres_timestamp(Utc::now());
+    let database_now = row
+        .try_get("database_now")
+        .map_err(|error| database_error("unarchive thread", error))?;
+    projection.updated_at = projection.updated_at.max(postgres_timestamp(database_now));
     let projection_json = serde_json::to_value(&projection).map_err(serialization_error)?;
     sqlx::query(AssertSqlSafe(format!(
         "UPDATE {} SET projection = $1, updated_at = $2, archived_at = NULL \

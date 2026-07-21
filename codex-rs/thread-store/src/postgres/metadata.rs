@@ -36,7 +36,7 @@ pub(super) async fn update_thread_metadata(
     let row = sqlx::query(AssertSqlSafe(format!(
         "SELECT projection, stream_version, fencing_token, writer_id, \
          writer_lease_expires_at > CURRENT_TIMESTAMP AS lease_active, \
-         created_at, updated_at, recency_at, archived_at \
+         CURRENT_TIMESTAMP AS database_now, created_at, updated_at, recency_at, archived_at \
          FROM {} WHERE thread_id = $1 FOR UPDATE",
         store.tables.threads
     )))
@@ -134,7 +134,10 @@ pub(super) async fn update_thread_metadata(
     }
     apply_metadata_patch(&mut projection, &params.patch);
     if writes_canonical_metadata && params.patch.updated_at.is_none() {
-        projection.updated_at = postgres_timestamp(Utc::now());
+        let database_now = row
+            .try_get("database_now")
+            .map_err(|error| database_error("update thread metadata", error))?;
+        projection.updated_at = projection.updated_at.max(postgres_timestamp(database_now));
     }
     let projection_json = serde_json::to_value(&projection).map_err(serialization_error)?;
     sqlx::query(AssertSqlSafe(format!(
@@ -300,9 +303,7 @@ pub(super) fn apply_metadata_patch(thread: &mut StoredThread, patch: &ThreadMeta
             .first_user_message
             .as_deref()
             .or(thread.first_user_message.as_deref());
-        let preview = patch.preview.as_deref().unwrap_or(&thread.preview);
-        let matches_first_message =
-            first_user_message.map(str::trim) == Some(title) || preview.trim() == title;
+        let matches_first_message = first_user_message.map(str::trim) == Some(title);
         thread.name = (!title.is_empty() && !matches_first_message).then(|| title.to_string());
     }
     if let Some(preview) = patch.preview.clone() {
