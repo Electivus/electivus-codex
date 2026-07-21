@@ -46,6 +46,10 @@ use std::sync::atomic::AtomicI64;
 use std::time::Instant;
 use tracing::warn;
 
+mod backend;
+#[cfg(test)]
+#[path = "runtime/backend_contract_tests.rs"]
+mod backend_contract_tests;
 mod backfill;
 mod external_agent_config_imports;
 mod goals;
@@ -57,6 +61,7 @@ mod remote_control;
 pub(crate) mod test_support;
 mod threads;
 
+pub use backend::RuntimeStateBackendConfig;
 pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportHistoryRecord;
@@ -167,12 +172,16 @@ impl StateRuntime {
     /// Logs and paginated thread history live in dedicated files to reduce
     /// lock contention with the rest of the state store.
     pub async fn init(codex_home: PathBuf, default_provider: String) -> anyhow::Result<Arc<Self>> {
-        Self::init_inner(
-            codex_home,
-            default_provider,
-            /*telemetry_override*/ None,
-        )
-        .await
+        let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(codex_home)?);
+        Self::init_with_backend(RuntimeStateBackendConfig::Sqlite(sqlite), default_provider).await
+    }
+
+    /// Initialize the state runtime with the selected Runtime State Backend.
+    pub async fn init_with_backend(
+        backend: RuntimeStateBackendConfig,
+        default_provider: String,
+    ) -> anyhow::Result<Arc<Self>> {
+        Self::init_inner(backend, default_provider, /*telemetry_override*/ None).await
     }
 
     #[cfg(test)]
@@ -181,15 +190,33 @@ impl StateRuntime {
         default_provider: String,
         telemetry_override: &dyn DbTelemetry,
     ) -> anyhow::Result<Arc<Self>> {
-        Self::init_inner(codex_home, default_provider, Some(telemetry_override)).await
+        let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(codex_home)?);
+        Self::init_inner(
+            RuntimeStateBackendConfig::Sqlite(sqlite),
+            default_provider,
+            Some(telemetry_override),
+        )
+        .await
     }
 
     async fn init_inner(
-        codex_home: PathBuf,
+        backend: RuntimeStateBackendConfig,
         default_provider: String,
         telemetry_override: Option<&dyn DbTelemetry>,
     ) -> anyhow::Result<Arc<Self>> {
-        let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(codex_home.clone())?);
+        match backend {
+            RuntimeStateBackendConfig::Sqlite(sqlite) => {
+                Self::init_sqlite(sqlite, default_provider, telemetry_override).await
+            }
+        }
+    }
+
+    async fn init_sqlite(
+        sqlite: SqliteConfig,
+        default_provider: String,
+        telemetry_override: Option<&dyn DbTelemetry>,
+    ) -> anyhow::Result<Arc<Self>> {
+        let codex_home = sqlite.home().to_path_buf();
         tokio::fs::create_dir_all(&codex_home).await?;
         let state_migrator = runtime_state_migrator();
         let logs_migrator = runtime_logs_migrator();
