@@ -56,6 +56,9 @@ mod memories;
 mod recovery;
 mod remote_control;
 #[cfg(test)]
+#[path = "runtime/remote_control_contract_tests.rs"]
+pub(crate) mod remote_control_contract_tests;
+#[cfg(test)]
 pub(crate) mod test_support;
 mod threads;
 
@@ -77,6 +80,7 @@ pub use recovery::runtime_db_path_for_corruption_error;
 pub use recovery::sqlite_error_detail_is_corruption;
 pub use recovery::sqlite_error_detail_is_lock;
 pub use remote_control::RemoteControlEnrollmentRecord;
+pub use remote_control::RemoteControlEnrollmentStore;
 pub use threads::ThreadFilterOptions;
 
 // "Partition" is the retained-log-content bucket we cap at 10 MiB:
@@ -158,6 +162,7 @@ pub struct StateRuntime {
     default_provider: String,
     pool: Arc<sqlx::SqlitePool>,
     logs: LogStore,
+    remote_control_enrollments: RemoteControlEnrollmentStore,
     thread_goals: GoalStore,
     memories: MemoryStore,
     thread_updated_at_millis: Arc<AtomicI64>,
@@ -334,6 +339,9 @@ impl StateRuntime {
         let runtime = Arc::new(Self {
             thread_goals: GoalStore::new(Arc::clone(&goals_pool)),
             memories: MemoryStore::new(Arc::clone(&memories_pool), Arc::clone(&pool)),
+            remote_control_enrollments: RemoteControlEnrollmentStore::from_sqlite(Arc::clone(
+                &pool,
+            )),
             pool,
             logs: LogStore::from_sqlite(logs_pool),
             codex_home,

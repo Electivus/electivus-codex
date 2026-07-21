@@ -17,10 +17,13 @@ use config::connection_failed;
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
 const MINIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
-const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 2;
+const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 3;
 const BASELINE_SCHEMA_VERSION: i64 = 1;
 const LOGS_SCHEMA_VERSION: i64 = 2;
+const REMOTE_CONTROL_SCHEMA_VERSION: i64 = 3;
 const LOGS_MIGRATION_SQL: &str = include_str!("../postgres_migrations/0002_logs.sql");
+const REMOTE_CONTROL_MIGRATION_SQL: &str =
+    include_str!("../postgres_migrations/0003_remote_control_enrollments.sql");
 
 /// Explicit operation to perform on a PostgreSQL Runtime State Namespace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -142,6 +145,10 @@ async fn migrate_namespace(
         apply_logs_migration(&mut transaction, schema).await?;
         current_version = LOGS_SCHEMA_VERSION;
     }
+    if current_version < REMOTE_CONTROL_SCHEMA_VERSION {
+        apply_remote_control_migration(&mut transaction, schema).await?;
+        current_version = REMOTE_CONTROL_SCHEMA_VERSION;
+    }
     transaction
         .commit()
         .await
@@ -245,6 +252,22 @@ async fn apply_logs_migration(
         .await
         .map_err(|error| map_sql_error(schema, "create logs storage", error))?;
     record_migration_version(transaction, schema, LOGS_SCHEMA_VERSION).await
+}
+
+async fn apply_remote_control_migration(
+    transaction: &mut Transaction<'_, Postgres>,
+    schema: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("SELECT set_config('search_path', $1, true)")
+        .bind(quote_identifier(schema))
+        .execute(transaction.as_mut())
+        .await
+        .map_err(|error| map_sql_error(schema, "select migration schema", error))?;
+    sqlx::raw_sql(REMOTE_CONTROL_MIGRATION_SQL)
+        .execute(transaction.as_mut())
+        .await
+        .map_err(|error| map_sql_error(schema, "create remote control storage", error))?;
+    record_migration_version(transaction, schema, REMOTE_CONTROL_SCHEMA_VERSION).await
 }
 
 async fn record_migration_version(
