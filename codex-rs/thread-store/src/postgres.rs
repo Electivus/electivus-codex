@@ -30,6 +30,7 @@ use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
 use crate::SearchThreadOccurrencesParams;
 use crate::SearchThreadsParams;
+use crate::StoredModelContext;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::ThreadOccurrenceSearchPage;
@@ -48,6 +49,7 @@ mod append;
 mod items;
 mod lifecycle;
 mod metadata;
+mod model_context;
 mod projection;
 mod resume;
 mod turns;
@@ -351,6 +353,13 @@ impl ThreadStore for PostgresThreadStore {
                 message: format!("thread {} history was not loaded", params.thread_id),
             })
         })
+    }
+
+    fn load_latest_model_context(
+        &self,
+        params: LoadThreadHistoryParams,
+    ) -> ThreadStoreFuture<'_, StoredModelContext> {
+        Box::pin(model_context::load_latest_model_context(self, params))
     }
 
     fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {

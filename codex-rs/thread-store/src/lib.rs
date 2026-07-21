@@ -14,6 +14,9 @@ mod local;
 #[cfg(test)]
 #[path = "metadata_contract_tests.rs"]
 mod metadata_contract_tests;
+#[cfg(test)]
+#[path = "model_context_contract_tests.rs"]
+mod model_context_contract_tests;
 mod postgres;
 #[cfg(test)]
 #[path = "postgres_contract_tests.rs"]
