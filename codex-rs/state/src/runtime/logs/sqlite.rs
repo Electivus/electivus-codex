@@ -4,6 +4,7 @@ use super::super::LOG_PARTITION_SIZE_LIMIT_BYTES;
 use super::super::StateRuntime;
 #[cfg(test)]
 use super::super::test_support;
+use super::LOG_RETENTION_DAYS;
 use super::estimated_log_bytes;
 use super::format_feedback_log_line;
 use crate::LogEntry;
@@ -17,8 +18,6 @@ use sqlx::SqliteConnection;
 use sqlx::SqlitePool;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-
-const LOG_RETENTION_DAYS: i64 = 10;
 
 #[derive(Clone)]
 pub(super) struct SqliteLogStore {

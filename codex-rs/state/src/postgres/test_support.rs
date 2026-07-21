@@ -171,7 +171,7 @@ impl PostgresContractFixture {
         Ok(())
     }
 
-    async fn connect_pool(&self) -> anyhow::Result<PgPool> {
+    pub(super) async fn connect_pool(&self) -> anyhow::Result<PgPool> {
         connect_pool_with_url(&self.config, &self.resolved_url).await
     }
 }

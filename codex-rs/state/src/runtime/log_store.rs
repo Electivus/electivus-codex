@@ -2,16 +2,21 @@ use super::StateRuntime;
 use crate::LogEntry;
 use crate::LogQuery;
 use crate::LogRow;
+use sqlx::PgPool;
 use sqlx::SqlitePool;
 use std::sync::Arc;
 
 #[path = "log_store/common.rs"]
 mod common;
+#[path = "logs/postgres.rs"]
+mod postgres;
 #[path = "logs/sqlite.rs"]
 mod sqlite;
 
+use common::LOG_RETENTION_DAYS;
 use common::estimated_log_bytes;
 use common::format_feedback_log_line;
+use postgres::PostgresLogStore;
 use sqlite::SqliteLogStore;
 
 /// Storage-neutral facade for runtime log operations.
@@ -25,6 +30,7 @@ pub(crate) struct LogStore {
 
 #[derive(Clone)]
 enum LogStoreBackend {
+    Postgres(PostgresLogStore),
     Sqlite(SqliteLogStore),
 }
 
@@ -35,26 +41,43 @@ impl LogStore {
         }
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "PostgreSQL runtime state selection lands in issue #31"
+        )
+    )]
+    pub(crate) fn from_postgres(pool: PgPool, schema: String) -> Self {
+        Self {
+            backend: LogStoreBackend::Postgres(PostgresLogStore::new(pool, schema)),
+        }
+    }
+
     pub(crate) async fn insert_log(&self, entry: &LogEntry) -> anyhow::Result<()> {
         match &self.backend {
+            LogStoreBackend::Postgres(store) => store.insert_log(entry).await,
             LogStoreBackend::Sqlite(store) => store.insert_log(entry).await,
         }
     }
 
     pub(crate) async fn insert_logs(&self, entries: &[LogEntry]) -> anyhow::Result<()> {
         match &self.backend {
+            LogStoreBackend::Postgres(store) => store.insert_logs(entries).await,
             LogStoreBackend::Sqlite(store) => store.insert_logs(entries).await,
         }
     }
 
     pub(crate) async fn run_startup_maintenance(&self) -> anyhow::Result<()> {
         match &self.backend {
+            LogStoreBackend::Postgres(store) => store.run_startup_maintenance().await,
             LogStoreBackend::Sqlite(store) => store.run_logs_startup_maintenance().await,
         }
     }
 
     pub(crate) async fn query_logs(&self, query: &LogQuery) -> anyhow::Result<Vec<LogRow>> {
         match &self.backend {
+            LogStoreBackend::Postgres(store) => store.query_logs(query).await,
             LogStoreBackend::Sqlite(store) => store.query_logs(query).await,
         }
     }
@@ -64,6 +87,9 @@ impl LogStore {
         thread_ids: &[&str],
     ) -> anyhow::Result<Vec<u8>> {
         match &self.backend {
+            LogStoreBackend::Postgres(store) => {
+                store.query_feedback_logs_for_threads(thread_ids).await
+            }
             LogStoreBackend::Sqlite(store) => {
                 store.query_feedback_logs_for_threads(thread_ids).await
             }
@@ -76,18 +102,21 @@ impl LogStore {
 
     pub(crate) async fn max_log_id(&self, query: &LogQuery) -> anyhow::Result<i64> {
         match &self.backend {
+            LogStoreBackend::Postgres(store) => store.max_log_id(query).await,
             LogStoreBackend::Sqlite(store) => store.max_log_id(query).await,
         }
     }
 
     pub(crate) async fn delete_logs_for_thread(&self, thread_id: &str) -> anyhow::Result<()> {
         match &self.backend {
+            LogStoreBackend::Postgres(store) => store.delete_logs_for_thread(thread_id).await,
             LogStoreBackend::Sqlite(store) => store.delete_logs_for_thread(thread_id).await,
         }
     }
 
     pub(crate) async fn close(&self) {
         match &self.backend {
+            LogStoreBackend::Postgres(store) => store.close().await,
             LogStoreBackend::Sqlite(store) => store.close().await,
         }
     }

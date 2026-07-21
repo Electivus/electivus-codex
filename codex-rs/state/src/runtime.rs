@@ -51,7 +51,7 @@ mod goals;
 mod log_store;
 #[cfg(test)]
 #[path = "runtime/logs_contract_tests.rs"]
-mod logs_contract_tests;
+pub(crate) mod logs_contract_tests;
 mod memories;
 mod recovery;
 mod remote_control;

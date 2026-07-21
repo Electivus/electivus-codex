@@ -48,7 +48,7 @@ fn entry(ts: i64, message: &str) -> LogEntry {
     }
 }
 
-async fn run_replica_visibility_contract(
+pub(crate) async fn run_replica_visibility_contract(
     writer: &LogStore,
     reader: &LogStore,
 ) -> anyhow::Result<()> {
@@ -101,7 +101,7 @@ async fn run_replica_visibility_contract(
     Ok(())
 }
 
-async fn run_filter_order_and_max_id_contract(
+pub(crate) async fn run_filter_order_and_max_id_contract(
     writer: &LogStore,
     reader: &LogStore,
 ) -> anyhow::Result<()> {
@@ -178,7 +178,10 @@ async fn run_filter_order_and_max_id_contract(
     Ok(())
 }
 
-async fn run_feedback_contract(writer: &LogStore, reader: &LogStore) -> anyhow::Result<()> {
+pub(crate) async fn run_feedback_contract(
+    writer: &LogStore,
+    reader: &LogStore,
+) -> anyhow::Result<()> {
     let mut thread = entry(10, "message fallback is not selected");
     thread.feedback_log_body = Some("thread body".to_string());
     thread.process_uuid = Some("shared-process".to_string());
@@ -205,7 +208,7 @@ async fn run_feedback_contract(writer: &LogStore, reader: &LogStore) -> anyhow::
     Ok(())
 }
 
-async fn run_startup_retention_contract(
+pub(crate) async fn run_startup_retention_contract(
     writer: &LogStore,
     reader: &LogStore,
 ) -> anyhow::Result<()> {
@@ -219,12 +222,24 @@ async fn run_startup_retention_contract(
     let rows = reader.query_logs(&LogQuery::default()).await?;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].message.as_deref(), Some("retained"));
+
+    writer.delete_logs_for_thread("thread-1").await?;
+    assert_eq!(reader.query_logs(&LogQuery::default()).await?, Vec::new());
     Ok(())
 }
 
-async fn run_partition_limits_contract(writer: &LogStore, reader: &LogStore) -> anyhow::Result<()> {
+pub(crate) async fn run_partition_limits_contract(
+    writer: &LogStore,
+    reader: &LogStore,
+) -> anyhow::Result<()> {
     let entries = (0..=1_000)
-        .map(|index| entry(index, &format!("row-{index}")))
+        .map(|index| {
+            let mut entry = entry(index, &format!("row-{index}"));
+            if index % 2 == 0 {
+                entry.process_uuid = None;
+            }
+            entry
+        })
         .collect::<Vec<_>>();
     writer.insert_logs(&entries).await?;
 
@@ -237,6 +252,35 @@ async fn run_partition_limits_contract(writer: &LogStore, reader: &LogStore) -> 
     assert_eq!(thread_rows.len(), 1_000);
     assert_eq!(thread_rows.first().map(|row| row.id), Some(2));
     assert_eq!(thread_rows.last().map(|row| row.id), Some(1_001));
+
+    let mut process_entries = (0..=1_000)
+        .map(|index| {
+            let mut entry = entry(1_000 + index, &format!("process-row-{index}"));
+            entry.thread_id = None;
+            entry.process_uuid = Some("thread-1".to_string());
+            entry
+        })
+        .collect::<Vec<_>>();
+    process_entries.push(entry(2_001, "newest-thread-row"));
+    writer.insert_logs(&process_entries).await?;
+    let process_rows = reader
+        .query_logs(&LogQuery {
+            include_threadless: true,
+            ..LogQuery::default()
+        })
+        .await?;
+    assert_eq!(process_rows.len(), 1_000);
+    assert_eq!(process_rows.first().map(|row| row.id), Some(1_003));
+    assert_eq!(process_rows.last().map(|row| row.id), Some(2_002));
+    let updated_thread_rows = reader
+        .query_logs(&LogQuery {
+            thread_ids: vec!["thread-1".to_string()],
+            ..LogQuery::default()
+        })
+        .await?;
+    assert_eq!(updated_thread_rows.len(), 1_000);
+    assert_eq!(updated_thread_rows.first().map(|row| row.id), Some(3));
+    assert_eq!(updated_thread_rows.last().map(|row| row.id), Some(2_003));
 
     let oversized_body = "x".repeat(10 * 1024 * 1024 + 1);
     let mut oversized = entry(2_000, &oversized_body);

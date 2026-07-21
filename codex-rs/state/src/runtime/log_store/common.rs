@@ -2,6 +2,8 @@ use crate::LogEntry;
 use chrono::DateTime;
 use chrono::Utc;
 
+pub(super) const LOG_RETENTION_DAYS: i64 = 10;
+
 pub(super) fn estimated_log_bytes(entry: &LogEntry) -> i64 {
     let feedback_log_body = entry.feedback_log_body.as_ref().or(entry.message.as_ref());
     feedback_log_body.map_or(0, String::len) as i64

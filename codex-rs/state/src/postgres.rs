@@ -17,7 +17,10 @@ use config::connection_failed;
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
 const MINIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
-const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
+const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 2;
+const BASELINE_SCHEMA_VERSION: i64 = 1;
+const LOGS_SCHEMA_VERSION: i64 = 2;
+const LOGS_MIGRATION_SQL: &str = include_str!("../postgres_migrations/0002_logs.sql");
 
 /// Explicit operation to perform on a PostgreSQL Runtime State Namespace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -125,16 +128,20 @@ async fn migrate_namespace(
         create_migration_table(&mut transaction, schema).await?;
     }
     let history = read_migration_history(transaction.as_mut(), schema).await?;
-    let current_version = match history.current_version(schema)? {
+    let mut current_version = match history.current_version(schema)? {
         Some(version) => {
             ensure_compatible_schema_version(schema, version)?;
             version
         }
         None => {
-            record_initial_migration(&mut transaction, schema).await?;
-            MAXIMUM_COMPATIBLE_SCHEMA_VERSION
+            record_migration_version(&mut transaction, schema, BASELINE_SCHEMA_VERSION).await?;
+            BASELINE_SCHEMA_VERSION
         }
     };
+    if current_version < LOGS_SCHEMA_VERSION {
+        apply_logs_migration(&mut transaction, schema).await?;
+        current_version = LOGS_SCHEMA_VERSION;
+    }
     transaction
         .commit()
         .await
@@ -224,15 +231,32 @@ async fn create_migration_table(
     Ok(())
 }
 
-async fn record_initial_migration(
+async fn apply_logs_migration(
     transaction: &mut Transaction<'_, Postgres>,
     schema: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("SELECT set_config('search_path', $1, true)")
+        .bind(quote_identifier(schema))
+        .execute(transaction.as_mut())
+        .await
+        .map_err(|error| map_sql_error(schema, "select migration schema", error))?;
+    sqlx::raw_sql(LOGS_MIGRATION_SQL)
+        .execute(transaction.as_mut())
+        .await
+        .map_err(|error| map_sql_error(schema, "create logs storage", error))?;
+    record_migration_version(transaction, schema, LOGS_SCHEMA_VERSION).await
+}
+
+async fn record_migration_version(
+    transaction: &mut Transaction<'_, Postgres>,
+    schema: &str,
+    version: i64,
 ) -> anyhow::Result<()> {
     let table = qualified_migration_table(schema);
     sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO {table} (version) VALUES ($1)"
     )))
-    .bind(MAXIMUM_COMPATIBLE_SCHEMA_VERSION)
+    .bind(version)
     .execute(transaction.as_mut())
     .await
     .map_err(|error| map_sql_error(schema, "record migration version", error))?;
@@ -313,11 +337,19 @@ fn qualified_migration_table(schema: &str) -> String {
     format!("{schema}.{table}")
 }
 
-fn quote_identifier(identifier: &str) -> String {
+pub(crate) fn qualified_table(schema: &str, table: &str) -> String {
+    format!("{}.{}", quote_identifier(schema), quote_identifier(table))
+}
+
+pub(crate) fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-fn map_sql_error(schema: &str, operation: &'static str, error: sqlx::Error) -> anyhow::Error {
+pub(crate) fn map_sql_error(
+    schema: &str,
+    operation: &'static str,
+    error: sqlx::Error,
+) -> anyhow::Error {
     match error
         .as_database_error()
         .and_then(sqlx::error::DatabaseError::code)
