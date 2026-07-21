@@ -53,6 +53,7 @@ mod metadata;
 mod model_context;
 mod projection;
 mod resume;
+mod search_thread_occurrences;
 mod search_threads;
 mod turns;
 
@@ -379,6 +380,9 @@ impl ThreadStore for PostgresThreadStore {
     fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
         Box::pin(list_threads::list_threads(self, params))
     }
+    fn supports_paginated_history_lists(&self) -> bool {
+        true
+    }
     fn search_threads(
         &self,
         params: SearchThreadsParams,
@@ -387,9 +391,11 @@ impl ThreadStore for PostgresThreadStore {
     }
     fn search_thread_occurrences(
         &self,
-        _params: SearchThreadOccurrencesParams,
+        params: SearchThreadOccurrencesParams,
     ) -> ThreadStoreFuture<'_, ThreadOccurrenceSearchPage> {
-        unsupported("thread/searchOccurrences")
+        Box::pin(search_thread_occurrences::search_thread_occurrences(
+            self, params,
+        ))
     }
     fn list_turns(&self, params: ListTurnsParams) -> ThreadStoreFuture<'_, TurnPage> {
         Box::pin(turns::list_turns(self, params))

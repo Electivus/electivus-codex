@@ -20,6 +20,7 @@ mod metadata_contract_tests;
 #[cfg(test)]
 #[path = "model_context_contract_tests.rs"]
 mod model_context_contract_tests;
+mod occurrence_search;
 mod postgres;
 #[cfg(test)]
 #[path = "postgres_contract_tests.rs"]
@@ -30,6 +31,9 @@ mod postgres_item_projection_contract_tests;
 #[cfg(test)]
 #[path = "postgres_turn_projection_contract_tests.rs"]
 mod postgres_turn_projection_contract_tests;
+#[cfg(test)]
+#[path = "search_thread_occurrences_contract_tests.rs"]
+mod search_thread_occurrences_contract_tests;
 #[cfg(test)]
 #[path = "search_threads_contract_tests.rs"]
 mod search_threads_contract_tests;

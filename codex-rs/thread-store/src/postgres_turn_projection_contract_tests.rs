@@ -283,7 +283,7 @@ fn paginated_turn_history(thread_id: ThreadId) -> Vec<RolloutItem> {
     history
 }
 
-fn turn_started(turn_id: &str, started_at: i64) -> RolloutItem {
+pub(super) fn turn_started(turn_id: &str, started_at: i64) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
         turn_id: turn_id.to_string(),
         trace_id: None,
@@ -293,7 +293,7 @@ fn turn_started(turn_id: &str, started_at: i64) -> RolloutItem {
     }))
 }
 
-fn turn_complete(
+pub(super) fn turn_complete(
     turn_id: &str,
     started_at: i64,
     completed_at: i64,
@@ -310,7 +310,7 @@ fn turn_complete(
     }))
 }
 
-fn completed_item(thread_id: ThreadId, turn_id: &str, item: TurnItem) -> RolloutItem {
+pub(super) fn completed_item(thread_id: ThreadId, turn_id: &str, item: TurnItem) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
         thread_id,
         turn_id: turn_id.to_string(),
@@ -327,7 +327,7 @@ fn user_item(item_id: &str) -> TurnItem {
     })
 }
 
-fn agent_item(item_id: &str, text: &str, phase: Option<MessagePhase>) -> TurnItem {
+pub(super) fn agent_item(item_id: &str, text: &str, phase: Option<MessagePhase>) -> TurnItem {
     TurnItem::AgentMessage(AgentMessageItem {
         id: item_id.to_string(),
         content: vec![AgentMessageContent::Text {

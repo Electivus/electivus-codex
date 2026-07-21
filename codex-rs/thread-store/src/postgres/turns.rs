@@ -122,7 +122,7 @@ async fn load_summary_items(
             OR item_id = (SELECT item_id FROM {items} WHERE thread_id = $1 AND turn_id = $2 \
                 AND item->>'type' = 'agentMessage' \
                 AND (item->>'phase' = 'final_answer' OR ($3 AND item->>'phase' IS NULL)) \
-                ORDER BY (item->>'phase' = 'final_answer') DESC, rollout_ordinal DESC LIMIT 1) \
+                ORDER BY (item->>'phase' = 'final_answer') DESC NULLS LAST, rollout_ordinal DESC LIMIT 1) \
          ) ORDER BY rollout_ordinal ASC"
     )))
     .bind(thread_id.to_string())
