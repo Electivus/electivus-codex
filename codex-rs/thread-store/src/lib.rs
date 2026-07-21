@@ -6,6 +6,9 @@
 
 mod error;
 mod in_memory;
+#[cfg(test)]
+#[path = "lifecycle_contract_tests.rs"]
+mod lifecycle_contract_tests;
 mod live_thread;
 mod local;
 mod postgres;

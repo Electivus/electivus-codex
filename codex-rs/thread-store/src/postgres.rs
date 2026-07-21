@@ -11,6 +11,7 @@ use serde_json::Value;
 use sqlx::AssertSqlSafe;
 use sqlx::Row;
 use tokio::sync::Mutex;
+use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 use crate::AppendBatchCommit;
@@ -60,6 +61,7 @@ pub struct PostgresThreadStore {
     pub(super) tables: PostgresThreadTables,
     pub(super) writer_id: String,
     pub(super) live_writers: Arc<Mutex<HashMap<ThreadId, ActiveWriter>>>,
+    operation_locks: Arc<Mutex<HashMap<ThreadId, Arc<Mutex<()>>>>>,
 }
 
 #[derive(Clone)]
@@ -90,7 +92,19 @@ impl PostgresThreadStore {
             },
             writer_id: Uuid::now_v7().to_string(),
             live_writers: Arc::new(Mutex::new(HashMap::new())),
+            operation_locks: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    async fn lock_operation(&self, thread_id: ThreadId) -> OwnedMutexGuard<()> {
+        let lock = self
+            .operation_locks
+            .lock()
+            .await
+            .entry(thread_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        lock.lock_owned().await
     }
 
     async fn create(&self, params: CreateThreadParams) -> ThreadStoreResult<()> {
@@ -248,35 +262,59 @@ impl ThreadStore for PostgresThreadStore {
     }
 
     fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(self.create(params))
+        Box::pin(async move {
+            let _operation_guard = self.lock_operation(params.thread_id).await;
+            self.create(params).await
+        })
     }
 
     fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(resume::resume_thread(self, params))
+        Box::pin(async move {
+            let _operation_guard = self.lock_operation(params.thread_id).await;
+            resume::resume_thread(self, params).await
+        })
     }
 
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(append::append_items(self, params))
+        Box::pin(async move {
+            let _operation_guard = self.lock_operation(params.thread_id).await;
+            append::append_items(self, params).await
+        })
     }
 
     fn append_batch(
         &self,
         batch: AppendThreadItemsBatch,
     ) -> ThreadStoreFuture<'_, AppendBatchCommit> {
-        Box::pin(append::append_batch(self, batch))
+        Box::pin(async move {
+            let _operation_guard = self.lock_operation(batch.thread_id).await;
+            append::append_batch(self, batch).await
+        })
     }
 
     fn persist_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(lifecycle::renew_writer(self, thread_id))
+        Box::pin(async move {
+            let _operation_guard = self.lock_operation(thread_id).await;
+            lifecycle::renew_writer(self, thread_id).await
+        })
     }
     fn flush_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(lifecycle::renew_writer(self, thread_id))
+        Box::pin(async move {
+            let _operation_guard = self.lock_operation(thread_id).await;
+            lifecycle::renew_writer(self, thread_id).await
+        })
     }
     fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(lifecycle::release_writer(self, thread_id))
+        Box::pin(async move {
+            let _operation_guard = self.lock_operation(thread_id).await;
+            lifecycle::release_writer(self, thread_id).await
+        })
     }
     fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(lifecycle::release_writer(self, thread_id))
+        Box::pin(async move {
+            let _operation_guard = self.lock_operation(thread_id).await;
+            lifecycle::release_writer(self, thread_id).await
+        })
     }
 
     fn load_history(
@@ -332,19 +370,28 @@ impl ThreadStore for PostgresThreadStore {
         &self,
         params: UpdateThreadMetadataParams,
     ) -> ThreadStoreFuture<'_, StoredThread> {
-        Box::pin(metadata::update_thread_metadata(self, params))
+        Box::pin(async move {
+            let _operation_guard = self.lock_operation(params.thread_id).await;
+            metadata::update_thread_metadata(self, params).await
+        })
     }
-    fn archive_thread(&self, _params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
-        unsupported("archive_thread")
+    fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            let _operation_guard = self.lock_operation(params.thread_id).await;
+            lifecycle::archive_thread(self, params).await
+        })
     }
-    fn unarchive_thread(
-        &self,
-        _params: ArchiveThreadParams,
-    ) -> ThreadStoreFuture<'_, StoredThread> {
-        unsupported("unarchive_thread")
+    fn unarchive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
+        Box::pin(async move {
+            let _operation_guard = self.lock_operation(params.thread_id).await;
+            lifecycle::unarchive_thread(self, params).await
+        })
     }
-    fn delete_thread(&self, _params: DeleteThreadParams) -> ThreadStoreFuture<'_, ()> {
-        unsupported("delete_thread")
+    fn delete_thread(&self, params: DeleteThreadParams) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            let _operation_guard = self.lock_operation(params.thread_id).await;
+            lifecycle::delete_thread(self, params).await
+        })
     }
 }
 
