@@ -20,6 +20,7 @@ use codex_protocol::protocol::user_message_preview;
 use crate::CreateThreadParams;
 use crate::GitInfoPatch;
 use crate::ResumeThreadParams;
+use crate::StoredThread;
 use crate::ThreadMetadataPatch;
 use crate::types::canonical_history_mode_from_rollout_items;
 
@@ -30,6 +31,7 @@ const THREAD_UPDATED_AT_TOUCH_INTERVAL: Duration = Duration::from_secs(5);
 /// Stores receive raw rollout items plus explicit metadata patches. This helper
 /// keeps append-derived metadata observation in the live layer without owning persistence-policy
 /// filtering or making `append_items` infer metadata inside a `ThreadStore` implementation.
+#[derive(Clone)]
 pub(crate) struct ThreadMetadataSync {
     thread_id: ThreadId,
     cwd_seen: bool,
@@ -49,6 +51,21 @@ pub(crate) struct PendingThreadMetadataPatch {
 }
 
 impl ThreadMetadataSync {
+    pub(crate) fn from_stored_thread(thread: &StoredThread) -> Self {
+        Self {
+            thread_id: thread.thread_id,
+            cwd_seen: !thread.cwd.as_os_str().is_empty(),
+            preview_seen: !thread.preview.is_empty(),
+            first_user_message_seen: thread.first_user_message.is_some(),
+            title_seen: thread.name.is_some(),
+            pending_update: None,
+            pending_update_generation: 0,
+            last_touch_persisted_at: None,
+            defer_create_update_until_history_exists: false,
+            defer_resume_update_until_append: false,
+        }
+    }
+
     pub(crate) async fn for_create(params: &CreateThreadParams) -> Self {
         let created_at = Utc::now();
         let cwd = params.metadata.cwd.clone().unwrap_or_default();

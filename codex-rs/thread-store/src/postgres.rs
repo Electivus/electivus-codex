@@ -13,6 +13,8 @@ use sqlx::Row;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::AppendBatchCommit;
+use crate::AppendThreadItemsBatch;
 use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
 use crate::CreateThreadParams;
@@ -38,9 +40,13 @@ use crate::ThreadStoreFuture;
 use crate::ThreadStoreResult;
 use crate::TurnPage;
 use crate::UpdateThreadMetadataParams;
+use crate::thread_metadata_sync::ThreadMetadataSync;
 use crate::types::initial_session_meta_item;
 
-const WRITER_LEASE_DURATION: Duration = Duration::from_secs(30);
+mod append;
+mod lifecycle;
+
+pub(super) const WRITER_LEASE_DURATION: Duration = Duration::from_secs(30);
 
 /// PostgreSQL-backed implementation of [`ThreadStore`].
 ///
@@ -48,22 +54,25 @@ const WRITER_LEASE_DURATION: Duration = Duration::from_secs(30);
 /// State Store responsibility can select PostgreSQL integrally.
 #[derive(Clone)]
 pub struct PostgresThreadStore {
-    pool: sqlx::PgPool,
-    tables: PostgresThreadTables,
-    writer_id: String,
-    live_writers: Arc<Mutex<HashMap<ThreadId, ActiveWriter>>>,
+    pub(super) pool: sqlx::PgPool,
+    pub(super) tables: PostgresThreadTables,
+    pub(super) writer_id: String,
+    pub(super) live_writers: Arc<Mutex<HashMap<ThreadId, ActiveWriter>>>,
 }
 
 #[derive(Clone)]
-struct PostgresThreadTables {
-    threads: String,
-    history: String,
+pub(super) struct PostgresThreadTables {
+    pub(super) threads: String,
+    pub(super) history: String,
+    pub(super) append_batches: String,
 }
 
-#[derive(Clone, Copy)]
-struct ActiveWriter {
-    _fencing_token: i64,
-    _expected_stream_version: i64,
+#[derive(Clone)]
+pub(super) struct ActiveWriter {
+    pub(super) fencing_token: i64,
+    pub(super) expected_stream_version: i64,
+    pub(super) history_mode: codex_protocol::protocol::ThreadHistoryMode,
+    pub(super) metadata_sync: ThreadMetadataSync,
 }
 
 impl PostgresThreadStore {
@@ -75,6 +84,7 @@ impl PostgresThreadStore {
             tables: PostgresThreadTables {
                 threads: format!("{schema}.threads"),
                 history: format!("{schema}.thread_history"),
+                append_batches: format!("{schema}.thread_append_batches"),
             },
             writer_id: Uuid::now_v7().to_string(),
             live_writers: Arc::new(Mutex::new(HashMap::new())),
@@ -118,6 +128,7 @@ impl PostgresThreadStore {
             first_user_message: None,
             history: None,
         };
+        let metadata_sync = ThreadMetadataSync::from_stored_thread(&projection);
         let projection = serde_json::to_value(projection).map_err(serialization_error)?;
         let session_meta = serde_json::to_value(session_meta).map_err(serialization_error)?;
         let lease_millis = i64::try_from(WRITER_LEASE_DURATION.as_millis()).map_err(|_| {
@@ -171,8 +182,10 @@ impl PostgresThreadStore {
         self.live_writers.lock().await.insert(
             params.thread_id,
             ActiveWriter {
-                _fencing_token: 1,
-                _expected_stream_version: 1,
+                fencing_token: 1,
+                expected_stream_version: 1,
+                history_mode: params.history_mode,
+                metadata_sync,
             },
         );
         Ok(())
@@ -240,21 +253,28 @@ impl ThreadStore for PostgresThreadStore {
         unsupported("resume_thread")
     }
 
-    fn append_items(&self, _params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
-        unsupported("append_items")
+    fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(append::append_items(self, params))
     }
 
-    fn persist_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-        unsupported("persist_thread")
+    fn append_batch(
+        &self,
+        batch: AppendThreadItemsBatch,
+    ) -> ThreadStoreFuture<'_, AppendBatchCommit> {
+        Box::pin(append::append_batch(self, batch))
     }
-    fn flush_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-        unsupported("flush_thread")
+
+    fn persist_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(lifecycle::renew_writer(self, thread_id))
     }
-    fn shutdown_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-        unsupported("shutdown_thread")
+    fn flush_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(lifecycle::renew_writer(self, thread_id))
     }
-    fn discard_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-        unsupported("discard_thread")
+    fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(lifecycle::release_writer(self, thread_id))
+    }
+    fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(lifecycle::release_writer(self, thread_id))
     }
 
     fn load_history(
@@ -330,16 +350,22 @@ fn unsupported<T>(operation: &'static str) -> ThreadStoreFuture<'static, T> {
     Box::pin(async move { Err(ThreadStoreError::Unsupported { operation }) })
 }
 
-fn serialization_error(error: serde_json::Error) -> ThreadStoreError {
+pub(super) fn serialization_error(error: serde_json::Error) -> ThreadStoreError {
     ThreadStoreError::Internal {
         message: format!("thread store could not encode durable thread data: {error}"),
     }
 }
 
-fn database_error(operation: &'static str, _error: sqlx::Error) -> ThreadStoreError {
+pub(super) fn database_error(operation: &'static str, _error: sqlx::Error) -> ThreadStoreError {
     ThreadStoreError::Internal {
         message: format!(
             "thread store could not complete `{operation}`; verify persistence health, then retry"
         ),
+    }
+}
+
+pub(super) fn writer_conflict(thread_id: ThreadId) -> ThreadStoreError {
+    ThreadStoreError::Conflict {
+        message: format!("thread {thread_id} writer no longer owns the expected stream version"),
     }
 }

@@ -4,6 +4,8 @@ use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::AppendBatchCommit;
+use crate::AppendThreadItemsBatch;
 use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
 use crate::CreateThreadParams;
@@ -56,6 +58,21 @@ pub trait ThreadStore: Any + Send + Sync {
     /// Implementations should apply the shared rollout persistence policy before writing durable
     /// replay history and before updating any implementation-owned projections.
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()>;
+
+    /// Atomically appends an explicitly identified batch and returns its durable stream position.
+    ///
+    /// Callers may retry the same identity and content after an ambiguous response. Stores that
+    /// do not expose explicit Append Batches can continue implementing [`ThreadStore::append_items`].
+    fn append_batch(
+        &self,
+        _batch: AppendThreadItemsBatch,
+    ) -> ThreadStoreFuture<'_, AppendBatchCommit> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "append_batch",
+            })
+        })
+    }
 
     /// Materializes the thread if persistence is lazy, then persists all queued items.
     fn persist_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()>;

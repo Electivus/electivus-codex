@@ -183,6 +183,58 @@ pub struct AppendThreadItemsParams {
     pub items: Vec<RolloutItem>,
 }
 
+/// Stable identity for one atomic Append Batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AppendBatchId(uuid::Uuid);
+
+impl Default for AppendBatchId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AppendBatchId {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::now_v7())
+    }
+
+    pub fn from_string(value: &str) -> Result<Self, uuid::Error> {
+        uuid::Uuid::parse_str(value).map(Self)
+    }
+}
+
+impl std::fmt::Display for AppendBatchId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
+/// One ordered, atomic append with an identity that can be reused after an ambiguous response.
+#[derive(Clone, Debug)]
+pub struct AppendThreadItemsBatch {
+    pub thread_id: ThreadId,
+    pub batch_id: AppendBatchId,
+    pub items: Vec<RolloutItem>,
+}
+
+impl AppendThreadItemsBatch {
+    pub fn new(thread_id: ThreadId, batch_id: AppendBatchId, items: Vec<RolloutItem>) -> Self {
+        Self {
+            thread_id,
+            batch_id,
+            items,
+        }
+    }
+}
+
+/// Durable position committed by an Append Batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppendBatchCommit {
+    pub first_ordinal: u64,
+    pub persisted_item_count: usize,
+    pub committed_stream_version: u64,
+}
+
 /// Parameters for loading persisted history for resume, fork, rollback, and memory jobs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoadThreadHistoryParams {
