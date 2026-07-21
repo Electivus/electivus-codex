@@ -74,7 +74,14 @@ impl PostgresNamespaceConfig {
 
 pub(super) async fn connect_pool(config: &PostgresNamespaceConfig) -> anyhow::Result<PgPool> {
     let resolved_url = resolve_url(config, |name| std::env::var_os(name))?;
-    let connect_options = parse_connection_options(config, &resolved_url)?
+    connect_pool_with_url(config, &resolved_url).await
+}
+
+pub(super) async fn connect_pool_with_url(
+    config: &PostgresNamespaceConfig,
+    resolved_url: &ResolvedUrl,
+) -> anyhow::Result<PgPool> {
+    let connect_options = parse_connection_options(config, resolved_url)?
         .application_name("codex-runtime-state-schema")
         .options([(
             "statement_timeout",

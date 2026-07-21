@@ -58,24 +58,36 @@ pub async fn manage_postgres_namespace(
     action: PostgresNamespaceAction,
 ) -> anyhow::Result<PostgresNamespaceStatus> {
     let pool = connect_pool(&config).await?;
+    manage_postgres_namespace_with_pool(&config, pool, action).await
+}
+
+async fn manage_postgres_namespace_with_pool(
+    config: &PostgresNamespaceConfig,
+    pool: sqlx::PgPool,
+    action: PostgresNamespaceAction,
+) -> anyhow::Result<PostgresNamespaceStatus> {
     let result = async {
         let mut connection = pool
             .acquire()
             .await
             .map_err(|_| connection_failed(&config.url_env))?;
-        validate_postgres_version(&mut connection, &config.schema).await?;
-        match action {
-            PostgresNamespaceAction::Migrate => {
-                migrate_namespace(&mut connection, &config.schema).await
-            }
-            PostgresNamespaceAction::Validate => {
-                validate_namespace(&mut connection, &config.schema).await
-            }
-        }
+        manage_postgres_namespace_with_connection(config, &mut connection, action).await
     }
     .await;
     pool.close().await;
     result
+}
+
+async fn manage_postgres_namespace_with_connection(
+    config: &PostgresNamespaceConfig,
+    connection: &mut PgConnection,
+    action: PostgresNamespaceAction,
+) -> anyhow::Result<PostgresNamespaceStatus> {
+    validate_postgres_version(connection, &config.schema).await?;
+    match action {
+        PostgresNamespaceAction::Migrate => migrate_namespace(connection, &config.schema).await,
+        PostgresNamespaceAction::Validate => validate_namespace(connection, &config.schema).await,
+    }
 }
 
 async fn validate_postgres_version(
@@ -331,3 +343,11 @@ fn migration_history_absent(schema: &str) -> anyhow::Error {
 #[cfg(test)]
 #[path = "postgres_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "postgres/test_support.rs"]
+mod test_support;
+
+#[cfg(test)]
+#[path = "postgres_contract_tests.rs"]
+mod contract_tests;

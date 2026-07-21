@@ -1,0 +1,46 @@
+name: PostgreSQL Runtime State contracts
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  postgres-contracts:
+    name: PostgreSQL 18 Runtime State contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CODEX_TEST_POSTGRES_URL: postgresql://codex:codex-test@localhost:5432/codex_runtime_state_test
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: codex_runtime_state_test
+          POSTGRES_PASSWORD: codex-test
+          POSTGRES_USER: codex
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U codex -d codex_runtime_state_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: nextest
+      - name: Run PostgreSQL Runtime State contracts
+        run: just test -p codex-state --run-ignored ignored-only -E 'test(/postgres_contract_/)'
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
