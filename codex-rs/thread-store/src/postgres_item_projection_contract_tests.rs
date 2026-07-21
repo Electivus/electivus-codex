@@ -267,6 +267,133 @@ async fn postgres_contract_item_projection_excludes_inherited_subagent_prefix()
     fixture.cleanup().await
 }
 
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_append_rebuilds_stale_prefix_before_projecting_suffix()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = PostgresThreadStoreFixture::new("thread_projection_append_rebuild")?;
+    fixture.migrate().await?;
+    let pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let store = PostgresThreadStore::new(&pool);
+    let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f014")?;
+    let mut create_params = create_thread_params(thread_id);
+    create_params.history_mode = ThreadHistoryMode::Paginated;
+    store.create_thread(create_params).await?;
+    let history = projected_item_history(thread_id);
+    store
+        .append_batch(AppendThreadItemsBatch::new(
+            thread_id,
+            AppendBatchId::new(),
+            history[..2].to_vec(),
+        ))
+        .await?;
+    delete_item_projection(&fixture, thread_id).await?;
+
+    store
+        .append_batch(AppendThreadItemsBatch::new(
+            thread_id,
+            AppendBatchId::new(),
+            history[2..].to_vec(),
+        ))
+        .await?;
+
+    assert_eq!(
+        item_ids(&store.list_items(default_item_params(thread_id)).await?),
+        vec!["item-1", "item-2", "item-3", "item-4"]
+    );
+    pool.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_failed_rebuild_preserves_projection_and_checkpoint()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = PostgresThreadStoreFixture::new("thread_projection_rebuild_rollback")?;
+    fixture.migrate().await?;
+    let pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let store = PostgresThreadStore::new(&pool);
+    let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f015")?;
+    let mut create_params = create_thread_params(thread_id);
+    create_params.history_mode = ThreadHistoryMode::Paginated;
+    store.create_thread(create_params).await?;
+    assert_eq!(
+        projection_snapshot(&fixture, thread_id).await?,
+        (Some(1), Vec::new())
+    );
+    store
+        .append_batch(AppendThreadItemsBatch::new(
+            thread_id,
+            AppendBatchId::new(),
+            projected_item_history(thread_id)[..1].to_vec(),
+        ))
+        .await?;
+    assert_eq!(
+        projection_snapshot(&fixture, thread_id).await?,
+        (Some(2), vec!["item-1".to_string()])
+    );
+    invalidate_item_projection(&fixture, thread_id).await?;
+    set_item_projection_writes(&fixture, ProjectionWrites::Reject).await?;
+    let before = projection_snapshot(&fixture, thread_id).await?;
+
+    assert!(matches!(
+        store.list_items(default_item_params(thread_id)).await,
+        Err(crate::ThreadStoreError::Internal { .. })
+    ));
+    assert_eq!(projection_snapshot(&fixture, thread_id).await?, before);
+
+    set_item_projection_writes(&fixture, ProjectionWrites::Allow).await?;
+    assert_eq!(
+        item_ids(&store.list_items(default_item_params(thread_id)).await?),
+        vec!["item-1"]
+    );
+    pool.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_confirmed_retry_does_not_depend_on_projection_rebuild()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = PostgresThreadStoreFixture::new("thread_projection_retry_rebuild")?;
+    fixture.migrate().await?;
+    let pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let store = PostgresThreadStore::new(&pool);
+    let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f016")?;
+    let mut create_params = create_thread_params(thread_id);
+    create_params.history_mode = ThreadHistoryMode::Paginated;
+    store.create_thread(create_params).await?;
+    let batch = AppendThreadItemsBatch::new(
+        thread_id,
+        AppendBatchId::new(),
+        projected_item_history(thread_id)[..1].to_vec(),
+    );
+    let committed = store.append_batch(batch.clone()).await?;
+    invalidate_item_projection(&fixture, thread_id).await?;
+    set_item_projection_writes(&fixture, ProjectionWrites::Reject).await?;
+
+    assert_eq!(store.append_batch(batch).await?, committed);
+    assert_eq!(
+        store
+            .load_history(crate::LoadThreadHistoryParams {
+                thread_id,
+                include_archived: false,
+            })
+            .await?
+            .items
+            .len(),
+        2
+    );
+
+    set_item_projection_writes(&fixture, ProjectionWrites::Allow).await?;
+    assert_eq!(
+        item_ids(&store.list_items(default_item_params(thread_id)).await?),
+        vec!["item-1"]
+    );
+    pool.close().await;
+    fixture.cleanup().await
+}
+
 fn projected_item_history(thread_id: ThreadId) -> Vec<RolloutItem> {
     [
         ("turn-1", "item-1"),
@@ -296,6 +423,78 @@ fn item_ids(page: &crate::ItemPage) -> Vec<&str> {
         .iter()
         .map(|item| item.item_id.as_str())
         .collect()
+}
+
+fn default_item_params(thread_id: ThreadId) -> ListItemsParams {
+    ListItemsParams {
+        thread_id,
+        turn_id: None,
+        include_archived: false,
+        cursor: None,
+        page_size: 10,
+        sort_direction: SortDirection::Asc,
+    }
+}
+
+async fn delete_item_projection(
+    fixture: &PostgresThreadStoreFixture,
+    thread_id: ThreadId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    execute_item_projection_sql(
+        fixture,
+        thread_id,
+        "DELETE FROM {items} WHERE thread_id = $1",
+    )
+    .await
+}
+
+async fn invalidate_item_projection(
+    fixture: &PostgresThreadStoreFixture,
+    thread_id: ThreadId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    execute_item_projection_sql(
+        fixture,
+        thread_id,
+        "UPDATE {items} SET item = item WHERE thread_id = $1",
+    )
+    .await
+}
+
+async fn execute_item_projection_sql(
+    fixture: &PostgresThreadStoreFixture,
+    thread_id: ThreadId,
+    sql: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pool = sqlx::PgPool::connect(&fixture.database_url).await?;
+    let items = format!("\"{}\".thread_items", fixture.schema);
+    sqlx::query(AssertSqlSafe(sql.replace("{items}", items.as_str())))
+        .bind(thread_id.to_string())
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    Ok(())
+}
+
+async fn projection_snapshot(
+    fixture: &PostgresThreadStoreFixture,
+    thread_id: ThreadId,
+) -> Result<(Option<i64>, Vec<String>), Box<dyn std::error::Error>> {
+    let pool = sqlx::PgPool::connect(&fixture.database_url).await?;
+    let schema = &fixture.schema;
+    let version = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT history_projection_version FROM \"{schema}\".threads WHERE thread_id = $1"
+    )))
+    .bind(thread_id.to_string())
+    .fetch_one(&pool)
+    .await?;
+    let items = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT item_id FROM \"{schema}\".thread_items WHERE thread_id = $1 ORDER BY rollout_ordinal"
+    )))
+    .bind(thread_id.to_string())
+    .fetch_all(&pool)
+    .await?;
+    pool.close().await;
+    Ok((version, items))
 }
 
 enum ProjectionWrites {

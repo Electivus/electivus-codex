@@ -76,7 +76,7 @@ pub(super) async fn append_batch(
         .await
         .map_err(|error| database_error("append thread history", error))?;
     let row = sqlx::query(AssertSqlSafe(format!(
-        "SELECT projection, stream_version, fencing_token, writer_id, \
+        "SELECT projection, stream_version, history_projection_version, fencing_token, writer_id, \
          writer_lease_expires_at > CURRENT_TIMESTAMP AS lease_active \
          FROM {} WHERE thread_id = $1 FOR UPDATE",
         store.tables.threads
@@ -148,6 +148,19 @@ pub(super) async fn append_batch(
     if stream_version != writer.expected_stream_version {
         return Err(writer_conflict(batch.thread_id));
     }
+    let history_projection_version: Option<i64> = row
+        .try_get("history_projection_version")
+        .map_err(|error| database_error("append thread history", error))?;
+    if history_projection_version != Some(stream_version) {
+        super::projection::rebuild_history_projections(
+            store,
+            &mut transaction,
+            batch.thread_id,
+            stream_version,
+            writer.history_projection_start_ordinal,
+        )
+        .await?;
+    }
     let projection: Value = row
         .try_get("projection")
         .map_err(|error| database_error("append thread history", error))?;
@@ -204,7 +217,8 @@ pub(super) async fn append_batch(
     let lease_millis =
         i64::try_from(WRITER_LEASE_DURATION.as_millis()).map_err(history_too_large)?;
     let updated = sqlx::query(AssertSqlSafe(format!(
-        "UPDATE {} SET projection = $1, stream_version = $2, updated_at = $3, recency_at = $4, \
+        "UPDATE {} SET projection = $1, stream_version = $2, history_projection_version = $2, \
+         updated_at = $3, recency_at = $4, \
          writer_lease_expires_at = CURRENT_TIMESTAMP + $5 * INTERVAL '1 millisecond' \
          WHERE thread_id = $6 AND writer_id = $7 AND fencing_token = $8 AND stream_version = $9 \
          AND writer_lease_expires_at > CURRENT_TIMESTAMP",

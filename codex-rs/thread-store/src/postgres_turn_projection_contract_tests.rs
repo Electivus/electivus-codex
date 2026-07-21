@@ -19,6 +19,7 @@ use sqlx::AssertSqlSafe;
 use crate::AppendBatchId;
 use crate::AppendThreadItemsBatch;
 use crate::ArchiveThreadParams;
+use crate::ListItemsParams;
 use crate::ListTurnsParams;
 use crate::LoadThreadHistoryParams;
 use crate::PostgresThreadStore;
@@ -30,6 +31,56 @@ use crate::ThreadStore;
 use crate::ThreadStoreError;
 use crate::postgres_contract_tests::PostgresThreadStoreFixture;
 use crate::postgres_contract_tests::create_thread_params;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn damaged_projections_rebuild_once_for_concurrent_public_readers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = PostgresThreadStoreFixture::new("thread_projection_rebuild")?;
+    fixture.migrate().await?;
+    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let writer = PostgresThreadStore::new(&first_pool);
+    let first_reader = PostgresThreadStore::new(&first_pool);
+    let second_reader = PostgresThreadStore::new(&second_pool);
+    let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f025")?;
+    let mut create_params = create_thread_params(thread_id);
+    create_params.history_mode = ThreadHistoryMode::Paginated;
+    writer.create_thread(create_params).await?;
+    writer
+        .append_batch(AppendThreadItemsBatch::new(
+            thread_id,
+            AppendBatchId::new(),
+            paginated_turn_history(thread_id),
+        ))
+        .await?;
+    damage_history_projections(&fixture, thread_id).await?;
+
+    let (items, turns) = tokio::join!(
+        first_reader.list_items(ListItemsParams {
+            thread_id,
+            turn_id: None,
+            include_archived: false,
+            cursor: None,
+            page_size: 10,
+            sort_direction: SortDirection::Asc,
+        }),
+        second_reader.list_turns(default_turn_params(thread_id)),
+    );
+    assert_eq!(
+        items?
+            .items
+            .into_iter()
+            .map(|item| item.item_id)
+            .collect::<Vec<_>>(),
+        vec!["user-1", "agent-1"]
+    );
+    assert_eq!(turn_ids(&turns?), vec!["turn-1", "turn-2", "turn-3"]);
+
+    first_pool.close().await;
+    second_pool.close().await;
+    fixture.cleanup().await
+}
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
@@ -152,6 +203,11 @@ async fn inherited_prefix_is_excluded_and_turn_projection_failure_rolls_back()
             history,
         ))
         .await?;
+    damage_history_projections(&fixture, thread_id).await?;
+    assert_eq!(
+        turn_ids(&store.list_turns(default_turn_params(thread_id)).await?),
+        vec!["owned"]
+    );
     let fault_pool = sqlx::PgPool::connect(&fixture.database_url).await?;
     let turns = format!("\"{}\".thread_turns", fixture.schema);
     sqlx::query(AssertSqlSafe(format!(
@@ -323,6 +379,26 @@ async fn assert_invalid(store: &PostgresThreadStore, params: ListTurnsParams) {
         store.list_turns(params).await,
         Err(ThreadStoreError::InvalidRequest { .. })
     ));
+}
+
+async fn damage_history_projections(
+    fixture: &PostgresThreadStoreFixture,
+    thread_id: ThreadId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pool = sqlx::PgPool::connect(&fixture.database_url).await?;
+    let schema = &fixture.schema;
+    let mut transaction = pool.begin().await?;
+    for table in ["thread_items", "thread_turns"] {
+        sqlx::query(AssertSqlSafe(format!(
+            "DELETE FROM \"{schema}\".{table} WHERE thread_id = $1"
+        )))
+        .bind(thread_id.to_string())
+        .execute(transaction.as_mut())
+        .await?;
+    }
+    transaction.commit().await?;
+    pool.close().await;
+    Ok(())
 }
 
 fn turn_ids(page: &crate::TurnPage) -> Vec<&str> {

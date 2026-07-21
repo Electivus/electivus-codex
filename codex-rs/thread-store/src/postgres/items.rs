@@ -1,20 +1,18 @@
 use codex_protocol::ThreadId;
-use codex_protocol::protocol::ThreadHistoryMode;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
-use sqlx::AssertSqlSafe;
 use sqlx::Postgres;
 use sqlx::QueryBuilder;
 use sqlx::Row;
 
 use super::PostgresThreadStore;
 use super::database_error;
+use super::projection::begin_consistent_read;
 use super::serialization_error;
 use crate::ItemPage;
 use crate::ListItemsParams;
 use crate::SortDirection;
-use crate::StoredThread;
 use crate::StoredThreadItem;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
@@ -44,7 +42,7 @@ pub(super) async fn list_items(
     store: &PostgresThreadStore,
     params: ListItemsParams,
 ) -> ThreadStoreResult<ItemPage> {
-    validate_thread(
+    let mut transaction = begin_consistent_read(
         store,
         params.thread_id,
         params.include_archived,
@@ -68,7 +66,7 @@ pub(super) async fn list_items(
     push_pagination_clause(&mut query, params.sort_direction, cursor.as_ref(), limit);
     let rows = query
         .build()
-        .fetch_all(&store.pool)
+        .fetch_all(transaction.as_mut())
         .await
         .map_err(|error| database_error("list thread items", error))?;
     let mut item_rows = rows
@@ -84,40 +82,16 @@ pub(super) async fn list_items(
         item_rows.last().map(|row| row.rollout_ordinal),
         has_more,
     )?;
-    Ok(ItemPage {
+    let page = ItemPage {
         items: item_rows.into_iter().map(|row| row.item).collect(),
         next_cursor,
         backwards_cursor,
-    })
-}
-
-pub(super) async fn validate_thread(
-    store: &PostgresThreadStore,
-    thread_id: ThreadId,
-    include_archived: bool,
-    operation: &'static str,
-) -> ThreadStoreResult<()> {
-    let projection = sqlx::query(AssertSqlSafe(format!(
-        "SELECT projection FROM {} WHERE thread_id = $1",
-        store.tables.threads
-    )))
-    .bind(thread_id.to_string())
-    .fetch_optional(&store.pool)
-    .await
-    .map_err(|error| database_error("list thread items", error))?
-    .ok_or(ThreadStoreError::Unsupported { operation })?
-    .try_get::<Value, _>("projection")
-    .map_err(|error| database_error("list thread items", error))?;
-    let thread: StoredThread = serde_json::from_value(projection).map_err(serialization_error)?;
-    if thread.archived_at.is_some() && !include_archived {
-        return Err(ThreadStoreError::InvalidRequest {
-            message: format!("thread {thread_id} is archived"),
-        });
-    }
-    match thread.history_mode {
-        ThreadHistoryMode::Legacy => Err(ThreadStoreError::Unsupported { operation }),
-        ThreadHistoryMode::Paginated => Ok(()),
-    }
+    };
+    transaction
+        .commit()
+        .await
+        .map_err(|error| database_error("list thread items", error))?;
+    Ok(page)
 }
 
 pub(super) fn page_limit(page_size: usize) -> ThreadStoreResult<i64> {

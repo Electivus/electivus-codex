@@ -173,8 +173,8 @@ impl PostgresThreadStore {
             .await
             .map_err(|error| database_error("create", error))?;
         let insert_thread = sqlx::query(AssertSqlSafe(format!(
-            "INSERT INTO {} (thread_id, projection, stream_version, fencing_token, writer_id, writer_lease_expires_at, created_at, updated_at, recency_at, history_projection_start_ordinal) \
-             VALUES ($1, $2, 1, 1, $3, CURRENT_TIMESTAMP + $4 * INTERVAL '1 millisecond', $5, $5, $5, $6)",
+            "INSERT INTO {} (thread_id, projection, stream_version, history_projection_version, fencing_token, writer_id, writer_lease_expires_at, created_at, updated_at, recency_at, history_projection_start_ordinal) \
+             VALUES ($1, $2, 1, 1, 1, $3, CURRENT_TIMESTAMP + $4 * INTERVAL '1 millisecond', $5, $5, $5, $6)",
             self.tables.threads
         )))
         .bind(params.thread_id.to_string())

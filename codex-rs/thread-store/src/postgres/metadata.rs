@@ -141,8 +141,13 @@ pub(super) async fn update_thread_metadata(
     }
     let projection_json = serde_json::to_value(&projection).map_err(serialization_error)?;
     sqlx::query(AssertSqlSafe(format!(
-        "UPDATE {} SET projection = $1, stream_version = $2, created_at = $3, \
-         updated_at = $4, recency_at = $5 WHERE thread_id = $6",
+        "UPDATE {} SET projection = $1, \
+         history_projection_version = CASE \
+             WHEN history_projection_version = stream_version THEN $2 \
+             ELSE history_projection_version \
+         END, \
+         stream_version = $2, created_at = $3, updated_at = $4, recency_at = $5 \
+         WHERE thread_id = $6",
         store.tables.threads
     )))
     .bind(projection_json)

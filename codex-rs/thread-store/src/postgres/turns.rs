@@ -3,6 +3,7 @@ use sqlx::AssertSqlSafe;
 use sqlx::Postgres;
 use sqlx::QueryBuilder;
 use sqlx::Row;
+use sqlx::Transaction;
 
 use super::PostgresThreadStore;
 use super::database_error;
@@ -12,7 +13,7 @@ use super::items::page_limit;
 use super::items::parse_cursor;
 use super::items::push_pagination_clause;
 use super::items::stored_thread_item_row;
-use super::items::validate_thread;
+use super::projection::begin_consistent_read;
 use super::serialization_error;
 use crate::ListTurnsParams;
 use crate::StoredTurn;
@@ -37,7 +38,7 @@ pub(super) async fn list_turns(
     store: &PostgresThreadStore,
     params: ListTurnsParams,
 ) -> ThreadStoreResult<TurnPage> {
-    validate_thread(
+    let mut transaction = begin_consistent_read(
         store,
         params.thread_id,
         params.include_archived,
@@ -59,7 +60,7 @@ pub(super) async fn list_turns(
     push_pagination_clause(&mut query, params.sort_direction, cursor.as_ref(), limit);
     let rows = query
         .build()
-        .fetch_all(&store.pool)
+        .fetch_all(transaction.as_mut())
         .await
         .map_err(turn_read_error)?;
     let mut turns = rows
@@ -80,7 +81,7 @@ pub(super) async fn list_turns(
         let items = match params.items_view {
             StoredTurnItemsView::NotLoaded => Vec::new(),
             StoredTurnItemsView::Summary => {
-                load_summary_items(store, params.thread_id, &turn).await?
+                load_summary_items(store, &mut transaction, params.thread_id, &turn).await?
             }
         };
         stored_turns.push(StoredTurn {
@@ -94,15 +95,21 @@ pub(super) async fn list_turns(
             duration_ms: turn.duration_ms,
         });
     }
-    Ok(TurnPage {
+    let page = TurnPage {
         turns: stored_turns,
         next_cursor,
         backwards_cursor,
-    })
+    };
+    transaction
+        .commit()
+        .await
+        .map_err(|error| database_error("list thread turns", error))?;
+    Ok(page)
 }
 
 async fn load_summary_items(
     store: &PostgresThreadStore,
+    transaction: &mut Transaction<'_, Postgres>,
     thread_id: codex_protocol::ThreadId,
     turn: &StoredTurnRow,
 ) -> ThreadStoreResult<Vec<crate::StoredThreadItem>> {
@@ -121,7 +128,7 @@ async fn load_summary_items(
     .bind(thread_id.to_string())
     .bind(turn.turn_id.as_str())
     .bind(turn_is_terminal(turn.status))
-    .fetch_all(&store.pool)
+    .fetch_all(transaction.as_mut())
     .await
     .map_err(|error| database_error("load turn summary items", error))?;
     rows.into_iter()
