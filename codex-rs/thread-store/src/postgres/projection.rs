@@ -1,19 +1,22 @@
 use chrono::DateTime;
 use chrono::SecondsFormat;
 use chrono::Utc;
+use codex_app_server_protocol::ThreadHistoryTurnChange;
+use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::project_rollout_line;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use sqlx::AssertSqlSafe;
 use sqlx::Postgres;
 use sqlx::Transaction;
+use sqlx::types::Json;
 
 use super::PostgresThreadStore;
 use super::database_error;
 use super::serialization_error;
 use crate::ThreadStoreResult;
 
-pub(super) async fn apply_item_projections(
+pub(super) async fn apply_history_projections(
     store: &PostgresThreadStore,
     transaction: &mut Transaction<'_, Postgres>,
     thread_id: codex_protocol::ThreadId,
@@ -38,7 +41,11 @@ pub(super) async fn apply_item_projections(
             ordinal: Some(u64::try_from(rollout_ordinal).map_err(projection_too_large)?),
             item: item.clone(),
         };
-        for change in project_rollout_line(&line).changed_items {
+        let changes = project_rollout_line(&line);
+        for change in changes.changed_turns {
+            apply_turn_projection(store, transaction, thread_id, rollout_ordinal, change).await?;
+        }
+        for change in changes.changed_items {
             let item_id = change.item.id().to_string();
             let item = serde_json::to_value(change.item).map_err(serialization_error)?;
             sqlx::query(AssertSqlSafe(format!(
@@ -59,6 +66,45 @@ pub(super) async fn apply_item_projections(
         }
     }
     Ok(())
+}
+
+async fn apply_turn_projection(
+    store: &PostgresThreadStore,
+    transaction: &mut Transaction<'_, Postgres>,
+    thread_id: codex_protocol::ThreadId,
+    rollout_ordinal: i64,
+    change: ThreadHistoryTurnChange,
+) -> ThreadStoreResult<()> {
+    let error = change.error.map(Json);
+    sqlx::query(AssertSqlSafe(format!(
+        "INSERT INTO {} (thread_id, turn_id, rollout_ordinal, status, error, started_at, completed_at, duration_ms) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+         ON CONFLICT (thread_id, turn_id) DO UPDATE SET \
+            status = EXCLUDED.status, error = EXCLUDED.error, started_at = EXCLUDED.started_at, \
+            completed_at = EXCLUDED.completed_at, duration_ms = EXCLUDED.duration_ms",
+        store.tables.turns
+    )))
+    .bind(thread_id.to_string())
+    .bind(change.turn_id)
+    .bind(rollout_ordinal)
+    .bind(turn_status(change.status))
+    .bind(error)
+    .bind(change.started_at)
+    .bind(change.completed_at)
+    .bind(change.duration_ms)
+    .execute(transaction.as_mut())
+    .await
+    .map_err(|error| database_error("project thread turns", error))?;
+    Ok(())
+}
+
+fn turn_status(status: TurnStatus) -> &'static str {
+    match status {
+        TurnStatus::Completed => "completed",
+        TurnStatus::Interrupted => "interrupted",
+        TurnStatus::Failed => "failed",
+        TurnStatus::InProgress => "inProgress",
+    }
 }
 
 fn projection_too_large<T>(_value: T) -> crate::ThreadStoreError {

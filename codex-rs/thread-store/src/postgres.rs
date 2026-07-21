@@ -50,6 +50,7 @@ mod lifecycle;
 mod metadata;
 mod projection;
 mod resume;
+mod turns;
 
 pub(super) const WRITER_LEASE_DURATION: Duration = Duration::from_secs(30);
 
@@ -72,6 +73,7 @@ pub(super) struct PostgresThreadTables {
     pub(super) history: String,
     pub(super) append_batches: String,
     pub(super) items: String,
+    pub(super) turns: String,
 }
 
 #[derive(Clone)]
@@ -94,6 +96,7 @@ impl PostgresThreadStore {
                 history: format!("{schema}.thread_history"),
                 append_batches: format!("{schema}.thread_append_batches"),
                 items: format!("{schema}.thread_items"),
+                turns: format!("{schema}.thread_turns"),
             },
             writer_id: Uuid::now_v7().to_string(),
             live_writers: Arc::new(Mutex::new(HashMap::new())),
@@ -375,8 +378,8 @@ impl ThreadStore for PostgresThreadStore {
     ) -> ThreadStoreFuture<'_, ThreadOccurrenceSearchPage> {
         unsupported("thread/searchOccurrences")
     }
-    fn list_turns(&self, _params: ListTurnsParams) -> ThreadStoreFuture<'_, TurnPage> {
-        unsupported("list_turns")
+    fn list_turns(&self, params: ListTurnsParams) -> ThreadStoreFuture<'_, TurnPage> {
+        Box::pin(turns::list_turns(self, params))
     }
     fn list_items(&self, params: ListItemsParams) -> ThreadStoreFuture<'_, ItemPage> {
         Box::pin(items::list_items(self, params))

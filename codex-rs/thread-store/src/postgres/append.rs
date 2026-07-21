@@ -190,7 +190,7 @@ pub(super) async fn append_batch(
         .execute(transaction.as_mut())
         .await
         .map_err(|error| database_error("append thread history", error))?;
-    super::projection::apply_item_projections(
+    super::projection::apply_history_projections(
         store,
         &mut transaction,
         batch.thread_id,

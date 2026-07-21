@@ -21,30 +21,41 @@ use crate::ThreadStoreResult;
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct HistoryCursor {
+pub(super) struct HistoryCursor {
     thread_id: ThreadId,
     scope: CursorScope,
     rollout_ordinal: i64,
     include_anchor: bool,
 }
 
-#[derive(Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
-enum CursorScope {
+pub(super) enum CursorScope {
+    Turns,
     Items,
 }
 
-struct StoredThreadItemRow {
-    item: StoredThreadItem,
-    rollout_ordinal: i64,
+pub(super) struct StoredThreadItemRow {
+    pub(super) item: StoredThreadItem,
+    pub(super) rollout_ordinal: i64,
 }
 
 pub(super) async fn list_items(
     store: &PostgresThreadStore,
     params: ListItemsParams,
 ) -> ThreadStoreResult<ItemPage> {
-    validate_thread(store, &params).await?;
-    let cursor = parse_cursor(params.cursor.as_deref(), params.thread_id)?;
+    validate_thread(
+        store,
+        params.thread_id,
+        params.include_archived,
+        "list_items",
+    )
+    .await?;
+    let cursor = parse_cursor(
+        params.cursor.as_deref(),
+        params.thread_id,
+        CursorScope::Items,
+    )?;
     let limit = page_limit(params.page_size)?;
     let mut query = QueryBuilder::<Postgres>::new(format!(
         "SELECT turn_id, item_id, rollout_ordinal, created_at_ms, item FROM {} WHERE thread_id = ",
@@ -66,18 +77,13 @@ pub(super) async fn list_items(
         .collect::<ThreadStoreResult<Vec<_>>>()?;
     let has_more = item_rows.len() > params.page_size;
     item_rows.truncate(params.page_size);
-    let backwards_cursor = item_rows
-        .first()
-        .map(|row| serialize_cursor(params.thread_id, row.rollout_ordinal, true))
-        .transpose()?;
-    let next_cursor = if has_more {
-        item_rows
-            .last()
-            .map(|row| serialize_cursor(params.thread_id, row.rollout_ordinal, false))
-            .transpose()?
-    } else {
-        None
-    };
+    let (next_cursor, backwards_cursor) = page_cursors(
+        params.thread_id,
+        CursorScope::Items,
+        item_rows.first().map(|row| row.rollout_ordinal),
+        item_rows.last().map(|row| row.rollout_ordinal),
+        has_more,
+    )?;
     Ok(ItemPage {
         items: item_rows.into_iter().map(|row| row.item).collect(),
         next_cursor,
@@ -85,38 +91,36 @@ pub(super) async fn list_items(
     })
 }
 
-async fn validate_thread(
+pub(super) async fn validate_thread(
     store: &PostgresThreadStore,
-    params: &ListItemsParams,
+    thread_id: ThreadId,
+    include_archived: bool,
+    operation: &'static str,
 ) -> ThreadStoreResult<()> {
     let projection = sqlx::query(AssertSqlSafe(format!(
         "SELECT projection FROM {} WHERE thread_id = $1",
         store.tables.threads
     )))
-    .bind(params.thread_id.to_string())
+    .bind(thread_id.to_string())
     .fetch_optional(&store.pool)
     .await
     .map_err(|error| database_error("list thread items", error))?
-    .ok_or(ThreadStoreError::Unsupported {
-        operation: "list_items",
-    })?
+    .ok_or(ThreadStoreError::Unsupported { operation })?
     .try_get::<Value, _>("projection")
     .map_err(|error| database_error("list thread items", error))?;
     let thread: StoredThread = serde_json::from_value(projection).map_err(serialization_error)?;
-    if thread.archived_at.is_some() && !params.include_archived {
+    if thread.archived_at.is_some() && !include_archived {
         return Err(ThreadStoreError::InvalidRequest {
-            message: format!("thread {} is archived", params.thread_id),
+            message: format!("thread {thread_id} is archived"),
         });
     }
     match thread.history_mode {
-        ThreadHistoryMode::Legacy => Err(ThreadStoreError::Unsupported {
-            operation: "list_items",
-        }),
+        ThreadHistoryMode::Legacy => Err(ThreadStoreError::Unsupported { operation }),
         ThreadHistoryMode::Paginated => Ok(()),
     }
 }
 
-fn page_limit(page_size: usize) -> ThreadStoreResult<i64> {
+pub(super) fn page_limit(page_size: usize) -> ThreadStoreResult<i64> {
     if page_size == 0 {
         return Err(ThreadStoreError::InvalidRequest {
             message: "page size must be positive".to_string(),
@@ -132,22 +136,23 @@ fn page_limit(page_size: usize) -> ThreadStoreResult<i64> {
     })
 }
 
-fn parse_cursor(
+pub(super) fn parse_cursor(
     cursor: Option<&str>,
     thread_id: ThreadId,
+    scope: CursorScope,
 ) -> ThreadStoreResult<Option<HistoryCursor>> {
     let Some(cursor) = cursor else {
         return Ok(None);
     };
     let cursor_value: HistoryCursor =
         serde_json::from_str(cursor).map_err(|_| invalid_cursor(cursor))?;
-    if cursor_value.thread_id != thread_id || cursor_value.scope != CursorScope::Items {
+    if cursor_value.thread_id != thread_id || cursor_value.scope != scope {
         return Err(invalid_cursor(cursor));
     }
     Ok(Some(cursor_value))
 }
 
-fn push_pagination_clause(
+pub(super) fn push_pagination_clause(
     query: &mut QueryBuilder<Postgres>,
     direction: SortDirection,
     cursor: Option<&HistoryCursor>,
@@ -177,18 +182,42 @@ fn push_pagination_clause(
         .push_bind(limit);
 }
 
-fn serialize_cursor(
+pub(super) fn serialize_cursor(
     thread_id: ThreadId,
+    scope: CursorScope,
     rollout_ordinal: i64,
     include_anchor: bool,
 ) -> ThreadStoreResult<String> {
     serde_json::to_string(&HistoryCursor {
         thread_id,
-        scope: CursorScope::Items,
+        scope,
         rollout_ordinal,
         include_anchor,
     })
     .map_err(serialization_error)
+}
+
+pub(super) fn page_cursors(
+    thread_id: ThreadId,
+    scope: CursorScope,
+    first_ordinal: Option<i64>,
+    last_ordinal: Option<i64>,
+    has_more: bool,
+) -> ThreadStoreResult<(Option<String>, Option<String>)> {
+    let cursor = |rollout_ordinal, include_anchor| {
+        serialize_cursor(thread_id, scope, rollout_ordinal, include_anchor)
+    };
+    let backwards_cursor = first_ordinal
+        .map(|ordinal| cursor(ordinal, /*include_anchor*/ true))
+        .transpose()?;
+    let next_cursor = if has_more {
+        last_ordinal
+            .map(|ordinal| cursor(ordinal, /*include_anchor*/ false))
+            .transpose()?
+    } else {
+        None
+    };
+    Ok((next_cursor, backwards_cursor))
 }
 
 fn invalid_cursor(cursor: &str) -> ThreadStoreError {
@@ -197,7 +226,9 @@ fn invalid_cursor(cursor: &str) -> ThreadStoreError {
     }
 }
 
-fn stored_thread_item_row(row: sqlx::postgres::PgRow) -> ThreadStoreResult<StoredThreadItemRow> {
+pub(super) fn stored_thread_item_row(
+    row: sqlx::postgres::PgRow,
+) -> ThreadStoreResult<StoredThreadItemRow> {
     let rollout_ordinal = row
         .try_get::<i64, _>("rollout_ordinal")
         .map_err(|error| database_error("list thread items", error))?;
