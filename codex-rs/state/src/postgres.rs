@@ -17,13 +17,15 @@ use config::connection_failed;
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
 const MINIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
-const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 3;
+const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 4;
 const BASELINE_SCHEMA_VERSION: i64 = 1;
 const LOGS_SCHEMA_VERSION: i64 = 2;
 const REMOTE_CONTROL_SCHEMA_VERSION: i64 = 3;
+const THREADS_SCHEMA_VERSION: i64 = 4;
 const LOGS_MIGRATION_SQL: &str = include_str!("../postgres_migrations/0002_logs.sql");
 const REMOTE_CONTROL_MIGRATION_SQL: &str =
     include_str!("../postgres_migrations/0003_remote_control_enrollments.sql");
+const THREADS_MIGRATION_SQL: &str = include_str!("../postgres_migrations/0004_threads.sql");
 
 /// Explicit operation to perform on a PostgreSQL Runtime State Namespace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,6 +98,15 @@ impl PostgresRuntimeStatePool {
     /// Derives an enrollment facade that shares this owner's pool.
     pub fn remote_control_enrollment_store(&self) -> crate::RemoteControlEnrollmentStore {
         crate::RemoteControlEnrollmentStore::from_postgres(self.pool.clone(), self.schema.clone())
+    }
+
+    /// Returns the shared pool and namespace needed by the thread-store facade.
+    ///
+    /// This is an internal workspace integration seam. Application code should construct runtime
+    /// state responsibilities from this owner instead of issuing SQL directly.
+    #[doc(hidden)]
+    pub fn thread_store_connection(&self) -> (sqlx::PgPool, String) {
+        (self.pool.clone(), self.schema.clone())
     }
 
     /// Closes the shared pool and waits for checked-out connections to return.
@@ -197,6 +208,10 @@ async fn migrate_namespace(
     if current_version < REMOTE_CONTROL_SCHEMA_VERSION {
         apply_remote_control_migration(&mut transaction, schema).await?;
         current_version = REMOTE_CONTROL_SCHEMA_VERSION;
+    }
+    if current_version < THREADS_SCHEMA_VERSION {
+        apply_threads_migration(&mut transaction, schema).await?;
+        current_version = THREADS_SCHEMA_VERSION;
     }
     transaction
         .commit()
@@ -317,6 +332,22 @@ async fn apply_remote_control_migration(
         .await
         .map_err(|error| map_sql_error(schema, "create remote control storage", error))?;
     record_migration_version(transaction, schema, REMOTE_CONTROL_SCHEMA_VERSION).await
+}
+
+async fn apply_threads_migration(
+    transaction: &mut Transaction<'_, Postgres>,
+    schema: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("SELECT set_config('search_path', $1, true)")
+        .bind(quote_identifier(schema))
+        .execute(transaction.as_mut())
+        .await
+        .map_err(|error| map_sql_error(schema, "select migration schema", error))?;
+    sqlx::raw_sql(THREADS_MIGRATION_SQL)
+        .execute(transaction.as_mut())
+        .await
+        .map_err(|error| map_sql_error(schema, "create thread storage", error))?;
+    record_migration_version(transaction, schema, THREADS_SCHEMA_VERSION).await
 }
 
 async fn record_migration_version(

@@ -1,0 +1,345 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use chrono::SecondsFormat;
+use chrono::Utc;
+use codex_protocol::ThreadId;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::AskForApproval;
+use serde_json::Value;
+use sqlx::AssertSqlSafe;
+use sqlx::Row;
+use tokio::sync::Mutex;
+use uuid::Uuid;
+
+use crate::AppendThreadItemsParams;
+use crate::ArchiveThreadParams;
+use crate::CreateThreadParams;
+use crate::DeleteThreadParams;
+use crate::ItemPage;
+use crate::ListItemsParams;
+use crate::ListThreadsParams;
+use crate::ListTurnsParams;
+use crate::LoadThreadHistoryParams;
+use crate::ReadThreadByRolloutPathParams;
+use crate::ReadThreadParams;
+use crate::ResumeThreadParams;
+use crate::SearchThreadOccurrencesParams;
+use crate::SearchThreadsParams;
+use crate::StoredThread;
+use crate::StoredThreadHistory;
+use crate::ThreadOccurrenceSearchPage;
+use crate::ThreadPage;
+use crate::ThreadSearchPage;
+use crate::ThreadStore;
+use crate::ThreadStoreError;
+use crate::ThreadStoreFuture;
+use crate::ThreadStoreResult;
+use crate::TurnPage;
+use crate::UpdateThreadMetadataParams;
+use crate::types::initial_session_meta_item;
+
+const WRITER_LEASE_DURATION: Duration = Duration::from_secs(30);
+
+/// PostgreSQL-backed implementation of [`ThreadStore`].
+///
+/// Construction is intentionally separate from runtime backend selection until every Runtime
+/// State Store responsibility can select PostgreSQL integrally.
+#[derive(Clone)]
+pub struct PostgresThreadStore {
+    pool: sqlx::PgPool,
+    tables: PostgresThreadTables,
+    writer_id: String,
+    live_writers: Arc<Mutex<HashMap<ThreadId, ActiveWriter>>>,
+}
+
+#[derive(Clone)]
+struct PostgresThreadTables {
+    threads: String,
+    history: String,
+}
+
+#[derive(Clone, Copy)]
+struct ActiveWriter {
+    _fencing_token: i64,
+    _expected_stream_version: i64,
+}
+
+impl PostgresThreadStore {
+    pub fn new(runtime_pool: &codex_state::PostgresRuntimeStatePool) -> Self {
+        let (pool, schema) = runtime_pool.thread_store_connection();
+        let schema = format!("\"{schema}\"");
+        Self {
+            pool,
+            tables: PostgresThreadTables {
+                threads: format!("{schema}.threads"),
+                history: format!("{schema}.thread_history"),
+            },
+            writer_id: Uuid::now_v7().to_string(),
+            live_writers: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    async fn create(&self, params: CreateThreadParams) -> ThreadStoreResult<()> {
+        let created_at = Utc::now();
+        let session_meta = initial_session_meta_item(
+            &params,
+            created_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+            env!("CARGO_PKG_VERSION").to_string(),
+        );
+        let projection = StoredThread {
+            thread_id: params.thread_id,
+            extra_config: params.extra_config.clone(),
+            rollout_path: None,
+            forked_from_id: params.forked_from_id,
+            parent_thread_id: params.parent_thread_id,
+            preview: String::new(),
+            name: None,
+            model_provider: params.metadata.model_provider.clone(),
+            model: None,
+            reasoning_effort: None,
+            created_at,
+            updated_at: created_at,
+            recency_at: created_at,
+            archived_at: None,
+            cwd: params.metadata.cwd.clone().unwrap_or_default(),
+            cli_version: env!("CARGO_PKG_VERSION").to_string(),
+            source: params.source.clone(),
+            history_mode: params.history_mode,
+            thread_source: params.thread_source.clone(),
+            agent_nickname: params.source.get_nickname(),
+            agent_role: params.source.get_agent_role(),
+            agent_path: params.source.get_agent_path().map(Into::into),
+            git_info: None,
+            approval_mode: AskForApproval::OnRequest,
+            permission_profile: PermissionProfile::read_only(),
+            token_usage: None,
+            first_user_message: None,
+            history: None,
+        };
+        let projection = serde_json::to_value(projection).map_err(serialization_error)?;
+        let session_meta = serde_json::to_value(session_meta).map_err(serialization_error)?;
+        let lease_millis = i64::try_from(WRITER_LEASE_DURATION.as_millis()).map_err(|_| {
+            ThreadStoreError::Internal {
+                message: "thread writer lease duration is out of range".to_string(),
+            }
+        })?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| database_error("create", error))?;
+        let insert_thread = sqlx::query(AssertSqlSafe(format!(
+            "INSERT INTO {} (thread_id, projection, stream_version, fencing_token, writer_id, writer_lease_expires_at, created_at, updated_at, recency_at) \
+             VALUES ($1, $2, 1, 1, $3, CURRENT_TIMESTAMP + $4 * INTERVAL '1 millisecond', $5, $5, $5)",
+            self.tables.threads
+        )))
+        .bind(params.thread_id.to_string())
+        .bind(projection)
+        .bind(&self.writer_id)
+        .bind(lease_millis)
+        .bind(created_at)
+        .execute(transaction.as_mut())
+        .await;
+        if let Err(error) = insert_thread {
+            if error
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::code)
+                .as_deref()
+                == Some("23505")
+            {
+                return Err(ThreadStoreError::Conflict {
+                    message: format!("thread {} already exists", params.thread_id),
+                });
+            }
+            return Err(database_error("create", error));
+        }
+        sqlx::query(AssertSqlSafe(format!(
+            "INSERT INTO {} (thread_id, ordinal, item) VALUES ($1, 0, $2)",
+            self.tables.history
+        )))
+        .bind(params.thread_id.to_string())
+        .bind(session_meta)
+        .execute(transaction.as_mut())
+        .await
+        .map_err(|error| database_error("create", error))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| database_error("create", error))?;
+        self.live_writers.lock().await.insert(
+            params.thread_id,
+            ActiveWriter {
+                _fencing_token: 1,
+                _expected_stream_version: 1,
+            },
+        );
+        Ok(())
+    }
+
+    async fn read(&self, params: ReadThreadParams) -> ThreadStoreResult<StoredThread> {
+        let row = sqlx::query(AssertSqlSafe(format!(
+            "SELECT projection FROM {} WHERE thread_id = $1",
+            self.tables.threads
+        )))
+        .bind(params.thread_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| database_error("read", error))?
+        .ok_or(ThreadStoreError::ThreadNotFound {
+            thread_id: params.thread_id,
+        })?;
+        let projection: Value = row
+            .try_get("projection")
+            .map_err(|error| database_error("read", error))?;
+        let mut thread: StoredThread =
+            serde_json::from_value(projection).map_err(serialization_error)?;
+        if !params.include_archived && thread.archived_at.is_some() {
+            return Err(ThreadStoreError::InvalidRequest {
+                message: format!("thread {} is archived", params.thread_id),
+            });
+        }
+        if params.include_history {
+            let rows = sqlx::query(AssertSqlSafe(format!(
+                "SELECT item FROM {} WHERE thread_id = $1 ORDER BY ordinal ASC",
+                self.tables.history
+            )))
+            .bind(params.thread_id.to_string())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| database_error("load history", error))?;
+            let items = rows
+                .into_iter()
+                .map(|row| {
+                    let value: Value = row
+                        .try_get("item")
+                        .map_err(|error| database_error("load history", error))?;
+                    serde_json::from_value(value).map_err(serialization_error)
+                })
+                .collect::<ThreadStoreResult<Vec<_>>>()?;
+            thread.history = Some(StoredThreadHistory {
+                thread_id: params.thread_id,
+                items,
+            });
+        }
+        Ok(thread)
+    }
+}
+
+impl ThreadStore for PostgresThreadStore {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(self.create(params))
+    }
+
+    fn resume_thread(&self, _params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()> {
+        unsupported("resume_thread")
+    }
+
+    fn append_items(&self, _params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
+        unsupported("append_items")
+    }
+
+    fn persist_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        unsupported("persist_thread")
+    }
+    fn flush_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        unsupported("flush_thread")
+    }
+    fn shutdown_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        unsupported("shutdown_thread")
+    }
+    fn discard_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        unsupported("discard_thread")
+    }
+
+    fn load_history(
+        &self,
+        params: LoadThreadHistoryParams,
+    ) -> ThreadStoreFuture<'_, StoredThreadHistory> {
+        Box::pin(async move {
+            self.read(ReadThreadParams {
+                thread_id: params.thread_id,
+                include_archived: params.include_archived,
+                include_history: true,
+            })
+            .await?
+            .history
+            .ok_or_else(|| ThreadStoreError::Internal {
+                message: format!("thread {} history was not loaded", params.thread_id),
+            })
+        })
+    }
+
+    fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
+        Box::pin(self.read(params))
+    }
+
+    fn read_thread_by_rollout_path(
+        &self,
+        _params: ReadThreadByRolloutPathParams,
+    ) -> ThreadStoreFuture<'_, StoredThread> {
+        unsupported("read_thread_by_rollout_path")
+    }
+    fn list_threads(&self, _params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
+        unsupported("list_threads")
+    }
+    fn search_threads(
+        &self,
+        _params: SearchThreadsParams,
+    ) -> ThreadStoreFuture<'_, ThreadSearchPage> {
+        unsupported("thread/search")
+    }
+    fn search_thread_occurrences(
+        &self,
+        _params: SearchThreadOccurrencesParams,
+    ) -> ThreadStoreFuture<'_, ThreadOccurrenceSearchPage> {
+        unsupported("thread/searchOccurrences")
+    }
+    fn list_turns(&self, _params: ListTurnsParams) -> ThreadStoreFuture<'_, TurnPage> {
+        unsupported("list_turns")
+    }
+    fn list_items(&self, _params: ListItemsParams) -> ThreadStoreFuture<'_, ItemPage> {
+        unsupported("list_items")
+    }
+    fn update_thread_metadata(
+        &self,
+        _params: UpdateThreadMetadataParams,
+    ) -> ThreadStoreFuture<'_, StoredThread> {
+        unsupported("update_thread_metadata")
+    }
+    fn archive_thread(&self, _params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
+        unsupported("archive_thread")
+    }
+    fn unarchive_thread(
+        &self,
+        _params: ArchiveThreadParams,
+    ) -> ThreadStoreFuture<'_, StoredThread> {
+        unsupported("unarchive_thread")
+    }
+    fn delete_thread(&self, _params: DeleteThreadParams) -> ThreadStoreFuture<'_, ()> {
+        unsupported("delete_thread")
+    }
+}
+
+fn unsupported<T>(operation: &'static str) -> ThreadStoreFuture<'static, T> {
+    Box::pin(async move { Err(ThreadStoreError::Unsupported { operation }) })
+}
+
+fn serialization_error(error: serde_json::Error) -> ThreadStoreError {
+    ThreadStoreError::Internal {
+        message: format!("thread store could not encode durable thread data: {error}"),
+    }
+}
+
+fn database_error(operation: &'static str, _error: sqlx::Error) -> ThreadStoreError {
+    ThreadStoreError::Internal {
+        message: format!(
+            "thread store could not complete `{operation}`; verify persistence health, then retry"
+        ),
+    }
+}

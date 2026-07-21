@@ -8,6 +8,10 @@ mod error;
 mod in_memory;
 mod live_thread;
 mod local;
+mod postgres;
+#[cfg(test)]
+#[path = "postgres_contract_tests.rs"]
+mod postgres_contract_tests;
 mod store;
 mod thread_metadata_sync;
 mod types;
@@ -20,6 +24,7 @@ pub use live_thread::LiveThread;
 pub use live_thread::LiveThreadInitGuard;
 pub use local::LocalThreadStore;
 pub use local::LocalThreadStoreConfig;
+pub use postgres::PostgresThreadStore;
 pub use store::ThreadStore;
 pub use store::ThreadStoreFuture;
 pub use types::AppendThreadItemsParams;

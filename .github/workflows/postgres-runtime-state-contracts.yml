@@ -39,7 +39,9 @@ jobs:
         with:
           tool: nextest
       - name: Run PostgreSQL Runtime State contracts
-        run: just test -p codex-state --run-ignored ignored-only -E 'test(/postgres_contract_/)'
+        run: |
+          just test -p codex-state --run-ignored ignored-only -E 'test(/postgres_contract_/)'
+          just test -p codex-thread-store --run-ignored ignored-only -E 'test(/postgres_contract_/)'
 
       - name: Check for a clean worktree
         if: always() && !cancelled()
