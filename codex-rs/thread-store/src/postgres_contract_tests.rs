@@ -23,14 +23,295 @@ use sqlx::AssertSqlSafe;
 use crate::AppendBatchId;
 use crate::AppendThreadItemsBatch;
 use crate::CreateThreadParams;
+use crate::GitInfoPatch;
 use crate::PostgresThreadStore;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
+use crate::ThreadMetadataPatch;
 use crate::ThreadPersistenceMetadata;
 use crate::ThreadStore;
+use crate::UpdateThreadMetadataParams;
 
 const TEST_DATABASE_URL_ENV: &str = "CODEX_TEST_POSTGRES_URL";
 static NEXT_SCHEMA_ID: AtomicU64 = AtomicU64::new(0);
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_metadata_updates_and_repairs_from_canonical_history()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = PostgresThreadStoreFixture::new("thread_metadata")?;
+    fixture.migrate().await?;
+    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let writer = PostgresThreadStore::new(&first_pool);
+    let replica = PostgresThreadStore::new(&second_pool);
+    let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f010")?;
+    writer
+        .create_thread(create_thread_params(thread_id))
+        .await?;
+    writer
+        .append_batch(AppendThreadItemsBatch::new(
+            thread_id,
+            AppendBatchId::new(),
+            append_items(),
+        ))
+        .await?;
+    let before_update = replica
+        .read_thread(ReadThreadParams {
+            thread_id,
+            include_archived: false,
+            include_history: false,
+        })
+        .await?;
+    let updated_at = before_update.updated_at + chrono::Duration::seconds(10);
+    let recency_at = before_update.recency_at + chrono::Duration::seconds(20);
+
+    let updated = writer
+        .update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id,
+            patch: ThreadMetadataPatch {
+                name: Some(Some("Shared PostgreSQL thread".to_string())),
+                updated_at: Some(updated_at),
+                advance_recency_at: Some(recency_at),
+                git_info: Some(GitInfoPatch {
+                    sha: Some(Some("abc123".to_string())),
+                    branch: Some(Some("main".to_string())),
+                    origin_url: Some(Some("https://example.com/codex.git".to_string())),
+                }),
+                memory_mode: Some(ThreadMemoryMode::Disabled),
+                ..Default::default()
+            },
+            include_archived: false,
+        })
+        .await?;
+    let from_replica = replica
+        .read_thread(ReadThreadParams {
+            thread_id,
+            include_archived: false,
+            include_history: false,
+        })
+        .await?;
+    assert_eq!(
+        serde_json::to_value(&from_replica)?,
+        serde_json::to_value(&updated)?
+    );
+    assert_eq!(
+        from_replica.name.as_deref(),
+        Some("Shared PostgreSQL thread")
+    );
+    assert_eq!(from_replica.updated_at, updated_at);
+    assert_eq!(from_replica.recency_at, recency_at);
+    let updated_history = replica
+        .load_history(crate::LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await?;
+    let latest_meta = updated_history
+        .items
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            RolloutItem::SessionMeta(meta) => Some(meta),
+            _ => None,
+        })
+        .ok_or("updated canonical SessionMeta must exist")?;
+    assert_eq!(latest_meta.meta.memory_mode.as_deref(), Some("disabled"));
+    assert_eq!(
+        serde_json::to_value(&latest_meta.git)?,
+        serde_json::json!({
+            "commit_hash": "abc123",
+            "branch": "main",
+            "repository_url": "https://example.com/codex.git",
+        })
+    );
+
+    let partially_updated = writer
+        .update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id,
+            patch: ThreadMetadataPatch {
+                git_info: Some(GitInfoPatch {
+                    branch: Some(Some("feature/postgres".to_string())),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            include_archived: false,
+        })
+        .await?;
+    assert_eq!(
+        serde_json::to_value(&partially_updated.git_info)?,
+        serde_json::json!({
+            "commit_hash": "abc123",
+            "branch": "feature/postgres",
+            "repository_url": "https://example.com/codex.git",
+        })
+    );
+    let cleared = writer
+        .update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id,
+            patch: ThreadMetadataPatch {
+                git_info: Some(GitInfoPatch {
+                    sha: Some(None),
+                    branch: Some(None),
+                    origin_url: Some(None),
+                }),
+                ..Default::default()
+            },
+            include_archived: false,
+        })
+        .await?;
+    assert!(cleared.git_info.is_none());
+    let memory_only = writer
+        .update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id,
+            patch: ThreadMetadataPatch {
+                memory_mode: Some(ThreadMemoryMode::Enabled),
+                ..Default::default()
+            },
+            include_archived: false,
+        })
+        .await?;
+    assert!(memory_only.git_info.is_none());
+    let metadata_markers = replica
+        .load_history(crate::LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await?
+        .items
+        .into_iter()
+        .rev()
+        .filter_map(|item| match item {
+            RolloutItem::SessionMeta(meta) => Some(meta),
+            _ => None,
+        })
+        .take(2)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        metadata_markers[0].meta.memory_mode.as_deref(),
+        Some("enabled")
+    );
+    assert!(metadata_markers[0].git.is_none());
+    assert!(metadata_markers[1].git.is_some());
+    assert_eq!(
+        serde_json::to_value(&metadata_markers[1].git)?,
+        serde_json::json!({})
+    );
+
+    let mut expected_repaired = memory_only;
+    expected_repaired.name = Some("Repaired from history".to_string());
+    fixture.damage_thread_projection(thread_id).await?;
+    let repaired = replica
+        .update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id,
+            patch: ThreadMetadataPatch {
+                name: Some(Some("Repaired from history".to_string())),
+                ..Default::default()
+            },
+            include_archived: false,
+        })
+        .await?;
+    assert_eq!(
+        serde_json::to_value(repaired)?,
+        serde_json::to_value(expected_repaired)?
+    );
+
+    first_pool.close().await;
+    second_pool.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_title_and_name_precedence_matches_history_mode()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = PostgresThreadStoreFixture::new("thread_title")?;
+    fixture.migrate().await?;
+    let pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let store = PostgresThreadStore::new(&pool);
+    let legacy_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f011")?;
+    store.create_thread(create_thread_params(legacy_id)).await?;
+    store
+        .append_batch(AppendThreadItemsBatch::new(
+            legacy_id,
+            AppendBatchId::new(),
+            append_items(),
+        ))
+        .await?;
+
+    let distinct_title = store
+        .update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id: legacy_id,
+            patch: ThreadMetadataPatch {
+                title: Some("Distinct derived title".to_string()),
+                ..Default::default()
+            },
+            include_archived: false,
+        })
+        .await?;
+    assert_eq!(
+        distinct_title.name.as_deref(),
+        Some("Distinct derived title")
+    );
+    let matching_title = store
+        .update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id: legacy_id,
+            patch: ThreadMetadataPatch {
+                title: Some("full fidelity user message".to_string()),
+                ..Default::default()
+            },
+            include_archived: false,
+        })
+        .await?;
+    assert_eq!(matching_title.name, None);
+    let explicit_name = store
+        .update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id: legacy_id,
+            patch: ThreadMetadataPatch {
+                name: Some(Some("Explicit legacy name".to_string())),
+                title: Some("Ignored derived title".to_string()),
+                ..Default::default()
+            },
+            include_archived: false,
+        })
+        .await?;
+    assert_eq!(explicit_name.name.as_deref(), Some("Explicit legacy name"));
+
+    let paginated_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f012")?;
+    let mut paginated_params = create_thread_params(paginated_id);
+    paginated_params.history_mode = ThreadHistoryMode::Paginated;
+    store.create_thread(paginated_params).await?;
+    let paginated = store
+        .update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id: paginated_id,
+            patch: ThreadMetadataPatch {
+                title: Some("Paginated derived title".to_string()),
+                ..Default::default()
+            },
+            include_archived: false,
+        })
+        .await?;
+    assert_eq!(paginated.name, None);
+    let paginated_named = store
+        .update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id: paginated_id,
+            patch: ThreadMetadataPatch {
+                name: Some(Some("Explicit paginated name".to_string())),
+                title: Some("Ignored paginated title".to_string()),
+                ..Default::default()
+            },
+            include_archived: false,
+        })
+        .await?;
+    assert_eq!(
+        paginated_named.name.as_deref(),
+        Some("Explicit paginated name")
+    );
+
+    pool.close().await;
+    fixture.cleanup().await
+}
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
@@ -608,6 +889,22 @@ impl PostgresThreadStoreFixture {
             "UPDATE \"{schema}\".threads \
              SET writer_lease_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second' \
              WHERE thread_id = $1"
+        )))
+        .bind(thread_id.to_string())
+        .execute(&pool)
+        .await?;
+        pool.close().await;
+        Ok(())
+    }
+
+    async fn damage_thread_projection(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let pool = sqlx::PgPool::connect(&self.database_url).await?;
+        let schema = &self.schema;
+        sqlx::query(AssertSqlSafe(format!(
+            "UPDATE \"{schema}\".threads SET projection = '{{}}'::jsonb WHERE thread_id = $1"
         )))
         .bind(thread_id.to_string())
         .execute(&pool)

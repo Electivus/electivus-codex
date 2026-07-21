@@ -8,6 +8,7 @@ use sqlx::Row;
 use super::PostgresThreadStore;
 use super::WRITER_LEASE_DURATION;
 use super::database_error;
+use super::metadata::apply_metadata_patch;
 use super::serialization_error;
 use super::writer_conflict;
 use crate::AppendBatchCommit;
@@ -15,7 +16,6 @@ use crate::AppendBatchId;
 use crate::AppendThreadItemsBatch;
 use crate::AppendThreadItemsParams;
 use crate::StoredThread;
-use crate::ThreadMetadataPatch;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
@@ -268,66 +268,6 @@ fn sort_json_objects(value: &mut Value) {
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-    }
-}
-
-pub(super) fn apply_metadata_patch(thread: &mut StoredThread, patch: &ThreadMetadataPatch) {
-    if let Some(name) = patch.name.clone() {
-        thread.name = name;
-    }
-    if let Some(preview) = patch.preview.clone() {
-        thread.preview = preview;
-    }
-    if let Some(model_provider) = patch.model_provider.clone() {
-        thread.model_provider = model_provider;
-    }
-    if let Some(model) = patch.model.clone() {
-        thread.model = Some(model);
-    }
-    if let Some(reasoning_effort) = patch.reasoning_effort.clone() {
-        thread.reasoning_effort = reasoning_effort;
-    }
-    if let Some(created_at) = patch.created_at {
-        thread.created_at = created_at;
-    }
-    if let Some(updated_at) = patch.updated_at {
-        thread.updated_at = updated_at;
-    }
-    if let Some(recency_at) = patch.advance_recency_at {
-        thread.recency_at = thread.recency_at.max(recency_at);
-    }
-    if let Some(source) = patch.source.clone() {
-        thread.source = source;
-    }
-    if let Some(thread_source) = patch.thread_source.clone() {
-        thread.thread_source = thread_source;
-    }
-    if let Some(agent_nickname) = patch.agent_nickname.clone() {
-        thread.agent_nickname = agent_nickname;
-    }
-    if let Some(agent_role) = patch.agent_role.clone() {
-        thread.agent_role = agent_role;
-    }
-    if let Some(agent_path) = patch.agent_path.clone() {
-        thread.agent_path = agent_path;
-    }
-    if let Some(cwd) = patch.cwd.clone() {
-        thread.cwd = cwd;
-    }
-    if let Some(cli_version) = patch.cli_version.clone() {
-        thread.cli_version = cli_version;
-    }
-    if let Some(approval_mode) = patch.approval_mode {
-        thread.approval_mode = approval_mode;
-    }
-    if let Some(permission_profile) = patch.permission_profile.clone() {
-        thread.permission_profile = permission_profile;
-    }
-    if let Some(token_usage) = patch.token_usage.clone() {
-        thread.token_usage = Some(token_usage);
-    }
-    if let Some(first_user_message) = patch.first_user_message.clone() {
-        thread.first_user_message = Some(first_user_message);
     }
 }
 

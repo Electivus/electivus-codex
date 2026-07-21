@@ -45,6 +45,7 @@ use crate::types::initial_session_meta_item;
 
 mod append;
 mod lifecycle;
+mod metadata;
 mod resume;
 
 pub(super) const WRITER_LEASE_DURATION: Duration = Duration::from_secs(30);
@@ -93,7 +94,7 @@ impl PostgresThreadStore {
     }
 
     async fn create(&self, params: CreateThreadParams) -> ThreadStoreResult<()> {
-        let created_at = Utc::now();
+        let created_at = metadata::postgres_timestamp(Utc::now());
         let session_meta = initial_session_meta_item(
             &params,
             created_at.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -329,9 +330,9 @@ impl ThreadStore for PostgresThreadStore {
     }
     fn update_thread_metadata(
         &self,
-        _params: UpdateThreadMetadataParams,
+        params: UpdateThreadMetadataParams,
     ) -> ThreadStoreFuture<'_, StoredThread> {
-        unsupported("update_thread_metadata")
+        Box::pin(metadata::update_thread_metadata(self, params))
     }
     fn archive_thread(&self, _params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
         unsupported("archive_thread")
