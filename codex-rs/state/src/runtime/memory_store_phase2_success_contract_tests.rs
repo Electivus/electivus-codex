@@ -76,7 +76,7 @@ fn claimed_token(outcome: Phase2JobClaimOutcome, input_watermark: i64) -> String
     }
 }
 
-async fn persist_stage1_output(
+pub(crate) async fn persist_stage1_output(
     store: &MemoryStore,
     thread_id: ThreadId,
     source_updated_at: i64,
@@ -186,26 +186,20 @@ where
         initial_watermark,
     );
     assert_ne!(takeover_token, initial_token);
-    assert!(
-        !first
-            .mark_global_phase2_job_succeeded(
-                &initial_token,
-                initial_watermark,
-                &initial_selection,
-            )
-            .await?
-    );
 
     persist_stage1_output(first, thread_ids[1], source_b + 1, "b-v2").await?;
-    assert!(
-        second
-            .mark_global_phase2_job_succeeded(
-                &takeover_token,
-                initial_watermark,
-                &initial_selection,
-            )
-            .await?
+    let current_success = second.mark_global_phase2_job_succeeded(
+        &takeover_token,
+        initial_watermark,
+        &initial_selection,
     );
+    let stale_success = first.mark_global_phase2_job_succeeded(
+        &initial_token,
+        initial_watermark,
+        &initial_selection,
+    );
+    let (current_success, stale_success) = tokio::join!(current_success, stale_success);
+    assert_eq!((current_success?, stale_success?), (true, false));
     assert_eq!(
         first
             .try_claim_global_phase2_job(ThreadId::new(), /*lease_seconds*/ 60)
@@ -242,14 +236,24 @@ where
             .await?,
         source_b + 2,
     );
-    assert!(
-        first
-            .mark_global_phase2_job_succeeded(
-                &replacement_token,
-                initial_watermark - 1,
-                std::slice::from_ref(&replacement_b),
-            )
-            .await?
+    let first_success = first.mark_global_phase2_job_succeeded(
+        &replacement_token,
+        initial_watermark - 1,
+        std::slice::from_ref(&replacement_b),
+    );
+    let second_success = second.mark_global_phase2_job_succeeded(
+        &replacement_token,
+        initial_watermark - 1,
+        std::slice::from_ref(&replacement_b),
+    );
+    let (first_success, second_success) = tokio::join!(first_success, second_success);
+    let success_outcomes = [first_success?, second_success?];
+    assert_eq!(
+        success_outcomes
+            .into_iter()
+            .filter(|succeeded| *succeeded)
+            .count(),
+        1
     );
     assert_eq!(read_last_success_watermark().await?, initial_watermark);
     assert_eq!(

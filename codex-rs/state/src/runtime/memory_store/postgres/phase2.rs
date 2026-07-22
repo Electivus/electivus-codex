@@ -134,6 +134,8 @@ impl PostgresMemoryStore {
         selected_outputs: &[Stage1Output],
     ) -> anyhow::Result<bool> {
         let mut transaction = self.pool.begin().await?;
+        self.acquire_output_and_global_job_lock(&mut transaction)
+            .await?;
         let rows_affected = sqlx::query(AssertSqlSafe(format!(
             "WITH db_clock AS ( \
              SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint AS now \

@@ -51,6 +51,8 @@ struct PostgresThreadProjection {
 impl PostgresMemoryStore {
     pub(crate) async fn clear_memory_data(&self) -> anyhow::Result<()> {
         let mut transaction = self.pool.begin().await?;
+        self.acquire_output_and_global_job_lock(&mut transaction)
+            .await?;
         sqlx::query(AssertSqlSafe(format!("DELETE FROM {}", self.outputs_table)))
             .execute(&mut *transaction)
             .await?;
@@ -68,6 +70,8 @@ impl PostgresMemoryStore {
 
     pub(crate) async fn delete_thread_memory(&self, thread_id: ThreadId) -> anyhow::Result<()> {
         let mut transaction = self.pool.begin().await?;
+        self.acquire_output_and_global_job_lock(&mut transaction)
+            .await?;
         let thread_id = thread_id.to_string();
         let selected_for_phase2: Option<bool> = sqlx::query_scalar(AssertSqlSafe(format!(
             "SELECT selected_for_phase2 FROM {} WHERE thread_id = $1 FOR UPDATE",
@@ -182,6 +186,8 @@ impl PostgresMemoryStore {
         thread_id: ThreadId,
     ) -> anyhow::Result<bool> {
         let mut transaction = self.pool.begin().await?;
+        self.acquire_output_and_global_job_lock(&mut transaction)
+            .await?;
         let thread_id = thread_id.to_string();
         let stream_version: Option<i64> = sqlx::query_scalar(AssertSqlSafe(format!(
             "SELECT stream_version FROM {} WHERE thread_id = $1 FOR UPDATE",

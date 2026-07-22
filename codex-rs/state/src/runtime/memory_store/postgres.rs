@@ -46,6 +46,26 @@ impl PostgresMemoryStore {
         self.pool.close().await;
     }
 
+    /// Serializes transactions that can lock both memory outputs and the global phase-2 job.
+    ///
+    /// Callers acquire this namespace-scoped lock before touching either resource. Unlike row
+    /// locks, the advisory lock also orders transactions when an output or global job row has not
+    /// been inserted yet.
+    async fn acquire_output_and_global_job_lock(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended(\
+             current_database() || ':codex-runtime-state:' || $1 || \
+             ':memory-output-global-job', 0))",
+        )
+        .bind(&self.schema)
+        .execute(&mut **transaction)
+        .await?;
+        Ok(())
+    }
+
     fn enabled_thread_predicate(&self) -> String {
         let canonical_mode = format!(
             "SELECT history.item #>> '{{payload,memory_mode}}' FROM {} AS history \
@@ -205,6 +225,8 @@ impl PostgresMemoryStore {
         rollout_slug: Option<&str>,
     ) -> anyhow::Result<bool> {
         let mut transaction = self.pool.begin().await?;
+        self.acquire_output_and_global_job_lock(&mut transaction)
+            .await?;
         let now: i64 =
             sqlx::query_scalar("SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint")
                 .fetch_one(&mut *transaction)
@@ -258,6 +280,8 @@ impl PostgresMemoryStore {
         ownership_token: &str,
     ) -> anyhow::Result<bool> {
         let mut transaction = self.pool.begin().await?;
+        self.acquire_output_and_global_job_lock(&mut transaction)
+            .await?;
         let thread_id = thread_id.to_string();
         let source_updated_at: Option<i64> = sqlx::query_scalar(AssertSqlSafe(format!(
             "UPDATE {} SET status = 'done', \

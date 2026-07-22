@@ -521,3 +521,7 @@ mod test_support;
 #[cfg(test)]
 #[path = "postgres_contract_tests.rs"]
 mod contract_tests;
+
+#[cfg(test)]
+#[path = "postgres_memory_concurrency_contract_tests.rs"]
+mod memory_concurrency_contract_tests;
