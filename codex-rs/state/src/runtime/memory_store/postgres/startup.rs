@@ -97,7 +97,7 @@ impl PostgresMemoryStore {
                 sqlx::query_scalar("SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint")
                     .fetch_one(&mut *transaction)
                     .await?;
-            self.enqueue_global_consolidation(&mut transaction, now)
+            self.enqueue_global_consolidation_in_transaction(&mut transaction, now)
                 .await?;
         }
         transaction.commit().await?;
@@ -249,7 +249,7 @@ impl PostgresMemoryStore {
                 sqlx::query_scalar("SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint")
                     .fetch_one(&mut *transaction)
                     .await?;
-            self.enqueue_global_consolidation(&mut transaction, now)
+            self.enqueue_global_consolidation_in_transaction(&mut transaction, now)
                 .await?;
         }
         transaction.commit().await?;

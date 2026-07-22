@@ -17,6 +17,7 @@ use crate::runtime::logs_contract_tests::run_startup_retention_contract;
 use crate::runtime::memory_store_contract_tests::run_stage1_claim_and_output_contract;
 use crate::runtime::memory_store_contract_tests::run_stage1_retry_and_lease_contract;
 use crate::runtime::memory_store_output_contract_tests::run_postgres_stage1_output_data_contract;
+use crate::runtime::memory_store_phase2_contract_tests::run_phase2_enqueue_and_claim_contract;
 use crate::runtime::memory_store_startup_contract_tests::run_postgres_stage1_startup_contract;
 use crate::runtime::remote_control_contract_tests::run_remote_control_enrollment_contract;
 use anyhow::Context;
@@ -113,6 +114,28 @@ async fn postgres_contract_stage1_startup_matches_sqlite_across_replicas() -> Re
         fixture.schema(),
     )
     .await?;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_phase2_enqueue_and_claim_are_shared_between_replicas() -> Result<()> {
+    let database_url = test_database_url()?;
+    let mut fixture = PostgresContractFixture::new(database_url, "phase2_enqueue_claim")?;
+    fixture.manage(PostgresNamespaceAction::Migrate).await?;
+    let first = crate::MemoryStore::from_postgres(
+        fixture.connect_pool().await?,
+        fixture.schema().to_string(),
+    );
+    let second = crate::MemoryStore::from_postgres(
+        fixture.connect_pool().await?,
+        fixture.schema().to_string(),
+    );
+
+    run_phase2_enqueue_and_claim_contract(&first, &second).await?;
+
+    first.close().await;
+    second.close().await;
     fixture.cleanup().await
 }
 

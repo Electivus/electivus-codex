@@ -8,6 +8,7 @@ use crate::model::Stage1JobClaimOutcome;
 use crate::model::Stage1Output;
 use crate::model::Stage1StartupClaimParams;
 use crate::model::ThreadRow;
+use crate::runtime::memory_store::PHASE2_SUCCESS_COOLDOWN_SECONDS;
 use chrono::DateTime;
 use chrono::Duration;
 use sqlx::Executor;
@@ -18,7 +19,6 @@ use uuid::Uuid;
 const JOB_KIND_MEMORY_STAGE1: &str = "memory_stage1";
 const JOB_KIND_MEMORY_CONSOLIDATE_GLOBAL: &str = "memory_consolidate_global";
 const MEMORY_CONSOLIDATION_JOB_KEY: &str = "global";
-const PHASE2_SUCCESS_COOLDOWN_SECONDS: i64 = 6 * 60 * 60;
 const PHASE2_INPUT_SELECTION_PAGE_SIZE: usize = 512;
 
 const DEFAULT_RETRY_REMAINING: i64 = 3;

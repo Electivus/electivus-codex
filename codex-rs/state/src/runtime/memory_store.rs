@@ -12,6 +12,8 @@ use std::sync::Arc;
 mod postgres;
 use postgres::PostgresMemoryStore;
 
+pub(super) const PHASE2_SUCCESS_COOLDOWN_SECONDS: i64 = 6 * 60 * 60;
+
 /// Storage-neutral facade for memory extraction and consolidation state.
 #[derive(Clone)]
 pub struct MemoryStore {
@@ -290,9 +292,14 @@ impl MemoryStore {
     }
 
     pub async fn enqueue_global_consolidation(&self, input_watermark: i64) -> anyhow::Result<()> {
-        self.sqlite("enqueue global memory consolidation")?
-            .enqueue_global_consolidation(input_watermark)
-            .await
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => {
+                store.enqueue_global_consolidation(input_watermark).await
+            }
+            MemoryStoreBackend::Sqlite(store) => {
+                store.enqueue_global_consolidation(input_watermark).await
+            }
+        }
     }
 
     pub async fn try_claim_global_phase2_job(
@@ -300,9 +307,18 @@ impl MemoryStore {
         worker_id: ThreadId,
         lease_seconds: i64,
     ) -> anyhow::Result<Phase2JobClaimOutcome> {
-        self.sqlite("claim global memory consolidation")?
-            .try_claim_global_phase2_job(worker_id, lease_seconds)
-            .await
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => {
+                store
+                    .try_claim_global_phase2_job(worker_id, lease_seconds)
+                    .await
+            }
+            MemoryStoreBackend::Sqlite(store) => {
+                store
+                    .try_claim_global_phase2_job(worker_id, lease_seconds)
+                    .await
+            }
+        }
     }
 
     pub async fn heartbeat_global_phase2_job(

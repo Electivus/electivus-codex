@@ -1,0 +1,105 @@
+use super::super::PHASE2_SUCCESS_COOLDOWN_SECONDS;
+use super::DEFAULT_RETRY_REMAINING;
+use super::JOB_KIND_MEMORY_CONSOLIDATE_GLOBAL;
+use super::MEMORY_CONSOLIDATION_JOB_KEY;
+use super::PostgresMemoryStore;
+use crate::Phase2JobClaimOutcome;
+use codex_protocol::ThreadId;
+use sqlx::AssertSqlSafe;
+use sqlx::Row;
+use uuid::Uuid;
+
+impl PostgresMemoryStore {
+    pub(crate) async fn enqueue_global_consolidation(
+        &self,
+        input_watermark: i64,
+    ) -> anyhow::Result<()> {
+        let mut transaction = self.pool.begin().await?;
+        self.enqueue_global_consolidation_in_transaction(&mut transaction, input_watermark)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn try_claim_global_phase2_job(
+        &self,
+        worker_id: ThreadId,
+        lease_seconds: i64,
+    ) -> anyhow::Result<Phase2JobClaimOutcome> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "INSERT INTO {} (kind, job_key, thread_id, status, worker_id, ownership_token, \
+             started_at, finished_at, lease_until, retry_at, retry_remaining, last_error, \
+             input_watermark, last_success_watermark) \
+             VALUES ($1, $2, NULL, 'pending', NULL, NULL, NULL, NULL, NULL, NULL, $3, NULL, 0, 0) \
+             ON CONFLICT(kind, job_key) DO NOTHING",
+            self.jobs_table
+        )))
+        .bind(JOB_KIND_MEMORY_CONSOLIDATE_GLOBAL)
+        .bind(MEMORY_CONSOLIDATION_JOB_KEY)
+        .bind(DEFAULT_RETRY_REMAINING)
+        .execute(&mut *transaction)
+        .await?;
+
+        let existing_job = sqlx::query(AssertSqlSafe(format!(
+            "SELECT status, lease_until, retry_at, input_watermark, finished_at, last_error \
+             FROM {} WHERE kind = $1 AND job_key = $2 FOR UPDATE",
+            self.jobs_table
+        )))
+        .bind(JOB_KIND_MEMORY_CONSOLIDATE_GLOBAL)
+        .bind(MEMORY_CONSOLIDATION_JOB_KEY)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let now: i64 =
+            sqlx::query_scalar("SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint")
+                .fetch_one(&mut *transaction)
+                .await?;
+        let lease_until = now.saturating_add(lease_seconds.max(0));
+        let cooldown_cutoff = now.saturating_sub(PHASE2_SUCCESS_COOLDOWN_SECONDS);
+
+        let status: String = existing_job.try_get("status")?;
+        let existing_lease_until: Option<i64> = existing_job.try_get("lease_until")?;
+        let retry_at: Option<i64> = existing_job.try_get("retry_at")?;
+        let finished_at: Option<i64> = existing_job.try_get("finished_at")?;
+        let last_error: Option<String> = existing_job.try_get("last_error")?;
+        if retry_at.is_some_and(|retry_at| retry_at > now) {
+            transaction.commit().await?;
+            return Ok(Phase2JobClaimOutcome::SkippedRetryUnavailable);
+        }
+        if status == "running" && existing_lease_until.is_some_and(|lease_until| lease_until > now)
+        {
+            transaction.commit().await?;
+            return Ok(Phase2JobClaimOutcome::SkippedRunning);
+        }
+        if last_error.is_none()
+            && finished_at.is_some_and(|finished_at| finished_at > cooldown_cutoff)
+        {
+            transaction.commit().await?;
+            return Ok(Phase2JobClaimOutcome::SkippedCooldown);
+        }
+
+        let ownership_token = Uuid::new_v4().to_string();
+        sqlx::query(AssertSqlSafe(format!(
+            "UPDATE {} SET status = 'running', worker_id = $1, ownership_token = $2, \
+             started_at = $3, finished_at = NULL, lease_until = $4, retry_at = NULL, \
+             last_error = NULL WHERE kind = $5 AND job_key = $6",
+            self.jobs_table
+        )))
+        .bind(worker_id.to_string())
+        .bind(&ownership_token)
+        .bind(now)
+        .bind(lease_until)
+        .bind(JOB_KIND_MEMORY_CONSOLIDATE_GLOBAL)
+        .bind(MEMORY_CONSOLIDATION_JOB_KEY)
+        .execute(&mut *transaction)
+        .await?;
+        let input_watermark = existing_job
+            .try_get::<Option<i64>, _>("input_watermark")?
+            .unwrap_or(0);
+        transaction.commit().await?;
+        Ok(Phase2JobClaimOutcome::Claimed {
+            ownership_token,
+            input_watermark,
+        })
+    }
+}

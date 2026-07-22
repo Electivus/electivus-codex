@@ -8,6 +8,8 @@ use uuid::Uuid;
 
 #[path = "postgres/outputs.rs"]
 mod outputs;
+#[path = "postgres/phase2.rs"]
+mod phase2;
 #[path = "postgres/startup.rs"]
 mod startup;
 
@@ -244,7 +246,7 @@ impl PostgresMemoryStore {
         .bind(now)
         .execute(&mut *transaction)
         .await?;
-        self.enqueue_global_consolidation(&mut transaction, source_updated_at)
+        self.enqueue_global_consolidation_in_transaction(&mut transaction, source_updated_at)
             .await?;
         transaction.commit().await?;
         Ok(true)
@@ -284,7 +286,7 @@ impl PostgresMemoryStore {
         .await?
         .rows_affected();
         if deleted_rows > 0 {
-            self.enqueue_global_consolidation(&mut transaction, source_updated_at)
+            self.enqueue_global_consolidation_in_transaction(&mut transaction, source_updated_at)
                 .await?;
         }
         transaction.commit().await?;
@@ -343,7 +345,7 @@ impl PostgresMemoryStore {
         Ok(rows_affected > 0)
     }
 
-    async fn enqueue_global_consolidation(
+    async fn enqueue_global_consolidation_in_transaction(
         &self,
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         input_watermark: i64,
