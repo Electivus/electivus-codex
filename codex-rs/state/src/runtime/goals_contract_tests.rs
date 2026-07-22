@@ -155,6 +155,115 @@ pub(crate) fn goal_store_error_signature(
     (error.kind(), error.operation(), error.to_string())
 }
 
+struct AccountingModeContract {
+    name: &'static str,
+    mode: GoalAccountingMode,
+    accepted_statuses: &'static [ThreadGoalStatus],
+}
+
+const GOAL_STATUSES: [ThreadGoalStatus; 6] = [
+    ThreadGoalStatus::Active,
+    ThreadGoalStatus::Paused,
+    ThreadGoalStatus::Blocked,
+    ThreadGoalStatus::UsageLimited,
+    ThreadGoalStatus::BudgetLimited,
+    ThreadGoalStatus::Complete,
+];
+
+const ACCOUNTING_MODE_CONTRACTS: [AccountingModeContract; 4] = [
+    AccountingModeContract {
+        name: "active-status-only",
+        mode: GoalAccountingMode::ActiveStatusOnly,
+        accepted_statuses: &[ThreadGoalStatus::Active],
+    },
+    AccountingModeContract {
+        name: "active-only",
+        mode: GoalAccountingMode::ActiveOnly,
+        accepted_statuses: &[ThreadGoalStatus::Active, ThreadGoalStatus::BudgetLimited],
+    },
+    AccountingModeContract {
+        name: "active-or-complete",
+        mode: GoalAccountingMode::ActiveOrComplete,
+        accepted_statuses: &[
+            ThreadGoalStatus::Active,
+            ThreadGoalStatus::BudgetLimited,
+            ThreadGoalStatus::Complete,
+        ],
+    },
+    AccountingModeContract {
+        name: "active-or-stopped",
+        mode: GoalAccountingMode::ActiveOrStopped,
+        accepted_statuses: &[
+            ThreadGoalStatus::Active,
+            ThreadGoalStatus::Paused,
+            ThreadGoalStatus::Blocked,
+            ThreadGoalStatus::UsageLimited,
+            ThreadGoalStatus::BudgetLimited,
+        ],
+    },
+];
+
+async fn assert_accounting_status_matrix(
+    writer: &GoalStore,
+    reader: &GoalStore,
+    thread_id: ThreadId,
+) -> Result<()> {
+    for contract in ACCOUNTING_MODE_CONTRACTS {
+        for status in GOAL_STATUSES {
+            let objective = format!("{} {status:?}", contract.name);
+            let goal = writer
+                .replace_thread_goal(
+                    thread_id,
+                    &objective,
+                    status,
+                    /*token_budget*/ Some(10),
+                )
+                .await?;
+            let outcome = reader
+                .account_thread_goal_usage(
+                    thread_id,
+                    GoalAccountingRequest {
+                        event_id: &objective,
+                        time_delta_seconds: 1,
+                        token_delta: 11,
+                        mode: contract.mode,
+                        target: GoalAccountingTarget::GoalId(goal.goal_id.as_str()),
+                    },
+                )
+                .await?;
+
+            if contract.accepted_statuses.contains(&status) {
+                let GoalAccountingOutcome::Updated(accounted) = outcome else {
+                    anyhow::bail!(
+                        "{} should account a {status:?} goal, got {outcome:?}",
+                        contract.name
+                    );
+                };
+                let expected = ThreadGoal {
+                    status: if status == ThreadGoalStatus::Complete {
+                        ThreadGoalStatus::Complete
+                    } else {
+                        ThreadGoalStatus::BudgetLimited
+                    },
+                    tokens_used: 11,
+                    time_used_seconds: 1,
+                    updated_at: accounted.updated_at,
+                    ..goal
+                };
+                assert_eq!(accounted, expected);
+                assert_eq!(writer.get_thread_goal(thread_id).await?, Some(expected));
+            } else {
+                assert_eq!(
+                    outcome,
+                    GoalAccountingOutcome::Unchanged(Some(goal.clone()))
+                );
+                assert_eq!(writer.get_thread_goal(thread_id).await?, Some(goal));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn run_goal_lifecycle_contract(
     writer: &GoalStore,
     reader: &GoalStore,
@@ -197,6 +306,32 @@ pub(crate) async fn run_goal_lifecycle_contract(
         .await?
         .expect("current goal should update");
     assert_eq!(resumed.status, ThreadGoalStatus::Active);
+    let blocked = reader
+        .update_thread_goal(
+            thread_id,
+            GoalUpdate {
+                objective: None,
+                status: Some(ThreadGoalStatus::Blocked),
+                token_budget: None,
+                expected_goal_id: Some(replacement.goal_id.clone()),
+            },
+        )
+        .await?
+        .expect("active goal should become blocked");
+    assert_eq!(writer.get_thread_goal(thread_id).await?, Some(blocked));
+    let reactivated = writer
+        .update_thread_goal(
+            thread_id,
+            GoalUpdate {
+                objective: None,
+                status: Some(ThreadGoalStatus::Active),
+                token_budget: None,
+                expected_goal_id: Some(replacement.goal_id.clone()),
+            },
+        )
+        .await?
+        .expect("blocked goal should resume");
+    assert_eq!(reader.get_thread_goal(thread_id).await?, Some(reactivated));
     assert_eq!(
         reader
             .pause_active_thread_goal(thread_id)
@@ -212,7 +347,7 @@ pub(crate) async fn run_goal_lifecycle_contract(
                 objective: None,
                 status: Some(ThreadGoalStatus::Complete),
                 token_budget: None,
-                expected_goal_id: Some(replacement.goal_id),
+                expected_goal_id: Some(replacement.goal_id.clone()),
             },
         )
         .await?
@@ -228,6 +363,24 @@ pub(crate) async fn run_goal_lifecycle_contract(
         .await?
         .expect("completed goal should be replaceable");
     assert_eq!(inserted.status, ThreadGoalStatus::BudgetLimited);
+    assert_eq!(
+        writer
+            .update_thread_goal(
+                thread_id,
+                GoalUpdate {
+                    objective: Some("stale update must not apply".to_string()),
+                    status: Some(ThreadGoalStatus::Complete),
+                    token_budget: Some(None),
+                    expected_goal_id: Some(replacement.goal_id),
+                },
+            )
+            .await?,
+        None
+    );
+    assert_eq!(
+        writer.get_thread_goal(thread_id).await?,
+        Some(inserted.clone())
+    );
     let preserved = writer
         .update_thread_goal(
             thread_id,
@@ -241,6 +394,20 @@ pub(crate) async fn run_goal_lifecycle_contract(
         .await?
         .expect("budget-limited goal should remain addressable");
     assert_eq!(preserved.status, ThreadGoalStatus::BudgetLimited);
+    let preserved = reader
+        .update_thread_goal(
+            thread_id,
+            GoalUpdate {
+                objective: None,
+                status: Some(ThreadGoalStatus::Blocked),
+                token_budget: None,
+                expected_goal_id: Some(inserted.goal_id.clone()),
+            },
+        )
+        .await?
+        .expect("budget-limited goal should remain addressable");
+    assert_eq!(preserved.status, ThreadGoalStatus::BudgetLimited);
+    assert_eq!(writer.get_thread_goal(thread_id).await?, Some(preserved));
     let usage_limited = reader
         .usage_limit_active_thread_goal(thread_id)
         .await?
@@ -368,47 +535,7 @@ pub(crate) async fn run_goal_lifecycle_contract(
         Some(idempotently_accounted)
     );
 
-    let accounting_modes = [
-        (
-            "active-status",
-            ThreadGoalStatus::Active,
-            GoalAccountingMode::ActiveStatusOnly,
-        ),
-        (
-            "complete",
-            ThreadGoalStatus::Complete,
-            GoalAccountingMode::ActiveOrComplete,
-        ),
-        (
-            "stopped",
-            ThreadGoalStatus::Paused,
-            GoalAccountingMode::ActiveOrStopped,
-        ),
-    ];
-    for (event_id, status, mode) in accounting_modes {
-        let goal = writer
-            .replace_thread_goal(thread_id, event_id, status, /*token_budget*/ None)
-            .await?;
-        let outcome = reader
-            .account_thread_goal_usage(
-                thread_id,
-                GoalAccountingRequest {
-                    event_id,
-                    time_delta_seconds: 1,
-                    token_delta: 11,
-                    mode,
-                    target: GoalAccountingTarget::GoalId(goal.goal_id.as_str()),
-                },
-            )
-            .await?;
-        let GoalAccountingOutcome::Updated(accounted) = outcome else {
-            anyhow::bail!("accounting mode did not accept its supported goal status");
-        };
-        assert_eq!(accounted.status, status);
-        assert_eq!(accounted.tokens_used, 11);
-        assert_eq!(accounted.time_used_seconds, 1);
-        assert_eq!(writer.get_thread_goal(thread_id).await?, Some(accounted));
-    }
+    assert_accounting_status_matrix(writer, reader, thread_id).await?;
     Ok(())
 }
 

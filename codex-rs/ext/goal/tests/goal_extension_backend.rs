@@ -359,6 +359,90 @@ async fn parallel_tool_finish_accounts_active_goal_progress_once() -> anyhow::Re
 }
 
 #[tokio::test]
+async fn replayed_tool_finish_advances_baseline_without_double_accounting() -> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let harness = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
+    let goal = runtime
+        .thread_goals()
+        .replace_thread_goal(
+            thread_id,
+            "resume after a persisted accounting response",
+            codex_state::ThreadGoalStatus::Active,
+            /*token_budget*/ None,
+        )
+        .await?;
+    let preaccounted = runtime
+        .thread_goals()
+        .account_thread_goal_usage(
+            thread_id,
+            codex_state::GoalAccountingRequest {
+                event_id: "call-shell-retry",
+                time_delta_seconds: 0,
+                token_delta: 23,
+                mode: codex_state::GoalAccountingMode::ActiveOnly,
+                target: codex_state::GoalAccountingTarget::GoalId(goal.goal_id.as_str()),
+            },
+        )
+        .await?;
+    let codex_state::GoalAccountingOutcome::Updated(preaccounted) = preaccounted else {
+        anyhow::bail!("pre-recording the retry event should update the goal");
+    };
+
+    harness.start_turn("turn-1", &TokenUsage::default()).await;
+    harness
+        .record_token_usage(
+            "turn-1",
+            &token_usage(
+                /*input_tokens*/ 20, /*cached_input_tokens*/ 5, /*output_tokens*/ 8,
+                /*reasoning_output_tokens*/ 2, /*total_tokens*/ 30,
+            ),
+        )
+        .await;
+    harness
+        .notify_tool_finish("turn-1", "call-shell-retry", "shell")
+        .await;
+
+    assert_eq!(
+        runtime.thread_goals().get_thread_goal(thread_id).await?,
+        Some(preaccounted)
+    );
+    assert_eq!(Vec::<CapturedGoalEvent>::new(), harness.sink.goal_events());
+
+    harness
+        .record_token_usage(
+            "turn-1",
+            &token_usage(
+                /*input_tokens*/ 28, /*cached_input_tokens*/ 5,
+                /*output_tokens*/ 10, /*reasoning_output_tokens*/ 2,
+                /*total_tokens*/ 40,
+            ),
+        )
+        .await;
+    harness
+        .notify_tool_finish("turn-1", "call-shell-next", "shell")
+        .await;
+
+    let goal = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("goal should exist"))?;
+    assert_eq!(33, goal.tokens_used);
+    assert_eq!(
+        vec![CapturedGoalEvent {
+            event_id: "call-shell-next".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            status: ThreadGoalStatus::Active,
+            tokens_used: 33,
+        }],
+        harness.sink.goal_events()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn budget_limited_goal_keeps_accruing_until_turn_stop() -> anyhow::Result<()> {
     let runtime = test_runtime().await?;
     let thread_id = test_thread_id()?;
