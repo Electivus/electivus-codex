@@ -73,6 +73,9 @@ pub(crate) mod memory_store_phase2_contract_tests;
 #[path = "runtime/memory_store_phase2_success_contract_tests.rs"]
 pub(crate) mod memory_store_phase2_success_contract_tests;
 #[cfg(test)]
+#[path = "runtime/memory_store_reset_contract_tests.rs"]
+pub(crate) mod memory_store_reset_contract_tests;
+#[cfg(test)]
 #[path = "runtime/memory_store_startup_contract_tests.rs"]
 pub(crate) mod memory_store_startup_contract_tests;
 mod recovery;

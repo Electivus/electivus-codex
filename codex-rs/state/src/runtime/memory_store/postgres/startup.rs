@@ -53,6 +53,24 @@ impl PostgresMemoryStore {
         let mut transaction = self.pool.begin().await?;
         self.acquire_output_and_global_job_lock(&mut transaction)
             .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "UPDATE {} SET active_generation_id = NULL WHERE singleton",
+            self.generation_state_table
+        )))
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "DELETE FROM {}",
+            self.artifacts_table
+        )))
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "DELETE FROM {}",
+            self.generations_table
+        )))
+        .execute(&mut *transaction)
+        .await?;
         sqlx::query(AssertSqlSafe(format!("DELETE FROM {}", self.outputs_table)))
             .execute(&mut *transaction)
             .await?;

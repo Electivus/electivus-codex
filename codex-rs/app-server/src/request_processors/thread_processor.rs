@@ -1634,21 +1634,13 @@ impl ThreadRequestProcessor {
         let state_db = self
             .state_db
             .clone()
-            .ok_or_else(|| internal_error("sqlite state db unavailable for memory reset"))?;
+            .ok_or_else(|| internal_error("runtime state unavailable for memory reset"))?;
 
-        state_db
-            .memories()
-            .clear_memory_data()
-            .await
-            .map_err(|err| {
-                internal_error(format!("failed to clear memory rows in memories db: {err}"))
-            })?;
-
-        clear_memory_roots_contents(&self.config.codex_home)
+        reset_memories(state_db.memories(), &self.config.codex_home)
             .await
             .map_err(|err| {
                 internal_error(format!(
-                    "failed to clear memory directories under {}: {err}",
+                    "failed to reset memory state under {}: {err}",
                     self.config.codex_home.display()
                 ))
             })?;

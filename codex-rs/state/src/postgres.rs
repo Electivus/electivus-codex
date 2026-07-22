@@ -534,3 +534,7 @@ mod memory_concurrency_contract_tests;
 #[cfg(test)]
 #[path = "postgres_memory_generation_contract_tests.rs"]
 mod memory_generation_contract_tests;
+
+#[cfg(test)]
+#[path = "postgres_memory_reset_contract_tests.rs"]
+mod memory_reset_contract_tests;

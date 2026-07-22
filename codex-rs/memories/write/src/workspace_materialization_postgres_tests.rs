@@ -1,5 +1,6 @@
 use super::prepare_memory_workspace_from_store;
 use crate::collect_memory_artifacts;
+use crate::reset_memories;
 use anyhow::Context;
 use anyhow::Result;
 use codex_protocol::ThreadId;
@@ -17,7 +18,7 @@ const DATABASE_URL_ENV: &str = "CODEX_TEST_POSTGRES_URL";
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_replica_materializes_generation_without_shared_workspace() -> Result<()> {
+async fn postgres_replica_materializes_generation_and_reset_clears_workspaces() -> Result<()> {
     let database_url = std::env::var(DATABASE_URL_ENV)?;
     let schema = format!("codex_memory_materialize_{}", Uuid::new_v4().simple());
     let config = PostgresNamespaceConfig::new(
@@ -81,6 +82,32 @@ async fn postgres_replica_materializes_generation_without_shared_workspace() -> 
     assert_eq!(
         tokio::fs::read(reader_root.join("skills/example/SKILL.md")).await?,
         nested_bytes
+    );
+
+    tokio::fs::create_dir(reader_root.join(".git")).await?;
+    tokio::fs::write(reader_root.join(".git/HEAD"), "stale git metadata").await?;
+    let extensions_root = reader_home.path().join("memories_extensions");
+    tokio::fs::create_dir(&extensions_root).await?;
+    tokio::fs::write(extensions_root.join("stale.md"), "stale extension").await?;
+    reset_memories(&reader, reader_home.path()).await?;
+
+    assert_eq!(
+        reader.memory_workspace_materialization().await?,
+        codex_state::MemoryWorkspaceMaterialization::Clear
+    );
+    assert!(
+        tokio::fs::read_dir(&reader_root)
+            .await?
+            .next_entry()
+            .await?
+            .is_none()
+    );
+    assert!(
+        tokio::fs::read_dir(&extensions_root)
+            .await?
+            .next_entry()
+            .await?
+            .is_none()
     );
 
     drop(writer);
