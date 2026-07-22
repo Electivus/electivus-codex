@@ -2,7 +2,12 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use codex_protocol::ThreadId;
+use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
+use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
+use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
+use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::BaseInstructions;
@@ -23,6 +28,7 @@ use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::user_input::UserInput;
 use codex_state::PostgresRuntimeStatePool;
 use pretty_assertions::assert_eq;
+use serde_json::json;
 use tempfile::TempDir;
 
 use crate::AppendThreadItemsParams;
@@ -159,10 +165,15 @@ async fn postgres_resume_and_context_are_database_native_across_replicas()
         })
         .await?;
     assert_eq!(context.items.len(), latest_turn.len() + 1);
-    assert!(matches!(
-        context.items.first(),
-        Some(RolloutItem::SessionMeta(meta)) if meta.meta.id == thread_id
-    ));
+    let Some(RolloutItem::SessionMeta(meta)) = context.items.first() else {
+        panic!("model context should start with canonical session metadata");
+    };
+    assert_eq!(meta.meta.id, thread_id);
+    assert_eq!(meta.meta.dynamic_tools, Some(dynamic_tools_fixture()));
+    assert_eq!(
+        meta.meta.selected_capability_roots,
+        selected_capability_roots_fixture()
+    );
     assert_eq!(
         serde_json::to_value(&context.items[1..])?,
         serde_json::to_value(latest_turn)?
@@ -204,10 +215,15 @@ async fn assert_latest_model_context_contract(
 
     assert_eq!(context.thread_id, thread_id);
     assert_eq!(context.items.len(), history[6..].len() + 1);
-    assert!(matches!(
-        context.items.first(),
-        Some(RolloutItem::SessionMeta(meta)) if meta.meta.id == thread_id
-    ));
+    let Some(RolloutItem::SessionMeta(meta)) = context.items.first() else {
+        panic!("model context should start with canonical session metadata");
+    };
+    assert_eq!(meta.meta.id, thread_id);
+    assert_eq!(meta.meta.dynamic_tools, Some(dynamic_tools_fixture()));
+    assert_eq!(
+        meta.meta.selected_capability_roots,
+        selected_capability_roots_fixture()
+    );
     assert_eq!(
         serde_json::to_value(&context.items[1..])?,
         serde_json::to_value(&history[6..])?
@@ -434,8 +450,8 @@ fn create_thread_params(
         thread_source: None,
         originator: "model-context-contract".to_string(),
         base_instructions: BaseInstructions::default(),
-        dynamic_tools: Vec::new(),
-        selected_capability_roots: Vec::new(),
+        dynamic_tools: dynamic_tools_fixture(),
+        selected_capability_roots: selected_capability_roots_fixture(),
         multi_agent_version: None,
         history_mode,
         subagent_history_start_ordinal: None,
@@ -446,4 +462,60 @@ fn create_thread_params(
             memory_mode: ThreadMemoryMode::Enabled,
         },
     }
+}
+
+fn dynamic_tools_fixture() -> Vec<DynamicToolSpec> {
+    vec![
+        dynamic_tool_namespace("alpha", "Alpha tools", "ticketId", "archive_ticket"),
+        dynamic_tool_namespace("beta", "Beta tools", "repository", "archive_repository"),
+    ]
+}
+
+fn dynamic_tool_namespace(
+    name: &str,
+    description: &str,
+    required_property: &str,
+    deferred_name: &str,
+) -> DynamicToolSpec {
+    DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
+        name: name.to_string(),
+        description: description.to_string(),
+        tools: vec![
+            DynamicToolNamespaceTool::Function(DynamicToolFunctionSpec {
+                name: "lookup".to_string(),
+                description: format!("Look up by {required_property}"),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { required_property: { "type": "string" } },
+                    "required": [required_property],
+                    "additionalProperties": false,
+                }),
+                defer_loading: false,
+            }),
+            DynamicToolNamespaceTool::Function(DynamicToolFunctionSpec {
+                name: deferred_name.to_string(),
+                description: format!("Deferred {name} operation"),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false,
+                }),
+                defer_loading: true,
+            }),
+        ],
+    })
+}
+
+fn selected_capability_roots_fixture() -> Vec<SelectedCapabilityRoot> {
+    vec![
+        serde_json::from_value(json!({
+            "id": "selected-dynamic-tools",
+            "location": {
+                "type": "environment",
+                "environmentId": "executor-test",
+                "path": "file:///plugins/dynamic-tools"
+            }
+        }))
+        .expect("selected capability root fixture should deserialize"),
+    ]
 }

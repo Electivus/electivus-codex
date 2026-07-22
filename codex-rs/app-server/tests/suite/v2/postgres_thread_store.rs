@@ -33,6 +33,7 @@ use codex_thread_store::ThreadStore;
 use pretty_assertions::assert_eq;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use serde_json::json;
 use sqlx::AssertSqlSafe;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -300,6 +301,7 @@ async fn postgres_store_serves_database_native_v2_history_flows() -> Result<()> 
     let persisted_history = persisted_fork
         .history
         .expect("persistent fork should expose canonical PostgreSQL history");
+    assert_dynamic_tools(&persisted_history.items);
     assert_eq!(
         persisted_history
             .items
@@ -545,6 +547,7 @@ plugins = false
     let canonical = persisted
         .history
         .context("rolled-back thread should retain canonical history")?;
+    assert_dynamic_tools(&canonical.items);
     assert_eq!(
         canonical
             .items
@@ -611,14 +614,53 @@ plugins = false
         .rev()
         .find(|request| request.url.path().ends_with("/responses"))
         .context("missing post-rollback model request")?;
+    let model_request = model_request.body_json::<Value>()?;
     let model_input = model_request
-        .body_json::<Value>()?
         .get("input")
         .context("model request should include input")?
         .to_string();
     assert!(model_input.contains("database native needle"));
     assert!(model_input.contains("after rollback"));
     assert!(!model_input.contains("second needle"));
+    assert_eq!(
+        dynamic_namespaces(&model_request),
+        vec![
+            json!({
+                "type": "namespace",
+                "name": "alpha",
+                "description": "Alpha tools",
+                "tools": [{
+                    "type": "function",
+                    "name": "lookup",
+                    "description": "Look up by ticketId",
+                    "strict": false,
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "ticketId": { "type": "string" } },
+                        "required": ["ticketId"],
+                        "additionalProperties": false
+                    }
+                }]
+            }),
+            json!({
+                "type": "namespace",
+                "name": "beta",
+                "description": "Beta tools",
+                "tools": [{
+                    "type": "function",
+                    "name": "lookup",
+                    "description": "Look up by repository",
+                    "strict": false,
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "repository": { "type": "string" } },
+                        "required": ["repository"],
+                        "additionalProperties": false
+                    }
+                }]
+            }),
+        ]
+    );
     let after_append: api::ThreadTurnsListResponse = request(
         &reader_client,
         api::ClientRequest::ThreadTurnsList {
@@ -724,6 +766,31 @@ fn occurrence_ids(page: &api::ThreadSearchOccurrencesResponse) -> Vec<&str> {
     page.data.iter().map(|item| item.item_id.as_str()).collect()
 }
 
+fn dynamic_namespaces(body: &Value) -> Vec<Value> {
+    body.get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|tool| {
+            matches!(
+                tool.get("name").and_then(Value::as_str),
+                Some("alpha" | "beta")
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+fn assert_dynamic_tools(items: &[RolloutItem]) {
+    let Some(RolloutItem::SessionMeta(session_meta)) = items.first() else {
+        panic!("canonical history should start with session metadata");
+    };
+    assert_eq!(
+        session_meta.meta.dynamic_tools,
+        Some(dynamic_tools_fixture())
+    );
+}
+
 async fn seed_thread(
     store: &store::PostgresThreadStore,
     thread_id: ThreadId,
@@ -741,7 +808,7 @@ async fn seed_thread(
             thread_source: None,
             originator: "app-server-postgres-contract".to_string(),
             base_instructions: BaseInstructions::default(),
-            dynamic_tools: Vec::new(),
+            dynamic_tools: dynamic_tools_fixture(),
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
             history_mode: codex_protocol::protocol::ThreadHistoryMode::Paginated,
@@ -795,6 +862,48 @@ fn history(thread_id: ThreadId) -> Vec<RolloutItem> {
         ),
     ]
     .concat()
+}
+
+fn dynamic_tools_fixture() -> Vec<api::DynamicToolSpec> {
+    vec![
+        dynamic_tool_namespace("alpha", "Alpha tools", "ticketId", "archive_ticket"),
+        dynamic_tool_namespace("beta", "Beta tools", "repository", "archive_repository"),
+    ]
+}
+
+fn dynamic_tool_namespace(
+    name: &str,
+    description: &str,
+    required_property: &str,
+    deferred_name: &str,
+) -> api::DynamicToolSpec {
+    api::DynamicToolSpec::Namespace(api::DynamicToolNamespaceSpec {
+        name: name.to_string(),
+        description: description.to_string(),
+        tools: vec![
+            api::DynamicToolNamespaceTool::Function(api::DynamicToolFunctionSpec {
+                name: "lookup".to_string(),
+                description: format!("Look up by {required_property}"),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { required_property: { "type": "string" } },
+                    "required": [required_property],
+                    "additionalProperties": false,
+                }),
+                defer_loading: false,
+            }),
+            api::DynamicToolNamespaceTool::Function(api::DynamicToolFunctionSpec {
+                name: deferred_name.to_string(),
+                description: format!("Deferred {name} operation"),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false,
+                }),
+                defer_loading: true,
+            }),
+        ],
+    })
 }
 
 fn turn(
