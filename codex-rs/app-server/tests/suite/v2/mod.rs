@@ -49,6 +49,8 @@ mod plugin_list;
 mod plugin_read;
 mod plugin_share;
 mod plugin_uninstall;
+#[cfg(debug_assertions)]
+mod postgres_thread_store;
 mod process_exec;
 mod rate_limit_reset_credits;
 mod rate_limits;
