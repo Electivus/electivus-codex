@@ -181,6 +181,7 @@ pub(super) async fn stored_thread_from_rollout_item_with_metadata(
 }
 
 pub(super) fn overlay_rollout_fields(thread: &mut StoredThread, rollout_thread: StoredThread) {
+    thread.parent_thread_id = rollout_thread.parent_thread_id.or(thread.parent_thread_id);
     thread.rollout_path = rollout_thread.rollout_path;
     thread.preview = rollout_thread.preview;
     thread.model_provider = rollout_thread.model_provider;

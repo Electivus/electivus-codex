@@ -234,9 +234,13 @@ async fn postgres_contract_runtime_state_thread_import_is_visible_to_another_poo
             }
         })
         .await?;
+    let mut expected_children = listed.items.clone();
+    for child in &mut expected_children {
+        child.parent_thread_id = Some(source.legacy_id);
+    }
     assert_eq!(
         serde_json::to_value(&children.items)?,
-        serde_json::to_value(&listed.items)?
+        serde_json::to_value(expected_children)?
     );
     let searched = replica
         .search_threads(SearchThreadsParams {

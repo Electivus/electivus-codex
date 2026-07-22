@@ -46,6 +46,7 @@ pub(super) async fn list_threads(
     };
     let include_thread_id_tiebreaker =
         params.sort_key == ThreadSortKey::RecencyAt || params.relation_filter.is_some();
+    let include_relation_parent = params.relation_filter.is_some();
     let mut query = QueryBuilder::<Postgres>::new("");
     if let Some(ThreadRelationFilter::DescendantsOf(ancestor_thread_id)) = params.relation_filter {
         query.push(format!(
@@ -61,9 +62,16 @@ pub(super) async fn list_threads(
         ));
     }
     query.push(format!(
-        "SELECT threads.projection, threads.{sort_column} AS sort_at FROM {} AS threads",
-        store.tables.threads
+        "SELECT threads.projection, threads.{sort_column} AS sort_at"
     ));
+    if include_relation_parent {
+        query.push(format!(
+            ", (SELECT edge.parent_thread_id FROM {} AS edge \
+             WHERE edge.child_thread_id = threads.thread_id) AS relation_parent_thread_id",
+            store.tables.spawn_edges
+        ));
+    }
+    query.push(format!(" FROM {} AS threads", store.tables.threads));
     if matches!(
         params.relation_filter,
         Some(ThreadRelationFilter::DescendantsOf(_))
@@ -168,7 +176,20 @@ pub(super) async fn list_threads(
             let projection: Value = row
                 .try_get("projection")
                 .map_err(|error| database_error("list threads", error))?;
-            let thread = serde_json::from_value(projection).map_err(serialization_error)?;
+            let mut thread: StoredThread =
+                serde_json::from_value(projection).map_err(serialization_error)?;
+            if include_relation_parent {
+                let parent_thread_id: String = row
+                    .try_get("relation_parent_thread_id")
+                    .map_err(|error| database_error("list threads", error))?;
+                thread.parent_thread_id =
+                    Some(ThreadId::from_string(&parent_thread_id).map_err(|_| {
+                        ThreadStoreError::Internal {
+                            message: "thread store found an invalid parent thread relationship"
+                                .to_string(),
+                        }
+                    })?);
+            }
             let sort_at = row
                 .try_get("sort_at")
                 .map_err(|error| database_error("list threads", error))?;
