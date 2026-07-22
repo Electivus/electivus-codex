@@ -92,7 +92,10 @@ async fn referenced_rollout_paths(source: &SqliteConfig) -> anyhow::Result<Vec<P
     Ok(result?.into_iter().map(PathBuf::from).collect())
 }
 
-fn relative_rollout_path(source_home: &Path, rollout_path: &Path) -> anyhow::Result<PathBuf> {
+pub(super) fn relative_rollout_path(
+    source_home: &Path,
+    rollout_path: &Path,
+) -> anyhow::Result<PathBuf> {
     let relative_path = if rollout_path.is_absolute() {
         rollout_path.strip_prefix(source_home).with_context(|| {
             format!(

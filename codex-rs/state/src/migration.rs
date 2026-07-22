@@ -15,6 +15,19 @@ mod destination_validation;
 mod source_lock;
 #[path = "migration/source_validation.rs"]
 mod source_validation;
+#[path = "migration/thread_snapshot.rs"]
+mod thread_snapshot;
+
+pub use thread_snapshot::BackfillCoordinationSnapshot;
+pub use thread_snapshot::CanonicalThreadHistoryReader;
+pub use thread_snapshot::CanonicalThreadHistorySnapshot;
+pub use thread_snapshot::RuntimeStateThreadSnapshot;
+pub use thread_snapshot::ThreadHistoryProjectionStateSnapshot;
+pub use thread_snapshot::ThreadItemProjectionSnapshot;
+pub use thread_snapshot::ThreadMigrationSnapshot;
+pub use thread_snapshot::ThreadSpawnEdgeSnapshot;
+pub use thread_snapshot::ThreadTurnProjectionSnapshot;
+pub use thread_snapshot::snapshot_runtime_state_migration_threads;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SourceInventory {
@@ -388,3 +401,6 @@ mod test_support;
 #[cfg(test)]
 #[path = "migration_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "migration_thread_snapshot_tests.rs"]
+mod thread_snapshot_tests;

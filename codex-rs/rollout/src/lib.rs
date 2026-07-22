@@ -87,5 +87,20 @@ pub use session_index::remove_thread_name_entries;
 pub use state_db::StateDbHandle;
 pub use state_db::sqlite_telemetry_recorder;
 
+/// Reads complete rollout history for a runtime-state migration snapshot.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CanonicalRolloutHistoryReader;
+
+impl codex_state::CanonicalThreadHistoryReader for CanonicalRolloutHistoryReader {
+    async fn read(
+        &self,
+        path: &std::path::Path,
+    ) -> anyhow::Result<(Vec<codex_protocol::protocol::RolloutLine>, usize)> {
+        let (lines, _thread_id, rejected_line_count) =
+            RolloutRecorder::load_rollout_lines(path).await?;
+        Ok((lines, rejected_line_count))
+    }
+}
+
 #[cfg(test)]
 mod tests;

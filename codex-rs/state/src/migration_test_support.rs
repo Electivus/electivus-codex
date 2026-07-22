@@ -40,7 +40,7 @@ pub(super) async fn initialized_source(prefix: &str) -> anyhow::Result<PathBuf> 
     Ok(source)
 }
 
-async fn initialized_runtime_source(
+pub(super) async fn initialized_runtime_source(
     prefix: &str,
 ) -> anyhow::Result<(PathBuf, std::sync::Arc<crate::StateRuntime>)> {
     let source = std::env::temp_dir().join(format!(
