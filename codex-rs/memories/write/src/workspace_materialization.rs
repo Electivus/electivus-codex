@@ -14,7 +14,8 @@ const STAGING_SUFFIX: &str = ".codex-staging";
 const BACKUP_SUFFIX: &str = ".codex-backup";
 static MATERIALIZATION_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
-pub(crate) async fn prepare_memory_workspace_from_store(
+/// Synchronizes a disposable local memory workspace with its authoritative store generation.
+pub async fn prepare_memory_workspace_from_store(
     store: &MemoryStore,
     root: &Path,
 ) -> anyhow::Result<()> {

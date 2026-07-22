@@ -30,6 +30,7 @@ pub use start::start_memories_startup_task;
 pub use storage::rebuild_raw_memories_file_from_memories;
 pub use storage::rollout_summary_file_stem;
 pub use storage::sync_rollout_summaries_from_memories;
+pub use workspace_materialization::prepare_memory_workspace_from_store;
 
 #[cfg(test)]
 mod startup_tests;

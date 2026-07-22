@@ -1,6 +1,8 @@
 use super::StateRuntime;
 use super::memory_store::MemoryArtifact;
 use super::memory_store::MemoryArtifactSet;
+use super::memory_store::MemoryStore;
+use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
 use sqlx::PgPool;
@@ -84,6 +86,36 @@ impl ExternalAgentMemoryImport {
     pub fn artifacts(&self) -> &MemoryArtifactSet {
         &self.artifacts
     }
+
+    /// Overlays a later replacement while retaining unrelated project resources.
+    pub fn overlay(self, newer: Self) -> anyhow::Result<Self> {
+        let Self {
+            mut project_keys,
+            artifacts,
+        } = self;
+        let Self {
+            project_keys: newer_project_keys,
+            artifacts: newer_artifacts,
+        } = newer;
+        let mut merged_artifacts = artifacts
+            .artifacts()
+            .iter()
+            .filter(|artifact| {
+                !newer_project_keys.iter().any(|project_key| {
+                    artifact
+                        .path()
+                        .starts_with(&format!("{IMPORTED_MEMORY_RESOURCES_PREFIX}{project_key}/"))
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for artifact in newer_artifacts.artifacts() {
+            merged_artifacts.retain(|existing| existing.path() != artifact.path());
+            merged_artifacts.push(artifact.clone());
+        }
+        project_keys.extend(newer_project_keys);
+        Self::new(project_keys, MemoryArtifactSet::new(merged_artifacts)?)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,15 +165,19 @@ pub struct ExternalAgentConfigImportStore {
 #[derive(Clone)]
 enum ExternalAgentConfigImportStoreBackend {
     Postgres(Box<PostgresExternalAgentConfigImportStore>),
-    Sqlite(SqliteExternalAgentConfigImportStore),
+    Sqlite {
+        imports: SqliteExternalAgentConfigImportStore,
+        memories: MemoryStore,
+    },
 }
 
 impl ExternalAgentConfigImportStore {
-    pub(crate) fn from_sqlite(pool: Arc<SqlitePool>) -> Self {
+    pub(crate) fn from_sqlite(pool: Arc<SqlitePool>, memories: MemoryStore) -> Self {
         Self {
-            backend: ExternalAgentConfigImportStoreBackend::Sqlite(
-                SqliteExternalAgentConfigImportStore::new(pool),
-            ),
+            backend: ExternalAgentConfigImportStoreBackend::Sqlite {
+                imports: SqliteExternalAgentConfigImportStore::new(pool),
+                memories,
+            },
         }
     }
 
@@ -163,13 +199,16 @@ impl ExternalAgentConfigImportStore {
             ExternalAgentConfigImportStoreBackend::Postgres(store) => {
                 store.record_completed(import_id, successes, failures).await
             }
-            ExternalAgentConfigImportStoreBackend::Sqlite(store) => {
-                store.record_completed(import_id, successes, failures).await
+            ExternalAgentConfigImportStoreBackend::Sqlite { imports, .. } => {
+                imports
+                    .record_completed(import_id, successes, failures)
+                    .await
             }
         }
     }
 
-    /// Records one completion and publishes its imported resources in the same backend commit.
+    /// Records one completion and schedules or atomically publishes its imported resources,
+    /// according to the configured backend's authority model.
     pub async fn record_completed_with_memory_import(
         &self,
         import_id: &str,
@@ -188,8 +227,13 @@ impl ExternalAgentConfigImportStore {
                     )
                     .await
             }
-            ExternalAgentConfigImportStoreBackend::Sqlite(store) => {
-                store.record_completed(import_id, successes, failures).await
+            ExternalAgentConfigImportStoreBackend::Sqlite { imports, memories } => {
+                imports
+                    .record_completed(import_id, successes, failures)
+                    .await?;
+                memories
+                    .enqueue_global_consolidation(Utc::now().timestamp())
+                    .await
             }
         }
     }
@@ -202,23 +246,23 @@ impl ExternalAgentConfigImportStore {
             ExternalAgentConfigImportStoreBackend::Postgres(store) => {
                 store.details(import_id).await
             }
-            ExternalAgentConfigImportStoreBackend::Sqlite(store) => store.details(import_id).await,
+            ExternalAgentConfigImportStoreBackend::Sqlite { imports, .. } => {
+                imports.details(import_id).await
+            }
         }
     }
 
     pub async fn history(&self) -> anyhow::Result<Vec<ExternalAgentConfigImportHistoryRecord>> {
         match &self.backend {
             ExternalAgentConfigImportStoreBackend::Postgres(store) => store.history().await,
-            ExternalAgentConfigImportStoreBackend::Sqlite(store) => store.history().await,
+            ExternalAgentConfigImportStoreBackend::Sqlite { imports, .. } => {
+                imports.history().await
+            }
         }
     }
 }
 
 impl StateRuntime {
-    pub fn external_agent_config_import_store(&self) -> &ExternalAgentConfigImportStore {
-        &self.external_agent_config_imports
-    }
-
     pub async fn record_external_agent_config_import_completed(
         &self,
         import_id: &str,
@@ -227,6 +271,18 @@ impl StateRuntime {
     ) -> anyhow::Result<()> {
         self.external_agent_config_imports
             .record_completed(import_id, successes, failures)
+            .await
+    }
+
+    pub async fn record_external_agent_config_import_completed_with_memory_import(
+        &self,
+        import_id: &str,
+        successes: &[ExternalAgentConfigImportSuccessRecord],
+        failures: &[ExternalAgentConfigImportFailureRecord],
+        memory_import: &ExternalAgentMemoryImport,
+    ) -> anyhow::Result<()> {
+        self.external_agent_config_imports
+            .record_completed_with_memory_import(import_id, successes, failures, memory_import)
             .await
     }
 

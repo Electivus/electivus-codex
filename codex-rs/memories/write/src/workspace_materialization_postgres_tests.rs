@@ -4,6 +4,9 @@ use crate::reset_memories;
 use anyhow::Context;
 use anyhow::Result;
 use codex_protocol::ThreadId;
+use codex_state::ExternalAgentMemoryImport;
+use codex_state::MemoryArtifact;
+use codex_state::MemoryArtifactSet;
 use codex_state::Phase2JobClaimOutcome;
 use codex_state::PostgresNamespaceAction;
 use codex_state::PostgresNamespaceConfig;
@@ -82,6 +85,34 @@ async fn postgres_replica_materializes_generation_and_reset_clears_workspaces() 
     assert_eq!(
         tokio::fs::read(reader_root.join("skills/example/SKILL.md")).await?,
         nested_bytes
+    );
+
+    let imported_resources = MemoryArtifactSet::new(vec![
+        MemoryArtifact::new(
+            "extensions/external_agent_import/instructions.md",
+            b"# imported memory\n".to_vec(),
+        )?,
+        MemoryArtifact::new(
+            "extensions/external_agent_import/resources/project-a/MEMORY.md",
+            b"project memory\n".to_vec(),
+        )?,
+    ])?;
+    writer_pool
+        .external_agent_config_import_store()
+        .record_completed_with_memory_import(
+            "import-project-a",
+            &[],
+            &[],
+            &ExternalAgentMemoryImport::new(vec!["project-a".to_string()], imported_resources)?,
+        )
+        .await?;
+    prepare_memory_workspace_from_store(&reader, &reader_root).await?;
+    assert_eq!(
+        tokio::fs::read(
+            reader_root.join("extensions/external_agent_import/resources/project-a/MEMORY.md")
+        )
+        .await?,
+        b"project memory\n"
     );
 
     tokio::fs::create_dir(reader_root.join(".git")).await?;

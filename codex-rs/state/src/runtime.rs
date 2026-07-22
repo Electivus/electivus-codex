@@ -381,12 +381,14 @@ impl StateRuntime {
             };
         let thread_updated_at_millis = thread_updated_at_millis.unwrap_or(0);
         let thread_recency_at_millis = thread_recency_at_millis.unwrap_or(0);
+        let memories = MemoryStore::new(Arc::clone(&memories_pool), Arc::clone(&pool));
         let runtime = Arc::new(Self {
-            external_agent_config_imports: ExternalAgentConfigImportStore::from_sqlite(Arc::clone(
-                &pool,
-            )),
+            external_agent_config_imports: ExternalAgentConfigImportStore::from_sqlite(
+                Arc::clone(&pool),
+                memories.clone(),
+            ),
             thread_goals: GoalStore::new(Arc::clone(&goals_pool)),
-            memories: MemoryStore::new(Arc::clone(&memories_pool), Arc::clone(&pool)),
+            memories,
             remote_control_enrollments: RemoteControlEnrollmentStore::from_sqlite(Arc::clone(
                 &pool,
             )),

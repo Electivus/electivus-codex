@@ -40,6 +40,7 @@ use codex_features::Feature;
 use codex_rollout::StateDbHandle;
 use codex_state::ExternalAgentConfigImportFailureRecord;
 use codex_state::ExternalAgentConfigImportSuccessRecord;
+use codex_state::ExternalAgentMemoryImport;
 use codex_thread_store::ThreadStore;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -206,6 +207,7 @@ impl ExternalAgentConfigRequestProcessor {
         }
 
         let mut completed_item_results = Vec::new();
+        let memory_import = import_outcome.memory_import().cloned();
         if let Some(session_validation_result) = session_validation_result {
             send_import_progress(&self.outgoing, &import_id, &session_validation_result).await;
             completed_item_results.push(session_validation_result);
@@ -222,10 +224,13 @@ impl ExternalAgentConfigRequestProcessor {
                 &self.outgoing,
                 self.state_db.as_ref(),
                 &self.analytics_events_client,
-                import_id,
-                analytics_source,
-                provider_id,
-                &completed_item_results,
+                CompletedImport {
+                    import_id,
+                    analytics_source,
+                    provider_id,
+                    item_results: completed_item_results,
+                    memory_import,
+                },
             )
             .await;
             return Ok(());
@@ -317,10 +322,13 @@ impl ExternalAgentConfigRequestProcessor {
                 &outgoing,
                 state_db.as_ref(),
                 &analytics_events_client,
-                import_id,
-                analytics_source,
-                provider_id,
-                &completed_item_results,
+                CompletedImport {
+                    import_id,
+                    analytics_source,
+                    provider_id,
+                    item_results: completed_item_results,
+                    memory_import,
+                },
             )
             .await;
         });
@@ -477,16 +485,28 @@ async fn send_import_progress(
         .await;
 }
 
+struct CompletedImport {
+    import_id: String,
+    analytics_source: String,
+    provider_id: String,
+    item_results: Vec<CoreImportItemResult>,
+    memory_import: Option<ExternalAgentMemoryImport>,
+}
+
 async fn send_completed_import_notification(
     outgoing: &OutgoingMessageSender,
     state_db: Option<&StateDbHandle>,
     analytics_events_client: &AnalyticsEventsClient,
-    import_id: String,
-    analytics_source: String,
-    provider_id: String,
-    item_results: &[CoreImportItemResult],
+    completed_import: CompletedImport,
 ) {
-    let notification = completed_notification(import_id, item_results);
+    let CompletedImport {
+        import_id,
+        analytics_source,
+        provider_id,
+        item_results,
+        memory_import,
+    } = completed_import;
+    let notification = completed_notification(import_id, &item_results);
     log_completed_import_failures(&notification);
     track_completed_import_notification(
         analytics_events_client,
@@ -495,7 +515,9 @@ async fn send_completed_import_notification(
         &notification,
     );
     if let Some(state_db) = state_db
-        && let Err(err) = record_completed_import_notification(state_db, &notification).await
+        && let Err(err) =
+            record_completed_import_notification(state_db, &notification, memory_import.as_ref())
+                .await
     {
         tracing::warn!(
             import_id = %notification.import_id,
@@ -587,6 +609,7 @@ fn analytics_migration_item_type(item_type: ExternalAgentConfigMigrationItemType
 async fn record_completed_import_notification(
     state_db: &StateDbHandle,
     notification: &ExternalAgentConfigImportCompletedNotification,
+    memory_import: Option<&ExternalAgentMemoryImport>,
 ) -> anyhow::Result<()> {
     let successes = notification
         .item_type_results
@@ -617,13 +640,27 @@ async fn record_completed_import_notification(
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    state_db
-        .record_external_agent_config_import_completed(
-            notification.import_id.as_str(),
-            &successes,
-            &failures,
-        )
-        .await
+    match memory_import {
+        Some(memory_import) => {
+            state_db
+                .record_external_agent_config_import_completed_with_memory_import(
+                    notification.import_id.as_str(),
+                    &successes,
+                    &failures,
+                    memory_import,
+                )
+                .await
+        }
+        None => {
+            state_db
+                .record_external_agent_config_import_completed(
+                    notification.import_id.as_str(),
+                    &successes,
+                    &failures,
+                )
+                .await
+        }
+    }
 }
 
 fn apply_plugin_outcome_to_item_result(
