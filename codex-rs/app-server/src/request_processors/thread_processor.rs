@@ -3997,7 +3997,8 @@ impl ThreadRequestProcessor {
                 /*include_history*/ false,
             )
             .await?;
-        if matches!(source_thread.history_mode, ThreadHistoryMode::Paginated) {
+        let paginated_fork = matches!(source_thread.history_mode, ThreadHistoryMode::Paginated);
+        if paginated_fork && ephemeral {
             return Err(method_not_found("paginated_threads is not supported yet"));
         }
         if last_turn_id.is_some() && before_turn_id.is_some() {
@@ -4123,9 +4124,7 @@ impl ThreadRequestProcessor {
             app_server_client_version,
         )
         .await?;
-        if session_configured.rollout_path.is_some()
-            && let Some(name) = source_thread_name.clone()
-        {
+        if !ephemeral && let Some(name) = source_thread_name.clone() {
             self.thread_manager
                 .update_thread_metadata(
                     thread_id,
@@ -4183,8 +4182,9 @@ impl ThreadRequestProcessor {
 
         let config_snapshot = forked_thread.config_snapshot().await;
 
-        // Persistent forks materialize their own rollout immediately. Ephemeral forks stay
-        // pathless, so they rebuild their visible history from the copied source history instead.
+        // Rollout-backed forks can read their stored summary immediately. Pathless forks build
+        // their visible metadata from the copied source history; durable paginated forks hydrate
+        // their turns from the thread store below.
         let mut thread = if session_configured.rollout_path.is_some() {
             let stored_thread = self
                 .read_stored_thread_for_new_fork(thread_id, include_turns)
@@ -4204,7 +4204,7 @@ impl ThreadRequestProcessor {
             );
             thread.preview = preview_from_rollout_items(&history_items);
             thread.forked_from_id = Some(source_thread_id.to_string());
-            if include_turns {
+            if include_turns && !paginated_fork {
                 populate_thread_turns_from_history(
                     &mut thread,
                     &history_items,
@@ -4213,6 +4213,9 @@ impl ThreadRequestProcessor {
             }
             thread
         };
+        if include_turns && paginated_fork {
+            thread.turns = self.paginated_thread_full_turns(thread_id).await?;
+        }
         if let Some(name) = source_thread_name {
             set_thread_name_from_title(&mut thread, name);
         }

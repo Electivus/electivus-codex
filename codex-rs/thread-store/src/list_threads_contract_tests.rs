@@ -60,7 +60,9 @@ async fn postgres_list_threads_matches_public_store_contract()
     let fixture = PostgresThreadStoreFixture::new("list_threads_order")?;
     fixture.migrate().await?;
     let pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let reader_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
     let store = PostgresThreadStore::new(&pool);
+    let reader = PostgresThreadStore::new(&reader_pool);
 
     assert_list_threads_contract(&store, Path::new("/list-contract")).await?;
     let parent_thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f301")?;
@@ -87,8 +89,15 @@ async fn postgres_list_threads_matches_public_store_contract()
         thread_ids_from_page(&store.list_threads(name_search).await?),
         vec![parent_thread_id]
     );
-    assert_relation_filters(&store, Path::new("/list-contract"), parent_thread_id).await?;
+    assert_relation_filters(
+        &store,
+        &reader,
+        Path::new("/list-contract"),
+        parent_thread_id,
+    )
+    .await?;
     pool.close().await;
+    reader_pool.close().await;
     fixture.cleanup().await
 }
 
@@ -375,7 +384,8 @@ async fn assert_list_threads_contract(
 }
 
 async fn assert_relation_filters(
-    store: &dyn ThreadStore,
+    writer: &dyn ThreadStore,
+    reader: &dyn ThreadStore,
     cwd: &Path,
     parent_thread_id: ThreadId,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -393,7 +403,7 @@ async fn assert_relation_filters(
         ),
     ] {
         create_listed_thread(
-            store,
+            writer,
             ListedThread {
                 thread_id,
                 cwd,
@@ -415,7 +425,7 @@ async fn assert_relation_filters(
         )
         .await?;
     }
-    store
+    writer
         .archive_thread(ArchiveThreadParams {
             thread_id: archived_child_id,
         })
@@ -431,18 +441,18 @@ async fn assert_relation_filters(
     related.search_term = Some("relation".to_string());
     related.relation_filter = Some(ThreadRelationFilter::DirectChildrenOf(parent_thread_id));
     assert_eq!(
-        thread_ids_from_page(&store.list_threads(related.clone()).await?),
+        thread_ids_from_page(&reader.list_threads(related.clone()).await?),
         vec![child_id]
     );
     related.relation_filter = Some(ThreadRelationFilter::DescendantsOf(parent_thread_id));
     assert_eq!(
-        thread_ids_from_page(&store.list_threads(related.clone()).await?),
+        thread_ids_from_page(&reader.list_threads(related.clone()).await?),
         vec![grandchild_id, child_id]
     );
     related.archived = true;
     related.relation_filter = Some(ThreadRelationFilter::DirectChildrenOf(parent_thread_id));
     assert_eq!(
-        thread_ids_from_page(&store.list_threads(related).await?),
+        thread_ids_from_page(&reader.list_threads(related).await?),
         vec![archived_child_id]
     );
     Ok(())

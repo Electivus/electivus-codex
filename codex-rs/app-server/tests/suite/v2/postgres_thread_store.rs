@@ -193,10 +193,121 @@ async fn postgres_store_serves_database_native_v2_history_flows() -> Result<()> 
     assert!(resumed.turns_backwards_cursor.is_some());
     assert!(resumed.items_backwards_cursor.is_some());
 
+    for (id, exclude_turns) in [(11, false), (12, true)] {
+        let error = client
+            .request(api::ClientRequest::ThreadFork {
+                request_id: request_id(id),
+                params: api::ThreadForkParams {
+                    thread_id: thread_id.clone(),
+                    ephemeral: true,
+                    exclude_turns,
+                    ..Default::default()
+                },
+            })
+            .await?
+            .expect_err("ephemeral paginated forks should be rejected before session creation");
+        assert_eq!(error.code, -32601);
+        assert_eq!(error.message, "paginated_threads is not supported yet");
+    }
+
+    let forked: api::ThreadForkResponse = request(
+        &client,
+        api::ClientRequest::ThreadFork {
+            request_id: request_id(13),
+            params: api::ThreadForkParams {
+                thread_id: thread_id.clone(),
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    assert_ne!(forked.thread.id, thread_id);
+    assert_eq!(forked.thread.forked_from_id, Some(thread_id.clone()));
+    assert_eq!(
+        forked.thread.name.as_deref(),
+        Some("database native source")
+    );
+    assert_eq!(forked.thread.path, None);
+    assert_eq!(forked.thread.status, api::ThreadStatus::Idle);
+    assert_eq!(
+        turn_ids_from(&forked.thread.turns),
+        vec!["turn-1", "turn-2"]
+    );
+    assert_eq!(
+        item_ids_from(&forked.thread.turns),
+        vec!["user-1", "agent-1", "user-2", "agent-2"]
+    );
+
+    for (id, last_turn_id, before_turn_id) in [
+        (14, Some("turn-1".to_string()), None),
+        (15, None, Some("turn-2".to_string())),
+    ] {
+        let bounded: api::ThreadForkResponse = request(
+            &client,
+            api::ClientRequest::ThreadFork {
+                request_id: request_id(id),
+                params: api::ThreadForkParams {
+                    thread_id: thread_id.clone(),
+                    last_turn_id,
+                    before_turn_id,
+                    ..Default::default()
+                },
+            },
+        )
+        .await?;
+        assert_eq!(turn_ids_from(&bounded.thread.turns), vec!["turn-1"]);
+        assert_eq!(
+            item_ids_from(&bounded.thread.turns),
+            vec!["user-1", "agent-1"]
+        );
+    }
+
+    let verifier_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let verifier = store::PostgresThreadStore::new(&verifier_pool);
+    let forked_thread_id = ThreadId::from_string(&forked.thread.id)?;
+    let persisted_fork = verifier
+        .read_thread(store::ReadThreadParams {
+            thread_id: forked_thread_id,
+            include_archived: false,
+            include_history: true,
+        })
+        .await?;
+    assert_eq!(
+        persisted_fork.forked_from_id,
+        Some(ThreadId::from_string(&thread_id)?)
+    );
+    assert_eq!(persisted_fork.parent_thread_id, None);
+    assert_eq!(
+        persisted_fork.name.as_deref(),
+        Some("database native source")
+    );
+    assert_eq!(persisted_fork.preview, "database native needle");
+    assert_eq!(persisted_fork.rollout_path, None);
+    assert_eq!(persisted_fork.cwd, codex_home.path());
+    assert_eq!(persisted_fork.model_provider, "openai");
+    assert_eq!(
+        persisted_fork.history_mode,
+        codex_protocol::protocol::ThreadHistoryMode::Paginated
+    );
+    let persisted_history = persisted_fork
+        .history
+        .expect("persistent fork should expose canonical PostgreSQL history");
+    assert_eq!(
+        persisted_history
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => Some(event.turn_id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["turn-1", "turn-2"]
+    );
+
     let started: api::ThreadStartResponse = request(
         &client,
         api::ClientRequest::ThreadStart {
-            request_id: request_id(11),
+            request_id: request_id(16),
             params: api::ThreadStartParams {
                 history_mode: Some(api::ThreadHistoryMode::Paginated),
                 ..Default::default()
@@ -213,6 +324,7 @@ async fn postgres_store_serves_database_native_v2_history_flows() -> Result<()> 
     client.shutdown().await?;
     writer_pool.close().await;
     reader_pool.close().await;
+    verifier_pool.close().await;
     fixture.cleanup().await
 }
 
@@ -281,6 +393,13 @@ fn turn_ids_from(turns: &[api::Turn]) -> Vec<&str> {
     turns.iter().map(|turn| turn.id.as_str()).collect()
 }
 
+fn item_ids_from(turns: &[api::Turn]) -> Vec<&str> {
+    turns
+        .iter()
+        .flat_map(|turn| turn.items.iter().map(api::ThreadItem::id))
+        .collect()
+}
+
 fn item_ids(page: &api::ThreadItemsListResponse) -> Vec<&str> {
     page.data.iter().map(|entry| entry.item.id()).collect()
 }
@@ -323,6 +442,16 @@ async fn seed_thread(
         .append_items(store::AppendThreadItemsParams {
             thread_id,
             items: history(thread_id),
+        })
+        .await?;
+    store
+        .update_thread_metadata(store::UpdateThreadMetadataParams {
+            thread_id,
+            patch: store::ThreadMetadataPatch {
+                name: Some(Some("database native source".to_string())),
+                ..Default::default()
+            },
+            include_archived: false,
         })
         .await?;
     store.shutdown_thread(thread_id).await?;
