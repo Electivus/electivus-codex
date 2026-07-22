@@ -1,24 +1,16 @@
-use crate::PostgresNamespaceAction;
 use crate::PostgresNamespaceConfig;
 use crate::SqliteConfig;
-use crate::postgres::MAXIMUM_COMPATIBLE_SCHEMA_VERSION;
-use crate::postgres::config::connect_pool;
-use crate::postgres::config::connection_failed;
-use crate::postgres::manage_postgres_namespace_with_connection;
-use crate::postgres::map_sql_error;
-use crate::postgres::qualified_table;
 use crate::runtime_db_paths;
 use anyhow::Context;
 use sha2::Digest;
 use sha2::Sha256;
 use sqlx::AssertSqlSafe;
-use sqlx::Connection;
 use std::path::Path;
 use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
 
-const IMPORTED_RESOURCE_PREFIX: &str = "memories/extensions/external_agent_import/";
-
+#[path = "migration/destination.rs"]
+mod destination_validation;
 #[path = "migration/source_lock.rs"]
 mod source_lock;
 #[path = "migration/source_validation.rs"]
@@ -135,17 +127,25 @@ impl SourceFileInventory {
 ///
 /// The operation opens SQLite with `immutable=1` and PostgreSQL in a read-only transaction. It
 /// never runs migrations, copies records, edits configuration, or checkpoints SQLite journals.
+/// Source authorities are inventoried twice and the destination is revalidated after that work.
+/// Because no cross-database lock can make these checks atomic, a write beginning after the final
+/// validation can still escape detection. Keep the source offline and the destination isolated
+/// from before preflight starts until the later migration operation completes.
 pub async fn preflight_runtime_state_migration(
     source: SqliteConfig,
     destination: PostgresNamespaceConfig,
 ) -> anyhow::Result<RuntimeStateMigrationInventory> {
-    let (destination_schema, destination_schema_version) =
-        inspect_postgres_destination(&destination).await?;
+    let destination_state = destination_validation::inspect(&destination).await?;
     let source_inventory = inspect_source(&source).await?;
     let verification_inventory = inspect_source(&source).await?;
     anyhow::ensure!(
         source_inventory == verification_inventory,
         "Runtime State Migration source changed during preflight; stop every process using this SQLite home and retry"
+    );
+    let verified_destination_state = destination_validation::inspect(&destination).await?;
+    anyhow::ensure!(
+        destination_state == verified_destination_state,
+        "PostgreSQL Runtime State Namespace changed during preflight; isolate the empty destination and retry"
     );
     let SourceInventory {
         databases,
@@ -160,8 +160,8 @@ pub async fn preflight_runtime_state_migration(
         rollout_files,
         memory_files,
         imported_resources,
-        destination_schema,
-        destination_schema_version,
+        destination_schema: destination_state.schema,
+        destination_schema_version: destination_state.version,
     })
 }
 
@@ -173,11 +173,12 @@ async fn inspect_source(source: &SqliteConfig) -> anyhow::Result<SourceInventory
     })
     .await?;
     let memory_artifacts = collect_files(source.home(), &["memories"], |_| true).await?;
-    let (imported_resources, memory_files) = memory_artifacts.into_iter().partition(|file| {
-        file.relative_path
-            .to_string_lossy()
-            .starts_with(IMPORTED_RESOURCE_PREFIX)
-    });
+    let imported_resource_prefix = Path::new("memories")
+        .join("extensions")
+        .join("external_agent_import");
+    let (imported_resources, memory_files) = memory_artifacts
+        .into_iter()
+        .partition(|file| file.relative_path.starts_with(&imported_resource_prefix));
     source_validation::validate_rollout_files(source, &rollout_files).await?;
     let configuration = if tokio::fs::try_exists(source.home().join("config.toml")).await? {
         Some(inventory_file(source.home(), Path::new("config.toml")).await?)
@@ -191,109 +192,6 @@ async fn inspect_source(source: &SqliteConfig) -> anyhow::Result<SourceInventory
         imported_resources,
         configuration,
     })
-}
-
-async fn inspect_postgres_destination(
-    config: &PostgresNamespaceConfig,
-) -> anyhow::Result<(String, i64)> {
-    let pool = connect_pool(config).await?;
-    let result = async {
-        let mut connection = pool
-            .acquire()
-            .await
-            .map_err(|_| connection_failed(config.url_env()))?;
-        let mut transaction = connection
-            .begin()
-            .await
-            .map_err(|error| map_sql_error(config.schema(), "begin migration preflight", error))?;
-        sqlx::query("SET TRANSACTION READ ONLY")
-            .execute(transaction.as_mut())
-            .await
-            .map_err(|error| {
-                map_sql_error(config.schema(), "make migration preflight read-only", error)
-            })?;
-        let status = manage_postgres_namespace_with_connection(
-            config,
-            transaction.as_mut(),
-            PostgresNamespaceAction::Validate,
-        )
-        .await?;
-        anyhow::ensure!(
-            status.version() == MAXIMUM_COMPATIBLE_SCHEMA_VERSION,
-            "PostgreSQL schema `{}` is at version {}, but Runtime State Migration requires the current version {}; run `codex state schema migrate` and retry",
-            status.schema(),
-            status.version(),
-            MAXIMUM_COMPATIBLE_SCHEMA_VERSION
-        );
-        ensure_postgres_namespace_empty(transaction.as_mut(), status.schema()).await?;
-        transaction.rollback().await.map_err(|error| {
-            map_sql_error(config.schema(), "finish migration preflight", error)
-        })?;
-        Ok((status.schema().to_string(), status.version()))
-    }
-    .await;
-    pool.close().await;
-    result
-}
-
-async fn ensure_postgres_namespace_empty(
-    connection: &mut sqlx::PgConnection,
-    schema: &str,
-) -> anyhow::Result<()> {
-    let backfill_state = qualified_table(schema, "backfill_state");
-    let backfill_is_baseline: bool = sqlx::query_scalar(AssertSqlSafe(format!(
-        "SELECT COUNT(*) = 1 AND BOOL_AND(\
-         id = 1 AND status = 'pending' AND last_watermark IS NULL \
-         AND last_success_at IS NULL AND owner_id IS NULL \
-         AND fencing_token = 0 AND lease_expires_at IS NULL) \
-         FROM {backfill_state}"
-    )))
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(|error| map_sql_error(schema, "inspect destination backfill state", error))?;
-    let generation_state = qualified_table(schema, "memory_generation_state");
-    let generation_is_baseline: bool = sqlx::query_scalar(AssertSqlSafe(format!(
-        "SELECT COUNT(*) = 1 AND BOOL_AND(singleton AND active_generation_id IS NULL) \
-         FROM {generation_state}"
-    )))
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(|error| map_sql_error(schema, "inspect destination memory state", error))?;
-    anyhow::ensure!(
-        backfill_is_baseline && generation_is_baseline,
-        "PostgreSQL Runtime State Namespace `{schema}` contains non-baseline coordination state; provision an empty migrated namespace and retry"
-    );
-    let tables = sqlx::query_scalar::<_, String>(
-        "SELECT c.relname FROM pg_class c \
-         JOIN pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') \
-         AND c.relname <> '_codex_runtime_state_migrations' \
-         AND c.relname <> 'backfill_state' \
-         AND c.relname <> 'memory_generation_state' \
-         ORDER BY c.relname",
-    )
-    .bind(schema)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(|error| map_sql_error(schema, "inventory destination tables", error))?;
-    let mut populated = Vec::new();
-    for table in tables {
-        let qualified = qualified_table(schema, &table);
-        let row_count: i64 =
-            sqlx::query_scalar(AssertSqlSafe(format!("SELECT COUNT(*) FROM {qualified}")))
-                .fetch_one(&mut *connection)
-                .await
-                .map_err(|error| map_sql_error(schema, "count destination records", error))?;
-        if row_count > 0 {
-            populated.push(format!("{table} ({row_count})"));
-        }
-    }
-    anyhow::ensure!(
-        populated.is_empty(),
-        "PostgreSQL Runtime State Namespace `{schema}` is not empty: {}; provision an empty migrated namespace and retry",
-        populated.join(", ")
-    );
-    Ok(())
 }
 
 async fn inspect_sqlite_databases(
@@ -338,6 +236,8 @@ async fn inspect_sqlite_databases(
             )
             .fetch_all(&pool)
             .await?;
+            source_validation::validate_database_schema(database.label, &pool, &table_names)
+                .await?;
             let mut tables = Vec::with_capacity(table_names.len());
             for name in table_names {
                 let quoted_name = format!("\"{}\"", name.replace('"', "\"\""));
@@ -420,16 +320,8 @@ async fn collect_files(
                 path.display()
             );
             if metadata.is_dir() {
-                if path.file_name().is_none_or(|name| name != ".git") {
-                    pending.push(path);
-                }
+                pending.push(path);
             } else if metadata.is_file() && include(&path) {
-                if path
-                    .file_name()
-                    .is_some_and(|name| name == "phase2_workspace_diff.md")
-                {
-                    continue;
-                }
                 let relative_path = path.strip_prefix(source_home).with_context(|| {
                     format!("source file is outside SQLite home: {}", path.display())
                 })?;
@@ -481,6 +373,18 @@ async fn inventory_file(
     })
 }
 
+#[cfg(test)]
+#[path = "migration_destination_tests.rs"]
+mod destination_tests;
+#[cfg(test)]
+#[path = "migration_redaction_tests.rs"]
+mod redaction_tests;
+#[cfg(test)]
+#[path = "migration_source_tests.rs"]
+mod source_tests;
+#[cfg(test)]
+#[path = "migration_test_support.rs"]
+mod test_support;
 #[cfg(test)]
 #[path = "migration_tests.rs"]
 mod tests;

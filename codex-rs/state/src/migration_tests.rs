@@ -12,8 +12,7 @@ use std::process::Command;
 use std::time::Duration;
 use std::time::SystemTime;
 
-#[path = "migration_test_support.rs"]
-mod test_support;
+use super::test_support;
 
 #[tokio::test]
 async fn preflight_inventories_all_source_authorities() -> anyhow::Result<()> {
@@ -30,7 +29,6 @@ async fn preflight_inventories_all_source_authorities() -> anyhow::Result<()> {
     let history = open_thread_history_db(&source).await?;
     history.close().await;
     runtime.close().await;
-
     tokio::fs::create_dir_all(source.join("sessions/2026/07/22")).await?;
     tokio::fs::write(
         source.join("sessions/2026/07/22/rollout.jsonl"),
@@ -129,6 +127,7 @@ async fn preflight_reports_a_positive_active_writer_check() -> anyhow::Result<()
     let history = open_thread_history_db(&source).await?;
     history.close().await;
     runtime.close().await;
+    std::fs::write(source.join("config.toml"), b"model = \"gpt-5\"\n")?;
 
     let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(source.as_path())?);
     let ready_path = source.join("writer-ready");
@@ -159,6 +158,8 @@ async fn preflight_reports_a_positive_active_writer_check() -> anyhow::Result<()
 
     let mut destination = PostgresContractFixture::new(test_database_url()?, "preflight_writer")?;
     destination.manage(PostgresNamespaceAction::Migrate).await?;
+    let source_before = test_support::snapshot_source(&source)?;
+    let destination_before = test_support::snapshot_destination(&destination).await?;
     let error = preflight_runtime_state_migration(sqlite, destination.config_for_tests())
         .await
         .expect_err("an active SQLite writer must block migration preflight");
@@ -166,6 +167,11 @@ async fn preflight_reports_a_positive_active_writer_check() -> anyhow::Result<()
     assert!(
         error.to_string().contains("active SQLite writer"),
         "{error:#}"
+    );
+    assert_eq!(test_support::snapshot_source(&source)?, source_before);
+    assert_eq!(
+        test_support::snapshot_destination(&destination).await?,
+        destination_before
     );
     drop(writer_guard);
     destination.cleanup().await?;

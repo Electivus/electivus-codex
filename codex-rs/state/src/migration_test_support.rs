@@ -1,9 +1,11 @@
+use crate::open_thread_history_db;
 use crate::postgres::qualified_table;
 use crate::postgres::test_support::PostgresContractFixture;
 use anyhow::Context;
 use sqlx::AssertSqlSafe;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -30,6 +32,44 @@ pub(super) struct DestinationSnapshot {
     version: i64,
     schema_definition: Vec<String>,
     table_records: Vec<(String, String)>,
+}
+
+pub(super) async fn initialized_source(prefix: &str) -> anyhow::Result<PathBuf> {
+    let (source, runtime) = initialized_runtime_source(prefix).await?;
+    runtime.close().await;
+    Ok(source)
+}
+
+async fn initialized_runtime_source(
+    prefix: &str,
+) -> anyhow::Result<(PathBuf, std::sync::Arc<crate::StateRuntime>)> {
+    let source = std::env::temp_dir().join(format!(
+        "codex-migration-{prefix}-{}-{}",
+        std::process::id(),
+        SystemTime::UNIX_EPOCH.elapsed()?.as_nanos()
+    ));
+    std::fs::create_dir(&source)?;
+    let runtime = crate::StateRuntime::init(source.clone(), "test-provider".to_string()).await?;
+    let history = open_thread_history_db(&source).await?;
+    history.close().await;
+    std::fs::write(source.join("config.toml"), b"model = \"gpt-5\"\n")?;
+    Ok((source, runtime))
+}
+
+pub(super) async fn source_with_rollout(
+    prefix: &str,
+    rollout_path: impl FnOnce(&Path) -> PathBuf,
+) -> anyhow::Result<PathBuf> {
+    let (source, runtime) = initialized_runtime_source(prefix).await?;
+    let mut metadata = crate::runtime::test_support::test_thread_metadata(
+        &source,
+        codex_protocol::ThreadId::new(),
+        source.clone(),
+    );
+    metadata.rollout_path = rollout_path(&source);
+    runtime.upsert_thread(&metadata).await?;
+    runtime.close().await;
+    Ok(source)
 }
 
 pub(super) fn snapshot_source(source_home: &Path) -> anyhow::Result<SourceSnapshot> {
@@ -101,6 +141,20 @@ pub(super) async fn snapshot_destination(
                  data_type, is_nullable, COALESCE(column_default, '')) \
                  FROM information_schema.columns WHERE table_schema = $1 \
                  ORDER BY table_name, ordinal_position",
+            )
+            .bind(schema)
+            .fetch_all(&pool)
+            .await?,
+        );
+        schema_definition.extend(
+            sqlx::query_scalar::<_, String>(
+                "SELECT definition FROM (\
+                 SELECT concat_ws('|', 'view', viewname, definition) AS definition FROM pg_views WHERE schemaname = $1 UNION ALL \
+                 SELECT concat_ws('|', 'function', p.proname, pg_get_functiondef(p.oid)) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = $1 UNION ALL \
+                 SELECT concat_ws('|', 'trigger', t.tgname, pg_get_triggerdef(t.oid)) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 UNION ALL \
+                 SELECT concat_ws('|', 'policy', tablename, policyname, cmd, qual, with_check) FROM pg_policies WHERE schemaname = $1 UNION ALL \
+                 SELECT concat_ws('|', 'grant', table_name, grantee, privilege_type) FROM information_schema.table_privileges WHERE table_schema = $1 UNION ALL \
+                 SELECT concat_ws('|', 'sequence', sequencename, start_value, min_value, max_value, increment_by, cycle, cache_size, last_value) FROM pg_sequences WHERE schemaname = $1) definitions ORDER BY definition",
             )
             .bind(schema)
             .fetch_all(&pool)

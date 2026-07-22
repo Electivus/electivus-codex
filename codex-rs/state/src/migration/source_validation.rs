@@ -3,9 +3,56 @@ use crate::SqliteConfig;
 use crate::state_db_path;
 use anyhow::Context;
 use std::collections::HashSet;
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use tokio::io::AsyncBufReadExt;
+
+const STATE_TABLES: &str = "_sqlx_migrations,backfill_state,external_agent_config_imports,remote_control_enrollments,thread_dynamic_tools,thread_spawn_edges,threads";
+const GOALS_TABLES: &str = "_sqlx_migrations,thread_goal_accounting_events,thread_goal_continuation_deferrals,thread_goals";
+const THREAD_HISTORY_TABLES: &str =
+    "_sqlx_migrations,thread_history_projection_state,thread_items,thread_turns";
+
+pub(super) async fn validate_database_schema(
+    label: &str,
+    pool: &sqlx::SqlitePool,
+    tables: &[String],
+) -> anyhow::Result<()> {
+    let (version, required_tables) = match label {
+        "state DB" => (43, STATE_TABLES),
+        "log DB" => (2, "_sqlx_migrations,logs"),
+        "goals DB" => (3, GOALS_TABLES),
+        "memories DB" => (1, "_sqlx_migrations,jobs,stage1_outputs"),
+        "thread history DB" => (2, THREAD_HISTORY_TABLES),
+        _ => anyhow::bail!("unknown mandatory SQLite database `{label}`"),
+    };
+    anyhow::ensure!(
+        required_tables
+            .split(',')
+            .all(|required| tables.iter().any(|table| table == required)),
+        "SQLite {label} has an incompatible schema; restore a current, complete source database before retrying"
+    );
+    let current_version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+        .fetch_one(pool)
+        .await?;
+    anyhow::ensure!(
+        current_version == version,
+        "SQLite {label} is at schema version {current_version}, but migration preflight requires version {version}; use a matching Codex version or restore a compatible backup"
+    );
+    if label == "state DB" {
+        let rollout_path_is_required: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) = 1 FROM pragma_table_info('threads') \
+             WHERE name = 'rollout_path' AND type = 'TEXT' AND \"notnull\" = 1",
+        )
+        .fetch_one(pool)
+        .await?;
+        anyhow::ensure!(
+            rollout_path_is_required,
+            "SQLite state DB has an incompatible threads.rollout_path column; expected required TEXT"
+        );
+    }
+    Ok(())
+}
 
 pub(super) async fn validate_rollout_files(
     source: &SqliteConfig,
@@ -54,6 +101,13 @@ fn relative_rollout_path(source_home: &Path, rollout_path: &Path) -> anyhow::Res
             )
         })?
     } else {
+        anyhow::ensure!(
+            rollout_path
+                .components()
+                .all(|component| matches!(component, Component::Normal(_))),
+            "SQLite thread metadata references rollout outside the source home: {}",
+            rollout_path.display()
+        );
         rollout_path
     };
     anyhow::ensure!(

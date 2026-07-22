@@ -112,7 +112,7 @@ impl PostgresContractFixture {
         result
     }
 
-    pub(super) async fn schema_exists(&self) -> anyhow::Result<bool> {
+    pub(crate) async fn schema_exists(&self) -> anyhow::Result<bool> {
         let pool = self.connect_pool().await?;
         let result = async {
             let mut connection = pool
@@ -162,10 +162,12 @@ impl PostgresContractFixture {
                 .await
                 .map_err(|_| connection_failed(&self.config.url_env))?;
             let schema = quote_identifier(self.schema());
-            sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
-                .execute(&mut *connection)
-                .await
-                .map_err(|error| map_sql_error(self.schema(), "clean up test schema", error))?;
+            sqlx::query(AssertSqlSafe(format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE"
+            )))
+            .execute(&mut *connection)
+            .await
+            .map_err(|error| map_sql_error(self.schema(), "clean up test schema", error))?;
             Ok(())
         }
         .await;
