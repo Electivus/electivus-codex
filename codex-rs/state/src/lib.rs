@@ -30,6 +30,10 @@ pub use postgres::PostgresNamespaceStatus;
 pub use postgres::PostgresPoolConfig;
 pub use postgres::PostgresRuntimeStatePool;
 pub use postgres::manage_postgres_namespace;
+pub use runtime::BackfillClaimOutcome;
+pub use runtime::BackfillCoordinator;
+pub use runtime::BackfillLease;
+pub use runtime::BackfillLeaseUpdate;
 pub use runtime::RuntimeStateBackendConfig;
 /// Preferred entrypoint: owns configuration and metrics.
 pub use runtime::StateRuntime;

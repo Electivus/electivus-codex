@@ -46,6 +46,9 @@ mod backend;
 #[path = "runtime/backend_contract_tests.rs"]
 mod backend_contract_tests;
 mod backfill;
+#[cfg(test)]
+#[path = "runtime/backfill_contract_tests.rs"]
+pub(crate) mod backfill_contract_tests;
 mod external_agent_config_imports;
 mod goals;
 mod log_store;
@@ -63,6 +66,10 @@ pub(crate) mod test_support;
 mod threads;
 
 pub use backend::RuntimeStateBackendConfig;
+pub use backfill::BackfillClaimOutcome;
+pub use backfill::BackfillCoordinator;
+pub use backfill::BackfillLease;
+pub use backfill::BackfillLeaseUpdate;
 pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportHistoryRecord;

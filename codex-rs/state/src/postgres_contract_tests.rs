@@ -4,6 +4,7 @@ use super::test_support::PostgresContractFixture;
 use super::test_support::test_database_url;
 use crate::runtime::LogStore;
 use crate::runtime::RemoteControlEnrollmentStore;
+use crate::runtime::backfill_contract_tests::run_backfill_coordination_contract;
 use crate::runtime::logs_contract_tests::run_feedback_contract;
 use crate::runtime::logs_contract_tests::run_filter_order_and_max_id_contract;
 use crate::runtime::logs_contract_tests::run_partition_limits_contract;
@@ -37,6 +38,28 @@ async fn postgres_remote_control_replicas(
         fixture.schema().to_string(),
     );
     Ok((writer, reader))
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_backfill_coordination_is_shared_between_replicas() -> Result<()> {
+    let database_url = test_database_url()?;
+    let mut fixture = PostgresContractFixture::new(database_url, "backfill_coordination")?;
+    fixture.manage(PostgresNamespaceAction::Migrate).await?;
+    let first_pool = fixture.connect_pool().await?;
+    let second_pool = fixture.connect_pool().await?;
+    let first =
+        crate::BackfillCoordinator::from_postgres(first_pool.clone(), fixture.schema().to_string());
+    let second = crate::BackfillCoordinator::from_postgres(
+        second_pool.clone(),
+        fixture.schema().to_string(),
+    );
+
+    run_backfill_coordination_contract(&first, &second).await?;
+
+    first_pool.close().await;
+    second_pool.close().await;
+    fixture.cleanup().await
 }
 
 #[tokio::test]
@@ -245,7 +268,7 @@ async fn postgres_contract_creates_migrates_validates_and_cleans_up_namespace() 
 
     assert_eq!(validated, migrated);
     assert_eq!(migrated.schema(), fixture.schema());
-    assert_eq!(migrated.version(), 8);
+    assert_eq!(migrated.version(), 9);
 
     fixture.cleanup().await?;
     assert!(!fixture.schema_exists().await?);
@@ -266,8 +289,8 @@ async fn postgres_contract_migration_is_idempotent() -> Result<()> {
         fixture.migration_history().await?,
         MigrationHistory {
             minimum: Some(1),
-            maximum: Some(8),
-            count: 8,
+            maximum: Some(9),
+            count: 9,
         }
     );
     fixture.cleanup().await?;
@@ -328,8 +351,8 @@ async fn postgres_contract_migration_uses_namespace_advisory_lock() -> Result<()
         fixture.migration_history().await?,
         MigrationHistory {
             minimum: Some(1),
-            maximum: Some(8),
-            count: 8,
+            maximum: Some(9),
+            count: 9,
         }
     );
     drop(contending_migration);
