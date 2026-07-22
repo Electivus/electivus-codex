@@ -8,6 +8,8 @@ use uuid::Uuid;
 
 #[path = "postgres/outputs.rs"]
 mod outputs;
+#[path = "postgres/startup.rs"]
+mod startup;
 
 const DEFAULT_RETRY_REMAINING: i64 = 3;
 const JOB_KIND_MEMORY_CONSOLIDATE_GLOBAL: &str = "memory_consolidate_global";
@@ -18,6 +20,7 @@ const MEMORY_CONSOLIDATION_JOB_KEY: &str = "global";
 pub(super) struct PostgresMemoryStore {
     history_table: String,
     jobs_table: String,
+    mode_overrides_table: String,
     outputs_table: String,
     pool: PgPool,
     schema: String,
@@ -29,6 +32,7 @@ impl PostgresMemoryStore {
         Self {
             history_table: qualified_table(&schema, "thread_history"),
             jobs_table: qualified_table(&schema, "memory_jobs"),
+            mode_overrides_table: qualified_table(&schema, "memory_thread_mode_overrides"),
             outputs_table: qualified_table(&schema, "memory_stage1_outputs"),
             pool,
             threads_table: qualified_table(&schema, "threads"),
@@ -38,6 +42,35 @@ impl PostgresMemoryStore {
 
     pub(super) async fn close(&self) {
         self.pool.close().await;
+    }
+
+    fn enabled_thread_predicate(&self) -> String {
+        let canonical_mode = format!(
+            "SELECT history.item #>> '{{payload,memory_mode}}' FROM {} AS history \
+             WHERE history.thread_id = thread.thread_id \
+             AND history.item ->> 'type' = 'session_meta' \
+             AND history.item #>> '{{payload,id}}' = thread.thread_id \
+             AND history.item #>> '{{payload,memory_mode}}' IS NOT NULL \
+             ORDER BY history.ordinal DESC LIMIT 1",
+            self.history_table
+        );
+        let canonical_mode_ordinal = format!(
+            "SELECT history.ordinal FROM {} AS history \
+             WHERE history.thread_id = thread.thread_id \
+             AND history.item ->> 'type' = 'session_meta' \
+             AND history.item #>> '{{payload,id}}' = thread.thread_id \
+             AND history.item #>> '{{payload,memory_mode}}' IS NOT NULL \
+             ORDER BY history.ordinal DESC LIMIT 1",
+            self.history_table
+        );
+        format!(
+            "COALESCE(({canonical_mode}), 'enabled') = 'enabled' AND NOT EXISTS (\
+             SELECT 1 FROM {} AS mode_override \
+             WHERE mode_override.thread_id = thread.thread_id \
+             AND mode_override.polluted_at_stream_version > \
+             COALESCE(({canonical_mode_ordinal}), -1))",
+            self.mode_overrides_table
+        )
     }
 
     pub(super) async fn try_claim_stage1_job(

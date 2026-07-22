@@ -128,18 +128,6 @@ impl PostgresMemoryStore {
         .rows_affected();
         Ok(usize::try_from(rows_affected).unwrap_or(usize::MAX))
     }
-
-    fn enabled_thread_predicate(&self) -> String {
-        format!(
-            "COALESCE((SELECT history.item #>> '{{payload,memory_mode}}' \
-             FROM {} AS history WHERE history.thread_id = thread.thread_id \
-             AND history.item ->> 'type' = 'session_meta' \
-             AND history.item #>> '{{payload,id}}' = thread.thread_id \
-             AND history.item #>> '{{payload,memory_mode}}' IS NOT NULL \
-             ORDER BY history.ordinal DESC LIMIT 1), 'enabled') = 'enabled'",
-            self.history_table
-        )
-    }
 }
 
 fn retention_seconds(max_unused_days: i64) -> i64 {

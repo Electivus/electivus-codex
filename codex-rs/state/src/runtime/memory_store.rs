@@ -50,7 +50,10 @@ impl MemoryStore {
         }
     }
     pub async fn clear_memory_data(&self) -> anyhow::Result<()> {
-        self.sqlite("clear memory data")?.clear_memory_data().await
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => store.clear_memory_data().await,
+            MemoryStoreBackend::Sqlite(store) => store.clear_memory_data().await,
+        }
     }
     pub async fn record_stage1_output_usage(
         &self,
@@ -68,14 +71,24 @@ impl MemoryStore {
         current_thread_id: ThreadId,
         params: Stage1StartupClaimParams<'_>,
     ) -> anyhow::Result<Vec<Stage1JobClaim>> {
-        self.sqlite("claim stage-one startup jobs")?
-            .claim_stage1_jobs_for_startup(current_thread_id, params)
-            .await
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => {
+                store
+                    .claim_stage1_jobs_for_startup(current_thread_id, params)
+                    .await
+            }
+            MemoryStoreBackend::Sqlite(store) => {
+                store
+                    .claim_stage1_jobs_for_startup(current_thread_id, params)
+                    .await
+            }
+        }
     }
     pub(super) async fn delete_thread_memory(&self, thread_id: ThreadId) -> anyhow::Result<()> {
-        self.sqlite("delete thread memory")?
-            .delete_thread_memory(thread_id)
-            .await
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => store.delete_thread_memory(thread_id).await,
+            MemoryStoreBackend::Sqlite(store) => store.delete_thread_memory(thread_id).await,
+        }
     }
     pub async fn list_stage1_outputs_for_global(
         &self,
@@ -125,9 +138,14 @@ impl MemoryStore {
         &self,
         thread_id: ThreadId,
     ) -> anyhow::Result<bool> {
-        self.sqlite("mark thread memory polluted")?
-            .mark_thread_memory_mode_polluted(thread_id)
-            .await
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => {
+                store.mark_thread_memory_mode_polluted(thread_id).await
+            }
+            MemoryStoreBackend::Sqlite(store) => {
+                store.mark_thread_memory_mode_polluted(thread_id).await
+            }
+        }
     }
 
     pub async fn try_claim_stage1_job(
