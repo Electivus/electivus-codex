@@ -80,6 +80,7 @@ mod stage_one {
         codex_protocol::openai_models::ReasoningEffort::Low;
     pub(super) const CONCURRENCY_LIMIT: usize = 8;
     pub(super) const JOB_LEASE_SECONDS: i64 = 3_600;
+    pub(super) const JOB_HEARTBEAT_SECONDS: u64 = 90;
     pub(super) const JOB_RETRY_DELAY_SECONDS: i64 = 3_600;
     pub(super) const THREAD_SCAN_LIMIT: usize = 5_000;
     pub(super) const PRUNE_BATCH_SIZE: usize = 200;
