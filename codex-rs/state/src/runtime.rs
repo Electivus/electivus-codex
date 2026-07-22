@@ -51,6 +51,9 @@ mod backfill;
 pub(crate) mod backfill_contract_tests;
 mod external_agent_config_imports;
 mod goals;
+#[cfg(test)]
+#[path = "runtime/goals_contract_tests.rs"]
+pub(crate) mod goals_contract_tests;
 mod log_store;
 #[cfg(test)]
 #[path = "runtime/logs_contract_tests.rs"]

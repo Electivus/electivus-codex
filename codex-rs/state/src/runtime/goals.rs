@@ -1,19 +1,49 @@
 use super::*;
 use crate::model::ThreadGoalRow;
+use sqlx::PgPool;
 use uuid::Uuid;
+
+#[path = "goals/postgres.rs"]
+mod postgres;
+
+use postgres::PostgresGoalStore;
 
 #[derive(Clone)]
 pub struct GoalStore {
-    pool: Arc<SqlitePool>,
+    backend: GoalStoreBackend,
+}
+
+#[derive(Clone)]
+enum GoalStoreBackend {
+    Postgres(PostgresGoalStore),
+    Sqlite(Arc<SqlitePool>),
 }
 
 impl GoalStore {
     pub(crate) fn new(pool: Arc<SqlitePool>) -> Self {
-        Self { pool }
+        Self {
+            backend: GoalStoreBackend::Sqlite(pool),
+        }
+    }
+
+    pub(crate) fn from_postgres(pool: PgPool, schema: String) -> Self {
+        Self {
+            backend: GoalStoreBackend::Postgres(PostgresGoalStore::new(pool, schema)),
+        }
+    }
+
+    fn sqlite_pool(&self) -> anyhow::Result<&Arc<SqlitePool>> {
+        match &self.backend {
+            GoalStoreBackend::Postgres(_) => Err(goal_persistence_error("access thread goals")),
+            GoalStoreBackend::Sqlite(pool) => Ok(pool),
+        }
     }
 
     pub(crate) async fn close(&self) {
-        self.pool.close().await;
+        match &self.backend {
+            GoalStoreBackend::Postgres(store) => store.close().await,
+            GoalStoreBackend::Sqlite(pool) => pool.close().await,
+        }
     }
 }
 
@@ -42,6 +72,13 @@ impl GoalStore {
         &self,
         thread_id: ThreadId,
     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+        if let GoalStoreBackend::Postgres(store) = &self.backend {
+            return store
+                .get_thread_goal(thread_id)
+                .await
+                .map_err(|_| goal_persistence_error("get thread goal"));
+        }
+        let pool = self.sqlite_pool()?;
         let row = sqlx::query(
             r#"
 SELECT
@@ -59,7 +96,7 @@ WHERE thread_id = ?
             "#,
         )
         .bind(thread_id.to_string())
-        .fetch_optional(self.pool.as_ref())
+        .fetch_optional(pool.as_ref())
         .await?;
 
         row.map(|row| thread_goal_from_row(&row)).transpose()
@@ -69,7 +106,13 @@ WHERE thread_id = ?
         &self,
         goal: &crate::ThreadGoal,
     ) -> anyhow::Result<()> {
-        let mut transaction = self.pool.begin().await?;
+        if let GoalStoreBackend::Postgres(store) = &self.backend {
+            return store
+                .replace_thread_goal_snapshot(goal)
+                .await
+                .map_err(|_| goal_persistence_error("replace thread goal snapshot"));
+        }
+        let mut transaction = self.sqlite_pool()?.begin().await?;
         sqlx::query(
             r#"
 INSERT INTO thread_goals (
@@ -126,6 +169,12 @@ ON CONFLICT(thread_id) DO NOTHING
         &self,
         thread_id: ThreadId,
     ) -> anyhow::Result<bool> {
+        if let GoalStoreBackend::Postgres(store) = &self.backend {
+            return store
+                .has_thread_goal_continuation_deferral(thread_id)
+                .await
+                .map_err(|_| goal_persistence_error("read goal continuation deferral"));
+        }
         sqlx::query_scalar(
             r#"
 SELECT EXISTS(
@@ -136,7 +185,7 @@ SELECT EXISTS(
             "#,
         )
         .bind(thread_id.to_string())
-        .fetch_one(self.pool.as_ref())
+        .fetch_one(self.sqlite_pool()?.as_ref())
         .await
         .map_err(Into::into)
     }
@@ -145,9 +194,15 @@ SELECT EXISTS(
         &self,
         thread_id: ThreadId,
     ) -> anyhow::Result<()> {
+        if let GoalStoreBackend::Postgres(store) = &self.backend {
+            return store
+                .clear_thread_goal_continuation_deferral(thread_id)
+                .await
+                .map_err(|_| goal_persistence_error("clear goal continuation deferral"));
+        }
         sqlx::query("DELETE FROM thread_goal_continuation_deferrals WHERE thread_id = ?")
             .bind(thread_id.to_string())
-            .execute(self.pool.as_ref())
+            .execute(self.sqlite_pool()?.as_ref())
             .await?;
 
         Ok(())
@@ -160,6 +215,13 @@ SELECT EXISTS(
         status: crate::ThreadGoalStatus,
         token_budget: Option<i64>,
     ) -> anyhow::Result<crate::ThreadGoal> {
+        if let GoalStoreBackend::Postgres(store) = &self.backend {
+            return store
+                .replace_thread_goal(thread_id, objective, status, token_budget)
+                .await
+                .map_err(|_| goal_persistence_error("replace thread goal"));
+        }
+        let pool = self.sqlite_pool()?;
         let goal_id = Uuid::new_v4().to_string();
         let now_ms = datetime_to_epoch_millis(Utc::now());
         let status = status_after_budget_limit(status, /*tokens_used*/ 0, token_budget);
@@ -204,7 +266,7 @@ RETURNING
         .bind(token_budget)
         .bind(now_ms)
         .bind(now_ms)
-        .fetch_one(self.pool.as_ref())
+        .fetch_one(pool.as_ref())
         .await?;
 
         thread_goal_from_row(&row)
@@ -217,6 +279,12 @@ RETURNING
         status: crate::ThreadGoalStatus,
         token_budget: Option<i64>,
     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+        if let GoalStoreBackend::Postgres(store) = &self.backend {
+            return store
+                .insert_thread_goal(thread_id, objective, status, token_budget)
+                .await
+                .map_err(|_| goal_persistence_error("insert thread goal"));
+        }
         let goal_id = Uuid::new_v4().to_string();
         let now_ms = datetime_to_epoch_millis(Utc::now());
         let status = status_after_budget_limit(status, /*tokens_used*/ 0, token_budget);
@@ -262,7 +330,7 @@ RETURNING
         .bind(token_budget)
         .bind(now_ms)
         .bind(now_ms)
-        .fetch_optional(self.pool.as_ref())
+        .fetch_optional(self.sqlite_pool()?.as_ref())
         .await?;
 
         row.map(|row| thread_goal_from_row(&row)).transpose()
@@ -273,6 +341,12 @@ RETURNING
         thread_id: ThreadId,
         update: GoalUpdate,
     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+        if let GoalStoreBackend::Postgres(store) = &self.backend {
+            return store
+                .update_thread_goal(thread_id, update)
+                .await
+                .map_err(|_| goal_persistence_error("update thread goal"));
+        }
         let GoalUpdate {
             objective,
             status,
@@ -315,7 +389,7 @@ WHERE thread_id = ?
                 .bind(thread_id.to_string())
                 .bind(expected_goal_id)
                 .bind(expected_goal_id)
-                .execute(self.pool.as_ref())
+                .execute(self.sqlite_pool()?.as_ref())
                 .await?
             }
             (Some(status), None) => {
@@ -346,7 +420,7 @@ WHERE thread_id = ?
                 .bind(thread_id.to_string())
                 .bind(expected_goal_id)
                 .bind(expected_goal_id)
-                .execute(self.pool.as_ref())
+                .execute(self.sqlite_pool()?.as_ref())
                 .await?
             }
             (None, Some(token_budget)) => {
@@ -374,7 +448,7 @@ WHERE thread_id = ?
                 .bind(thread_id.to_string())
                 .bind(expected_goal_id)
                 .bind(expected_goal_id)
-                .execute(self.pool.as_ref())
+                .execute(self.sqlite_pool()?.as_ref())
                 .await?
             }
             (None, None) => {
@@ -394,7 +468,7 @@ WHERE thread_id = ?
                     .bind(thread_id.to_string())
                     .bind(expected_goal_id)
                     .bind(expected_goal_id)
-                    .execute(self.pool.as_ref())
+                    .execute(self.sqlite_pool()?.as_ref())
                     .await?
                 } else {
                     let goal = self.get_thread_goal(thread_id).await?;
@@ -438,6 +512,12 @@ WHERE thread_id = ?
         thread_id: ThreadId,
         status: crate::ThreadGoalStatus,
     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+        if let GoalStoreBackend::Postgres(store) = &self.backend {
+            return store
+                .update_active_thread_goal_status(thread_id, status)
+                .await
+                .map_err(|_| goal_persistence_error("stop active thread goal"));
+        }
         let now_ms = datetime_to_epoch_millis(Utc::now());
         let result = sqlx::query(
             r#"
@@ -459,7 +539,7 @@ WHERE thread_id = ?
         .bind(now_ms)
         .bind(thread_id.to_string())
         .bind(status.as_str())
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?.as_ref())
         .await?;
 
         if result.rows_affected() == 0 {
@@ -473,6 +553,12 @@ WHERE thread_id = ?
         &self,
         thread_id: ThreadId,
     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+        if let GoalStoreBackend::Postgres(store) = &self.backend {
+            return store
+                .delete_thread_goal(thread_id)
+                .await
+                .map_err(|_| goal_persistence_error("delete thread goal"));
+        }
         let row = sqlx::query(
             r#"
 DELETE FROM thread_goals
@@ -490,7 +576,7 @@ RETURNING
             "#,
         )
         .bind(thread_id.to_string())
-        .fetch_optional(self.pool.as_ref())
+        .fetch_optional(self.sqlite_pool()?.as_ref())
         .await?;
 
         row.map(|row| thread_goal_from_row(&row)).transpose()
@@ -504,6 +590,18 @@ RETURNING
         mode: GoalAccountingMode,
         expected_goal_id: Option<&str>,
     ) -> anyhow::Result<GoalAccountingOutcome> {
+        if let GoalStoreBackend::Postgres(store) = &self.backend {
+            return store
+                .account_thread_goal_usage(
+                    thread_id,
+                    time_delta_seconds,
+                    token_delta,
+                    mode,
+                    expected_goal_id,
+                )
+                .await
+                .map_err(|_| goal_persistence_error("account thread goal usage"));
+        }
         let time_delta_seconds = time_delta_seconds.max(0);
         let token_delta = token_delta.max(0);
         if time_delta_seconds == 0 && token_delta == 0 {
@@ -598,7 +696,10 @@ RETURNING
             "#,
         );
 
-        let row = builder.build().fetch_optional(self.pool.as_ref()).await?;
+        let row = builder
+            .build()
+            .fetch_optional(self.sqlite_pool()?.as_ref())
+            .await?;
 
         let Some(row) = row else {
             return Ok(GoalAccountingOutcome::Unchanged(
@@ -613,6 +714,12 @@ RETURNING
 
 fn thread_goal_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<crate::ThreadGoal> {
     ThreadGoalRow::try_from_row(row).and_then(crate::ThreadGoal::try_from)
+}
+
+fn goal_persistence_error(operation: &'static str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Runtime State could not complete the `{operation}` operation; verify goal persistence health, then retry"
+    )
 }
 
 fn status_after_budget_limit(

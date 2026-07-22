@@ -17,7 +17,7 @@ use config::connection_failed;
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
 const MINIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
-const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 9;
+const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 10;
 const BASELINE_SCHEMA_VERSION: i64 = 1;
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
@@ -59,6 +59,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         9,
         include_str!("../postgres_migrations/0009_backfill_coordination.sql"),
         "create backfill coordination",
+    ),
+    (
+        10,
+        include_str!("../postgres_migrations/0010_thread_goals.sql"),
+        "create thread goal storage",
     ),
 ];
 
@@ -138,6 +143,11 @@ impl PostgresRuntimeStatePool {
     /// Derives a rollout metadata backfill coordinator that shares this owner's pool.
     pub fn backfill_coordinator(&self) -> crate::BackfillCoordinator {
         crate::BackfillCoordinator::from_postgres(self.pool.clone(), self.schema.clone())
+    }
+
+    /// Derives a goal facade that shares this owner's pool.
+    pub fn goal_store(&self) -> crate::GoalStore {
+        crate::GoalStore::from_postgres(self.pool.clone(), self.schema.clone())
     }
 
     /// Returns the shared pool and namespace needed by the thread-store facade.

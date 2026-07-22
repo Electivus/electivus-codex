@@ -5,6 +5,7 @@ use super::test_support::test_database_url;
 use crate::runtime::LogStore;
 use crate::runtime::RemoteControlEnrollmentStore;
 use crate::runtime::backfill_contract_tests::run_backfill_coordination_contract;
+use crate::runtime::goals_contract_tests::run_goal_lifecycle_contract;
 use crate::runtime::logs_contract_tests::run_feedback_contract;
 use crate::runtime::logs_contract_tests::run_filter_order_and_max_id_contract;
 use crate::runtime::logs_contract_tests::run_partition_limits_contract;
@@ -13,8 +14,49 @@ use crate::runtime::logs_contract_tests::run_startup_retention_contract;
 use crate::runtime::remote_control_contract_tests::run_remote_control_enrollment_contract;
 use anyhow::Context;
 use anyhow::Result;
+use codex_protocol::ThreadId;
 use pretty_assertions::assert_eq;
+use sqlx::AssertSqlSafe;
 use std::time::Duration;
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_goals_are_shared_between_replicas() -> Result<()> {
+    let database_url = test_database_url()?;
+    let mut fixture = PostgresContractFixture::new(database_url, "goals_visibility")?;
+    fixture.manage(PostgresNamespaceAction::Migrate).await?;
+    let writer_pool = fixture.connect_pool().await?;
+    let thread_id = ThreadId::new();
+    let threads_table = super::qualified_table(fixture.schema(), "threads");
+    sqlx::query(AssertSqlSafe(format!(
+        "INSERT INTO {threads_table} (thread_id, projection, stream_version, fencing_token, \
+         writer_id, writer_lease_expires_at, created_at, updated_at, recency_at) \
+         VALUES ($1, '{{}}', 0, 1, 'goal-contract', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, \
+         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )))
+    .bind(thread_id.to_string())
+    .execute(&writer_pool)
+    .await?;
+    let writer = crate::GoalStore::from_postgres(writer_pool.clone(), fixture.schema().to_string());
+    let reader = crate::GoalStore::from_postgres(
+        fixture.connect_pool().await?,
+        fixture.schema().to_string(),
+    );
+
+    run_goal_lifecycle_contract(&writer, &reader, thread_id).await?;
+
+    sqlx::query(AssertSqlSafe(format!(
+        "DELETE FROM {threads_table} WHERE thread_id = $1"
+    )))
+    .bind(thread_id.to_string())
+    .execute(&writer_pool)
+    .await?;
+    assert_eq!(reader.get_thread_goal(thread_id).await?, None);
+
+    writer.close().await;
+    reader.close().await;
+    fixture.cleanup().await
+}
 
 async fn postgres_log_replicas(fixture: &PostgresContractFixture) -> Result<(LogStore, LogStore)> {
     fixture.manage(PostgresNamespaceAction::Migrate).await?;
@@ -268,7 +310,7 @@ async fn postgres_contract_creates_migrates_validates_and_cleans_up_namespace() 
 
     assert_eq!(validated, migrated);
     assert_eq!(migrated.schema(), fixture.schema());
-    assert_eq!(migrated.version(), 9);
+    assert_eq!(migrated.version(), 10);
 
     fixture.cleanup().await?;
     assert!(!fixture.schema_exists().await?);
@@ -289,8 +331,8 @@ async fn postgres_contract_migration_is_idempotent() -> Result<()> {
         fixture.migration_history().await?,
         MigrationHistory {
             minimum: Some(1),
-            maximum: Some(9),
-            count: 9,
+            maximum: Some(10),
+            count: 10,
         }
     );
     fixture.cleanup().await?;
@@ -351,8 +393,8 @@ async fn postgres_contract_migration_uses_namespace_advisory_lock() -> Result<()
         fixture.migration_history().await?,
         MigrationHistory {
             minimum: Some(1),
-            maximum: Some(9),
-            count: 9,
+            maximum: Some(10),
+            count: 10,
         }
     );
     drop(contending_migration);
