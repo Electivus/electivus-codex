@@ -17,7 +17,7 @@ use config::connection_failed;
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
 const MINIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
-const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 13;
+const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 14;
 const BASELINE_SCHEMA_VERSION: i64 = 1;
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
@@ -79,6 +79,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         13,
         include_str!("../postgres_migrations/0013_memory_thread_mode_overrides.sql"),
         "track runtime memory pollution",
+    ),
+    (
+        14,
+        include_str!("../postgres_migrations/0014_memory_generations.sql"),
+        "create atomic memory generation storage",
     ),
 ];
 
@@ -525,3 +530,7 @@ mod contract_tests;
 #[cfg(test)]
 #[path = "postgres_memory_concurrency_contract_tests.rs"]
 mod memory_concurrency_contract_tests;
+
+#[cfg(test)]
+#[path = "postgres_memory_generation_contract_tests.rs"]
+mod memory_generation_contract_tests;

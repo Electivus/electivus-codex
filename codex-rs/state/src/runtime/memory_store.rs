@@ -8,8 +8,16 @@ use codex_protocol::ThreadId;
 use sqlx::PgPool;
 use sqlx::SqlitePool;
 use std::sync::Arc;
+#[path = "memory_store/generation.rs"]
+#[allow(
+    dead_code,
+    reason = "used by the next Memory Generation integration checkpoint"
+)]
+mod generation;
 #[path = "memory_store/postgres.rs"]
 mod postgres;
+pub(crate) use generation::MemoryArtifact;
+pub(crate) use generation::MemoryGeneration;
 use postgres::PostgresMemoryStore;
 
 pub(super) const PHASE2_SUCCESS_COOLDOWN_SECONDS: i64 = 6 * 60 * 60;
@@ -22,7 +30,7 @@ pub struct MemoryStore {
 
 #[derive(Clone)]
 enum MemoryStoreBackend {
-    Postgres(PostgresMemoryStore),
+    Postgres(Box<PostgresMemoryStore>),
     Sqlite(SqliteMemoryStore),
 }
 
@@ -34,7 +42,7 @@ impl MemoryStore {
     }
     pub(crate) fn from_postgres(pool: PgPool, schema: String) -> Self {
         Self {
-            backend: MemoryStoreBackend::Postgres(PostgresMemoryStore::new(pool, schema)),
+            backend: MemoryStoreBackend::Postgres(Box::new(PostgresMemoryStore::new(pool, schema))),
         }
     }
     pub(crate) async fn close(&self) {
@@ -356,6 +364,49 @@ impl MemoryStore {
                         selected_outputs,
                     )
                     .await
+            }
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "used by the next Memory Generation integration checkpoint"
+    )]
+    pub(crate) async fn publish_memory_generation(
+        &self,
+        ownership_token: &str,
+        completed_watermark: i64,
+        selected_outputs: &[Stage1Output],
+        artifacts: &[MemoryArtifact],
+    ) -> anyhow::Result<Option<MemoryGeneration>> {
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => {
+                store
+                    .publish_memory_generation(
+                        ownership_token,
+                        completed_watermark,
+                        selected_outputs,
+                        artifacts,
+                    )
+                    .await
+            }
+            MemoryStoreBackend::Sqlite(_) => {
+                anyhow::bail!("Memory Generations are not used by the SQLite backend")
+            }
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "used by the next Memory Generation integration checkpoint"
+    )]
+    pub(crate) async fn load_active_memory_generation(
+        &self,
+    ) -> anyhow::Result<Option<MemoryGeneration>> {
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => store.load_active_memory_generation().await,
+            MemoryStoreBackend::Sqlite(_) => {
+                anyhow::bail!("Memory Generations are not used by the SQLite backend")
             }
         }
     }

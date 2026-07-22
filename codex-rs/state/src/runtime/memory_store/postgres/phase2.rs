@@ -134,8 +134,26 @@ impl PostgresMemoryStore {
         selected_outputs: &[Stage1Output],
     ) -> anyhow::Result<bool> {
         let mut transaction = self.pool.begin().await?;
-        self.acquire_output_and_global_job_lock(&mut transaction)
+        let completed = self
+            .complete_global_phase2_job_in_transaction(
+                &mut transaction,
+                ownership_token,
+                completed_watermark,
+                selected_outputs,
+            )
             .await?;
+        transaction.commit().await?;
+        Ok(completed)
+    }
+
+    pub(super) async fn complete_global_phase2_job_in_transaction(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        ownership_token: &str,
+        completed_watermark: i64,
+        selected_outputs: &[Stage1Output],
+    ) -> anyhow::Result<bool> {
+        self.acquire_output_and_global_job_lock(transaction).await?;
         let rows_affected = sqlx::query(AssertSqlSafe(format!(
             "WITH db_clock AS ( \
              SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint AS now \
@@ -150,12 +168,11 @@ impl PostgresMemoryStore {
         .bind(JOB_KIND_MEMORY_CONSOLIDATE_GLOBAL)
         .bind(MEMORY_CONSOLIDATION_JOB_KEY)
         .bind(ownership_token)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?
         .rows_affected();
 
         if rows_affected == 0 {
-            transaction.commit().await?;
             return Ok(false);
         }
 
@@ -165,7 +182,7 @@ impl PostgresMemoryStore {
              WHERE selected_for_phase2 OR selected_for_phase2_source_updated_at IS NOT NULL",
             self.outputs_table
         )))
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
 
         for output in selected_outputs {
@@ -177,11 +194,10 @@ impl PostgresMemoryStore {
             )))
             .bind(output.source_updated_at.timestamp())
             .bind(output.thread_id.to_string())
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         }
 
-        transaction.commit().await?;
         Ok(true)
     }
 
