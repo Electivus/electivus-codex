@@ -27,7 +27,7 @@ pub(super) const TEST_DATABASE_URL_ENV: &str = "CODEX_TEST_POSTGRES_URL";
 
 static NEXT_NAMESPACE_ID: AtomicU64 = AtomicU64::new(0);
 
-pub(super) fn test_database_url() -> anyhow::Result<String> {
+pub(crate) fn test_database_url() -> anyhow::Result<String> {
     std::env::var_os(TEST_DATABASE_URL_ENV)
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -43,14 +43,14 @@ pub(super) fn test_database_url() -> anyhow::Result<String> {
 }
 
 #[derive(Debug)]
-pub(super) struct PostgresContractFixture {
+pub(crate) struct PostgresContractFixture {
     config: PostgresNamespaceConfig,
     resolved_url: ResolvedUrl,
     cleanup_confirmed: bool,
 }
 
 impl PostgresContractFixture {
-    pub(super) fn new(database_url: String, group: &str) -> anyhow::Result<Self> {
+    pub(crate) fn new(database_url: String, group: &str) -> anyhow::Result<Self> {
         let schema = unique_schema_name(group)?;
         let config = PostgresNamespaceConfig::new(
             TEST_DATABASE_URL_ENV.to_string(),
@@ -68,7 +68,11 @@ impl PostgresContractFixture {
         &self.config.schema
     }
 
-    pub(super) async fn manage(
+    pub(crate) fn config_for_tests(&self) -> PostgresNamespaceConfig {
+        self.config.clone()
+    }
+
+    pub(crate) async fn manage(
         &self,
         action: PostgresNamespaceAction,
     ) -> anyhow::Result<PostgresNamespaceStatus> {
@@ -150,7 +154,7 @@ impl PostgresContractFixture {
         })
     }
 
-    pub(super) async fn cleanup(&mut self) -> anyhow::Result<()> {
+    pub(crate) async fn cleanup(&mut self) -> anyhow::Result<()> {
         let pool = self.connect_pool().await?;
         let result: anyhow::Result<()> = async {
             let mut connection = pool

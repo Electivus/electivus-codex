@@ -7,7 +7,7 @@ use sqlx::Row;
 use sqlx::Transaction;
 
 #[path = "postgres/config.rs"]
-mod config;
+pub(crate) mod config;
 
 pub use config::PostgresNamespaceConfig;
 pub use config::PostgresPoolConfig;
@@ -17,7 +17,7 @@ use config::connection_failed;
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
 const MINIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
-const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 16;
+pub(crate) const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 16;
 const BASELINE_SCHEMA_VERSION: i64 = 1;
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
@@ -234,7 +234,7 @@ async fn manage_postgres_namespace_with_pool(
     result
 }
 
-async fn manage_postgres_namespace_with_connection(
+pub(crate) async fn manage_postgres_namespace_with_connection(
     config: &PostgresNamespaceConfig,
     connection: &mut PgConnection,
     action: PostgresNamespaceAction,
@@ -536,7 +536,7 @@ mod tests;
 
 #[cfg(test)]
 #[path = "postgres/test_support.rs"]
-mod test_support;
+pub(crate) mod test_support;
 
 #[cfg(test)]
 #[path = "postgres_contract_tests.rs"]

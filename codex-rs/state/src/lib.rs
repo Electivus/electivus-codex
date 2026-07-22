@@ -12,6 +12,7 @@ const _: () = assert!(
 mod audit;
 mod extract;
 pub mod log_db;
+mod migration;
 mod migrations;
 mod model;
 mod paths;
@@ -20,6 +21,11 @@ mod runtime;
 mod sqlite;
 mod telemetry;
 
+pub use migration::RuntimeStateMigrationInventory;
+pub use migration::SourceFileInventory;
+pub use migration::SqliteDatabaseInventory;
+pub use migration::SqliteTableInventory;
+pub use migration::preflight_runtime_state_migration;
 pub use model::LogEntry;
 pub use model::LogQuery;
 pub use model::LogRow;

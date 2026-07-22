@@ -70,9 +70,17 @@ impl PostgresNamespaceConfig {
             pool,
         })
     }
+
+    pub(crate) fn schema(&self) -> &str {
+        &self.schema
+    }
+
+    pub(crate) fn url_env(&self) -> &str {
+        &self.url_env
+    }
 }
 
-pub(super) async fn connect_pool(config: &PostgresNamespaceConfig) -> anyhow::Result<PgPool> {
+pub(crate) async fn connect_pool(config: &PostgresNamespaceConfig) -> anyhow::Result<PgPool> {
     let resolved_url = resolve_url(config, |name| std::env::var_os(name))?;
     connect_pool_with_url(config, &resolved_url).await
 }
@@ -194,7 +202,7 @@ fn invalid_connection_url(name: &str) -> anyhow::Error {
     )
 }
 
-pub(super) fn connection_failed(name: &str) -> anyhow::Error {
+pub(crate) fn connection_failed(name: &str) -> anyhow::Error {
     anyhow!(
         "could not connect to PostgreSQL using environment variable `{name}`; check the URL, credentials, TLS settings, and network reachability"
     )
