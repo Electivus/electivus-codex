@@ -43,14 +43,6 @@ impl MemoryStore {
             MemoryStoreBackend::Sqlite(store) => store.close().await,
         }
     }
-    fn sqlite(&self, operation: &str) -> anyhow::Result<&SqliteMemoryStore> {
-        match &self.backend {
-            MemoryStoreBackend::Postgres(_) => anyhow::bail!(
-                "PostgreSQL memory store does not yet implement `{operation}`; keep PostgreSQL Runtime State selection disabled"
-            ),
-            MemoryStoreBackend::Sqlite(store) => Ok(store),
-        }
-    }
     pub async fn clear_memory_data(&self) -> anyhow::Result<()> {
         match &self.backend {
             MemoryStoreBackend::Postgres(store) => store.clear_memory_data().await,
@@ -346,13 +338,26 @@ impl MemoryStore {
         completed_watermark: i64,
         selected_outputs: &[Stage1Output],
     ) -> anyhow::Result<bool> {
-        self.sqlite("complete global memory consolidation")?
-            .mark_global_phase2_job_succeeded(
-                ownership_token,
-                completed_watermark,
-                selected_outputs,
-            )
-            .await
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => {
+                store
+                    .mark_global_phase2_job_succeeded(
+                        ownership_token,
+                        completed_watermark,
+                        selected_outputs,
+                    )
+                    .await
+            }
+            MemoryStoreBackend::Sqlite(store) => {
+                store
+                    .mark_global_phase2_job_succeeded(
+                        ownership_token,
+                        completed_watermark,
+                        selected_outputs,
+                    )
+                    .await
+            }
+        }
     }
 
     pub async fn mark_global_phase2_job_failed(

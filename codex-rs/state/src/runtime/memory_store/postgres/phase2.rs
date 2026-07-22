@@ -4,6 +4,7 @@ use super::JOB_KIND_MEMORY_CONSOLIDATE_GLOBAL;
 use super::MEMORY_CONSOLIDATION_JOB_KEY;
 use super::PostgresMemoryStore;
 use crate::Phase2JobClaimOutcome;
+use crate::Stage1Output;
 use codex_protocol::ThreadId;
 use sqlx::AssertSqlSafe;
 use sqlx::Row;
@@ -124,6 +125,62 @@ impl PostgresMemoryStore {
         .await?
         .rows_affected();
         Ok(rows_affected > 0)
+    }
+
+    pub(crate) async fn mark_global_phase2_job_succeeded(
+        &self,
+        ownership_token: &str,
+        completed_watermark: i64,
+        selected_outputs: &[Stage1Output],
+    ) -> anyhow::Result<bool> {
+        let mut transaction = self.pool.begin().await?;
+        let rows_affected = sqlx::query(AssertSqlSafe(format!(
+            "WITH db_clock AS ( \
+             SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint AS now \
+             ) UPDATE {} AS job SET status = 'done', finished_at = db_clock.now, \
+             lease_until = NULL, last_error = NULL, last_success_watermark = \
+             GREATEST(COALESCE(job.last_success_watermark, 0), $1) FROM db_clock \
+             WHERE job.kind = $2 AND job.job_key = $3 AND job.status = 'running' \
+             AND job.ownership_token = $4 AND job.lease_until > db_clock.now",
+            self.jobs_table
+        )))
+        .bind(completed_watermark)
+        .bind(JOB_KIND_MEMORY_CONSOLIDATE_GLOBAL)
+        .bind(MEMORY_CONSOLIDATION_JOB_KEY)
+        .bind(ownership_token)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+
+        if rows_affected == 0 {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+
+        sqlx::query(AssertSqlSafe(format!(
+            "UPDATE {} SET selected_for_phase2 = FALSE, \
+             selected_for_phase2_source_updated_at = NULL \
+             WHERE selected_for_phase2 OR selected_for_phase2_source_updated_at IS NOT NULL",
+            self.outputs_table
+        )))
+        .execute(&mut *transaction)
+        .await?;
+
+        for output in selected_outputs {
+            sqlx::query(AssertSqlSafe(format!(
+                "UPDATE {} SET selected_for_phase2 = TRUE, \
+                 selected_for_phase2_source_updated_at = $1 \
+                 WHERE thread_id = $2 AND source_updated_at = $1",
+                self.outputs_table
+            )))
+            .bind(output.source_updated_at.timestamp())
+            .bind(output.thread_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        transaction.commit().await?;
+        Ok(true)
     }
 
     pub(crate) async fn mark_global_phase2_job_failed(

@@ -19,6 +19,9 @@ use crate::runtime::memory_store_contract_tests::run_stage1_retry_and_lease_cont
 use crate::runtime::memory_store_output_contract_tests::run_postgres_stage1_output_data_contract;
 use crate::runtime::memory_store_phase2_contract_tests::run_phase2_enqueue_and_claim_contract;
 use crate::runtime::memory_store_phase2_contract_tests::run_phase2_heartbeat_and_failure_contract;
+use crate::runtime::memory_store_phase2_success_contract_tests::phase2_success_thread_ids;
+use crate::runtime::memory_store_phase2_success_contract_tests::run_phase2_success_contract;
+use crate::runtime::memory_store_phase2_success_contract_tests::seed_postgres_phase2_success_threads;
 use crate::runtime::memory_store_startup_contract_tests::run_postgres_stage1_startup_contract;
 use crate::runtime::remote_control_contract_tests::run_remote_control_enrollment_contract;
 use anyhow::Context;
@@ -136,6 +139,50 @@ async fn postgres_contract_phase2_enqueue_and_claim_are_shared_between_replicas(
     run_phase2_enqueue_and_claim_contract(&first, &second).await?;
     run_phase2_heartbeat_and_failure_contract(&first, &second).await?;
 
+    first.close().await;
+    second.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_phase2_success_matches_sqlite_across_replicas() -> Result<()> {
+    let database_url = test_database_url()?;
+    let mut fixture = PostgresContractFixture::new(database_url, "phase2_success")?;
+    fixture.manage(PostgresNamespaceAction::Migrate).await?;
+    let first_pool = fixture.connect_pool().await?;
+    let second_pool = fixture.connect_pool().await?;
+    let thread_ids = phase2_success_thread_ids()?;
+    seed_postgres_phase2_success_threads(&first_pool, fixture.schema(), thread_ids).await?;
+    let first = crate::MemoryStore::from_postgres(first_pool.clone(), fixture.schema().to_string());
+    let second = crate::MemoryStore::from_postgres(second_pool, fixture.schema().to_string());
+    let jobs_table = super::qualified_table(fixture.schema(), "memory_jobs");
+    let age_pool = first_pool.clone();
+    let age_jobs_table = jobs_table.clone();
+    let read_pool = first_pool.clone();
+    run_phase2_success_contract(
+        &first,
+        &second,
+        thread_ids,
+        move || async move {
+            sqlx::query(AssertSqlSafe(format!(
+                "UPDATE {age_jobs_table} SET finished_at = 0 \
+                 WHERE kind = 'memory_consolidate_global' AND job_key = 'global'"
+            )))
+            .execute(&age_pool)
+            .await?;
+            Ok(())
+        },
+        move || async move {
+            Ok(sqlx::query_scalar(AssertSqlSafe(format!(
+                "SELECT COALESCE(last_success_watermark, -1) FROM {jobs_table} \
+                 WHERE kind = 'memory_consolidate_global' AND job_key = 'global'"
+            )))
+            .fetch_one(&read_pool)
+            .await?)
+        },
+    )
+    .await?;
     first.close().await;
     second.close().await;
     fixture.cleanup().await

@@ -1399,21 +1399,20 @@ async fn mark_global_phase2_job_succeeded_row<'e, E>(
 where
     E: Executor<'e, Database = Sqlite>,
 {
-    let now = Utc::now().timestamp();
     let rows_affected = sqlx::query(
         r#"
 UPDATE jobs
 SET
     status = 'done',
-    finished_at = ?,
+    finished_at = CAST(strftime('%s', 'now') AS INTEGER),
     lease_until = NULL,
     last_error = NULL,
     last_success_watermark = max(COALESCE(last_success_watermark, 0), ?)
 WHERE kind = ? AND job_key = ?
   AND status = 'running' AND ownership_token = ?
+  AND lease_until > CAST(strftime('%s', 'now') AS INTEGER)
             "#,
     )
-    .bind(now)
     .bind(completed_watermark)
     .bind(JOB_KIND_MEMORY_CONSOLIDATE_GLOBAL)
     .bind(MEMORY_CONSOLIDATION_JOB_KEY)
