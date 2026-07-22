@@ -100,8 +100,13 @@ impl BackfillCoordinator {
         lease: &BackfillLease,
         lease_duration: Duration,
     ) -> anyhow::Result<BackfillLeaseUpdate> {
-        self.update_lease("heartbeat backfill", lease, lease_duration, None)
-            .await
+        self.update_lease(
+            "heartbeat backfill",
+            lease,
+            lease_duration,
+            /*watermark*/ None,
+        )
+        .await
     }
 
     pub async fn checkpoint(
@@ -134,8 +139,13 @@ impl BackfillCoordinator {
     }
 
     pub async fn release(&self, lease: &BackfillLease) -> anyhow::Result<BackfillLeaseUpdate> {
-        self.finish("release backfill", lease, BackfillStatus::Pending, None)
-            .await
+        self.finish(
+            "release backfill",
+            lease,
+            BackfillStatus::Pending,
+            /*last_watermark*/ None,
+        )
+        .await
     }
 
     pub async fn complete(
