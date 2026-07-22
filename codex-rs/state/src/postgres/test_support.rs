@@ -64,7 +64,7 @@ impl PostgresContractFixture {
         })
     }
 
-    pub(super) fn schema(&self) -> &str {
+    pub(crate) fn schema(&self) -> &str {
         &self.config.schema
     }
 
@@ -175,7 +175,7 @@ impl PostgresContractFixture {
         Ok(())
     }
 
-    pub(super) async fn connect_pool(&self) -> anyhow::Result<PgPool> {
+    pub(crate) async fn connect_pool(&self) -> anyhow::Result<PgPool> {
         connect_pool_with_url(&self.config, &self.resolved_url).await
     }
 }

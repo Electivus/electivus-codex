@@ -4004,6 +4004,7 @@ dependencies = [
  "codex-protocol",
  "codex-utils-absolute-path",
  "dirs",
+ "libc",
  "libsqlite3-sys",
  "log",
  "owo-colors",
@@ -4019,6 +4020,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

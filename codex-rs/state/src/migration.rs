@@ -19,6 +19,20 @@ use tokio::io::AsyncReadExt;
 
 const IMPORTED_RESOURCE_PREFIX: &str = "memories/extensions/external_agent_import/";
 
+#[path = "migration/source_lock.rs"]
+mod source_lock;
+#[path = "migration/source_validation.rs"]
+mod source_validation;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SourceInventory {
+    databases: Vec<SqliteDatabaseInventory>,
+    rollout_files: Vec<SourceFileInventory>,
+    memory_files: Vec<SourceFileInventory>,
+    imported_resources: Vec<SourceFileInventory>,
+    configuration: Option<SourceFileInventory>,
+}
+
 /// Complete read-only inventory produced before an offline Runtime State Migration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeStateMigrationInventory {
@@ -127,7 +141,32 @@ pub async fn preflight_runtime_state_migration(
 ) -> anyhow::Result<RuntimeStateMigrationInventory> {
     let (destination_schema, destination_schema_version) =
         inspect_postgres_destination(&destination).await?;
-    let databases = inspect_sqlite_databases(&source).await?;
+    let source_inventory = inspect_source(&source).await?;
+    let verification_inventory = inspect_source(&source).await?;
+    anyhow::ensure!(
+        source_inventory == verification_inventory,
+        "Runtime State Migration source changed during preflight; stop every process using this SQLite home and retry"
+    );
+    let SourceInventory {
+        databases,
+        rollout_files,
+        memory_files,
+        imported_resources,
+        configuration: _,
+    } = source_inventory;
+
+    Ok(RuntimeStateMigrationInventory {
+        databases,
+        rollout_files,
+        memory_files,
+        imported_resources,
+        destination_schema,
+        destination_schema_version,
+    })
+}
+
+async fn inspect_source(source: &SqliteConfig) -> anyhow::Result<SourceInventory> {
+    let databases = inspect_sqlite_databases(source).await?;
     let rollout_files = collect_files(source.home(), &["sessions", "archived_sessions"], |path| {
         path.extension()
             .is_some_and(|extension| extension == "jsonl")
@@ -139,14 +178,18 @@ pub async fn preflight_runtime_state_migration(
             .to_string_lossy()
             .starts_with(IMPORTED_RESOURCE_PREFIX)
     });
-
-    Ok(RuntimeStateMigrationInventory {
+    source_validation::validate_rollout_files(source, &rollout_files).await?;
+    let configuration = if tokio::fs::try_exists(source.home().join("config.toml")).await? {
+        Some(inventory_file(source.home(), Path::new("config.toml")).await?)
+    } else {
+        None
+    };
+    Ok(SourceInventory {
         databases,
         rollout_files,
         memory_files,
         imported_resources,
-        destination_schema,
-        destination_schema_version,
+        configuration,
     })
 }
 
@@ -268,6 +311,7 @@ async fn inspect_sqlite_databases(
             database.label,
             database.path.display()
         );
+        reject_active_sqlite_writer(database.label, &database.path)?;
         reject_sqlite_sidecars(database.label, &database.path).await?;
         let pool = source
             .open_immutable_pool(&database.path)
@@ -323,6 +367,18 @@ async fn inspect_sqlite_databases(
     Ok(databases)
 }
 
+fn reject_active_sqlite_writer(label: &str, path: &Path) -> anyhow::Result<()> {
+    if source_lock::writer_is_active(path)
+        .with_context(|| format!("probe SQLite {label} for active writers"))?
+    {
+        anyhow::bail!(
+            "active SQLite writer detected for {label} at {}; stop every Codex process using this SQLite home and retry",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 async fn reject_sqlite_sidecars(label: &str, path: &Path) -> anyhow::Result<()> {
     for suffix in ["-wal", "-shm", "-journal"] {
         let mut sidecar = path.as_os_str().to_os_string();
@@ -330,7 +386,7 @@ async fn reject_sqlite_sidecars(label: &str, path: &Path) -> anyhow::Result<()> 
         let sidecar = PathBuf::from(sidecar);
         if tokio::fs::try_exists(&sidecar).await? {
             anyhow::bail!(
-                "SQLite {label} has active journal `{}`; stop every Codex writer, wait for SQLite to close cleanly, and retry",
+                "SQLite {label} has an uncheckpointed sidecar `{}`; stop every Codex writer, recover or checkpoint it with trusted SQLite tooling, and retry",
                 sidecar.display()
             );
         }
@@ -395,20 +451,32 @@ async fn inventory_file(
     relative_path: &Path,
 ) -> anyhow::Result<SourceFileInventory> {
     let path = source_home.join(relative_path);
-    let metadata = tokio::fs::metadata(&path).await?;
+    let metadata_before = tokio::fs::metadata(&path).await?;
     let mut file = tokio::fs::File::open(&path).await?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
+    let mut size_bytes = 0_u64;
     loop {
         let read = file.read(&mut buffer).await?;
         if read == 0 {
             break;
         }
+        size_bytes = size_bytes
+            .checked_add(read as u64)
+            .context("source file size exceeded u64")?;
         hasher.update(&buffer[..read]);
     }
+    let metadata_after = file.metadata().await?;
+    anyhow::ensure!(
+        metadata_before.len() == size_bytes
+            && metadata_after.len() == size_bytes
+            && metadata_before.modified()? == metadata_after.modified()?,
+        "Runtime State Migration source file changed while it was being inventoried: {}; stop every process using this SQLite home and retry",
+        path.display()
+    );
     Ok(SourceFileInventory {
         relative_path: relative_path.to_path_buf(),
-        size_bytes: metadata.len(),
+        size_bytes,
         sha256: format!("{:x}", hasher.finalize()),
     })
 }
