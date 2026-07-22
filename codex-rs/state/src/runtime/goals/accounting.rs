@@ -1,6 +1,9 @@
 use super::GoalStore;
 use super::GoalStoreBackend;
-use super::goal_persistence_error;
+use super::GoalStoreOperation;
+use super::GoalStoreResult;
+use super::error::GoalStoreFailure;
+use super::error::public_goal_store_result;
 use super::thread_goal_from_row;
 use crate::ThreadGoal;
 use crate::ThreadGoalStatus;
@@ -109,21 +112,27 @@ impl GoalStore {
         &self,
         thread_id: ThreadId,
         request: GoalAccountingRequest<'_>,
+    ) -> GoalStoreResult<GoalAccountingOutcome> {
+        public_goal_store_result(
+            GoalStoreOperation::AccountThreadGoalUsage,
+            self.account_thread_goal_usage_inner(thread_id, request)
+                .await,
+        )
+    }
+
+    async fn account_thread_goal_usage_inner(
+        &self,
+        thread_id: ThreadId,
+        request: GoalAccountingRequest<'_>,
     ) -> anyhow::Result<GoalAccountingOutcome> {
         if request.event_id.trim().is_empty() {
-            return Err(anyhow::anyhow!(
-                "goal accounting event id must not be empty"
-            ));
+            return Err(GoalStoreFailure::AccountingEventIdRequired.into());
         }
         if let GoalStoreBackend::Postgres(store) = &self.backend {
-            return store
-                .account_thread_goal_usage(thread_id, request)
-                .await
-                .map_err(|_| goal_persistence_error("account thread goal usage"));
+            return store.account_thread_goal_usage(thread_id, request).await;
         }
         self.account_thread_goal_usage_sqlite(thread_id, request)
             .await
-            .map_err(|_| goal_persistence_error("account thread goal usage"))
     }
 
     async fn account_thread_goal_usage_sqlite(
@@ -135,7 +144,7 @@ impl GoalStore {
         let token_delta = request.token_delta.max(0);
         if time_delta_seconds == 0 && token_delta == 0 {
             return Ok(GoalAccountingOutcome::Unchanged(
-                self.get_thread_goal(thread_id).await?,
+                self.get_thread_goal_inner(thread_id).await?,
             ));
         }
 
@@ -165,7 +174,7 @@ impl GoalStore {
         .await?;
         if let Some(recorded) = recorded {
             if !recorded.matches(request, &current.goal_id) {
-                anyhow::bail!("goal accounting event was reused with different usage");
+                return Err(GoalStoreFailure::AccountingEventConflict.into());
             }
             transaction.commit().await?;
             return Ok(GoalAccountingOutcome::AlreadyAccounted(current));

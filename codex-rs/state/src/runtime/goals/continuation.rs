@@ -1,17 +1,23 @@
 use super::GoalStore;
 use super::GoalStoreBackend;
-use super::goal_persistence_error;
+use super::GoalStoreOperation;
+use super::GoalStoreResult;
+use super::error::public_goal_store_result;
 use crate::ThreadGoal;
 use crate::model::datetime_to_epoch_millis;
 use codex_protocol::ThreadId;
 
 impl GoalStore {
-    pub async fn replace_thread_goal_snapshot(&self, goal: &ThreadGoal) -> anyhow::Result<()> {
+    pub async fn replace_thread_goal_snapshot(&self, goal: &ThreadGoal) -> GoalStoreResult<()> {
+        public_goal_store_result(
+            GoalStoreOperation::ReplaceThreadGoalSnapshot,
+            self.replace_thread_goal_snapshot_inner(goal).await,
+        )
+    }
+
+    async fn replace_thread_goal_snapshot_inner(&self, goal: &ThreadGoal) -> anyhow::Result<()> {
         if let GoalStoreBackend::Postgres(store) = &self.backend {
-            return store
-                .replace_thread_goal_snapshot(goal)
-                .await
-                .map_err(|_| goal_persistence_error("replace thread goal snapshot"));
+            return store.replace_thread_goal_snapshot(goal).await;
         }
         let mut transaction = self.sqlite_pool()?.begin().await?;
         sqlx::query(
@@ -68,12 +74,20 @@ ON CONFLICT(thread_id) DO NOTHING
     pub async fn has_thread_goal_continuation_deferral(
         &self,
         thread_id: ThreadId,
+    ) -> GoalStoreResult<bool> {
+        public_goal_store_result(
+            GoalStoreOperation::HasThreadGoalContinuationDeferral,
+            self.has_thread_goal_continuation_deferral_inner(thread_id)
+                .await,
+        )
+    }
+
+    async fn has_thread_goal_continuation_deferral_inner(
+        &self,
+        thread_id: ThreadId,
     ) -> anyhow::Result<bool> {
         if let GoalStoreBackend::Postgres(store) = &self.backend {
-            return store
-                .has_thread_goal_continuation_deferral(thread_id)
-                .await
-                .map_err(|_| goal_persistence_error("read goal continuation deferral"));
+            return store.has_thread_goal_continuation_deferral(thread_id).await;
         }
         sqlx::query_scalar(
             r#"
@@ -93,12 +107,22 @@ SELECT EXISTS(
     pub async fn clear_thread_goal_continuation_deferral(
         &self,
         thread_id: ThreadId,
+    ) -> GoalStoreResult<()> {
+        public_goal_store_result(
+            GoalStoreOperation::ClearThreadGoalContinuationDeferral,
+            self.clear_thread_goal_continuation_deferral_inner(thread_id)
+                .await,
+        )
+    }
+
+    async fn clear_thread_goal_continuation_deferral_inner(
+        &self,
+        thread_id: ThreadId,
     ) -> anyhow::Result<()> {
         if let GoalStoreBackend::Postgres(store) = &self.backend {
             return store
                 .clear_thread_goal_continuation_deferral(thread_id)
-                .await
-                .map_err(|_| goal_persistence_error("clear goal continuation deferral"));
+                .await;
         }
         sqlx::query("DELETE FROM thread_goal_continuation_deferrals WHERE thread_id = ?")
             .bind(thread_id.to_string())

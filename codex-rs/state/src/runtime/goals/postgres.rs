@@ -3,6 +3,7 @@ use super::GoalAccountingRequest;
 use super::GoalUpdate;
 use super::accounting::RecordedGoalAccountingEvent;
 use super::accounting::status_after_accounting;
+use super::error::GoalStoreFailure;
 use super::status_after_budget_limit;
 use crate::ThreadGoal;
 use crate::ThreadGoalStatus;
@@ -328,7 +329,7 @@ impl PostgresGoalStore {
         .await?;
         if let Some(recorded) = recorded {
             if !recorded.matches(request, &current.goal_id) {
-                anyhow::bail!("goal accounting event was reused with different usage");
+                return Err(GoalStoreFailure::AccountingEventConflict.into());
             }
             transaction.commit().await?;
             return Ok(GoalAccountingOutcome::AlreadyAccounted(current));

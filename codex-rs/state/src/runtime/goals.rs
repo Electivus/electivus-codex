@@ -5,14 +5,22 @@ use uuid::Uuid;
 
 mod accounting;
 mod continuation;
+mod error;
 #[path = "goals/postgres.rs"]
 mod postgres;
+mod update;
 
 pub use accounting::GoalAccountingMode;
 pub use accounting::GoalAccountingOutcome;
 pub use accounting::GoalAccountingRequest;
 pub use accounting::GoalAccountingTarget;
+pub use error::GoalStoreError;
+pub use error::GoalStoreErrorKind;
+pub use error::GoalStoreOperation;
+pub use error::GoalStoreResult;
+use error::public_goal_store_result;
 use postgres::PostgresGoalStore;
+pub use update::GoalUpdate;
 
 #[derive(Clone)]
 pub struct GoalStore {
@@ -40,7 +48,9 @@ impl GoalStore {
 
     fn sqlite_pool(&self) -> anyhow::Result<&Arc<SqlitePool>> {
         match &self.backend {
-            GoalStoreBackend::Postgres(_) => Err(goal_persistence_error("access thread goals")),
+            GoalStoreBackend::Postgres(_) => {
+                anyhow::bail!("SQLite goal pool requested for a PostgreSQL goal store")
+            }
             GoalStoreBackend::Sqlite(pool) => Ok(pool),
         }
     }
@@ -53,23 +63,23 @@ impl GoalStore {
     }
 }
 
-pub struct GoalUpdate {
-    pub objective: Option<String>,
-    pub status: Option<crate::ThreadGoalStatus>,
-    pub token_budget: Option<Option<i64>>,
-    pub expected_goal_id: Option<String>,
-}
-
 impl GoalStore {
     pub async fn get_thread_goal(
         &self,
         thread_id: ThreadId,
+    ) -> GoalStoreResult<Option<crate::ThreadGoal>> {
+        public_goal_store_result(
+            GoalStoreOperation::GetThreadGoal,
+            self.get_thread_goal_inner(thread_id).await,
+        )
+    }
+
+    async fn get_thread_goal_inner(
+        &self,
+        thread_id: ThreadId,
     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
         if let GoalStoreBackend::Postgres(store) = &self.backend {
-            return store
-                .get_thread_goal(thread_id)
-                .await
-                .map_err(|_| goal_persistence_error("get thread goal"));
+            return store.get_thread_goal(thread_id).await;
         }
         let pool = self.sqlite_pool()?;
         let row = sqlx::query(
@@ -101,12 +111,25 @@ WHERE thread_id = ?
         objective: &str,
         status: crate::ThreadGoalStatus,
         token_budget: Option<i64>,
+    ) -> GoalStoreResult<crate::ThreadGoal> {
+        public_goal_store_result(
+            GoalStoreOperation::ReplaceThreadGoal,
+            self.replace_thread_goal_inner(thread_id, objective, status, token_budget)
+                .await,
+        )
+    }
+
+    async fn replace_thread_goal_inner(
+        &self,
+        thread_id: ThreadId,
+        objective: &str,
+        status: crate::ThreadGoalStatus,
+        token_budget: Option<i64>,
     ) -> anyhow::Result<crate::ThreadGoal> {
         if let GoalStoreBackend::Postgres(store) = &self.backend {
             return store
                 .replace_thread_goal(thread_id, objective, status, token_budget)
-                .await
-                .map_err(|_| goal_persistence_error("replace thread goal"));
+                .await;
         }
         let pool = self.sqlite_pool()?;
         let goal_id = Uuid::new_v4().to_string();
@@ -165,12 +188,25 @@ RETURNING
         objective: &str,
         status: crate::ThreadGoalStatus,
         token_budget: Option<i64>,
+    ) -> GoalStoreResult<Option<crate::ThreadGoal>> {
+        public_goal_store_result(
+            GoalStoreOperation::InsertThreadGoal,
+            self.insert_thread_goal_inner(thread_id, objective, status, token_budget)
+                .await,
+        )
+    }
+
+    async fn insert_thread_goal_inner(
+        &self,
+        thread_id: ThreadId,
+        objective: &str,
+        status: crate::ThreadGoalStatus,
+        token_budget: Option<i64>,
     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
         if let GoalStoreBackend::Postgres(store) = &self.backend {
             return store
                 .insert_thread_goal(thread_id, objective, status, token_budget)
-                .await
-                .map_err(|_| goal_persistence_error("insert thread goal"));
+                .await;
         }
         let goal_id = Uuid::new_v4().to_string();
         let now_ms = datetime_to_epoch_millis(Utc::now());
@@ -223,228 +259,22 @@ RETURNING
         row.map(|row| thread_goal_from_row(&row)).transpose()
     }
 
-    pub async fn update_thread_goal(
-        &self,
-        thread_id: ThreadId,
-        update: GoalUpdate,
-    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
-        if let GoalStoreBackend::Postgres(store) = &self.backend {
-            return store
-                .update_thread_goal(thread_id, update)
-                .await
-                .map_err(|_| goal_persistence_error("update thread goal"));
-        }
-        let GoalUpdate {
-            objective,
-            status,
-            token_budget,
-            expected_goal_id,
-        } = update;
-        let objective = objective.as_deref();
-        let expected_goal_id = expected_goal_id.as_deref();
-        let now_ms = datetime_to_epoch_millis(Utc::now());
-        let result = match (status, token_budget) {
-            (Some(status), Some(token_budget)) => {
-                sqlx::query(
-                    r#"
-UPDATE thread_goals
-SET
-    objective = COALESCE(?, objective),
-    status = CASE
-        WHEN status = ? AND ? IN (?, ?) THEN status
-        WHEN ? = 'active' AND ? IS NOT NULL AND tokens_used >= ? THEN ?
-        ELSE ?
-    END,
-    token_budget = ?,
-    updated_at_ms = ?
-WHERE thread_id = ?
-  AND (? IS NULL OR goal_id = ?)
-            "#,
-                )
-                .bind(objective)
-                .bind(crate::ThreadGoalStatus::BudgetLimited.as_str())
-                .bind(status.as_str())
-                .bind(crate::ThreadGoalStatus::Paused.as_str())
-                .bind(crate::ThreadGoalStatus::Blocked.as_str())
-                .bind(status.as_str())
-                .bind(token_budget)
-                .bind(token_budget)
-                .bind(crate::ThreadGoalStatus::BudgetLimited.as_str())
-                .bind(status.as_str())
-                .bind(token_budget)
-                .bind(now_ms)
-                .bind(thread_id.to_string())
-                .bind(expected_goal_id)
-                .bind(expected_goal_id)
-                .execute(self.sqlite_pool()?.as_ref())
-                .await?
-            }
-            (Some(status), None) => {
-                sqlx::query(
-                    r#"
-UPDATE thread_goals
-SET
-    objective = COALESCE(?, objective),
-    status = CASE
-        WHEN status = ? AND ? IN (?, ?) THEN status
-        WHEN ? = 'active' AND token_budget IS NOT NULL AND tokens_used >= token_budget THEN ?
-        ELSE ?
-    END,
-    updated_at_ms = ?
-WHERE thread_id = ?
-  AND (? IS NULL OR goal_id = ?)
-            "#,
-                )
-                .bind(objective)
-                .bind(crate::ThreadGoalStatus::BudgetLimited.as_str())
-                .bind(status.as_str())
-                .bind(crate::ThreadGoalStatus::Paused.as_str())
-                .bind(crate::ThreadGoalStatus::Blocked.as_str())
-                .bind(status.as_str())
-                .bind(crate::ThreadGoalStatus::BudgetLimited.as_str())
-                .bind(status.as_str())
-                .bind(now_ms)
-                .bind(thread_id.to_string())
-                .bind(expected_goal_id)
-                .bind(expected_goal_id)
-                .execute(self.sqlite_pool()?.as_ref())
-                .await?
-            }
-            (None, Some(token_budget)) => {
-                sqlx::query(
-                    r#"
-UPDATE thread_goals
-SET
-    objective = COALESCE(?, objective),
-    token_budget = ?,
-    status = CASE
-        WHEN status = 'active' AND ? IS NOT NULL AND tokens_used >= ? THEN ?
-        ELSE status
-    END,
-    updated_at_ms = ?
-WHERE thread_id = ?
-  AND (? IS NULL OR goal_id = ?)
-            "#,
-                )
-                .bind(objective)
-                .bind(token_budget)
-                .bind(token_budget)
-                .bind(token_budget)
-                .bind(crate::ThreadGoalStatus::BudgetLimited.as_str())
-                .bind(now_ms)
-                .bind(thread_id.to_string())
-                .bind(expected_goal_id)
-                .bind(expected_goal_id)
-                .execute(self.sqlite_pool()?.as_ref())
-                .await?
-            }
-            (None, None) => {
-                if let Some(objective) = objective {
-                    sqlx::query(
-                        r#"
-UPDATE thread_goals
-SET
-    objective = ?,
-    updated_at_ms = ?
-WHERE thread_id = ?
-  AND (? IS NULL OR goal_id = ?)
-            "#,
-                    )
-                    .bind(objective)
-                    .bind(now_ms)
-                    .bind(thread_id.to_string())
-                    .bind(expected_goal_id)
-                    .bind(expected_goal_id)
-                    .execute(self.sqlite_pool()?.as_ref())
-                    .await?
-                } else {
-                    let goal = self.get_thread_goal(thread_id).await?;
-                    return Ok(match (goal, expected_goal_id) {
-                        (Some(goal), Some(expected_goal_id))
-                            if goal.goal_id != expected_goal_id =>
-                        {
-                            None
-                        }
-                        (goal, _) => goal,
-                    });
-                }
-            }
-        };
-
-        if result.rows_affected() == 0 {
-            return Ok(None);
-        }
-
-        self.get_thread_goal(thread_id).await
-    }
-
-    pub async fn pause_active_thread_goal(
-        &self,
-        thread_id: ThreadId,
-    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
-        self.update_active_thread_goal_status(thread_id, crate::ThreadGoalStatus::Paused)
-            .await
-    }
-
-    pub async fn usage_limit_active_thread_goal(
-        &self,
-        thread_id: ThreadId,
-    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
-        self.update_active_thread_goal_status(thread_id, crate::ThreadGoalStatus::UsageLimited)
-            .await
-    }
-
-    async fn update_active_thread_goal_status(
-        &self,
-        thread_id: ThreadId,
-        status: crate::ThreadGoalStatus,
-    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
-        if let GoalStoreBackend::Postgres(store) = &self.backend {
-            return store
-                .update_active_thread_goal_status(thread_id, status)
-                .await
-                .map_err(|_| goal_persistence_error("stop active thread goal"));
-        }
-        let now_ms = datetime_to_epoch_millis(Utc::now());
-        let result = sqlx::query(
-            r#"
-UPDATE thread_goals
-SET
-    status = ?,
-    updated_at_ms = ?
-WHERE thread_id = ?
-  AND (
-      status = 'active'
-      OR (
-          ? = 'usage_limited'
-          AND status = 'budget_limited'
-      )
-  )
-            "#,
-        )
-        .bind(status.as_str())
-        .bind(now_ms)
-        .bind(thread_id.to_string())
-        .bind(status.as_str())
-        .execute(self.sqlite_pool()?.as_ref())
-        .await?;
-
-        if result.rows_affected() == 0 {
-            return Ok(None);
-        }
-
-        self.get_thread_goal(thread_id).await
-    }
-
     pub async fn delete_thread_goal(
         &self,
         thread_id: ThreadId,
+    ) -> GoalStoreResult<Option<crate::ThreadGoal>> {
+        public_goal_store_result(
+            GoalStoreOperation::DeleteThreadGoal,
+            self.delete_thread_goal_inner(thread_id).await,
+        )
+    }
+
+    async fn delete_thread_goal_inner(
+        &self,
+        thread_id: ThreadId,
     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
         if let GoalStoreBackend::Postgres(store) = &self.backend {
-            return store
-                .delete_thread_goal(thread_id)
-                .await
-                .map_err(|_| goal_persistence_error("delete thread goal"));
+            return store.delete_thread_goal(thread_id).await;
         }
         let row = sqlx::query(
             r#"
@@ -472,12 +302,6 @@ RETURNING
 
 fn thread_goal_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<crate::ThreadGoal> {
     ThreadGoalRow::try_from_row(row).and_then(crate::ThreadGoal::try_from)
-}
-
-fn goal_persistence_error(operation: &'static str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "Runtime State could not complete the `{operation}` operation; verify goal persistence health, then retry"
-    )
 }
 
 fn status_after_budget_limit(

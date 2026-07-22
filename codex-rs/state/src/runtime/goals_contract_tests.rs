@@ -3,14 +3,157 @@ use super::GoalAccountingOutcome;
 use super::GoalAccountingRequest;
 use super::GoalAccountingTarget;
 use super::GoalStore;
+use super::GoalStoreError;
+use super::GoalStoreErrorKind;
+use super::GoalStoreOperation;
 use super::GoalUpdate;
 use super::StateRuntime;
 use super::test_support::test_thread_metadata;
 use super::test_support::unique_temp_dir;
+use crate::ThreadGoal;
 use crate::ThreadGoalStatus;
 use anyhow::Result;
 use codex_protocol::ThreadId;
 use pretty_assertions::assert_eq;
+
+pub(crate) async fn provoke_goal_accounting_conflict(
+    store: &GoalStore,
+    thread_id: ThreadId,
+) -> Result<GoalStoreError> {
+    let goal = store
+        .replace_thread_goal(
+            thread_id,
+            "compare public goal errors",
+            ThreadGoalStatus::Active,
+            /*token_budget*/ Some(1_000),
+        )
+        .await?;
+    let invalid_request = store
+        .account_thread_goal_usage(
+            thread_id,
+            GoalAccountingRequest {
+                event_id: " ",
+                time_delta_seconds: 1,
+                token_delta: 10,
+                mode: GoalAccountingMode::ActiveOnly,
+                target: GoalAccountingTarget::GoalId(goal.goal_id.as_str()),
+            },
+        )
+        .await
+        .expect_err("a blank accounting event id should be rejected");
+    assert_eq!(invalid_request.kind(), GoalStoreErrorKind::InvalidRequest);
+    assert_eq!(
+        invalid_request.operation(),
+        GoalStoreOperation::AccountThreadGoalUsage
+    );
+    let request = GoalAccountingRequest {
+        event_id: "public-error-contract",
+        time_delta_seconds: 3,
+        token_delta: 30,
+        mode: GoalAccountingMode::ActiveOnly,
+        target: GoalAccountingTarget::GoalId(goal.goal_id.as_str()),
+    };
+    store.account_thread_goal_usage(thread_id, request).await?;
+
+    Ok(store
+        .account_thread_goal_usage(
+            thread_id,
+            GoalAccountingRequest {
+                token_delta: 31,
+                ..request
+            },
+        )
+        .await
+        .expect_err("reusing an accounting event with different usage should conflict"))
+}
+
+pub(crate) async fn collect_closed_goal_store_errors(
+    store: &GoalStore,
+    goal: &ThreadGoal,
+) -> Vec<GoalStoreError> {
+    let thread_id = goal.thread_id;
+    store.close().await;
+
+    vec![
+        store
+            .get_thread_goal(thread_id)
+            .await
+            .expect_err("get must fail after the goal store closes"),
+        store
+            .replace_thread_goal(
+                thread_id,
+                "replace after close",
+                ThreadGoalStatus::Active,
+                /*token_budget*/ None,
+            )
+            .await
+            .expect_err("replace must fail after the goal store closes"),
+        store
+            .insert_thread_goal(
+                thread_id,
+                "insert after close",
+                ThreadGoalStatus::Active,
+                /*token_budget*/ None,
+            )
+            .await
+            .expect_err("insert must fail after the goal store closes"),
+        store
+            .update_thread_goal(
+                thread_id,
+                GoalUpdate {
+                    objective: Some("update after close".to_string()),
+                    status: None,
+                    token_budget: None,
+                    expected_goal_id: Some(goal.goal_id.clone()),
+                },
+            )
+            .await
+            .expect_err("update must fail after the goal store closes"),
+        store
+            .pause_active_thread_goal(thread_id)
+            .await
+            .expect_err("pause must fail after the goal store closes"),
+        store
+            .usage_limit_active_thread_goal(thread_id)
+            .await
+            .expect_err("usage limit must fail after the goal store closes"),
+        store
+            .delete_thread_goal(thread_id)
+            .await
+            .expect_err("delete must fail after the goal store closes"),
+        store
+            .replace_thread_goal_snapshot(goal)
+            .await
+            .expect_err("snapshot replacement must fail after the goal store closes"),
+        store
+            .has_thread_goal_continuation_deferral(thread_id)
+            .await
+            .expect_err("deferral read must fail after the goal store closes"),
+        store
+            .clear_thread_goal_continuation_deferral(thread_id)
+            .await
+            .expect_err("deferral clear must fail after the goal store closes"),
+        store
+            .account_thread_goal_usage(
+                thread_id,
+                GoalAccountingRequest {
+                    event_id: "account-after-close",
+                    time_delta_seconds: 1,
+                    token_delta: 10,
+                    mode: GoalAccountingMode::ActiveOnly,
+                    target: GoalAccountingTarget::GoalId(goal.goal_id.as_str()),
+                },
+            )
+            .await
+            .expect_err("accounting must fail after the goal store closes"),
+    ]
+}
+
+pub(crate) fn goal_store_error_signature(
+    error: &GoalStoreError,
+) -> (GoalStoreErrorKind, GoalStoreOperation, String) {
+    (error.kind(), error.operation(), error.to_string())
+}
 
 pub(crate) async fn run_goal_lifecycle_contract(
     writer: &GoalStore,
@@ -290,5 +433,61 @@ async fn sqlite_goal_lifecycle_satisfies_shared_contract() -> Result<()> {
 
     writer.close().await;
     reader.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlite_goal_errors_expose_the_runtime_state_contract() -> Result<()> {
+    let codex_home = unique_temp_dir();
+    let _cleanup = scopeguard::guard(codex_home.clone(), |path| {
+        let _ = std::fs::remove_dir_all(path);
+    });
+    let runtime = StateRuntime::init(codex_home, "test-provider".to_string()).await?;
+    let thread_id = ThreadId::new();
+
+    let error = provoke_goal_accounting_conflict(runtime.thread_goals(), thread_id).await?;
+
+    assert_eq!(error.kind(), GoalStoreErrorKind::Conflict);
+    assert_eq!(
+        error.operation(),
+        GoalStoreOperation::AccountThreadGoalUsage
+    );
+    assert_eq!(
+        error.to_string(),
+        "Runtime State could not complete the `account thread goal usage` operation because the accounting event conflicts with persisted goal usage"
+    );
+    let goal = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .expect("goal should exist before the store closes");
+    let persistence_errors = collect_closed_goal_store_errors(runtime.thread_goals(), &goal).await;
+    assert_eq!(
+        persistence_errors
+            .iter()
+            .map(GoalStoreError::kind)
+            .collect::<Vec<_>>(),
+        vec![GoalStoreErrorKind::Persistence; 11]
+    );
+    assert_eq!(
+        persistence_errors
+            .iter()
+            .map(GoalStoreError::operation)
+            .collect::<Vec<_>>(),
+        vec![
+            GoalStoreOperation::GetThreadGoal,
+            GoalStoreOperation::ReplaceThreadGoal,
+            GoalStoreOperation::InsertThreadGoal,
+            GoalStoreOperation::UpdateThreadGoal,
+            GoalStoreOperation::PauseActiveThreadGoal,
+            GoalStoreOperation::UsageLimitActiveThreadGoal,
+            GoalStoreOperation::DeleteThreadGoal,
+            GoalStoreOperation::ReplaceThreadGoalSnapshot,
+            GoalStoreOperation::HasThreadGoalContinuationDeferral,
+            GoalStoreOperation::ClearThreadGoalContinuationDeferral,
+            GoalStoreOperation::AccountThreadGoalUsage,
+        ]
+    );
+    runtime.close().await;
     Ok(())
 }

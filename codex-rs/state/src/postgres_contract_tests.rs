@@ -5,6 +5,9 @@ use super::test_support::test_database_url;
 use crate::runtime::LogStore;
 use crate::runtime::RemoteControlEnrollmentStore;
 use crate::runtime::backfill_contract_tests::run_backfill_coordination_contract;
+use crate::runtime::goals_contract_tests::collect_closed_goal_store_errors;
+use crate::runtime::goals_contract_tests::goal_store_error_signature;
+use crate::runtime::goals_contract_tests::provoke_goal_accounting_conflict;
 use crate::runtime::goals_contract_tests::run_goal_lifecycle_contract;
 use crate::runtime::logs_contract_tests::run_feedback_contract;
 use crate::runtime::logs_contract_tests::run_filter_order_and_max_id_contract;
@@ -55,6 +58,69 @@ async fn postgres_contract_goals_are_shared_between_replicas() -> Result<()> {
 
     writer.close().await;
     reader.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_goal_errors_match_sqlite() -> Result<()> {
+    let database_url = test_database_url()?;
+    let mut fixture = PostgresContractFixture::new(database_url, "goal_errors")?;
+    fixture.manage(PostgresNamespaceAction::Migrate).await?;
+    let postgres_pool = fixture.connect_pool().await?;
+    let postgres_thread_id = ThreadId::new();
+    let threads_table = super::qualified_table(fixture.schema(), "threads");
+    sqlx::query(AssertSqlSafe(format!(
+        "INSERT INTO {threads_table} (thread_id, projection, stream_version, fencing_token, \
+         writer_id, writer_lease_expires_at, created_at, updated_at, recency_at) \
+         VALUES ($1, '{{}}', 0, 1, 'goal-error-contract', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, \
+         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )))
+    .bind(postgres_thread_id.to_string())
+    .execute(&postgres_pool)
+    .await?;
+    let postgres =
+        crate::GoalStore::from_postgres(postgres_pool.clone(), fixture.schema().to_string());
+
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    let _sqlite_cleanup = scopeguard::guard(sqlite_home.clone(), |path| {
+        let _ = std::fs::remove_dir_all(path);
+    });
+    let sqlite = crate::StateRuntime::init(sqlite_home, "test-provider".to_string()).await?;
+    let sqlite_error_thread_id = ThreadId::new();
+    let sqlite_error =
+        provoke_goal_accounting_conflict(sqlite.thread_goals(), sqlite_error_thread_id).await?;
+    let postgres_error = provoke_goal_accounting_conflict(&postgres, postgres_thread_id).await?;
+
+    assert_eq!(postgres_error.kind(), sqlite_error.kind());
+    assert_eq!(postgres_error.operation(), sqlite_error.operation());
+    assert_eq!(postgres_error.to_string(), sqlite_error.to_string());
+
+    let sqlite_goal = sqlite
+        .thread_goals()
+        .get_thread_goal(sqlite_error_thread_id)
+        .await?
+        .expect("SQLite goal should exist before closing the store");
+    let postgres_goal = postgres
+        .get_thread_goal(postgres_thread_id)
+        .await?
+        .expect("PostgreSQL goal should exist before closing the store");
+    let sqlite_persistence_errors =
+        collect_closed_goal_store_errors(sqlite.thread_goals(), &sqlite_goal).await;
+    let postgres_persistence_errors =
+        collect_closed_goal_store_errors(&postgres, &postgres_goal).await;
+    assert_eq!(
+        postgres_persistence_errors
+            .iter()
+            .map(goal_store_error_signature)
+            .collect::<Vec<_>>(),
+        sqlite_persistence_errors
+            .iter()
+            .map(goal_store_error_signature)
+            .collect::<Vec<_>>()
+    );
+
+    sqlite.close().await;
     fixture.cleanup().await
 }
 
