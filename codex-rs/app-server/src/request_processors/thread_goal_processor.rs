@@ -1,5 +1,6 @@
 use super::*;
 use codex_goal_extension::GoalObjectiveUpdate;
+use codex_goal_extension::GoalPreviewUpdate;
 use codex_goal_extension::GoalService;
 use codex_goal_extension::GoalServiceError;
 use codex_goal_extension::GoalSetRequest;
@@ -141,7 +142,8 @@ impl ThreadGoalRequestProcessor {
         let outcome = self
             .goal_service
             .set_thread_goal(
-                &state_db,
+                state_db.thread_goals(),
+                GoalPreviewUpdate::FillIfEmpty(state_db.as_ref()),
                 GoalSetRequest {
                     thread_id,
                     objective: objective
@@ -227,7 +229,7 @@ impl ThreadGoalRequestProcessor {
         let state_db = self.state_db_for_materialized_thread(thread_id).await?;
         let goal = self
             .goal_service
-            .get_thread_goal(&state_db, thread_id)
+            .get_thread_goal(state_db.thread_goals(), thread_id)
             .await
             .map_err(goal_service_error)?
             .map(ThreadGoal::from);
@@ -255,7 +257,7 @@ impl ThreadGoalRequestProcessor {
         };
         let cleared = self
             .goal_service
-            .clear_thread_goal(&state_db, thread_id)
+            .clear_thread_goal(state_db.thread_goals(), thread_id)
             .await
             .map_err(goal_service_error)?;
 
