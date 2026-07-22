@@ -37,6 +37,7 @@ pub use migration::ThreadItemProjectionSnapshot;
 pub use migration::ThreadMigrationSnapshot;
 pub use migration::ThreadSpawnEdgeSnapshot;
 pub use migration::ThreadTurnProjectionSnapshot;
+pub use migration::import_runtime_state_operational;
 pub use migration::import_runtime_state_threads;
 pub use migration::preflight_runtime_state_migration;
 pub use migration::snapshot_runtime_state_migration_threads;

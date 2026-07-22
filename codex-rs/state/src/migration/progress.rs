@@ -25,6 +25,24 @@ impl RuntimeStateMigrationPhase {
             _ => anyhow::bail!("PostgreSQL Runtime State Migration has an invalid phase"),
         }
     }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ThreadsImported => "threads_imported",
+            Self::OperationalImported => "operational_imported",
+            Self::MemoryImported => "memory_imported",
+            Self::Ready => "ready",
+        }
+    }
+}
+
+pub(super) struct RuntimeStateMigrationEvidence<'a> {
+    pub(super) source_identity: &'a str,
+    pub(super) source_fingerprint: &'a str,
+    pub(super) phase: RuntimeStateMigrationPhase,
+    pub(super) ready: bool,
+    pub(super) fencing_token: i64,
+    pub(super) namespace_digest: &'a str,
 }
 
 /// Durable migration position after an idempotent phase attempt.
@@ -63,7 +81,7 @@ pub(super) async fn existing_progress(
     };
     let recorded_source_identity: String = row.try_get("source_identity")?;
     let recorded_source_fingerprint: String = row.try_get("source_fingerprint")?;
-    let phase: String = row.try_get("phase")?;
+    let phase = RuntimeStateMigrationPhase::parse(row.try_get::<String, _>("phase")?.as_str())?;
     let ready: bool = row.try_get("ready")?;
     let fencing_token: i64 = row.try_get("fencing_token")?;
     anyhow::ensure!(
@@ -80,24 +98,19 @@ pub(super) async fn existing_progress(
         .get("namespaceDigest")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("PostgreSQL Runtime State Migration evidence is invalid"))?;
-    let threads = qualified_table(schema, "threads");
-    let history = qualified_table(schema, "thread_history");
-    let counts: (i64, i64) = sqlx::query_as(AssertSqlSafe(format!(
-        "SELECT (SELECT COUNT(*) FROM {threads}), (SELECT COUNT(*) FROM {history})"
-    )))
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(|error| map_sql_error(schema, "validate Runtime State Migration evidence", error))?;
-    let expected_evidence = serde_json::json!({
-        "sourceIdentity": recorded_source_identity,
-        "sourceFingerprint": recorded_source_fingerprint,
-        "phase": phase,
-        "ready": ready,
-        "fencingToken": fencing_token,
-        "threads": counts.0,
-        "historyLines": counts.1,
-        "namespaceDigest": expected_digest,
-    });
+    let expected_evidence = phase_evidence(
+        connection,
+        schema,
+        RuntimeStateMigrationEvidence {
+            source_identity: &recorded_source_identity,
+            source_fingerprint: &recorded_source_fingerprint,
+            phase,
+            ready,
+            fencing_token,
+            namespace_digest: expected_digest,
+        },
+    )
+    .await?;
     anyhow::ensure!(
         evidence == expected_evidence,
         "PostgreSQL Runtime State Migration control evidence changed after its recorded phase"
@@ -107,9 +120,59 @@ pub(super) async fn existing_progress(
         "PostgreSQL Runtime State Namespace changed after its recorded migration phase"
     );
     Ok(Some(RuntimeStateMigrationProgress {
-        phase: RuntimeStateMigrationPhase::parse(&phase)?,
+        phase,
         fencing_token,
     }))
+}
+
+pub(super) async fn phase_evidence(
+    connection: &mut sqlx::PgConnection,
+    schema: &str,
+    metadata: RuntimeStateMigrationEvidence<'_>,
+) -> anyhow::Result<serde_json::Value> {
+    let threads = qualified_table(schema, "threads");
+    let history = qualified_table(schema, "thread_history");
+    let counts: (i64, i64) = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT (SELECT COUNT(*) FROM {threads}), (SELECT COUNT(*) FROM {history})"
+    )))
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|error| map_sql_error(schema, "validate Runtime State Migration evidence", error))?;
+    let mut evidence = serde_json::json!({
+        "sourceIdentity": metadata.source_identity,
+        "sourceFingerprint": metadata.source_fingerprint,
+        "phase": metadata.phase.as_str(),
+        "ready": metadata.ready,
+        "fencingToken": metadata.fencing_token,
+        "threads": counts.0,
+        "historyLines": counts.1,
+        "namespaceDigest": metadata.namespace_digest,
+    });
+    if metadata.phase != RuntimeStateMigrationPhase::ThreadsImported {
+        let tables = [
+            ("logs", "logs"),
+            ("goals", "thread_goals"),
+            ("goalDeferrals", "thread_goal_continuation_deferrals"),
+            ("goalAccountingEvents", "thread_goal_accounting_events"),
+            ("remoteControlEnrollments", "remote_control_enrollments"),
+            (
+                "externalAgentConfigImports",
+                "external_agent_config_imports",
+            ),
+        ];
+        for (field, table) in tables {
+            let table = qualified_table(schema, table);
+            let count: i64 =
+                sqlx::query_scalar(AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}")))
+                    .fetch_one(&mut *connection)
+                    .await
+                    .map_err(|error| {
+                        map_sql_error(schema, "validate operational migration evidence", error)
+                    })?;
+            evidence[field] = serde_json::Value::from(count);
+        }
+    }
+    Ok(evidence)
 }
 
 /// Hash every namespace row in a deterministic order without aggregating a table client-side.

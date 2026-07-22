@@ -54,7 +54,7 @@ pub async fn import_runtime_state_threads(
     let snapshot =
         snapshot_runtime_state_migration_threads(source, expected_inventory, history_reader)
             .await?;
-    let source_identity = digest(source.home().as_os_str().as_encoded_bytes());
+    let source_identity = source_identity(source);
     let source_fingerprint = fingerprint(expected_inventory);
     let pool = connect_pool(destination).await?;
     revalidate_source(source, expected_inventory).await?;
@@ -71,7 +71,7 @@ pub async fn import_runtime_state_threads(
     result
 }
 
-async fn revalidate_source(
+pub(super) async fn revalidate_source(
     source: &SqliteConfig,
     expected: &RuntimeStateMigrationInventory,
 ) -> anyhow::Result<()> {
@@ -379,7 +379,7 @@ async fn write_history(
     Ok(())
 }
 
-fn fingerprint(inventory: &RuntimeStateMigrationInventory) -> String {
+pub(super) fn fingerprint(inventory: &RuntimeStateMigrationInventory) -> String {
     let mut hasher = Sha256::new();
     for database in &inventory.databases {
         hash_field(&mut hasher, database.label.as_bytes());
@@ -424,6 +424,9 @@ fn hash_field(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(value);
 }
 
-fn digest(value: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(value))
+pub(super) fn source_identity(source: &SqliteConfig) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(source.home().as_os_str().as_encoded_bytes())
+    )
 }
