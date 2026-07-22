@@ -432,9 +432,15 @@ async fn stored_thread_from_session_meta(
 ) -> ThreadStoreResult<StoredThread> {
     let meta_line = read_required_session_meta_line(path.as_path()).await?;
     let archived = rollout_path_is_archived(store.config.codex_home.as_path(), path.as_path());
-    Ok(stored_thread_from_meta_line(
-        store, meta_line, path, archived,
-    ))
+    let mut thread = stored_thread_from_meta_line(store, meta_line, path, archived);
+    if thread.history_mode == ThreadHistoryMode::Legacy
+        && let Ok(Some(name)) =
+            find_thread_name_by_id(store.config.codex_home.as_path(), &thread.thread_id).await
+        && !name.trim().is_empty()
+    {
+        set_thread_name(&mut thread, name);
+    }
+    Ok(thread)
 }
 
 async fn read_required_session_meta_line(

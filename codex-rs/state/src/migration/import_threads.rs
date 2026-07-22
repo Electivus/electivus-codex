@@ -75,7 +75,8 @@ async fn revalidate_source(
             && actual.rollout_files == expected.rollout_files
             && actual.memory_files == expected.memory_files
             && actual.imported_resources == expected.imported_resources
-            && actual.configuration == expected.configuration,
+            && actual.configuration == expected.configuration
+            && actual.session_index == expected.session_index,
         "Runtime State Migration source changed after preflight; stop every process using it and retry"
     );
     Ok(())
@@ -270,7 +271,6 @@ fn thread_projection(
         .unwrap_or_else(|_| Value::String(metadata.source.clone()));
     let approval_mode = serde_json::from_str(&metadata.approval_mode)
         .unwrap_or_else(|_| Value::String(metadata.approval_mode.clone()));
-    let archived_at = metadata.archived_at.map(|_| metadata.updated_at);
     let permission_profile = serde_json::from_str::<PermissionProfile>(&metadata.sandbox_policy)
         .or_else(|_| {
             serde_json::from_str::<SandboxPolicy>(&metadata.sandbox_policy).map(|policy| {
@@ -292,7 +292,7 @@ fn thread_projection(
         "created_at": metadata.created_at,
         "updated_at": metadata.updated_at,
         "recency_at": metadata.recency_at,
-        "archived_at": archived_at,
+        "archived_at": metadata.archived_at,
         "cwd": metadata.cwd,
         "cli_version": metadata.cli_version,
         "source": source,
@@ -375,6 +375,12 @@ fn fingerprint(inventory: &RuntimeStateMigrationInventory) -> String {
         hash_file(&mut hasher, configuration);
     } else {
         hash_field(&mut hasher, b"no-configuration");
+    }
+    if let Some(session_index) = &inventory.session_index {
+        hash_field(&mut hasher, b"session-index");
+        hash_file(&mut hasher, session_index);
+    } else {
+        hash_field(&mut hasher, b"no-session-index");
     }
     format!("{:x}", hasher.finalize())
 }

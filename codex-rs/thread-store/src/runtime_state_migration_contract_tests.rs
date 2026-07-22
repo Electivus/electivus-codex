@@ -38,6 +38,8 @@ use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::user_input::UserInput;
+use codex_state::BackfillClaimOutcome;
+use codex_state::BackfillLeaseUpdate;
 use codex_state::BackfillState;
 use codex_state::BackfillStatus;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
@@ -64,9 +66,15 @@ pub(super) struct MigrationSource {
     history: Vec<RolloutLine>,
     legacy_id: ThreadId,
     legacy_history: Vec<RolloutLine>,
-    rollout_path: std::path::PathBuf,
+    rollout_only_id: ThreadId,
+    rollout_only_history: Vec<RolloutLine>,
+    pub(super) rollout_path: std::path::PathBuf,
+    rollout_only_path: std::path::PathBuf,
+    archived_at: chrono::DateTime<Utc>,
     public_view: ThreadPublicView,
+    rollout_only_view: serde_json::Value,
     backfill: BackfillState,
+    source_artifacts: Vec<Vec<u8>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -84,7 +92,7 @@ struct ThreadPublicView {
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn runtime_state_thread_import_is_visible_to_another_pool()
+async fn postgres_contract_runtime_state_thread_import_is_visible_to_another_pool()
 -> Result<(), Box<dyn std::error::Error>> {
     let source = migration_source(LineageFixture::Valid).await?;
     let fixture = PostgresThreadStoreFixture::new("runtime_migration")?;
@@ -138,6 +146,7 @@ async fn runtime_state_thread_import_is_visible_to_another_pool()
         serde_json::to_value(&imported)?
     );
     assert_eq!(imported.name.as_deref(), Some("Migrated thread"));
+    assert_eq!(imported.archived_at, Some(source.archived_at));
     assert_eq!(imported.preview, "migration needle");
     assert_eq!(
         imported.token_usage,
@@ -274,12 +283,12 @@ async fn runtime_state_thread_import_is_visible_to_another_pool()
     assert_eq!(items.items.len(), 1);
     let backfill = replica_pool.backfill_coordinator().state().await?;
     assert_eq!(backfill, second_pool.backfill_coordinator().state().await?);
-    assert_eq!(backfill.status, BackfillStatus::Complete);
+    assert_eq!(backfill.status, BackfillStatus::Running);
     assert_eq!(
         backfill.last_watermark.as_deref(),
         Some("archived_sessions/rollout.jsonl")
     );
-    assert!(backfill.last_success_at.is_some());
+    assert!(backfill.last_success_at.is_none());
     assert_eq!(backfill, source.backfill);
     let legacy = second
         .read_thread(ReadThreadParams {
@@ -311,6 +320,26 @@ async fn runtime_state_thread_import_is_visible_to_another_pool()
         thread_public_view(&replica, source.legacy_id, source.thread_id).await?,
         source.public_view
     );
+    let rollout_only = second
+        .read_thread(ReadThreadParams {
+            thread_id: source.rollout_only_id,
+            include_archived: true,
+            include_history: true,
+        })
+        .await?;
+    assert_eq!(rollout_only.name.as_deref(), Some("Index-only thread name"));
+    assert_eq!(normalized_value(&rollout_only)?, source.rollout_only_view);
+    assert_eq!(
+        serde_json::to_value(rollout_only.history.ok_or("rollout-only history")?.items)?,
+        serde_json::to_value(
+            source
+                .rollout_only_history
+                .iter()
+                .map(|line| line.item.clone())
+                .collect::<Vec<_>>()
+        )?
+    );
+    assert_eq!(source_artifacts(&source)?, source.source_artifacts);
     assert_eq!(
         import_runtime_state_threads(
             &source.config,
@@ -330,7 +359,7 @@ async fn runtime_state_thread_import_is_visible_to_another_pool()
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn runtime_state_thread_import_rolls_back_every_record_on_constraint_failure()
+async fn postgres_contract_runtime_state_thread_import_rolls_back_every_record_on_constraint_failure()
 -> Result<(), Box<dyn std::error::Error>> {
     let source = migration_source(LineageFixture::Orphan).await?;
     let source_before = (
@@ -388,8 +417,12 @@ pub(super) async fn migration_source(
     let source = tempfile::tempdir()?;
     let thread_id = ThreadId::from_string("019c84d0-3333-7777-8333-333333333333")?;
     let legacy_id = ThreadId::from_string("019c84d0-2222-7777-8222-222222222222")?;
+    let rollout_only_id = ThreadId::from_string("019c84d0-1111-7777-8111-111111111111")?;
     let rollout_path = source.path().join("archived_sessions/rollout.jsonl");
     let legacy_path = source.path().join("sessions/2026/07/21/legacy.jsonl");
+    let rollout_only_path = source.path().join(format!(
+        "archived_sessions/rollout-2026-07-21T10-00-00-{rollout_only_id}.jsonl.zst"
+    ));
     std::fs::create_dir_all(rollout_path.parent().ok_or("rollout parent")?)?;
     std::fs::create_dir_all(legacy_path.parent().ok_or("legacy rollout parent")?)?;
     let history = history(thread_id, source.path());
@@ -407,6 +440,19 @@ pub(super) async fn migration_source(
         &legacy_path,
         serde_json::to_string(&legacy_history[0])? + "\n",
     )?;
+    let rollout_only_history = self::legacy_history(rollout_only_id, source.path());
+    let rollout_only_json = rollout_only_history
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n")
+        + "\n";
+    std::fs::write(
+        &rollout_only_path,
+        zstd::stream::encode_all(rollout_only_json.as_bytes(), /*level*/ 0)?,
+    )?;
+    codex_rollout::append_thread_name(source.path(), rollout_only_id, "Index-only thread name")
+        .await?;
     let runtime =
         codex_state::StateRuntime::init(source.path().to_path_buf(), "test-provider".to_string())
             .await?;
@@ -428,7 +474,11 @@ pub(super) async fn migration_source(
     metadata.preview = Some("migration needle".to_string());
     metadata.first_user_message = metadata.preview.clone();
     metadata.tokens_used = 987;
-    metadata.archived_at = Some(metadata.updated_at);
+    let archived_at = Utc
+        .with_ymd_and_hms(2026, 7, 22, 8, 0, 0)
+        .single()
+        .ok_or("archive time")?;
+    metadata.archived_at = Some(archived_at);
     metadata.cwd = source.path().to_path_buf();
     metadata.cli_version = "0.0.0".to_string();
     metadata.git_sha = Some("abc987".to_string());
@@ -488,26 +538,79 @@ pub(super) async fn migration_source(
         })
         .await?;
     local.shutdown_thread(thread_id).await?;
-    runtime
-        .mark_backfill_complete(Some("archived_sessions/rollout.jsonl"))
-        .await?;
+    let coordinator = runtime.backfill_coordinator();
+    let lease = match coordinator
+        .try_claim("migration-source", std::time::Duration::from_secs(3600))
+        .await?
+    {
+        BackfillClaimOutcome::Claimed { lease, .. } => lease,
+        outcome => return Err(format!("unexpected backfill claim: {outcome:?}").into()),
+    };
+    assert_eq!(
+        coordinator
+            .checkpoint(
+                &lease,
+                "archived_sessions/rollout.jsonl",
+                std::time::Duration::from_secs(3600),
+            )
+            .await?,
+        BackfillLeaseUpdate::Applied
+    );
     let public_view = thread_public_view(&local, legacy_id, thread_id).await?;
+    runtime.delete_thread(rollout_only_id).await?;
     let backfill = runtime.backfill_coordinator().state().await?;
     drop(local);
     runtime.close().await;
+    let rollout_local = LocalThreadStore::new(
+        LocalThreadStoreConfig {
+            codex_home: source.path().to_path_buf(),
+            sqlite_home: source.path().to_path_buf(),
+            default_model_provider_id: "test-provider".to_string(),
+        },
+        /*state_db*/ None,
+    );
+    let rollout_only_view = normalized_value(
+        rollout_local
+            .read_thread(ReadThreadParams {
+                thread_id: rollout_only_id,
+                include_archived: true,
+                include_history: true,
+            })
+            .await?,
+    )?;
     open_thread_history_db(source.path()).await?.close().await;
     std::fs::write(source.path().join("config.toml"), b"model = \"gpt-5\"\n")?;
-    Ok(MigrationSource {
+    let mut migration_source = MigrationSource {
         config,
         _temp: source,
         thread_id,
         history,
         legacy_id,
         legacy_history,
+        rollout_only_id,
+        rollout_only_history,
         rollout_path,
+        rollout_only_path,
+        archived_at,
         public_view,
+        rollout_only_view,
         backfill,
-    })
+        source_artifacts: Vec::new(),
+    };
+    migration_source.source_artifacts = source_artifacts(&migration_source)?;
+    Ok(migration_source)
+}
+
+fn source_artifacts(source: &MigrationSource) -> std::io::Result<Vec<Vec<u8>>> {
+    [
+        source.rollout_path.clone(),
+        source.rollout_only_path.clone(),
+        source.config.home().join("config.toml"),
+        source.config.home().join("session_index.jsonl"),
+    ]
+    .into_iter()
+    .map(std::fs::read)
+    .collect()
 }
 
 async fn thread_public_view(
@@ -649,6 +752,7 @@ fn legacy_history(thread_id: ThreadId, source: &std::path::Path) -> Vec<RolloutL
             meta: SessionMeta {
                 session_id: thread_id.into(),
                 id: thread_id,
+                timestamp: "2026-07-21T10:00:00Z".to_string(),
                 cwd: source.to_path_buf(),
                 source: SessionSource::Cli,
                 model_provider: Some("test-provider".to_string()),

@@ -59,6 +59,7 @@ struct SourceInventory {
     memory_files: Vec<SourceFileInventory>,
     imported_resources: Vec<SourceFileInventory>,
     configuration: Option<SourceFileInventory>,
+    session_index: Option<SourceFileInventory>,
 }
 
 /// Complete read-only inventory produced before an offline Runtime State Migration.
@@ -69,6 +70,7 @@ pub struct RuntimeStateMigrationInventory {
     memory_files: Vec<SourceFileInventory>,
     imported_resources: Vec<SourceFileInventory>,
     configuration: Option<SourceFileInventory>,
+    session_index: Option<SourceFileInventory>,
     destination_schema: String,
     destination_schema_version: i64,
 }
@@ -92,6 +94,10 @@ impl RuntimeStateMigrationInventory {
 
     pub fn configuration(&self) -> Option<&SourceFileInventory> {
         self.configuration.as_ref()
+    }
+
+    pub fn session_index(&self) -> Option<&SourceFileInventory> {
+        self.session_index.as_ref()
     }
 
     pub fn destination_schema(&self) -> &str {
@@ -194,6 +200,7 @@ pub async fn preflight_runtime_state_migration(
         memory_files,
         imported_resources,
         configuration,
+        session_index,
     } = source_inventory;
 
     Ok(RuntimeStateMigrationInventory {
@@ -202,6 +209,7 @@ pub async fn preflight_runtime_state_migration(
         memory_files,
         imported_resources,
         configuration,
+        session_index,
         destination_schema: destination_state.schema,
         destination_schema_version: destination_state.version,
     })
@@ -209,11 +217,16 @@ pub async fn preflight_runtime_state_migration(
 
 async fn inspect_source(source: &SqliteConfig) -> anyhow::Result<SourceInventory> {
     let databases = inspect_sqlite_databases(source).await?;
-    let rollout_files = collect_files(source.home(), &["sessions", "archived_sessions"], |path| {
-        path.extension()
-            .is_some_and(|extension| extension == "jsonl")
-    })
-    .await?;
+    let mut rollout_files =
+        collect_files(source.home(), &["sessions", "archived_sessions"], |path| {
+            source_validation::logical_rollout_path(path).is_some()
+        })
+        .await?;
+    let mut logical_paths = std::collections::HashSet::new();
+    rollout_files.retain(|file| {
+        source_validation::logical_rollout_path(&file.relative_path)
+            .is_some_and(|path| logical_paths.insert(path))
+    });
     let memory_artifacts = collect_files(source.home(), &["memories"], |_| true).await?;
     let imported_resource_prefix = Path::new("memories")
         .join("extensions")
@@ -227,12 +240,18 @@ async fn inspect_source(source: &SqliteConfig) -> anyhow::Result<SourceInventory
     } else {
         None
     };
+    let session_index = if tokio::fs::try_exists(source.home().join("session_index.jsonl")).await? {
+        Some(inventory_file(source.home(), Path::new("session_index.jsonl")).await?)
+    } else {
+        None
+    };
     Ok(SourceInventory {
         databases,
         rollout_files,
         memory_files,
         imported_resources,
         configuration,
+        session_index,
     })
 }
 

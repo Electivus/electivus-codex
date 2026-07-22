@@ -15,7 +15,30 @@ use sqlx::AssertSqlSafe;
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn runtime_state_thread_retry_rejects_changed_destination()
+async fn postgres_contract_runtime_state_thread_import_rejects_discarded_canonical_records()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source = migration_source(LineageFixture::Valid).await?;
+    let mut rollout = std::fs::read_to_string(&source.rollout_path)?;
+    rollout.push_str(
+        "{\"timestamp\":\"2026-07-22T10:06:00Z\",\"type\":\"future_item\",\"payload\":{}}\n",
+    );
+    std::fs::write(&source.rollout_path, &rollout)?;
+    let fixture = PostgresThreadStoreFixture::new("runtime_migration_rejected_record")?;
+    fixture.migrate().await?;
+    let inventory =
+        preflight_runtime_state_migration(source.config.clone(), fixture.config.clone()).await?;
+
+    import_threads(&source, &fixture, &inventory)
+        .await
+        .expect_err("discarding a canonical rollout record must block migration");
+    assert_eq!(std::fs::read_to_string(&source.rollout_path)?, rollout);
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_runtime_state_thread_retry_rejects_changed_destination()
 -> Result<(), Box<dyn std::error::Error>> {
     let source = migration_source(LineageFixture::Valid).await?;
     for (label, table, assignment) in [
@@ -62,7 +85,7 @@ async fn runtime_state_thread_retry_rejects_changed_destination()
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn runtime_state_thread_import_rejects_changed_config_without_editing_it()
+async fn postgres_contract_runtime_state_thread_import_rejects_changed_config_without_editing_it()
 -> Result<(), Box<dyn std::error::Error>> {
     let source = migration_source(LineageFixture::Valid).await?;
     let fixture = PostgresThreadStoreFixture::new("runtime_migration_config")?;
@@ -70,18 +93,29 @@ async fn runtime_state_thread_import_rejects_changed_config_without_editing_it()
     let inventory =
         preflight_runtime_state_migration(source.config.clone(), fixture.config.clone()).await?;
     let config_path = source.config.home().join("config.toml");
+    let original_config = std::fs::read(&config_path)?;
     std::fs::write(&config_path, b"model = \"changed-after-preflight\"\n")?;
     let changed_config = std::fs::read(&config_path)?;
-    let result = import_threads(&source, &fixture, &inventory).await;
+    import_threads(&source, &fixture, &inventory)
+        .await
+        .expect_err("changed config must invalidate migration preflight");
     assert_eq!(std::fs::read(config_path)?, changed_config);
+    std::fs::write(source.config.home().join("config.toml"), original_config)?;
+
+    let session_index_path = source.config.home().join("session_index.jsonl");
+    std::fs::write(&session_index_path, b"changed-after-preflight\n")?;
+    let changed_session_index = std::fs::read(&session_index_path)?;
+    import_threads(&source, &fixture, &inventory)
+        .await
+        .expect_err("changed session index must invalidate migration preflight");
+    assert_eq!(std::fs::read(session_index_path)?, changed_session_index);
     fixture.cleanup().await?;
-    result.expect_err("changed config must invalidate migration preflight");
     Ok(())
 }
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn runtime_state_thread_import_rejects_other_sources_nonempty_and_ready_destinations()
+async fn postgres_contract_runtime_state_thread_import_rejects_other_sources_nonempty_and_ready_destinations()
 -> Result<(), Box<dyn std::error::Error>> {
     let first_source = migration_source(LineageFixture::Valid).await?;
     let second_source = migration_source(LineageFixture::Valid).await?;

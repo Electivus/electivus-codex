@@ -3,10 +3,11 @@ use crate::SqliteConfig;
 use crate::state_db_path;
 use anyhow::Context;
 use std::collections::HashSet;
+use std::io::BufRead;
+use std::io::BufReader;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
-use tokio::io::AsyncBufReadExt;
 
 const STATE_TABLES: &str = "_sqlx_migrations,backfill_state,external_agent_config_imports,remote_control_enrollments,thread_dynamic_tools,thread_spawn_edges,threads";
 const GOALS_TABLES: &str = "_sqlx_migrations,thread_goal_accounting_events,thread_goal_continuation_deferrals,thread_goals";
@@ -60,7 +61,7 @@ pub(super) async fn validate_rollout_files(
 ) -> anyhow::Result<()> {
     let inventoried_paths = rollout_files
         .iter()
-        .map(|file| file.relative_path.clone())
+        .filter_map(|file| logical_rollout_path(&file.relative_path))
         .collect::<HashSet<_>>();
     for rollout_path in referenced_rollout_paths(source).await? {
         let relative_path = relative_rollout_path(source.home(), &rollout_path)?;
@@ -113,35 +114,52 @@ pub(super) fn relative_rollout_path(
         );
         rollout_path
     };
-    anyhow::ensure!(
-        relative_path
-            .extension()
-            .is_some_and(|extension| extension == "jsonl"),
-        "SQLite thread metadata references non-JSONL rollout `{}`",
-        rollout_path.display()
-    );
-    Ok(relative_path.to_path_buf())
+    logical_rollout_path(relative_path).ok_or_else(|| {
+        anyhow::anyhow!(
+            "SQLite thread metadata references non-JSONL rollout `{}`",
+            rollout_path.display()
+        )
+    })
+}
+
+pub(super) fn logical_rollout_path(path: &Path) -> Option<PathBuf> {
+    if path
+        .extension()
+        .is_some_and(|extension| extension == "jsonl")
+    {
+        return Some(path.to_path_buf());
+    }
+    (path.extension().is_some_and(|extension| extension == "zst")
+        && path.file_stem().is_some_and(|stem| {
+            Path::new(stem)
+                .extension()
+                .is_some_and(|ext| ext == "jsonl")
+        }))
+    .then(|| path.with_extension(""))
 }
 
 async fn validate_json_lines(source_home: &Path, relative_path: &Path) -> anyhow::Result<()> {
     let path = source_home.join(relative_path);
-    let file = tokio::fs::File::open(&path)
-        .await
-        .with_context(|| format!("open rollout JSONL {}", path.display()))?;
-    let mut lines = tokio::io::BufReader::new(file).lines();
-    let mut line_number = 0_u64;
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .with_context(|| format!("read rollout JSONL {}", path.display()))?
-    {
-        line_number += 1;
-        serde_json::from_str::<serde_json::Value>(&line).with_context(|| {
-            format!(
-                "rollout JSONL {} contains invalid JSON at line {line_number}; restore a valid artifact before retrying",
-                path.display()
-            )
-        })?;
-    }
-    Ok(())
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&path)
+            .with_context(|| format!("open rollout JSONL {}", path.display()))?;
+        let reader: Box<dyn BufRead> =
+            if path.extension().is_some_and(|extension| extension == "zst") {
+                Box::new(BufReader::new(zstd::stream::read::Decoder::new(file)?))
+            } else {
+                Box::new(BufReader::new(file))
+            };
+        for (line_number, line) in reader.lines().enumerate() {
+            let line = line.with_context(|| format!("read rollout JSONL {}", path.display()))?;
+            serde_json::from_str::<serde_json::Value>(&line).with_context(|| {
+                format!(
+                    "rollout JSONL {} contains invalid JSON at line {}; restore a valid artifact before retrying",
+                    path.display(), line_number + 1
+                )
+            })?;
+        }
+        anyhow::Ok(())
+    })
+    .await
+    .context("join rollout validation task")?
 }

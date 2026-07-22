@@ -100,6 +100,21 @@ impl codex_state::CanonicalThreadHistoryReader for CanonicalRolloutHistoryReader
             RolloutRecorder::load_rollout_lines(path).await?;
         Ok((lines, rejected_line_count))
     }
+
+    async fn extract_metadata(
+        &self,
+        path: &std::path::Path,
+    ) -> anyhow::Result<codex_state::ExtractionOutcome> {
+        metadata::extract_metadata_from_rollout(path, "").await
+    }
+
+    async fn find_thread_names(
+        &self,
+        source_home: &std::path::Path,
+        thread_ids: &std::collections::HashSet<codex_protocol::ThreadId>,
+    ) -> anyhow::Result<std::collections::HashMap<codex_protocol::ThreadId, String>> {
+        Ok(find_thread_names_by_ids(source_home, thread_ids).await?)
+    }
 }
 
 #[cfg(test)]

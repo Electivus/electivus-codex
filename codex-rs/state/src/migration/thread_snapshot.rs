@@ -3,6 +3,7 @@ use super::source_validation;
 use crate::BackfillState;
 use crate::BackfillStatus;
 use crate::DirectionalThreadSpawnEdgeStatus;
+use crate::ExtractionOutcome;
 use crate::SqliteConfig;
 use crate::ThreadMetadata;
 use crate::model::ThreadRow;
@@ -20,6 +21,9 @@ use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::ThreadMemoryMode;
 use serde_json::Value;
 use sqlx::Row;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 
 /// Reads Canonical Thread History without giving migration code write access to its representation.
@@ -29,6 +33,29 @@ pub trait CanonicalThreadHistoryReader {
         &'a self,
         path: &'a Path,
     ) -> impl std::future::Future<Output = anyhow::Result<(Vec<RolloutLine>, usize)>> + Send + 'a;
+
+    /// Derives canonical thread metadata through the rollout subsystem's compatibility parser.
+    fn extract_metadata<'a>(
+        &'a self,
+        path: &'a Path,
+    ) -> impl std::future::Future<Output = anyhow::Result<ExtractionOutcome>> + Send + 'a {
+        async move {
+            anyhow::bail!(
+                "metadata extraction is unavailable for rollout-only thread {}",
+                path.display()
+            )
+        }
+    }
+
+    /// Returns the latest legacy session-index name for each requested thread.
+    fn find_thread_names<'a>(
+        &'a self,
+        _source_home: &'a Path,
+        _thread_ids: &'a HashSet<ThreadId>,
+    ) -> impl std::future::Future<Output = anyhow::Result<HashMap<ThreadId, String>>> + Send + 'a
+    {
+        async { Ok(HashMap::new()) }
+    }
 }
 
 /// Read-only, backend-neutral snapshot of every authoritative local thread record.
@@ -220,35 +247,39 @@ async fn snapshot(
     .fetch_all(state_pool)
     .await?;
     let mut threads = Vec::with_capacity(rows.len());
+    let rollout_files = inventory
+        .rollout_files
+        .iter()
+        .filter_map(|file| {
+            source_validation::logical_rollout_path(&file.relative_path)
+                .map(|logical| (logical, file.relative_path.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut referenced_rollouts = HashSet::new();
     for row in rows {
         let memory_mode = serde_json::from_value(Value::String(row.try_get("memory_mode")?))
             .context("decode thread memory mode")?;
         let metadata = ThreadMetadata::try_from(ThreadRow::try_from_row(&row)?)?;
         let relative_path =
             source_validation::relative_rollout_path(source.home(), &metadata.rollout_path)?;
-        anyhow::ensure!(
-            inventory
-                .rollout_files
-                .iter()
-                .any(|file| file.relative_path == relative_path),
-            "thread {} rollout was not present in the preflight inventory",
-            metadata.id
-        );
-        let rollout_path = source.home().join(relative_path);
+        let physical_path = rollout_files.get(&relative_path).with_context(|| {
+            format!(
+                "thread {} rollout was not present in the preflight inventory",
+                metadata.id
+            )
+        })?;
+        referenced_rollouts.insert(relative_path);
+        let rollout_path = source.home().join(physical_path);
         let (lines, rejected_line_count) = history_reader
             .read(&rollout_path)
             .await
             .with_context(|| format!("read Canonical Thread History for {}", metadata.id))?;
-        let session_meta_id = lines.iter().find_map(|line| match &line.item {
-            RolloutItem::SessionMeta(meta) => Some(meta.meta.id),
-            RolloutItem::ResponseItem(_)
-            | RolloutItem::InterAgentCommunication(_)
-            | RolloutItem::InterAgentCommunicationMetadata { .. }
-            | RolloutItem::Compacted(_)
-            | RolloutItem::TurnContext(_)
-            | RolloutItem::WorldState(_)
-            | RolloutItem::EventMsg(_) => None,
-        });
+        anyhow::ensure!(
+            rejected_line_count == 0,
+            "Canonical Thread History for {} contains {rejected_line_count} unsupported or malformed record(s); upgrade Codex or repair the rollout before migrating",
+            metadata.id
+        );
+        let session_meta_id = session_meta_id(&lines);
         anyhow::ensure!(
             session_meta_id == Some(metadata.id),
             "thread {} metadata does not match the first SessionMeta in its rollout",
@@ -265,10 +296,79 @@ async fn snapshot(
             .await?,
         );
     }
+    for (logical_path, physical_path) in rollout_files {
+        if referenced_rollouts.contains(&logical_path) {
+            continue;
+        }
+        let rollout_path = source.home().join(&physical_path);
+        let (lines, rejected_line_count) = history_reader.read(&rollout_path).await?;
+        anyhow::ensure!(
+            rejected_line_count == 0,
+            "Canonical Thread History at {} contains {rejected_line_count} unsupported or malformed record(s); upgrade Codex or repair the rollout before migrating",
+            rollout_path.display()
+        );
+        let thread_id = session_meta_id(&lines).with_context(|| {
+            format!(
+                "rollout-only thread {} has no SessionMeta",
+                rollout_path.display()
+            )
+        })?;
+        let mut outcome = history_reader.extract_metadata(&rollout_path).await?;
+        anyhow::ensure!(
+            outcome.metadata.id == thread_id,
+            "rollout-only thread metadata does not match SessionMeta for {thread_id}"
+        );
+        if logical_path.starts_with("archived_sessions") && outcome.metadata.archived_at.is_none() {
+            outcome.metadata.archived_at = Some(outcome.metadata.updated_at);
+        }
+        let memory_mode = outcome
+            .memory_mode
+            .map(|mode| serde_json::from_value(Value::String(mode)))
+            .transpose()?
+            .unwrap_or(ThreadMemoryMode::Enabled);
+        threads.push(
+            read_thread_snapshot(
+                outcome.metadata,
+                memory_mode,
+                CanonicalThreadHistorySnapshot::new(lines, rejected_line_count),
+                state_pool,
+                history_pool,
+            )
+            .await?,
+        );
+    }
+    let thread_ids = threads
+        .iter()
+        .map(|thread| thread.metadata.id)
+        .collect::<HashSet<_>>();
+    let names = history_reader
+        .find_thread_names(source.home(), &thread_ids)
+        .await?;
+    for thread in &mut threads {
+        if thread.metadata.history_mode == codex_protocol::protocol::ThreadHistoryMode::Legacy
+            && let Some(name) = names.get(&thread.metadata.id)
+        {
+            thread.metadata.name = Some(name.clone());
+        }
+    }
+    threads.sort_by_key(|thread| thread.metadata.id.to_string());
     Ok(RuntimeStateThreadSnapshot {
         threads,
         spawn_edges: read_spawn_edges(state_pool).await?,
         backfill: read_backfill(state_pool).await?,
+    })
+}
+
+fn session_meta_id(lines: &[RolloutLine]) -> Option<ThreadId> {
+    lines.iter().find_map(|line| match &line.item {
+        RolloutItem::SessionMeta(meta) => Some(meta.meta.id),
+        RolloutItem::ResponseItem(_)
+        | RolloutItem::InterAgentCommunication(_)
+        | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::Compacted(_)
+        | RolloutItem::TurnContext(_)
+        | RolloutItem::WorldState(_)
+        | RolloutItem::EventMsg(_) => None,
     })
 }
 
@@ -351,11 +451,30 @@ async fn read_thread_snapshot(
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let dynamic_tools = if tools.is_empty() {
+        canonical_history
+            .lines
+            .iter()
+            .rev()
+            .find_map(|line| match &line.item {
+                RolloutItem::SessionMeta(meta) => meta.meta.dynamic_tools.clone(),
+                RolloutItem::ResponseItem(_)
+                | RolloutItem::InterAgentCommunication(_)
+                | RolloutItem::InterAgentCommunicationMetadata { .. }
+                | RolloutItem::Compacted(_)
+                | RolloutItem::TurnContext(_)
+                | RolloutItem::WorldState(_)
+                | RolloutItem::EventMsg(_) => None,
+            })
+            .unwrap_or_default()
+    } else {
+        group_dynamic_tools_by_namespace(tools)
+    };
     Ok(ThreadMigrationSnapshot {
         metadata,
         memory_mode,
         canonical_history,
-        dynamic_tools: group_dynamic_tools_by_namespace(tools),
+        dynamic_tools,
         projection_state,
         turns,
         items,

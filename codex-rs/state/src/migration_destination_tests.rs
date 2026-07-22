@@ -11,7 +11,9 @@ use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
 
 #[tokio::test]
-async fn preflight_rejects_nonempty_destination_without_writes() -> anyhow::Result<()> {
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_preflight_rejects_nonempty_destination_without_writes()
+-> anyhow::Result<()> {
     let source = test_support::initialized_source("destination-nonempty").await?;
     let _cleanup = scopeguard::guard(source.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
@@ -51,7 +53,9 @@ async fn preflight_rejects_nonempty_destination_without_writes() -> anyhow::Resu
 }
 
 #[tokio::test]
-async fn preflight_rejects_incompatible_version_without_writes() -> anyhow::Result<()> {
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_preflight_rejects_incompatible_version_without_writes()
+-> anyhow::Result<()> {
     let source = test_support::initialized_source("destination-version").await?;
     let _cleanup = scopeguard::guard(source.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
@@ -118,7 +122,9 @@ async fn preflight_rejects_incompatible_version_without_writes() -> anyhow::Resu
 }
 
 #[tokio::test]
-async fn preflight_does_not_create_an_absent_destination_schema() -> anyhow::Result<()> {
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_preflight_does_not_create_an_absent_destination_schema()
+-> anyhow::Result<()> {
     let source = test_support::initialized_source("destination-absent").await?;
     let _cleanup = scopeguard::guard(source.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);

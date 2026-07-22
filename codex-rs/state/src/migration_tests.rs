@@ -15,7 +15,8 @@ use std::time::SystemTime;
 use super::test_support;
 
 #[tokio::test]
-async fn preflight_inventories_all_source_authorities() -> anyhow::Result<()> {
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_preflight_inventories_all_source_authorities() -> anyhow::Result<()> {
     let source = std::env::temp_dir().join(format!(
         "codex-migration-preflight-{}-{}",
         std::process::id(),
@@ -33,6 +34,16 @@ async fn preflight_inventories_all_source_authorities() -> anyhow::Result<()> {
     tokio::fs::write(
         source.join("sessions/2026/07/22/rollout.jsonl"),
         b"{\"type\":\"session_meta\"}\n",
+    )
+    .await?;
+    tokio::fs::write(
+        source.join("sessions/2026/07/22/rollout-only.jsonl.zst"),
+        zstd::stream::encode_all(&b"{\"type\":\"session_meta\"}\n"[..], /*level*/ 0)?,
+    )
+    .await?;
+    tokio::fs::write(
+        source.join("session_index.jsonl"),
+        b"{\"id\":\"019c84d0-2222-7777-8222-222222222222\",\"thread_name\":\"Indexed\",\"updated_at\":\"2026-07-22T10:00:00Z\"}\n",
     )
     .await?;
     tokio::fs::create_dir_all(
@@ -81,7 +92,16 @@ async fn preflight_inventories_all_source_authorities() -> anyhow::Result<()> {
             .iter()
             .map(super::SourceFileInventory::relative_path)
             .collect::<Vec<_>>(),
-        vec![std::path::Path::new("sessions/2026/07/22/rollout.jsonl")]
+        vec![
+            std::path::Path::new("sessions/2026/07/22/rollout-only.jsonl.zst"),
+            std::path::Path::new("sessions/2026/07/22/rollout.jsonl"),
+        ]
+    );
+    assert_eq!(
+        inventory
+            .session_index()
+            .map(super::SourceFileInventory::relative_path),
+        Some(std::path::Path::new("session_index.jsonl"))
     );
     assert_eq!(
         inventory
@@ -113,7 +133,9 @@ async fn preflight_inventories_all_source_authorities() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn preflight_reports_a_positive_active_writer_check() -> anyhow::Result<()> {
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_preflight_reports_a_positive_active_writer_check() -> anyhow::Result<()>
+{
     let source = std::env::temp_dir().join(format!(
         "codex-migration-active-writer-{}-{}",
         std::process::id(),

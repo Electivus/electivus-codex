@@ -186,7 +186,6 @@ pub(super) fn overlay_rollout_fields(thread: &mut StoredThread, rollout_thread: 
     thread.model_provider = rollout_thread.model_provider;
     thread.created_at = rollout_thread.created_at;
     thread.updated_at = rollout_thread.updated_at;
-    thread.archived_at = rollout_thread.archived_at;
     thread.cwd = rollout_thread.cwd;
     thread.cli_version = rollout_thread.cli_version;
     thread.source = rollout_thread.source;

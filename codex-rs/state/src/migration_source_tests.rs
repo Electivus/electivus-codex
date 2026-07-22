@@ -10,7 +10,9 @@ use std::ffi::OsString;
 use std::path::Path;
 
 #[tokio::test]
-async fn preflight_rejects_each_missing_sqlite_database_without_writes() -> anyhow::Result<()> {
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_preflight_rejects_each_missing_sqlite_database_without_writes()
+-> anyhow::Result<()> {
     let mut destination =
         PostgresContractFixture::new(test_database_url()?, "preflight_missing_db")?;
     destination.manage(PostgresNamespaceAction::Migrate).await?;
@@ -33,7 +35,8 @@ async fn preflight_rejects_each_missing_sqlite_database_without_writes() -> anyh
 }
 
 #[tokio::test]
-async fn preflight_rejects_corrupt_sqlite_without_writes() -> anyhow::Result<()> {
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_preflight_rejects_corrupt_sqlite_without_writes() -> anyhow::Result<()> {
     let source = test_support::initialized_source("corrupt-db").await?;
     let _cleanup = scopeguard::guard(source.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
@@ -54,7 +57,9 @@ async fn preflight_rejects_corrupt_sqlite_without_writes() -> anyhow::Result<()>
 }
 
 #[tokio::test]
-async fn preflight_distinguishes_stale_sidecar_from_active_writer() -> anyhow::Result<()> {
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_preflight_distinguishes_stale_sidecar_from_active_writer()
+-> anyhow::Result<()> {
     let source = test_support::initialized_source("stale-sidecar").await?;
     let _cleanup = scopeguard::guard(source.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
@@ -75,7 +80,9 @@ async fn preflight_distinguishes_stale_sidecar_from_active_writer() -> anyhow::R
 }
 
 #[tokio::test]
-async fn preflight_rejects_invalid_rollout_references_without_writes() -> anyhow::Result<()> {
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_preflight_rejects_invalid_rollout_references_without_writes()
+-> anyhow::Result<()> {
     let mut destination = PostgresContractFixture::new(test_database_url()?, "preflight_rollouts")?;
     destination.manage(PostgresNamespaceAction::Migrate).await?;
 

@@ -4022,6 +4022,7 @@ dependencies = [
  "url",
  "uuid",
  "windows-sys 0.52.0",
+ "zstd",
 ]
 
 [[package]]
@@ -4088,6 +4089,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "zstd",
 ]
 
 [[package]]
