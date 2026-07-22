@@ -50,6 +50,9 @@ mod backfill;
 #[path = "runtime/backfill_contract_tests.rs"]
 pub(crate) mod backfill_contract_tests;
 mod external_agent_config_imports;
+#[cfg(test)]
+#[path = "runtime/external_agent_config_imports_contract_tests.rs"]
+pub(crate) mod external_agent_config_imports_contract_tests;
 mod goals;
 #[cfg(test)]
 #[path = "runtime/goals_contract_tests.rs"]
@@ -95,6 +98,7 @@ pub use backfill::BackfillLeaseUpdate;
 pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportHistoryRecord;
+pub use external_agent_config_imports::ExternalAgentConfigImportStore;
 pub use external_agent_config_imports::ExternalAgentConfigImportSuccessRecord;
 pub use goals::GoalAccountingMode;
 pub use goals::GoalAccountingOutcome;
@@ -199,6 +203,7 @@ pub struct RuntimeDbPath {
 pub struct StateRuntime {
     codex_home: PathBuf,
     default_provider: String,
+    external_agent_config_imports: ExternalAgentConfigImportStore,
     pool: Arc<sqlx::SqlitePool>,
     logs: LogStore,
     remote_control_enrollments: RemoteControlEnrollmentStore,
@@ -376,6 +381,9 @@ impl StateRuntime {
         let thread_updated_at_millis = thread_updated_at_millis.unwrap_or(0);
         let thread_recency_at_millis = thread_recency_at_millis.unwrap_or(0);
         let runtime = Arc::new(Self {
+            external_agent_config_imports: ExternalAgentConfigImportStore::from_sqlite(Arc::clone(
+                &pool,
+            )),
             thread_goals: GoalStore::new(Arc::clone(&goals_pool)),
             memories: MemoryStore::new(Arc::clone(&memories_pool), Arc::clone(&pool)),
             remote_control_enrollments: RemoteControlEnrollmentStore::from_sqlite(Arc::clone(

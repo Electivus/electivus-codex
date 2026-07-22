@@ -3,6 +3,17 @@ use crate::runtime::test_support::unique_temp_dir;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
+async fn sqlite_matches_external_agent_config_import_contract() -> anyhow::Result<()> {
+    let runtime = StateRuntime::init(unique_temp_dir(), "test-provider".to_string()).await?;
+
+    crate::runtime::external_agent_config_imports_contract_tests::run_external_agent_config_import_contract(
+        runtime.external_agent_config_import_store(),
+        runtime.external_agent_config_import_store(),
+    )
+    .await
+}
+
+#[tokio::test]
 async fn records_completion_by_import_id() -> anyhow::Result<()> {
     let runtime = StateRuntime::init(unique_temp_dir(), "test-provider".to_string()).await?;
 

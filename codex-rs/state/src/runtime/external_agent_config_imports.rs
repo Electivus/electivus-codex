@@ -1,10 +1,18 @@
 use super::StateRuntime;
-use crate::model::datetime_to_epoch_millis;
-use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
-use sqlx::Row;
+use sqlx::PgPool;
+use sqlx::SqlitePool;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+#[path = "external_agent_config_imports/postgres.rs"]
+mod postgres;
+#[path = "external_agent_config_imports/sqlite.rs"]
+mod sqlite;
+
+use postgres::PostgresExternalAgentConfigImportStore;
+use sqlite::SqliteExternalAgentConfigImportStore;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalAgentConfigImportSuccessRecord {
@@ -40,96 +48,102 @@ pub struct ExternalAgentConfigImportHistoryRecord {
     pub failures: Vec<ExternalAgentConfigImportFailureRecord>,
 }
 
+/// Storage-neutral facade for completed external-agent import outcomes and history.
+///
+/// Implementations preserve the order of success and failure payloads exactly as supplied. A
+/// repeated import identifier replaces the prior completion as one record rather than adding a
+/// duplicate history entry.
+#[derive(Clone)]
+pub struct ExternalAgentConfigImportStore {
+    backend: ExternalAgentConfigImportStoreBackend,
+}
+
+#[derive(Clone)]
+enum ExternalAgentConfigImportStoreBackend {
+    Postgres(PostgresExternalAgentConfigImportStore),
+    Sqlite(SqliteExternalAgentConfigImportStore),
+}
+
+impl ExternalAgentConfigImportStore {
+    pub(crate) fn from_sqlite(pool: Arc<SqlitePool>) -> Self {
+        Self {
+            backend: ExternalAgentConfigImportStoreBackend::Sqlite(
+                SqliteExternalAgentConfigImportStore::new(pool),
+            ),
+        }
+    }
+
+    pub(crate) fn from_postgres(pool: PgPool, schema: String) -> Self {
+        Self {
+            backend: ExternalAgentConfigImportStoreBackend::Postgres(
+                PostgresExternalAgentConfigImportStore::new(pool, schema),
+            ),
+        }
+    }
+
+    pub async fn record_completed(
+        &self,
+        import_id: &str,
+        successes: &[ExternalAgentConfigImportSuccessRecord],
+        failures: &[ExternalAgentConfigImportFailureRecord],
+    ) -> anyhow::Result<()> {
+        match &self.backend {
+            ExternalAgentConfigImportStoreBackend::Postgres(store) => {
+                store.record_completed(import_id, successes, failures).await
+            }
+            ExternalAgentConfigImportStoreBackend::Sqlite(store) => {
+                store.record_completed(import_id, successes, failures).await
+            }
+        }
+    }
+
+    pub async fn details(
+        &self,
+        import_id: &str,
+    ) -> anyhow::Result<Option<ExternalAgentConfigImportDetailsRecord>> {
+        match &self.backend {
+            ExternalAgentConfigImportStoreBackend::Postgres(store) => {
+                store.details(import_id).await
+            }
+            ExternalAgentConfigImportStoreBackend::Sqlite(store) => store.details(import_id).await,
+        }
+    }
+
+    pub async fn history(&self) -> anyhow::Result<Vec<ExternalAgentConfigImportHistoryRecord>> {
+        match &self.backend {
+            ExternalAgentConfigImportStoreBackend::Postgres(store) => store.history().await,
+            ExternalAgentConfigImportStoreBackend::Sqlite(store) => store.history().await,
+        }
+    }
+}
+
 impl StateRuntime {
+    pub fn external_agent_config_import_store(&self) -> &ExternalAgentConfigImportStore {
+        &self.external_agent_config_imports
+    }
+
     pub async fn record_external_agent_config_import_completed(
         &self,
         import_id: &str,
         successes: &[ExternalAgentConfigImportSuccessRecord],
         failures: &[ExternalAgentConfigImportFailureRecord],
     ) -> anyhow::Result<()> {
-        sqlx::query(
-            r#"
-INSERT INTO external_agent_config_imports (
-    import_id,
-    completed_at_ms,
-    successes,
-    failures
-) VALUES (?, ?, ?, ?)
-ON CONFLICT(import_id) DO UPDATE SET
-    completed_at_ms = excluded.completed_at_ms,
-    successes = excluded.successes,
-    failures = excluded.failures
-"#,
-        )
-        .bind(import_id)
-        .bind(datetime_to_epoch_millis(Utc::now()))
-        .bind(serde_json::to_string(successes)?)
-        .bind(serde_json::to_string(failures)?)
-        .execute(self.pool.as_ref())
-        .await?;
-
-        Ok(())
+        self.external_agent_config_imports
+            .record_completed(import_id, successes, failures)
+            .await
     }
 
     pub async fn external_agent_config_import_details_record(
         &self,
         import_id: &str,
     ) -> anyhow::Result<Option<ExternalAgentConfigImportDetailsRecord>> {
-        let row = sqlx::query(
-            r#"
-SELECT
-    successes,
-    failures
-FROM external_agent_config_imports
-WHERE import_id = ?
-"#,
-        )
-        .bind(import_id)
-        .fetch_optional(self.pool.as_ref())
-        .await?;
-
-        row.map(|row| {
-            let successes: String = row.try_get("successes")?;
-            let failures: String = row.try_get("failures")?;
-            Ok(ExternalAgentConfigImportDetailsRecord {
-                successes: serde_json::from_str(&successes)?,
-                failures: serde_json::from_str(&failures)?,
-            })
-        })
-        .transpose()
+        self.external_agent_config_imports.details(import_id).await
     }
 
     pub async fn external_agent_config_import_history_records(
         &self,
     ) -> anyhow::Result<Vec<ExternalAgentConfigImportHistoryRecord>> {
-        let rows = sqlx::query(
-            r#"
-SELECT
-    import_id,
-    completed_at_ms,
-    successes,
-    failures
-FROM external_agent_config_imports
-ORDER BY completed_at_ms DESC, import_id ASC
-"#,
-        )
-        .fetch_all(self.pool.as_ref())
-        .await?;
-
-        rows.into_iter()
-            .map(|row| {
-                let import_id: String = row.try_get("import_id")?;
-                let completed_at_ms: i64 = row.try_get("completed_at_ms")?;
-                let successes: String = row.try_get("successes")?;
-                let failures: String = row.try_get("failures")?;
-                Ok(ExternalAgentConfigImportHistoryRecord {
-                    import_id,
-                    completed_at_ms,
-                    successes: serde_json::from_str(&successes)?,
-                    failures: serde_json::from_str(&failures)?,
-                })
-            })
-            .collect()
+        self.external_agent_config_imports.history().await
     }
 }
 

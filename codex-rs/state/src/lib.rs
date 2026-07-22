@@ -71,6 +71,7 @@ pub use model::ThreadsPage;
 pub use runtime::ExternalAgentConfigImportDetailsRecord;
 pub use runtime::ExternalAgentConfigImportFailureRecord;
 pub use runtime::ExternalAgentConfigImportHistoryRecord;
+pub use runtime::ExternalAgentConfigImportStore;
 pub use runtime::ExternalAgentConfigImportSuccessRecord;
 pub use runtime::GoalAccountingMode;
 pub use runtime::GoalAccountingOutcome;

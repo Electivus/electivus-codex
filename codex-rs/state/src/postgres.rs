@@ -17,7 +17,7 @@ use config::connection_failed;
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
 const MINIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
-const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 14;
+const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 15;
 const BASELINE_SCHEMA_VERSION: i64 = 1;
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
@@ -84,6 +84,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         14,
         include_str!("../postgres_migrations/0014_memory_generations.sql"),
         "create atomic memory generation storage",
+    ),
+    (
+        15,
+        include_str!("../postgres_migrations/0015_external_agent_config_imports.sql"),
+        "create external-agent import storage",
     ),
 ];
 
@@ -173,6 +178,11 @@ impl PostgresRuntimeStatePool {
     /// Derives a memory facade that shares this owner's pool.
     pub fn memory_store(&self) -> crate::MemoryStore {
         crate::MemoryStore::from_postgres(self.pool.clone(), self.schema.clone())
+    }
+
+    /// Derives an external-agent import facade that shares this owner's pool.
+    pub fn external_agent_config_import_store(&self) -> crate::ExternalAgentConfigImportStore {
+        crate::ExternalAgentConfigImportStore::from_postgres(self.pool.clone(), self.schema.clone())
     }
 
     /// Returns the shared pool and namespace needed by the thread-store facade.
