@@ -29,7 +29,7 @@ const MEMORY_CONSOLIDATION_JOB_KEY: &str = "global";
     dead_code,
     reason = "used by the next Memory Generation integration checkpoint"
 )]
-pub(super) struct PostgresMemoryStore {
+pub(crate) struct PostgresMemoryStore {
     artifacts_table: String,
     generation_state_table: String,
     generations_table: String,
@@ -43,7 +43,7 @@ pub(super) struct PostgresMemoryStore {
 }
 
 impl PostgresMemoryStore {
-    pub(super) fn new(pool: PgPool, schema: String) -> Self {
+    pub(crate) fn new(pool: PgPool, schema: String) -> Self {
         Self {
             artifacts_table: qualified_table(&schema, "memory_generation_artifacts"),
             generation_state_table: qualified_table(&schema, "memory_generation_state"),
@@ -67,7 +67,7 @@ impl PostgresMemoryStore {
     /// Callers acquire this namespace-scoped lock before touching either resource. Unlike row
     /// locks, the advisory lock also orders transactions when an output or global job row has not
     /// been inserted yet.
-    async fn acquire_output_and_global_job_lock(
+    pub(crate) async fn acquire_output_and_global_job_lock(
         &self,
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> anyhow::Result<()> {
@@ -385,7 +385,7 @@ impl PostgresMemoryStore {
         Ok(rows_affected > 0)
     }
 
-    async fn enqueue_global_consolidation_in_transaction(
+    pub(crate) async fn enqueue_global_consolidation_in_transaction(
         &self,
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         input_watermark: i64,

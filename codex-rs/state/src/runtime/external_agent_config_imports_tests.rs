@@ -2,6 +2,30 @@ use super::*;
 use crate::runtime::test_support::unique_temp_dir;
 use pretty_assertions::assert_eq;
 
+#[test]
+fn external_agent_memory_import_validates_replacement_scope() -> anyhow::Result<()> {
+    let removal = ExternalAgentMemoryImport::new(
+        vec!["project-a".to_string()],
+        MemoryArtifactSet::new(Vec::new())?,
+    )?;
+    assert_eq!(removal.project_keys(), &["project-a".to_string()]);
+    assert_eq!(removal.artifacts(), &MemoryArtifactSet::new(Vec::new())?);
+
+    let outside_scope = MemoryArtifactSet::new(vec![MemoryArtifact::new(
+        "extensions/external_agent_import/resources/project-b/MEMORY.md",
+        Vec::new(),
+    )?])?;
+    assert!(ExternalAgentMemoryImport::new(vec!["project-a".to_string()], outside_scope).is_err());
+    assert!(
+        ExternalAgentMemoryImport::new(
+            vec!["..".to_string()],
+            MemoryArtifactSet::new(Vec::new())?,
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn sqlite_matches_external_agent_config_import_contract() -> anyhow::Result<()> {
     let runtime = StateRuntime::init(unique_temp_dir(), "test-provider".to_string()).await?;

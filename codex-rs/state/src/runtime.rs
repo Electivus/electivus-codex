@@ -100,6 +100,7 @@ pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportHistoryRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportStore;
 pub use external_agent_config_imports::ExternalAgentConfigImportSuccessRecord;
+pub use external_agent_config_imports::ExternalAgentMemoryImport;
 pub use goals::GoalAccountingMode;
 pub use goals::GoalAccountingOutcome;
 pub use goals::GoalAccountingRequest;

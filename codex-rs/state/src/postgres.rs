@@ -17,7 +17,7 @@ use config::connection_failed;
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
 const MINIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
-const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 15;
+const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 16;
 const BASELINE_SCHEMA_VERSION: i64 = 1;
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
@@ -89,6 +89,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         15,
         include_str!("../postgres_migrations/0015_external_agent_config_imports.sql"),
         "create external-agent import storage",
+    ),
+    (
+        16,
+        include_str!("../postgres_migrations/0016_external_agent_memory_imports.sql"),
+        "link external-agent imports to Memory Generations",
     ),
 ];
 
@@ -536,6 +541,9 @@ mod test_support;
 #[cfg(test)]
 #[path = "postgres_contract_tests.rs"]
 mod contract_tests;
+#[cfg(test)]
+#[path = "postgres_external_agent_memory_import_contract_tests.rs"]
+mod external_agent_memory_import_contract_tests;
 
 #[cfg(test)]
 #[path = "postgres_memory_concurrency_contract_tests.rs"]

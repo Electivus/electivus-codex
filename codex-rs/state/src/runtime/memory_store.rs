@@ -11,7 +11,7 @@ use std::sync::Arc;
 #[path = "memory_store/generation.rs"]
 mod generation;
 #[path = "memory_store/postgres.rs"]
-mod postgres;
+pub(crate) mod postgres;
 pub use generation::MemoryArtifact;
 pub use generation::MemoryArtifactSet;
 pub use generation::MemoryGeneration;
