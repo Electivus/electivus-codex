@@ -960,8 +960,21 @@ impl RolloutRecorder {
     pub async fn load_rollout_items(
         path: &Path,
     ) -> std::io::Result<(Vec<RolloutItem>, Option<ThreadId>, usize)> {
+        let (lines, thread_id, parse_errors) = Self::load_rollout_lines(path).await?;
+        Ok((
+            lines.into_iter().map(|line| line.item).collect(),
+            thread_id,
+            parse_errors,
+        ))
+    }
+
+    /// Loads complete canonical rollout records through the same compatibility parser used by
+    /// resume, preserving each record's timestamp and optional persisted ordinal.
+    pub async fn load_rollout_lines(
+        path: &Path,
+    ) -> std::io::Result<(Vec<RolloutLine>, Option<ThreadId>, usize)> {
         trace!("Resuming rollout from {path:?}");
-        let mut items: Vec<RolloutItem> = Vec::new();
+        let mut lines = Vec::new();
         let mut thread_id: Option<ThreadId> = None;
         let mut parse_errors = 0usize;
         let mut reader = compression::open_rollout_line_reader(path).await?;
@@ -999,15 +1012,14 @@ impl RolloutRecorder {
                 }
             };
 
-            let item = rollout_line.item;
             // Use the FIRST SessionMeta encountered in the file as the canonical
             // thread id and main session information. Keep all items intact.
             if thread_id.is_none()
-                && let RolloutItem::SessionMeta(session_meta_line) = &item
+                && let RolloutItem::SessionMeta(session_meta_line) = &rollout_line.item
             {
                 thread_id = Some(session_meta_line.meta.id);
             }
-            items.push(item);
+            lines.push(rollout_line);
         }
         if !saw_non_empty_line {
             return Err(IoError::other("empty session file"));
@@ -1015,11 +1027,11 @@ impl RolloutRecorder {
 
         tracing::debug!(
             "Resumed rollout with {} items, thread ID: {:?}, parse errors: {}",
-            items.len(),
+            lines.len(),
             thread_id,
             parse_errors,
         );
-        Ok((items, thread_id, parse_errors))
+        Ok((lines, thread_id, parse_errors))
     }
 
     pub async fn get_rollout_history(path: &Path) -> std::io::Result<InitialHistory> {
