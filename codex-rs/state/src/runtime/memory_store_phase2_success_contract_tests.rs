@@ -4,6 +4,7 @@ use super::test_support::test_thread_metadata;
 use super::test_support::unique_temp_dir;
 use crate::MemoryArtifact;
 use crate::MemoryArtifactSet;
+use crate::MemoryWorkspaceMaterialization;
 use crate::Phase2JobClaimOutcome;
 use crate::Stage1JobClaimOutcome;
 use crate::Stage1Output;
@@ -332,6 +333,13 @@ async fn sqlite_consolidation_completion_preserves_filesystem_authority() -> Res
         let _ = std::fs::remove_dir_all(path);
     });
     let runtime = StateRuntime::init(codex_home, "test-provider".to_string()).await?;
+    assert_eq!(
+        runtime
+            .memories()
+            .memory_workspace_materialization()
+            .await?,
+        MemoryWorkspaceMaterialization::Preserve
+    );
     runtime
         .memories()
         .enqueue_global_consolidation(/*input_watermark*/ 10)

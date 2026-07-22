@@ -12,18 +12,52 @@ pub struct MemoryArtifactSet {
     artifacts: Vec<MemoryArtifact>,
 }
 
+/// Backend-neutral action for synchronizing the disposable local memory workspace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MemoryWorkspaceMaterialization {
+    /// Keep the filesystem-authoritative workspace unchanged.
+    Preserve,
+    /// Replace the local workspace with one complete authoritative generation.
+    Replace {
+        /// Immutable identity used to detect publication changes during materialization.
+        generation_id: String,
+        /// Complete artifact set published by the generation.
+        artifacts: MemoryArtifactSet,
+    },
+    /// Replace the local workspace with an empty artifact set.
+    Clear,
+}
+
 impl MemoryArtifactSet {
     /// Validates cross-filesystem key uniqueness and orders artifacts by their portable keys.
     pub fn new(mut artifacts: Vec<MemoryArtifact>) -> anyhow::Result<Self> {
+        let case_folded_paths = artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact
+                        .path
+                        .chars()
+                        .flat_map(char::to_uppercase)
+                        .collect::<String>(),
+                    artifact.path.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
         let mut case_folded_keys = std::collections::BTreeSet::new();
-        for artifact in &artifacts {
-            let case_folded_key: String =
-                artifact.path.chars().flat_map(char::to_uppercase).collect();
+        for (case_folded_key, path) in &case_folded_paths {
             anyhow::ensure!(
-                case_folded_keys.insert(case_folded_key),
-                "Memory Artifact set contains a case-insensitive collision at {}",
-                artifact.path
+                case_folded_keys.insert(case_folded_key.as_str()),
+                "Memory Artifact set contains a case-insensitive collision at {path}"
             );
+        }
+        for (case_folded_key, path) in &case_folded_paths {
+            for (separator_index, _) in case_folded_key.match_indices('/') {
+                anyhow::ensure!(
+                    !case_folded_keys.contains(&case_folded_key[..separator_index]),
+                    "Memory Artifact set contains a file-directory collision at {path}"
+                );
+            }
         }
         artifacts.sort_by(|left, right| left.path.cmp(&right.path));
         Ok(Self { artifacts })
@@ -119,6 +153,10 @@ impl MemoryGeneration {
     /// Returns the generation's complete artifact set in portable path order.
     pub fn artifacts(&self) -> &[MemoryArtifact] {
         self.artifacts.artifacts()
+    }
+
+    pub(crate) fn into_artifact_set(self) -> MemoryArtifactSet {
+        self.artifacts
     }
 }
 

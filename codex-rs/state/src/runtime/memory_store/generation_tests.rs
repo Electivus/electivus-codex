@@ -88,6 +88,32 @@ fn memory_artifact_set_uses_deterministic_unicode_case_fold() -> anyhow::Result<
 }
 
 #[test]
+fn memory_artifact_set_rejects_file_directory_prefix_collisions() -> anyhow::Result<()> {
+    let error = MemoryArtifactSet::new(vec![
+        MemoryArtifact::new("skills/example", Vec::new())?,
+        MemoryArtifact::new("Skills/Example/SKILL.md", Vec::new())?,
+    ])
+    .expect_err("a portable key cannot be both a file and a directory");
+
+    assert!(error.to_string().contains("file-directory collision"));
+    Ok(())
+}
+
+#[test]
+fn memory_artifact_set_rejects_non_adjacent_file_directory_prefix_collisions() -> anyhow::Result<()>
+{
+    let error = MemoryArtifactSet::new(vec![
+        MemoryArtifact::new("A", Vec::new())?,
+        MemoryArtifact::new("A-B", Vec::new())?,
+        MemoryArtifact::new("a/B", Vec::new())?,
+    ])
+    .expect_err("an intervening key cannot hide a case-insensitive file-directory collision");
+
+    assert!(error.to_string().contains("file-directory collision"));
+    Ok(())
+}
+
+#[test]
 fn memory_artifact_set_orders_distinct_portable_keys() -> anyhow::Result<()> {
     let artifacts = MemoryArtifactSet::new(vec![
         MemoryArtifact::new("skills/zeta/SKILL.md", Vec::new())?,

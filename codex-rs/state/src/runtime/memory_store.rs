@@ -15,6 +15,7 @@ mod postgres;
 pub use generation::MemoryArtifact;
 pub use generation::MemoryArtifactSet;
 pub use generation::MemoryGeneration;
+pub use generation::MemoryWorkspaceMaterialization;
 use postgres::PostgresMemoryStore;
 
 pub(super) const PHASE2_SUCCESS_COOLDOWN_SECONDS: i64 = 6 * 60 * 60;
@@ -402,6 +403,24 @@ impl MemoryStore {
         match &self.backend {
             MemoryStoreBackend::Postgres(store) => store.load_active_memory_generation().await,
             MemoryStoreBackend::Sqlite(_) => Ok(None),
+        }
+    }
+
+    /// Returns the backend-neutral action needed to synchronize a disposable local workspace.
+    pub async fn memory_workspace_materialization(
+        &self,
+    ) -> anyhow::Result<MemoryWorkspaceMaterialization> {
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => {
+                Ok(match store.load_active_memory_generation().await? {
+                    Some(generation) => MemoryWorkspaceMaterialization::Replace {
+                        generation_id: generation.generation_id().to_string(),
+                        artifacts: generation.into_artifact_set(),
+                    },
+                    None => MemoryWorkspaceMaterialization::Clear,
+                })
+            }
+            MemoryStoreBackend::Sqlite(_) => Ok(MemoryWorkspaceMaterialization::Preserve),
         }
     }
 

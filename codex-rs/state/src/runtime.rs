@@ -108,6 +108,7 @@ pub use memory_store::MemoryArtifact;
 pub use memory_store::MemoryArtifactSet;
 pub use memory_store::MemoryGeneration;
 pub use memory_store::MemoryStore;
+pub use memory_store::MemoryWorkspaceMaterialization;
 pub use recovery::RuntimeDbBackup;
 pub use recovery::backup_runtime_db_for_fresh_start;
 pub use recovery::is_sqlite_corruption_error;

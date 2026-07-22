@@ -116,6 +116,7 @@ mod workspace_diff {
 }
 
 mod workspace_artifacts;
+mod workspace_materialization;
 pub(crate) use workspace_artifacts::collect_memory_artifacts;
 
 pub fn memory_root(codex_home: &AbsolutePathBuf) -> AbsolutePathBuf {

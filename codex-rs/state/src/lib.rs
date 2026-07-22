@@ -37,6 +37,7 @@ pub use runtime::BackfillLeaseUpdate;
 pub use runtime::MemoryArtifact;
 pub use runtime::MemoryArtifactSet;
 pub use runtime::MemoryGeneration;
+pub use runtime::MemoryWorkspaceMaterialization;
 pub use runtime::RuntimeStateBackendConfig;
 /// Preferred entrypoint: owns configuration and metrics.
 pub use runtime::StateRuntime;
