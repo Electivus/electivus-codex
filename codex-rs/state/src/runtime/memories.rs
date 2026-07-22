@@ -25,18 +25,23 @@ const DEFAULT_RETRY_REMAINING: i64 = 3;
 
 /// Store for generated memory state and memory extraction/consolidation jobs.
 #[derive(Clone)]
-pub struct MemoryStore {
+pub(super) struct SqliteMemoryStore {
     pool: Arc<SqlitePool>,
     state_pool: Arc<SqlitePool>,
 }
 
-impl MemoryStore {
-    pub(crate) fn new(pool: Arc<SqlitePool>, state_pool: Arc<SqlitePool>) -> Self {
+impl SqliteMemoryStore {
+    pub(super) fn new(pool: Arc<SqlitePool>, state_pool: Arc<SqlitePool>) -> Self {
         Self { pool, state_pool }
     }
 
     pub(crate) async fn close(&self) {
         self.pool.close().await;
+    }
+
+    #[cfg(test)]
+    pub(super) fn pool_for_tests(&self) -> &SqlitePool {
+        self.pool.as_ref()
     }
 
     /// Deletes all persisted memory state in one transaction.
@@ -1688,7 +1693,7 @@ mod tests {
     }
 
     fn memory_pool(runtime: &StateRuntime) -> &sqlx::SqlitePool {
-        runtime.memories().pool.as_ref()
+        runtime.memories().sqlite_pool_for_tests()
     }
 
     async fn age_phase2_success_beyond_cooldown(runtime: &StateRuntime) {

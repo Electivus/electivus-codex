@@ -14,6 +14,7 @@ use crate::runtime::logs_contract_tests::run_filter_order_and_max_id_contract;
 use crate::runtime::logs_contract_tests::run_partition_limits_contract;
 use crate::runtime::logs_contract_tests::run_replica_visibility_contract;
 use crate::runtime::logs_contract_tests::run_startup_retention_contract;
+use crate::runtime::memory_store_contract_tests::run_stage1_claim_and_output_contract;
 use crate::runtime::remote_control_contract_tests::run_remote_control_enrollment_contract;
 use anyhow::Context;
 use anyhow::Result;
@@ -21,6 +22,65 @@ use codex_protocol::ThreadId;
 use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
 use std::time::Duration;
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_stage1_claims_and_outputs_are_shared_between_replicas() -> Result<()> {
+    let database_url = test_database_url()?;
+    let mut fixture = PostgresContractFixture::new(database_url, "stage1_claim_output")?;
+    fixture.manage(PostgresNamespaceAction::Migrate).await?;
+    let first_pool = fixture.connect_pool().await?;
+    let thread_id = ThreadId::new();
+    let threads_table = super::qualified_table(fixture.schema(), "threads");
+    sqlx::query(AssertSqlSafe(format!(
+        "INSERT INTO {threads_table} (thread_id, projection, stream_version, fencing_token, \
+         writer_id, writer_lease_expires_at, created_at, updated_at, recency_at) \
+         VALUES ($1, '{{}}', 0, 1, 'memory-contract', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, \
+         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )))
+    .bind(thread_id.to_string())
+    .execute(&first_pool)
+    .await?;
+    let first = crate::MemoryStore::from_postgres(first_pool.clone(), fixture.schema().to_string());
+    let second = crate::MemoryStore::from_postgres(
+        fixture.connect_pool().await?,
+        fixture.schema().to_string(),
+    );
+
+    run_stage1_claim_and_output_contract(&first, &second, thread_id).await?;
+
+    let outputs_table = super::qualified_table(fixture.schema(), "memory_stage1_outputs");
+    let jobs_table = super::qualified_table(fixture.schema(), "memory_jobs");
+    let before_delete: (i64, i64) = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT (SELECT COUNT(*) FROM {outputs_table} WHERE thread_id = $1), \
+         (SELECT COUNT(*) FROM {jobs_table} WHERE kind = 'memory_stage1' AND thread_id = $1)"
+    )))
+    .bind(thread_id.to_string())
+    .fetch_one(&first_pool)
+    .await?;
+    assert_eq!(before_delete, (1, 1));
+
+    sqlx::query(AssertSqlSafe(format!(
+        "DELETE FROM {threads_table} WHERE thread_id = $1"
+    )))
+    .bind(thread_id.to_string())
+    .execute(&first_pool)
+    .await?;
+    let after_delete: (i64, i64, i64) = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT (SELECT COUNT(*) FROM {outputs_table} WHERE thread_id = $1), \
+         (SELECT COUNT(*) FROM {jobs_table} WHERE kind = 'memory_stage1' AND thread_id = $1), \
+         (SELECT COUNT(*) FROM {jobs_table} WHERE kind = 'memory_consolidate_global' \
+         AND thread_id IS NULL)"
+    )))
+    .bind(thread_id.to_string())
+    .fetch_one(&first_pool)
+    .await?;
+    assert_eq!(after_delete, (0, 0, 1));
+
+    first.close().await;
+    second.close().await;
+    fixture.cleanup().await
+}
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
@@ -376,7 +436,7 @@ async fn postgres_contract_creates_migrates_validates_and_cleans_up_namespace() 
 
     assert_eq!(validated, migrated);
     assert_eq!(migrated.schema(), fixture.schema());
-    assert_eq!(migrated.version(), 11);
+    assert_eq!(migrated.version(), 12);
 
     fixture.cleanup().await?;
     assert!(!fixture.schema_exists().await?);
@@ -397,8 +457,8 @@ async fn postgres_contract_migration_is_idempotent() -> Result<()> {
         fixture.migration_history().await?,
         MigrationHistory {
             minimum: Some(1),
-            maximum: Some(11),
-            count: 11,
+            maximum: Some(12),
+            count: 12,
         }
     );
     fixture.cleanup().await?;
@@ -459,8 +519,8 @@ async fn postgres_contract_migration_uses_namespace_advisory_lock() -> Result<()
         fixture.migration_history().await?,
         MigrationHistory {
             minimum: Some(1),
-            maximum: Some(11),
-            count: 11,
+            maximum: Some(12),
+            count: 12,
         }
     );
     drop(contending_migration);

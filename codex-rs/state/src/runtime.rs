@@ -59,6 +59,10 @@ mod log_store;
 #[path = "runtime/logs_contract_tests.rs"]
 pub(crate) mod logs_contract_tests;
 mod memories;
+mod memory_store;
+#[cfg(test)]
+#[path = "runtime/memory_store_contract_tests.rs"]
+pub(crate) mod memory_store_contract_tests;
 mod recovery;
 mod remote_control;
 #[cfg(test)]
@@ -88,7 +92,7 @@ pub use goals::GoalStoreOperation;
 pub use goals::GoalStoreResult;
 pub use goals::GoalUpdate;
 pub(crate) use log_store::LogStore;
-pub use memories::MemoryStore;
+pub use memory_store::MemoryStore;
 pub use recovery::RuntimeDbBackup;
 pub use recovery::backup_runtime_db_for_fresh_start;
 pub use recovery::is_sqlite_corruption_error;

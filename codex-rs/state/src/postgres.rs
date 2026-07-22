@@ -17,7 +17,7 @@ use config::connection_failed;
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
 const MINIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
-const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 11;
+const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 12;
 const BASELINE_SCHEMA_VERSION: i64 = 1;
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
@@ -69,6 +69,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         11,
         include_str!("../postgres_migrations/0011_thread_goal_accounting_events.sql"),
         "create thread goal accounting storage",
+    ),
+    (
+        12,
+        include_str!("../postgres_migrations/0012_memory_stage1.sql"),
+        "create stage-one memory storage",
     ),
 ];
 
@@ -153,6 +158,11 @@ impl PostgresRuntimeStatePool {
     /// Derives a goal facade that shares this owner's pool.
     pub fn goal_store(&self) -> crate::GoalStore {
         crate::GoalStore::from_postgres(self.pool.clone(), self.schema.clone())
+    }
+
+    /// Derives a memory facade that shares this owner's pool.
+    pub fn memory_store(&self) -> crate::MemoryStore {
+        crate::MemoryStore::from_postgres(self.pool.clone(), self.schema.clone())
     }
 
     /// Returns the shared pool and namespace needed by the thread-store facade.
