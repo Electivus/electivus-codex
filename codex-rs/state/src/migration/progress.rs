@@ -1,3 +1,4 @@
+use super::import_memory::memory_evidence;
 use crate::postgres::map_sql_error;
 use crate::postgres::qualified_table;
 use futures::TryStreamExt;
@@ -172,7 +173,36 @@ pub(super) async fn phase_evidence(
             evidence[field] = serde_json::Value::from(count);
         }
     }
+    if matches!(
+        metadata.phase,
+        RuntimeStateMigrationPhase::MemoryImported | RuntimeStateMigrationPhase::Ready
+    ) {
+        add_memory_evidence(connection, schema, &mut evidence).await?;
+    }
     Ok(evidence)
+}
+
+async fn add_memory_evidence(
+    connection: &mut sqlx::PgConnection,
+    schema: &str,
+    evidence: &mut serde_json::Value,
+) -> anyhow::Result<()> {
+    let memory = memory_evidence(connection, schema).await?;
+    for (field, value) in [
+        ("memoryStage1Outputs", memory.outputs),
+        ("memoryJobs", memory.jobs),
+        ("memoryUsedOutputs", memory.used_outputs),
+        ("memorySelectedOutputs", memory.selected_outputs),
+        ("memoryGenerations", memory.generations),
+        ("memoryArtifacts", memory.artifacts),
+        ("memoryArtifactBytes", memory.artifact_bytes),
+    ] {
+        evidence[field] = serde_json::Value::from(value);
+    }
+    evidence["memoryStage1OutputsHash"] = serde_json::Value::String(memory.outputs_hash);
+    evidence["memoryJobsHash"] = serde_json::Value::String(memory.jobs_hash);
+    evidence["memoryArtifactSetHash"] = serde_json::Value::String(memory.artifact_set_hash);
+    Ok(())
 }
 
 /// Hash every namespace row in a deterministic order without aggregating a table client-side.

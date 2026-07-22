@@ -113,7 +113,7 @@ impl PostgresMemoryStore {
         memory_generation_from_rows(&rows)
     }
 
-    async fn load_active_memory_generation_in_transaction(
+    pub(in crate::runtime::memory_store) async fn load_active_memory_generation_in_transaction(
         &self,
         transaction: &mut Transaction<'_, Postgres>,
     ) -> anyhow::Result<Option<MemoryGeneration>> {
@@ -166,7 +166,7 @@ impl PostgresMemoryStore {
         MemoryArtifactSet::new(merged)
     }
 
-    async fn insert_and_activate_generation(
+    pub(in crate::runtime::memory_store) async fn insert_and_activate_generation(
         &self,
         transaction: &mut Transaction<'_, Postgres>,
         completed_watermark: i64,

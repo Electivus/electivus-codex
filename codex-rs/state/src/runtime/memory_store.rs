@@ -20,6 +20,23 @@ use postgres::PostgresMemoryStore;
 
 pub(super) const PHASE2_SUCCESS_COOLDOWN_SECONDS: i64 = 6 * 60 * 60;
 
+pub(crate) async fn import_migrated_memory_generation(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    pool: PgPool,
+    schema: String,
+    completed_watermark: i64,
+    artifacts: &MemoryArtifactSet,
+) -> anyhow::Result<MemoryGeneration> {
+    let store = PostgresMemoryStore::new(pool, schema);
+    store
+        .insert_and_activate_generation(transaction, completed_watermark, artifacts)
+        .await?;
+    store
+        .load_active_memory_generation_in_transaction(transaction)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("migrated Memory Generation is not active"))
+}
+
 /// Storage-neutral facade for memory extraction and consolidation state.
 #[derive(Clone)]
 pub struct MemoryStore {

@@ -7,10 +7,6 @@ use sqlx::Row;
 use uuid::Uuid;
 
 #[path = "postgres/artifacts.rs"]
-#[allow(
-    dead_code,
-    reason = "used by the next Memory Generation integration checkpoint"
-)]
 mod artifacts;
 #[path = "postgres/outputs.rs"]
 mod outputs;
@@ -25,10 +21,6 @@ const JOB_KIND_MEMORY_STAGE1: &str = "memory_stage1";
 const MEMORY_CONSOLIDATION_JOB_KEY: &str = "global";
 
 #[derive(Clone)]
-#[allow(
-    dead_code,
-    reason = "used by the next Memory Generation integration checkpoint"
-)]
 pub(crate) struct PostgresMemoryStore {
     artifacts_table: String,
     generation_state_table: String,
