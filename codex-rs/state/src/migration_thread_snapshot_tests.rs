@@ -256,6 +256,7 @@ fn inventory<const N: usize>(
             .collect::<anyhow::Result<Vec<_>>>()?,
         memory_files: Vec::new(),
         imported_resources: Vec::new(),
+        configuration: None,
         destination_schema: "unused".to_string(),
         destination_schema_version: 17,
     })

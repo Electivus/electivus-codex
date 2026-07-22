@@ -1,9 +1,13 @@
 use super::CanonicalThreadHistoryReader;
 use super::RuntimeStateMigrationInventory;
+use super::RuntimeStateMigrationPhase;
+use super::RuntimeStateMigrationProgress;
 use super::RuntimeStateThreadSnapshot;
 use super::ThreadMigrationSnapshot;
 use super::destination_validation;
 use super::inspect_source;
+use super::progress::existing_progress;
+use super::progress::namespace_digest;
 use super::snapshot_runtime_state_migration_threads;
 use crate::PostgresNamespaceAction;
 use crate::PostgresNamespaceConfig;
@@ -25,45 +29,6 @@ use serde_json::json;
 use sha2::Digest;
 use sha2::Sha256;
 use sqlx::AssertSqlSafe;
-use sqlx::Row;
-
-/// Durable phase reached by an explicit Runtime State Migration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeStateMigrationPhase {
-    ThreadsImported,
-    OperationalImported,
-    MemoryImported,
-    Ready,
-}
-
-impl RuntimeStateMigrationPhase {
-    fn parse(value: &str) -> anyhow::Result<Self> {
-        match value {
-            "threads_imported" => Ok(Self::ThreadsImported),
-            "operational_imported" => Ok(Self::OperationalImported),
-            "memory_imported" => Ok(Self::MemoryImported),
-            "ready" => Ok(Self::Ready),
-            _ => anyhow::bail!("PostgreSQL Runtime State Migration has an invalid phase"),
-        }
-    }
-}
-
-/// Durable migration position after an idempotent phase attempt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RuntimeStateMigrationProgress {
-    phase: RuntimeStateMigrationPhase,
-    fencing_token: i64,
-}
-
-impl RuntimeStateMigrationProgress {
-    pub fn phase(&self) -> RuntimeStateMigrationPhase {
-        self.phase
-    }
-
-    pub fn fencing_token(&self) -> i64 {
-        self.fencing_token
-    }
-}
 
 /// Revalidate and atomically import the authoritative local thread domain into PostgreSQL.
 pub async fn import_runtime_state_threads(
@@ -106,7 +71,8 @@ async fn revalidate_source(
         actual.databases == expected.databases
             && actual.rollout_files == expected.rollout_files
             && actual.memory_files == expected.memory_files
-            && actual.imported_resources == expected.imported_resources,
+            && actual.imported_resources == expected.imported_resources
+            && actual.configuration == expected.configuration,
         "Runtime State Migration source changed after preflight; stop every process using it and retry"
     );
     Ok(())
@@ -151,6 +117,7 @@ async fn import_snapshot(
     }
     destination_validation::ensure_empty(transaction.as_mut(), schema).await?;
     write_threads(transaction.as_mut(), schema, snapshot).await?;
+    let namespace_digest = namespace_digest(transaction.as_mut(), schema).await?;
     let migration = qualified_table(schema, "runtime_state_migration");
     let evidence = json!({
         "threads": snapshot.threads.len(),
@@ -160,6 +127,7 @@ async fn import_snapshot(
             .map(|thread| thread.canonical_history.lines().len())
             .sum::<usize>(),
         "sourceFingerprint": source_fingerprint,
+        "namespaceDigest": namespace_digest,
     });
     sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO {migration} (source_identity, source_fingerprint, phase, ready, phase_evidence, fencing_token) \
@@ -179,38 +147,6 @@ async fn import_snapshot(
         phase: RuntimeStateMigrationPhase::ThreadsImported,
         fencing_token: 1,
     })
-}
-
-async fn existing_progress(
-    connection: &mut sqlx::PgConnection,
-    schema: &str,
-    source_identity: &str,
-    source_fingerprint: &str,
-) -> anyhow::Result<Option<RuntimeStateMigrationProgress>> {
-    let migration = qualified_table(schema, "runtime_state_migration");
-    let row = sqlx::query(AssertSqlSafe(format!(
-        "SELECT source_identity, source_fingerprint, phase, ready, fencing_token \
-         FROM {migration} WHERE singleton FOR UPDATE"
-    )))
-    .fetch_optional(&mut *connection)
-    .await
-    .map_err(|error| map_sql_error(schema, "read Runtime State Migration phase", error))?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    anyhow::ensure!(
-        !row.try_get::<bool, _>("ready")?,
-        "PostgreSQL Runtime State Migration is already ready; retries are not allowed"
-    );
-    anyhow::ensure!(
-        row.try_get::<String, _>("source_identity")? == source_identity
-            && row.try_get::<String, _>("source_fingerprint")? == source_fingerprint,
-        "PostgreSQL Runtime State Namespace belongs to a different migration source"
-    );
-    Ok(Some(RuntimeStateMigrationProgress {
-        phase: RuntimeStateMigrationPhase::parse(&row.try_get::<String, _>("phase")?)?,
-        fencing_token: row.try_get("fencing_token")?,
-    }))
 }
 
 async fn write_threads(
@@ -359,7 +295,14 @@ fn thread_projection(
         "git_info": git_info,
         "approval_mode": approval_mode,
         "permission_profile": permission_profile,
-        "token_usage": null,
+        "token_usage": {
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_output_tokens": 0,
+            "total_tokens": metadata.tokens_used,
+        },
         "first_user_message": metadata.first_user_message,
         "history": null,
         "memory_mode": thread.memory_mode,
@@ -459,6 +402,12 @@ fn fingerprint(inventory: &RuntimeStateMigrationInventory) -> String {
         for file in files {
             hash_file(&mut hasher, file);
         }
+    }
+    if let Some(configuration) = &inventory.configuration {
+        hash_field(&mut hasher, b"configuration");
+        hash_file(&mut hasher, configuration);
+    } else {
+        hash_field(&mut hasher, b"no-configuration");
     }
     format!("{:x}", hasher.finalize())
 }

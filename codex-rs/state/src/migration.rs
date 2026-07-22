@@ -13,6 +13,8 @@ use tokio::io::AsyncReadExt;
 mod destination_validation;
 #[path = "migration/import_threads.rs"]
 mod import_threads;
+#[path = "migration/progress.rs"]
+mod progress;
 #[path = "migration/source_lock.rs"]
 mod source_lock;
 #[path = "migration/source_validation.rs"]
@@ -20,9 +22,9 @@ mod source_validation;
 #[path = "migration/thread_snapshot.rs"]
 mod thread_snapshot;
 
-pub use import_threads::RuntimeStateMigrationPhase;
-pub use import_threads::RuntimeStateMigrationProgress;
 pub use import_threads::import_runtime_state_threads;
+pub use progress::RuntimeStateMigrationPhase;
+pub use progress::RuntimeStateMigrationProgress;
 pub use thread_snapshot::BackfillCoordinationSnapshot;
 pub use thread_snapshot::CanonicalThreadHistoryReader;
 pub use thread_snapshot::CanonicalThreadHistorySnapshot;
@@ -50,6 +52,7 @@ pub struct RuntimeStateMigrationInventory {
     rollout_files: Vec<SourceFileInventory>,
     memory_files: Vec<SourceFileInventory>,
     imported_resources: Vec<SourceFileInventory>,
+    configuration: Option<SourceFileInventory>,
     destination_schema: String,
     destination_schema_version: i64,
 }
@@ -69,6 +72,10 @@ impl RuntimeStateMigrationInventory {
 
     pub fn imported_resources(&self) -> &[SourceFileInventory] {
         &self.imported_resources
+    }
+
+    pub fn configuration(&self) -> Option<&SourceFileInventory> {
+        self.configuration.as_ref()
     }
 
     pub fn destination_schema(&self) -> &str {
@@ -170,7 +177,7 @@ pub async fn preflight_runtime_state_migration(
         rollout_files,
         memory_files,
         imported_resources,
-        configuration: _,
+        configuration,
     } = source_inventory;
 
     Ok(RuntimeStateMigrationInventory {
@@ -178,6 +185,7 @@ pub async fn preflight_runtime_state_migration(
         rollout_files,
         memory_files,
         imported_resources,
+        configuration,
         destination_schema: destination_state.schema,
         destination_schema_version: destination_state.version,
     })
