@@ -4074,6 +4074,7 @@ dependencies = [
  "codex-protocol",
  "codex-rollout",
  "codex-state",
+ "codex-utils-absolute-path",
  "codex-utils-path",
  "futures",
  "pretty_assertions",

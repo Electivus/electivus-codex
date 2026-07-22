@@ -62,7 +62,7 @@ async fn preflight_rejects_incompatible_version_without_writes() -> anyhow::Resu
     let pool = destination.connect_pool().await?;
     let migrations = qualified_table(destination.schema(), "_codex_runtime_state_migrations");
     sqlx::query(AssertSqlSafe(format!(
-        "DELETE FROM {migrations} WHERE version = 16"
+        "DELETE FROM {migrations} WHERE version = 17"
     )))
     .execute(&pool)
     .await?;
@@ -78,7 +78,7 @@ async fn preflight_rejects_incompatible_version_without_writes() -> anyhow::Resu
     .expect_err("outdated destination must be rejected");
 
     let rendered = format!("{error:?} {error:#}");
-    assert!(rendered.contains("current version 16"), "{rendered}");
+    assert!(rendered.contains("current version 17"), "{rendered}");
     assert!(!rendered.contains(&database_url));
     assert_eq!(test_support::snapshot_source(&source)?, source_before);
     assert_eq!(
@@ -87,7 +87,7 @@ async fn preflight_rejects_incompatible_version_without_writes() -> anyhow::Resu
     );
     let pool = destination.connect_pool().await?;
     sqlx::query(AssertSqlSafe(format!(
-        "INSERT INTO {migrations} (version) VALUES (16)"
+        "INSERT INTO {migrations} (version) VALUES (17)"
     )))
     .execute(&pool)
     .await?;

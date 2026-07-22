@@ -17,7 +17,7 @@ use config::connection_failed;
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
 const MINIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
-pub(crate) const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 16;
+pub(crate) const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 17;
 const BASELINE_SCHEMA_VERSION: i64 = 1;
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
@@ -94,6 +94,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         16,
         include_str!("../postgres_migrations/0016_external_agent_memory_imports.sql"),
         "link external-agent imports to Memory Generations",
+    ),
+    (
+        17,
+        include_str!("../postgres_migrations/0017_runtime_state_migration.sql"),
+        "prepare explicit Runtime State Migration",
     ),
 ];
 
@@ -330,7 +335,7 @@ async fn validate_namespace(
     })
 }
 
-async fn acquire_namespace_lock(
+pub(crate) async fn acquire_namespace_lock(
     transaction: &mut Transaction<'_, Postgres>,
     schema: &str,
 ) -> anyhow::Result<()> {

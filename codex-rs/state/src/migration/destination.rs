@@ -9,7 +9,7 @@ use crate::postgres::qualified_table;
 use sqlx::AssertSqlSafe;
 use sqlx::Connection;
 
-const EXPECTED_SCHEMA_FINGERPRINT: &str = "3020368d81e9714c2d9a925d75c75620";
+const EXPECTED_SCHEMA_FINGERPRINT: &str = "331949118fa5285f1dc4b812b3cb46f7";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct DestinationState {
@@ -61,7 +61,10 @@ pub(super) async fn inspect(config: &PostgresNamespaceConfig) -> anyhow::Result<
     result
 }
 
-async fn ensure_empty(connection: &mut sqlx::PgConnection, schema: &str) -> anyhow::Result<()> {
+pub(super) async fn ensure_empty(
+    connection: &mut sqlx::PgConnection,
+    schema: &str,
+) -> anyhow::Result<()> {
     let backfill_state = qualified_table(schema, "backfill_state");
     let backfill_is_baseline: bool = sqlx::query_scalar(AssertSqlSafe(format!(
         "SELECT COUNT(*) = 1 AND BOOL_AND(\

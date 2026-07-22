@@ -11,6 +11,8 @@ use tokio::io::AsyncReadExt;
 
 #[path = "migration/destination.rs"]
 mod destination_validation;
+#[path = "migration/import_threads.rs"]
+mod import_threads;
 #[path = "migration/source_lock.rs"]
 mod source_lock;
 #[path = "migration/source_validation.rs"]
@@ -18,6 +20,9 @@ mod source_validation;
 #[path = "migration/thread_snapshot.rs"]
 mod thread_snapshot;
 
+pub use import_threads::RuntimeStateMigrationPhase;
+pub use import_threads::RuntimeStateMigrationProgress;
+pub use import_threads::import_runtime_state_threads;
 pub use thread_snapshot::BackfillCoordinationSnapshot;
 pub use thread_snapshot::CanonicalThreadHistoryReader;
 pub use thread_snapshot::CanonicalThreadHistorySnapshot;

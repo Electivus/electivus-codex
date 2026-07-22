@@ -257,7 +257,7 @@ fn inventory<const N: usize>(
         memory_files: Vec::new(),
         imported_resources: Vec::new(),
         destination_schema: "unused".to_string(),
-        destination_schema_version: 16,
+        destination_schema_version: 17,
     })
 }
 
