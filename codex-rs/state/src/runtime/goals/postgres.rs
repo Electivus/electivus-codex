@@ -1,6 +1,8 @@
-use super::GoalAccountingMode;
 use super::GoalAccountingOutcome;
+use super::GoalAccountingRequest;
 use super::GoalUpdate;
+use super::accounting::RecordedGoalAccountingEvent;
+use super::accounting::status_after_accounting;
 use super::status_after_budget_limit;
 use crate::ThreadGoal;
 use crate::ThreadGoalStatus;
@@ -11,14 +13,13 @@ use chrono::Utc;
 use codex_protocol::ThreadId;
 use sqlx::AssertSqlSafe;
 use sqlx::PgPool;
-use sqlx::Postgres;
-use sqlx::QueryBuilder;
 use sqlx::Row;
 use sqlx::postgres::PgRow;
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub(super) struct PostgresGoalStore {
+    accounting_events_table: String,
     pool: PgPool,
     deferrals_table: String,
     goals_table: String,
@@ -27,6 +28,7 @@ pub(super) struct PostgresGoalStore {
 impl PostgresGoalStore {
     pub(super) fn new(pool: PgPool, schema: String) -> Self {
         Self {
+            accounting_events_table: qualified_table(&schema, "thread_goal_accounting_events"),
             pool,
             deferrals_table: qualified_table(&schema, "thread_goal_continuation_deferrals"),
             goals_table: qualified_table(&schema, "thread_goals"),
@@ -288,69 +290,88 @@ impl PostgresGoalStore {
     pub(super) async fn account_thread_goal_usage(
         &self,
         thread_id: ThreadId,
-        time_delta_seconds: i64,
-        token_delta: i64,
-        mode: GoalAccountingMode,
-        expected_goal_id: Option<&str>,
+        request: GoalAccountingRequest<'_>,
     ) -> anyhow::Result<GoalAccountingOutcome> {
-        let time_delta_seconds = time_delta_seconds.max(0);
-        let token_delta = token_delta.max(0);
+        let time_delta_seconds = request.time_delta_seconds.max(0);
+        let token_delta = request.token_delta.max(0);
         if time_delta_seconds == 0 && token_delta == 0 {
             return Ok(GoalAccountingOutcome::Unchanged(
                 self.get_thread_goal(thread_id).await?,
             ));
         }
 
-        let active_or_stopped_status_filter =
-            "status IN ('active', 'paused', 'blocked', 'usage_limited', 'budget_limited')";
-        let status_filter = match mode {
-            GoalAccountingMode::ActiveStatusOnly => "status = 'active'",
-            GoalAccountingMode::ActiveOnly => "status IN ('active', 'budget_limited')",
-            GoalAccountingMode::ActiveOrComplete => {
-                "status IN ('active', 'budget_limited', 'complete')"
-            }
-            GoalAccountingMode::ActiveOrStopped => active_or_stopped_status_filter,
-        };
-        let budget_limit_status_filter = match mode {
-            GoalAccountingMode::ActiveStatusOnly
-            | GoalAccountingMode::ActiveOnly
-            | GoalAccountingMode::ActiveOrComplete => "status = 'active'",
-            GoalAccountingMode::ActiveOrStopped => active_or_stopped_status_filter,
-        };
-        let mut builder = QueryBuilder::<Postgres>::new(format!(
-            "UPDATE {} SET time_used_seconds = time_used_seconds + ",
+        let thread_id = thread_id.to_string();
+        let mut transaction = self.pool.begin().await?;
+        let current_row = sqlx::query(AssertSqlSafe(format!(
+            "SELECT thread_id, goal_id, objective, status, token_budget, tokens_used, \
+             time_used_seconds, created_at_ms, updated_at_ms FROM {} \
+             WHERE thread_id = $1 FOR UPDATE",
             self.goals_table
-        ));
-        builder.push_bind(time_delta_seconds);
-        builder.push(", tokens_used = tokens_used + ");
-        builder.push_bind(token_delta);
-        builder.push(", status = CASE WHEN ");
-        builder.push(budget_limit_status_filter);
-        builder.push(" AND token_budget IS NOT NULL AND tokens_used + ");
-        builder.push_bind(token_delta);
-        builder.push(" >= token_budget THEN ");
-        builder.push_bind(ThreadGoalStatus::BudgetLimited.as_str());
-        builder.push(" ELSE status END, updated_at_ms = ");
-        builder.push_bind(datetime_to_epoch_millis(Utc::now()));
-        builder.push(" WHERE thread_id = ");
-        builder.push_bind(thread_id.to_string());
-        builder.push(" AND ");
-        builder.push(status_filter);
-        if let Some(expected_goal_id) = expected_goal_id {
-            builder.push(" AND goal_id = ").push_bind(expected_goal_id);
-        }
-        builder.push(
-            " RETURNING thread_id, goal_id, objective, status, token_budget, tokens_used, \
-             time_used_seconds, created_at_ms, updated_at_ms",
-        );
-
-        let row = builder.build().fetch_optional(&self.pool).await?;
-        let Some(row) = row else {
-            return Ok(GoalAccountingOutcome::Unchanged(
-                self.get_thread_goal(thread_id).await?,
-            ));
+        )))
+        .bind(&thread_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(current_row) = current_row else {
+            transaction.commit().await?;
+            return Ok(GoalAccountingOutcome::Unchanged(None));
         };
-        Ok(GoalAccountingOutcome::Updated(thread_goal_from_row(&row)?))
+        let current = thread_goal_from_row(&current_row)?;
+
+        let recorded = sqlx::query_as::<_, RecordedGoalAccountingEvent>(AssertSqlSafe(format!(
+            "SELECT goal_id, time_delta_seconds, token_delta, mode FROM {} \
+             WHERE thread_id = $1 AND event_id = $2",
+            self.accounting_events_table
+        )))
+        .bind(&thread_id)
+        .bind(request.event_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(recorded) = recorded {
+            if !recorded.matches(request, &current.goal_id) {
+                anyhow::bail!("goal accounting event was reused with different usage");
+            }
+            transaction.commit().await?;
+            return Ok(GoalAccountingOutcome::AlreadyAccounted(current));
+        }
+        if !request.target.matches(&current.goal_id) || !request.mode.accepts(current.status) {
+            transaction.commit().await?;
+            return Ok(GoalAccountingOutcome::Unchanged(Some(current)));
+        }
+
+        sqlx::query(AssertSqlSafe(format!(
+            "INSERT INTO {} (thread_id, event_id, goal_id, time_delta_seconds, token_delta, mode) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            self.accounting_events_table
+        )))
+        .bind(&thread_id)
+        .bind(request.event_id)
+        .bind(&current.goal_id)
+        .bind(time_delta_seconds)
+        .bind(token_delta)
+        .bind(request.mode.as_str())
+        .execute(&mut *transaction)
+        .await?;
+
+        let next_status = status_after_accounting(&current, token_delta, request.mode);
+        let row = sqlx::query(AssertSqlSafe(format!(
+            "UPDATE {} SET time_used_seconds = time_used_seconds + $1, \
+             tokens_used = tokens_used + $2, status = $3, updated_at_ms = $4 \
+             WHERE thread_id = $5 AND goal_id = $6 \
+             RETURNING thread_id, goal_id, objective, status, token_budget, tokens_used, \
+             time_used_seconds, created_at_ms, updated_at_ms",
+            self.goals_table
+        )))
+        .bind(time_delta_seconds)
+        .bind(token_delta)
+        .bind(next_status.as_str())
+        .bind(datetime_to_epoch_millis(Utc::now()))
+        .bind(&thread_id)
+        .bind(&current.goal_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let updated = thread_goal_from_row(&row)?;
+        transaction.commit().await?;
+        Ok(GoalAccountingOutcome::Updated(updated))
     }
 
     pub(super) async fn close(&self) {

@@ -346,10 +346,13 @@ goals = true
         .thread_goals()
         .account_thread_goal_usage(
             source_thread_id,
-            /*time_delta_seconds*/ 12,
-            /*token_delta*/ 50,
-            codex_state::GoalAccountingMode::ActiveOrStopped,
-            Some(source_goal_id.as_str()),
+            codex_state::GoalAccountingRequest {
+                event_id: "safety-buffering-source-usage",
+                time_delta_seconds: 12,
+                token_delta: 50,
+                mode: codex_state::GoalAccountingMode::ActiveOrStopped,
+                target: codex_state::GoalAccountingTarget::GoalId(source_goal_id.as_str()),
+            },
         )
         .await
         .expect("source goal usage should be recorded");

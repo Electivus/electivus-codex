@@ -17,7 +17,7 @@ use config::connection_failed;
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
 const MINIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
-const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 10;
+const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 11;
 const BASELINE_SCHEMA_VERSION: i64 = 1;
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
@@ -64,6 +64,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         10,
         include_str!("../postgres_migrations/0010_thread_goals.sql"),
         "create thread goal storage",
+    ),
+    (
+        11,
+        include_str!("../postgres_migrations/0011_thread_goal_accounting_events.sql"),
+        "create thread goal accounting storage",
     ),
 ];
 

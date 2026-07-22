@@ -79,6 +79,8 @@ pub use external_agent_config_imports::ExternalAgentConfigImportHistoryRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportSuccessRecord;
 pub use goals::GoalAccountingMode;
 pub use goals::GoalAccountingOutcome;
+pub use goals::GoalAccountingRequest;
+pub use goals::GoalAccountingTarget;
 pub use goals::GoalStore;
 pub use goals::GoalUpdate;
 pub(crate) use log_store::LogStore;

@@ -1,5 +1,7 @@
 use super::GoalAccountingMode;
 use super::GoalAccountingOutcome;
+use super::GoalAccountingRequest;
+use super::GoalAccountingTarget;
 use super::GoalStore;
 use super::GoalUpdate;
 use super::StateRuntime;
@@ -132,17 +134,23 @@ pub(crate) async fn run_goal_lifecycle_contract(
 
     let first_accounting = writer.account_thread_goal_usage(
         thread_id,
-        /*time_delta_seconds*/ 4,
-        /*token_delta*/ 40,
-        GoalAccountingMode::ActiveOnly,
-        Some(deferred_goal.goal_id.as_str()),
+        GoalAccountingRequest {
+            event_id: "distinct-accounting-1",
+            time_delta_seconds: 4,
+            token_delta: 40,
+            mode: GoalAccountingMode::ActiveOnly,
+            target: GoalAccountingTarget::GoalId(deferred_goal.goal_id.as_str()),
+        },
     );
     let second_accounting = reader.account_thread_goal_usage(
         thread_id,
-        /*time_delta_seconds*/ 6,
-        /*token_delta*/ 60,
-        GoalAccountingMode::ActiveOnly,
-        Some(deferred_goal.goal_id.as_str()),
+        GoalAccountingRequest {
+            event_id: "distinct-accounting-2",
+            time_delta_seconds: 6,
+            token_delta: 60,
+            mode: GoalAccountingMode::ActiveOnly,
+            target: GoalAccountingTarget::GoalId(deferred_goal.goal_id.as_str()),
+        },
     );
     let (first_accounting, second_accounting) = tokio::join!(first_accounting, second_accounting);
     assert!(matches!(
@@ -161,6 +169,103 @@ pub(crate) async fn run_goal_lifecycle_contract(
     assert_eq!(accounted.time_used_seconds, 10);
     assert_eq!(accounted.status, ThreadGoalStatus::BudgetLimited);
     assert_eq!(reader.get_thread_goal(thread_id).await?, Some(accounted));
+
+    let idempotent_goal = writer
+        .replace_thread_goal(
+            thread_id,
+            "charge a retried event once",
+            ThreadGoalStatus::Active,
+            /*token_budget*/ Some(1_000),
+        )
+        .await?;
+    let request = GoalAccountingRequest {
+        event_id: "retried-accounting",
+        time_delta_seconds: 7,
+        token_delta: 70,
+        mode: GoalAccountingMode::ActiveOnly,
+        target: GoalAccountingTarget::GoalId(idempotent_goal.goal_id.as_str()),
+    };
+    let (first_retry, second_retry) = tokio::join!(
+        writer.account_thread_goal_usage(thread_id, request),
+        reader.account_thread_goal_usage(thread_id, request),
+    );
+    let outcomes = [first_retry?, second_retry?];
+    assert!(matches!(
+        (&outcomes[0], &outcomes[1]),
+        (
+            GoalAccountingOutcome::Updated(_),
+            GoalAccountingOutcome::AlreadyAccounted(_)
+        ) | (
+            GoalAccountingOutcome::AlreadyAccounted(_),
+            GoalAccountingOutcome::Updated(_)
+        )
+    ));
+    let idempotently_accounted = writer
+        .get_thread_goal(thread_id)
+        .await?
+        .expect("idempotently accounted goal should exist");
+    assert_eq!(idempotently_accounted.tokens_used, 70);
+    assert_eq!(idempotently_accounted.time_used_seconds, 7);
+    assert_eq!(
+        reader.get_thread_goal(thread_id).await?,
+        Some(idempotently_accounted.clone())
+    );
+    reader
+        .account_thread_goal_usage(
+            thread_id,
+            GoalAccountingRequest {
+                token_delta: 71,
+                ..request
+            },
+        )
+        .await
+        .expect_err("reusing an accounting event with different usage should fail");
+    assert_eq!(
+        writer.get_thread_goal(thread_id).await?,
+        Some(idempotently_accounted)
+    );
+
+    let accounting_modes = [
+        (
+            "active-status",
+            ThreadGoalStatus::Active,
+            GoalAccountingMode::ActiveStatusOnly,
+        ),
+        (
+            "complete",
+            ThreadGoalStatus::Complete,
+            GoalAccountingMode::ActiveOrComplete,
+        ),
+        (
+            "stopped",
+            ThreadGoalStatus::Paused,
+            GoalAccountingMode::ActiveOrStopped,
+        ),
+    ];
+    for (event_id, status, mode) in accounting_modes {
+        let goal = writer
+            .replace_thread_goal(thread_id, event_id, status, /*token_budget*/ None)
+            .await?;
+        let outcome = reader
+            .account_thread_goal_usage(
+                thread_id,
+                GoalAccountingRequest {
+                    event_id,
+                    time_delta_seconds: 1,
+                    token_delta: 11,
+                    mode,
+                    target: GoalAccountingTarget::GoalId(goal.goal_id.as_str()),
+                },
+            )
+            .await?;
+        let GoalAccountingOutcome::Updated(accounted) = outcome else {
+            anyhow::bail!("accounting mode did not accept its supported goal status");
+        };
+        assert_eq!(accounted.status, status);
+        assert_eq!(accounted.tokens_used, 11);
+        assert_eq!(accounted.time_used_seconds, 1);
+        assert_eq!(writer.get_thread_goal(thread_id).await?, Some(accounted));
+    }
     Ok(())
 }
 
