@@ -212,6 +212,7 @@ impl PostgresMemoryStore {
             "UPDATE {} SET status = 'done', finished_at = $1, lease_until = NULL, \
              last_error = NULL, last_success_watermark = input_watermark \
              WHERE kind = $2 AND job_key = $3 AND status = 'running' AND ownership_token = $4 \
+             AND lease_until > FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint \
              RETURNING input_watermark",
             self.jobs_table
         )))
@@ -261,6 +262,7 @@ impl PostgresMemoryStore {
              finished_at = FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint, \
              lease_until = NULL, last_error = NULL, last_success_watermark = input_watermark \
              WHERE kind = $1 AND job_key = $2 AND status = 'running' AND ownership_token = $3 \
+             AND lease_until > FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint \
              RETURNING input_watermark",
             self.jobs_table
         )))
@@ -327,7 +329,7 @@ impl PostgresMemoryStore {
              lease_until = NULL, retry_at = db_clock.now + $1, \
              retry_remaining = job.retry_remaining - 1, last_error = $2 FROM db_clock \
              WHERE job.kind = $3 AND job.job_key = $4 AND job.status = 'running' \
-             AND job.ownership_token = $5",
+             AND job.ownership_token = $5 AND job.lease_until > db_clock.now",
             self.jobs_table
         )))
         .bind(retry_delay_seconds.max(0))

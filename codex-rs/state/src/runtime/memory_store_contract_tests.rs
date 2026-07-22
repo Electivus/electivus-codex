@@ -170,6 +170,39 @@ pub(crate) async fn run_stage1_retry_and_lease_contract(
             .heartbeat_stage1_job(thread_id, &first_token, /*lease_seconds*/ 60)
             .await?
     );
+    let outputs_before_expired_finalization =
+        first.list_stage1_outputs_for_global(/*n*/ 10).await?;
+    assert!(
+        !first
+            .mark_stage1_job_succeeded(
+                thread_id,
+                &first_token,
+                source_updated_at,
+                "expired memory",
+                "expired summary",
+                /*rollout_slug*/ None,
+            )
+            .await?
+    );
+    assert!(
+        !first
+            .mark_stage1_job_succeeded_no_output(thread_id, &first_token)
+            .await?
+    );
+    assert!(
+        !first
+            .mark_stage1_job_failed(
+                thread_id,
+                &first_token,
+                "expired failure",
+                /*retry_delay_seconds*/ 60,
+            )
+            .await?
+    );
+    assert_eq!(
+        second.list_stage1_outputs_for_global(/*n*/ 10).await?,
+        outputs_before_expired_finalization
+    );
     let takeover_token = claimed_token(
         second
             .try_claim_stage1_job(

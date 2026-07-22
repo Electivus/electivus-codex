@@ -866,6 +866,7 @@ SET
     last_success_watermark = input_watermark
 WHERE kind = ? AND job_key = ?
   AND status = 'running' AND ownership_token = ?
+  AND lease_until > CAST(strftime('%s', 'now') AS INTEGER)
             "#,
         )
         .bind(now)
@@ -942,6 +943,7 @@ SET
     last_success_watermark = input_watermark
 WHERE kind = ? AND job_key = ?
   AND status = 'running' AND ownership_token = ?
+  AND lease_until > CAST(strftime('%s', 'now') AS INTEGER)
             "#,
         )
         .bind(JOB_KIND_MEMORY_STAGE1)
@@ -1043,6 +1045,7 @@ SET
     last_error = ?
 WHERE kind = ? AND job_key = ?
   AND status = 'running' AND ownership_token = ?
+  AND lease_until > CAST(strftime('%s', 'now') AS INTEGER)
             "#,
         )
         .bind(retry_delay_seconds.max(0))
