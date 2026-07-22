@@ -188,9 +188,38 @@ impl MemoryStore {
         thread_id: ThreadId,
         ownership_token: &str,
     ) -> anyhow::Result<bool> {
-        self.sqlite("complete stage-one job without output")?
-            .mark_stage1_job_succeeded_no_output(thread_id, ownership_token)
-            .await
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => {
+                store
+                    .mark_stage1_job_succeeded_no_output(thread_id, ownership_token)
+                    .await
+            }
+            MemoryStoreBackend::Sqlite(store) => {
+                store
+                    .mark_stage1_job_succeeded_no_output(thread_id, ownership_token)
+                    .await
+            }
+        }
+    }
+
+    pub async fn heartbeat_stage1_job(
+        &self,
+        thread_id: ThreadId,
+        ownership_token: &str,
+        lease_seconds: i64,
+    ) -> anyhow::Result<bool> {
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => {
+                store
+                    .heartbeat_stage1_job(thread_id, ownership_token, lease_seconds)
+                    .await
+            }
+            MemoryStoreBackend::Sqlite(store) => {
+                store
+                    .heartbeat_stage1_job(thread_id, ownership_token, lease_seconds)
+                    .await
+            }
+        }
     }
 
     pub async fn mark_stage1_job_failed(
@@ -200,14 +229,28 @@ impl MemoryStore {
         failure_reason: &str,
         retry_delay_seconds: i64,
     ) -> anyhow::Result<bool> {
-        self.sqlite("fail stage-one job")?
-            .mark_stage1_job_failed(
-                thread_id,
-                ownership_token,
-                failure_reason,
-                retry_delay_seconds,
-            )
-            .await
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => {
+                store
+                    .mark_stage1_job_failed(
+                        thread_id,
+                        ownership_token,
+                        failure_reason,
+                        retry_delay_seconds,
+                    )
+                    .await
+            }
+            MemoryStoreBackend::Sqlite(store) => {
+                store
+                    .mark_stage1_job_failed(
+                        thread_id,
+                        ownership_token,
+                        failure_reason,
+                        retry_delay_seconds,
+                    )
+                    .await
+            }
+        }
     }
 
     pub async fn enqueue_global_consolidation(&self, input_watermark: i64) -> anyhow::Result<()> {

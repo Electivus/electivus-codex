@@ -651,14 +651,16 @@ WHERE id = ? AND memory_mode != 'polluted'
         lease_seconds: i64,
         max_running_jobs: usize,
     ) -> anyhow::Result<Stage1JobClaimOutcome> {
-        let now = Utc::now().timestamp();
-        let lease_until = now.saturating_add(lease_seconds.max(0));
         let max_running_jobs = max_running_jobs as i64;
         let ownership_token = Uuid::new_v4().to_string();
         let thread_id = thread_id.to_string();
         let worker_id = worker_id.to_string();
 
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let now: i64 = sqlx::query_scalar("SELECT CAST(strftime('%s', 'now') AS INTEGER)")
+            .fetch_one(&mut *tx)
+            .await?;
+        let lease_until = now.saturating_add(lease_seconds.max(0));
 
         let existing_output = sqlx::query(
             r#"
@@ -839,10 +841,12 @@ WHERE kind = ? AND job_key = ?
         rollout_summary: &str,
         rollout_slug: Option<&str>,
     ) -> anyhow::Result<bool> {
-        let now = Utc::now().timestamp();
         let thread_id = thread_id.to_string();
 
         let mut tx = self.pool.begin().await?;
+        let now: i64 = sqlx::query_scalar("SELECT CAST(strftime('%s', 'now') AS INTEGER)")
+            .fetch_one(&mut *tx)
+            .await?;
         let rows_affected = sqlx::query(
             r#"
 UPDATE jobs
@@ -916,7 +920,6 @@ WHERE excluded.source_updated_at >= stage1_outputs.source_updated_at
         thread_id: ThreadId,
         ownership_token: &str,
     ) -> anyhow::Result<bool> {
-        let now = Utc::now().timestamp();
         let thread_id = thread_id.to_string();
 
         let mut tx = self.pool.begin().await?;
@@ -925,7 +928,7 @@ WHERE excluded.source_updated_at >= stage1_outputs.source_updated_at
 UPDATE jobs
 SET
     status = 'done',
-    finished_at = ?,
+    finished_at = CAST(strftime('%s', 'now') AS INTEGER),
     lease_until = NULL,
     last_error = NULL,
     last_success_watermark = input_watermark
@@ -933,7 +936,6 @@ WHERE kind = ? AND job_key = ?
   AND status = 'running' AND ownership_token = ?
             "#,
         )
-        .bind(now)
         .bind(JOB_KIND_MEMORY_STAGE1)
         .bind(thread_id.as_str())
         .bind(ownership_token)
@@ -979,6 +981,32 @@ WHERE thread_id = ?
         Ok(true)
     }
 
+    /// Extends the lease for an owned running stage-one job using the database clock.
+    pub async fn heartbeat_stage1_job(
+        &self,
+        thread_id: ThreadId,
+        ownership_token: &str,
+        lease_seconds: i64,
+    ) -> anyhow::Result<bool> {
+        let rows_affected = sqlx::query(
+            r#"
+UPDATE jobs
+SET lease_until = CAST(strftime('%s', 'now') AS INTEGER) + ?
+WHERE kind = ? AND job_key = ?
+  AND status = 'running' AND ownership_token = ?
+  AND lease_until > CAST(strftime('%s', 'now') AS INTEGER)
+            "#,
+        )
+        .bind(lease_seconds.max(0))
+        .bind(JOB_KIND_MEMORY_STAGE1)
+        .bind(thread_id.to_string())
+        .bind(ownership_token)
+        .execute(self.pool.as_ref())
+        .await?
+        .rows_affected();
+        Ok(rows_affected > 0)
+    }
+
     /// Marks a claimed stage-1 job as failed and schedules retry backoff.
     ///
     /// Query behavior:
@@ -993,8 +1021,6 @@ WHERE thread_id = ?
         failure_reason: &str,
         retry_delay_seconds: i64,
     ) -> anyhow::Result<bool> {
-        let now = Utc::now().timestamp();
-        let retry_at = now.saturating_add(retry_delay_seconds.max(0));
         let thread_id = thread_id.to_string();
 
         let rows_affected = sqlx::query(
@@ -1002,17 +1028,16 @@ WHERE thread_id = ?
 UPDATE jobs
 SET
     status = 'error',
-    finished_at = ?,
+    finished_at = CAST(strftime('%s', 'now') AS INTEGER),
     lease_until = NULL,
-    retry_at = ?,
+    retry_at = CAST(strftime('%s', 'now') AS INTEGER) + ?,
     retry_remaining = retry_remaining - 1,
     last_error = ?
 WHERE kind = ? AND job_key = ?
   AND status = 'running' AND ownership_token = ?
             "#,
         )
-        .bind(now)
-        .bind(retry_at)
+        .bind(retry_delay_seconds.max(0))
         .bind(failure_reason)
         .bind(JOB_KIND_MEMORY_STAGE1)
         .bind(thread_id.as_str())

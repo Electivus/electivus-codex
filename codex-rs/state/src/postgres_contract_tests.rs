@@ -15,6 +15,7 @@ use crate::runtime::logs_contract_tests::run_partition_limits_contract;
 use crate::runtime::logs_contract_tests::run_replica_visibility_contract;
 use crate::runtime::logs_contract_tests::run_startup_retention_contract;
 use crate::runtime::memory_store_contract_tests::run_stage1_claim_and_output_contract;
+use crate::runtime::memory_store_contract_tests::run_stage1_retry_and_lease_contract;
 use crate::runtime::remote_control_contract_tests::run_remote_control_enrollment_contract;
 use anyhow::Context;
 use anyhow::Result;
@@ -48,6 +49,7 @@ async fn postgres_contract_stage1_claims_and_outputs_are_shared_between_replicas
     );
 
     run_stage1_claim_and_output_contract(&first, &second, thread_id).await?;
+    run_stage1_retry_and_lease_contract(&first, &second, thread_id).await?;
 
     let outputs_table = super::qualified_table(fixture.schema(), "memory_stage1_outputs");
     let jobs_table = super::qualified_table(fixture.schema(), "memory_jobs");

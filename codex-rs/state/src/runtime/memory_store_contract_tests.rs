@@ -107,6 +107,230 @@ pub(crate) async fn run_stage1_claim_and_output_contract(
     Ok(())
 }
 
+fn claimed_token(outcome: Stage1JobClaimOutcome) -> String {
+    match outcome {
+        Stage1JobClaimOutcome::Claimed { ownership_token } => ownership_token,
+        Stage1JobClaimOutcome::SkippedUpToDate
+        | Stage1JobClaimOutcome::SkippedRunning
+        | Stage1JobClaimOutcome::SkippedRetryBackoff
+        | Stage1JobClaimOutcome::SkippedRetryExhausted => {
+            panic!("expected a claimed stage-one job, got {outcome:?}")
+        }
+    }
+}
+
+pub(crate) async fn run_stage1_retry_and_lease_contract(
+    first: &MemoryStore,
+    second: &MemoryStore,
+    thread_id: ThreadId,
+) -> Result<()> {
+    let first_worker_id = ThreadId::new();
+    let second_worker_id = ThreadId::new();
+    let source_updated_at = 1_700_000_001;
+    let first_token = claimed_token(
+        first
+            .try_claim_stage1_job(
+                thread_id,
+                first_worker_id,
+                source_updated_at,
+                /*lease_seconds*/ 60,
+                /*max_running_jobs*/ 4,
+            )
+            .await?,
+    );
+    assert!(
+        !first
+            .heartbeat_stage1_job(thread_id, "wrong-token", /*lease_seconds*/ 60)
+            .await?
+    );
+    assert!(
+        first
+            .heartbeat_stage1_job(thread_id, &first_token, /*lease_seconds*/ 60)
+            .await?
+    );
+    assert_eq!(
+        second
+            .try_claim_stage1_job(
+                thread_id,
+                second_worker_id,
+                source_updated_at,
+                /*lease_seconds*/ 60,
+                /*max_running_jobs*/ 4,
+            )
+            .await?,
+        Stage1JobClaimOutcome::SkippedRunning
+    );
+    assert!(
+        first
+            .heartbeat_stage1_job(thread_id, &first_token, /*lease_seconds*/ 0)
+            .await?
+    );
+    assert!(
+        !first
+            .heartbeat_stage1_job(thread_id, &first_token, /*lease_seconds*/ 60)
+            .await?
+    );
+    let takeover_token = claimed_token(
+        second
+            .try_claim_stage1_job(
+                thread_id,
+                second_worker_id,
+                source_updated_at,
+                /*lease_seconds*/ 60,
+                /*max_running_jobs*/ 4,
+            )
+            .await?,
+    );
+    assert!(
+        !first
+            .heartbeat_stage1_job(thread_id, &first_token, /*lease_seconds*/ 60)
+            .await?
+    );
+    assert!(
+        !first
+            .mark_stage1_job_failed(
+                thread_id,
+                &first_token,
+                "stale failure",
+                /*retry_delay_seconds*/ 0,
+            )
+            .await?
+    );
+    assert!(
+        !first
+            .mark_stage1_job_succeeded_no_output(thread_id, &first_token)
+            .await?
+    );
+    assert!(
+        !first
+            .mark_stage1_job_succeeded(
+                thread_id,
+                &first_token,
+                source_updated_at,
+                "stale memory",
+                "stale summary",
+                /*rollout_slug*/ None,
+            )
+            .await?
+    );
+
+    assert!(
+        second
+            .mark_stage1_job_failed(
+                thread_id,
+                &takeover_token,
+                "retry later",
+                /*retry_delay_seconds*/ 60,
+            )
+            .await?
+    );
+    assert_eq!(
+        first
+            .try_claim_stage1_job(
+                thread_id,
+                first_worker_id,
+                source_updated_at,
+                /*lease_seconds*/ 60,
+                /*max_running_jobs*/ 4,
+            )
+            .await?,
+        Stage1JobClaimOutcome::SkippedRetryBackoff
+    );
+
+    let retry_source_updated_at = source_updated_at + 1;
+    for _ in 0..3 {
+        let token = claimed_token(
+            first
+                .try_claim_stage1_job(
+                    thread_id,
+                    first_worker_id,
+                    retry_source_updated_at,
+                    /*lease_seconds*/ 60,
+                    /*max_running_jobs*/ 4,
+                )
+                .await?,
+        );
+        assert!(
+            second
+                .mark_stage1_job_failed(
+                    thread_id,
+                    &token,
+                    "consume retry",
+                    /*retry_delay_seconds*/ 0,
+                )
+                .await?
+        );
+    }
+    assert_eq!(
+        second
+            .try_claim_stage1_job(
+                thread_id,
+                second_worker_id,
+                retry_source_updated_at,
+                /*lease_seconds*/ 60,
+                /*max_running_jobs*/ 4,
+            )
+            .await?,
+        Stage1JobClaimOutcome::SkippedRetryExhausted
+    );
+
+    let no_output_source_updated_at = retry_source_updated_at + 1;
+    let no_output_token = claimed_token(
+        second
+            .try_claim_stage1_job(
+                thread_id,
+                second_worker_id,
+                no_output_source_updated_at,
+                /*lease_seconds*/ 60,
+                /*max_running_jobs*/ 4,
+            )
+            .await?,
+    );
+    assert!(
+        first
+            .mark_stage1_job_succeeded_no_output(thread_id, &no_output_token)
+            .await?
+    );
+    assert_eq!(
+        first
+            .try_claim_stage1_job(
+                thread_id,
+                first_worker_id,
+                no_output_source_updated_at,
+                /*lease_seconds*/ 60,
+                /*max_running_jobs*/ 4,
+            )
+            .await?,
+        Stage1JobClaimOutcome::SkippedUpToDate
+    );
+
+    let restored_source_updated_at = no_output_source_updated_at + 1;
+    let restored_token = claimed_token(
+        first
+            .try_claim_stage1_job(
+                thread_id,
+                first_worker_id,
+                restored_source_updated_at,
+                /*lease_seconds*/ 60,
+                /*max_running_jobs*/ 4,
+            )
+            .await?,
+    );
+    assert!(
+        second
+            .mark_stage1_job_succeeded(
+                thread_id,
+                &restored_token,
+                restored_source_updated_at,
+                "restored durable memory",
+                "restored durable summary",
+                Some("restored-stage-one"),
+            )
+            .await?
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn sqlite_stage1_claim_and_output_satisfies_shared_contract() -> Result<()> {
     let codex_home = unique_temp_dir();
@@ -125,6 +349,7 @@ async fn sqlite_stage1_claim_and_output_satisfies_shared_contract() -> Result<()
         .await?;
 
     run_stage1_claim_and_output_contract(first.memories(), second.memories(), thread_id).await?;
+    run_stage1_retry_and_lease_contract(first.memories(), second.memories(), thread_id).await?;
 
     first.close().await;
     second.close().await;

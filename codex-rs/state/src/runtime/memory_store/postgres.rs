@@ -209,6 +209,98 @@ impl PostgresMemoryStore {
         Ok(true)
     }
 
+    pub(super) async fn mark_stage1_job_succeeded_no_output(
+        &self,
+        thread_id: ThreadId,
+        ownership_token: &str,
+    ) -> anyhow::Result<bool> {
+        let mut transaction = self.pool.begin().await?;
+        let thread_id = thread_id.to_string();
+        let source_updated_at: Option<i64> = sqlx::query_scalar(AssertSqlSafe(format!(
+            "UPDATE {} SET status = 'done', \
+             finished_at = FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint, \
+             lease_until = NULL, last_error = NULL, last_success_watermark = input_watermark \
+             WHERE kind = $1 AND job_key = $2 AND status = 'running' AND ownership_token = $3 \
+             RETURNING input_watermark",
+            self.jobs_table
+        )))
+        .bind(JOB_KIND_MEMORY_STAGE1)
+        .bind(&thread_id)
+        .bind(ownership_token)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(source_updated_at) = source_updated_at else {
+            transaction.commit().await?;
+            return Ok(false);
+        };
+        let deleted_rows = sqlx::query(AssertSqlSafe(format!(
+            "DELETE FROM {} WHERE thread_id = $1",
+            self.outputs_table
+        )))
+        .bind(&thread_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if deleted_rows > 0 {
+            self.enqueue_global_consolidation(&mut transaction, source_updated_at)
+                .await?;
+        }
+        transaction.commit().await?;
+        Ok(true)
+    }
+
+    pub(super) async fn heartbeat_stage1_job(
+        &self,
+        thread_id: ThreadId,
+        ownership_token: &str,
+        lease_seconds: i64,
+    ) -> anyhow::Result<bool> {
+        let rows_affected = sqlx::query(AssertSqlSafe(format!(
+            "WITH db_clock AS ( \
+             SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint AS now \
+             ) UPDATE {} AS job SET lease_until = db_clock.now + $1 FROM db_clock \
+             WHERE job.kind = $2 AND job.job_key = $3 AND job.status = 'running' \
+             AND job.ownership_token = $4 AND job.lease_until > db_clock.now",
+            self.jobs_table
+        )))
+        .bind(lease_seconds.max(0))
+        .bind(JOB_KIND_MEMORY_STAGE1)
+        .bind(thread_id.to_string())
+        .bind(ownership_token)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(rows_affected > 0)
+    }
+
+    pub(super) async fn mark_stage1_job_failed(
+        &self,
+        thread_id: ThreadId,
+        ownership_token: &str,
+        failure_reason: &str,
+        retry_delay_seconds: i64,
+    ) -> anyhow::Result<bool> {
+        let rows_affected = sqlx::query(AssertSqlSafe(format!(
+            "WITH db_clock AS ( \
+             SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint AS now \
+             ) UPDATE {} AS job SET status = 'error', finished_at = db_clock.now, \
+             lease_until = NULL, retry_at = db_clock.now + $1, \
+             retry_remaining = job.retry_remaining - 1, last_error = $2 FROM db_clock \
+             WHERE job.kind = $3 AND job.job_key = $4 AND job.status = 'running' \
+             AND job.ownership_token = $5",
+            self.jobs_table
+        )))
+        .bind(retry_delay_seconds.max(0))
+        .bind(failure_reason)
+        .bind(JOB_KIND_MEMORY_STAGE1)
+        .bind(thread_id.to_string())
+        .bind(ownership_token)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(rows_affected > 0)
+    }
+
     async fn enqueue_global_consolidation(
         &self,
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
