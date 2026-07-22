@@ -62,7 +62,7 @@ pub(super) enum LineageFixture {
 pub(super) struct MigrationSource {
     _temp: tempfile::TempDir,
     pub(super) config: SqliteConfig,
-    thread_id: ThreadId,
+    pub(super) thread_id: ThreadId,
     history: Vec<RolloutLine>,
     legacy_id: ThreadId,
     legacy_history: Vec<RolloutLine>,
@@ -184,7 +184,7 @@ async fn postgres_contract_runtime_state_thread_import_is_visible_to_another_poo
         ),
         (
             Some(source.legacy_id),
-            Some(source.legacy_id),
+            None,
             Some("disabled"),
             Some(HistoryPosition {
                 thread_id: source.legacy_id,
@@ -316,6 +316,12 @@ async fn postgres_contract_runtime_state_thread_import_is_visible_to_another_poo
     .fetch_all(&pool)
     .await?;
     assert_eq!(source_ordinals, vec![0, 1, 2, 3, 4, 5]);
+    let pollution_overrides: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT COUNT(*) FROM \"{schema}\".memory_thread_mode_overrides"
+    )))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(pollution_overrides, 2);
     assert_eq!(
         thread_public_view(&replica, source.legacy_id, source.thread_id).await?,
         source.public_view
@@ -440,7 +446,10 @@ pub(super) async fn migration_source(
         &legacy_path,
         serde_json::to_string(&legacy_history[0])? + "\n",
     )?;
-    let rollout_only_history = self::legacy_history(rollout_only_id, source.path());
+    let mut rollout_only_history = self::legacy_history(rollout_only_id, source.path());
+    if let RolloutItem::SessionMeta(meta) = &mut rollout_only_history[0].item {
+        meta.meta.memory_mode = Some("polluted".to_string());
+    }
     let rollout_only_json = rollout_only_history
         .iter()
         .map(serde_json::to_string)
@@ -557,6 +566,9 @@ pub(super) async fn migration_source(
         BackfillLeaseUpdate::Applied
     );
     let public_view = thread_public_view(&local, legacy_id, thread_id).await?;
+    runtime
+        .set_thread_memory_mode(thread_id, "polluted")
+        .await?;
     runtime.delete_thread(rollout_only_id).await?;
     let backfill = runtime.backfill_coordinator().state().await?;
     drop(local);
@@ -771,7 +783,7 @@ fn history(thread_id: ThreadId, source: &std::path::Path) -> Vec<RolloutLine> {
         session_id: thread_id.into(),
         id: thread_id,
         forked_from_id: Some(ancestor),
-        parent_thread_id: Some(ancestor),
+        parent_thread_id: None,
         timestamp: "2026-07-22T10:00:00.123Z".to_string(),
         cwd: source.to_path_buf(),
         originator: "migration-test".to_string(),

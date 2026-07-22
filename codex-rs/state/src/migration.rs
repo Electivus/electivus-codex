@@ -45,6 +45,9 @@ pub use thread_snapshot::snapshot_runtime_state_migration_threads;
 pub trait RuntimeStateThreadProjectionMaterializer {
     type Error: std::error::Error + Send + Sync + 'static;
 
+    /// PostgreSQL schema that receives the materialized projections.
+    fn destination_schema(&self) -> &str;
+
     fn materialize<'a>(
         &'a self,
         connection: &'a mut sqlx::PgConnection,
@@ -217,16 +220,24 @@ pub async fn preflight_runtime_state_migration(
 
 async fn inspect_source(source: &SqliteConfig) -> anyhow::Result<SourceInventory> {
     let databases = inspect_sqlite_databases(source).await?;
-    let mut rollout_files =
-        collect_files(source.home(), &["sessions", "archived_sessions"], |path| {
-            source_validation::logical_rollout_path(path).is_some()
-        })
-        .await?;
-    let mut logical_paths = std::collections::HashSet::new();
-    rollout_files.retain(|file| {
-        source_validation::logical_rollout_path(&file.relative_path)
-            .is_some_and(|path| logical_paths.insert(path))
-    });
+    let rollout_files = collect_files(source.home(), &["sessions", "archived_sessions"], |path| {
+        source_validation::logical_rollout_path(path).is_some()
+    })
+    .await?;
+    let mut physical_by_logical_path = std::collections::HashMap::new();
+    for file in &rollout_files {
+        let Some(logical_path) = source_validation::logical_rollout_path(&file.relative_path)
+        else {
+            continue;
+        };
+        if let Some(existing) = physical_by_logical_path.insert(logical_path, &file.relative_path) {
+            anyhow::bail!(
+                "Runtime State Migration source has ambiguous physical rollout files {} and {}; remove or reconcile one copy and retry",
+                existing.display(),
+                file.relative_path.display()
+            );
+        }
+    }
     let memory_artifacts = collect_files(source.home(), &["memories"], |_| true).await?;
     let imported_resource_prefix = Path::new("memories")
         .join("extensions")

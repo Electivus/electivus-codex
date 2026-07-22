@@ -61,27 +61,54 @@ pub(super) async fn existing_progress(
     let Some(row) = row else {
         return Ok(None);
     };
+    let recorded_source_identity: String = row.try_get("source_identity")?;
+    let recorded_source_fingerprint: String = row.try_get("source_fingerprint")?;
+    let phase: String = row.try_get("phase")?;
+    let ready: bool = row.try_get("ready")?;
+    let fencing_token: i64 = row.try_get("fencing_token")?;
     anyhow::ensure!(
-        !row.try_get::<bool, _>("ready")?,
-        "PostgreSQL Runtime State Migration is already ready; retries are not allowed"
-    );
-    anyhow::ensure!(
-        row.try_get::<String, _>("source_identity")? == source_identity
-            && row.try_get::<String, _>("source_fingerprint")? == source_fingerprint,
+        recorded_source_identity == source_identity
+            && recorded_source_fingerprint == source_fingerprint,
         "PostgreSQL Runtime State Namespace belongs to a different migration source"
     );
     let evidence: serde_json::Value = row.try_get("phase_evidence")?;
+    anyhow::ensure!(
+        !ready,
+        "PostgreSQL Runtime State Migration is already ready; retries are not allowed"
+    );
     let expected_digest = evidence
         .get("namespaceDigest")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("PostgreSQL Runtime State Migration evidence is invalid"))?;
+    let threads = qualified_table(schema, "threads");
+    let history = qualified_table(schema, "thread_history");
+    let counts: (i64, i64) = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT (SELECT COUNT(*) FROM {threads}), (SELECT COUNT(*) FROM {history})"
+    )))
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|error| map_sql_error(schema, "validate Runtime State Migration evidence", error))?;
+    let expected_evidence = serde_json::json!({
+        "sourceIdentity": recorded_source_identity,
+        "sourceFingerprint": recorded_source_fingerprint,
+        "phase": phase,
+        "ready": ready,
+        "fencingToken": fencing_token,
+        "threads": counts.0,
+        "historyLines": counts.1,
+        "namespaceDigest": expected_digest,
+    });
+    anyhow::ensure!(
+        evidence == expected_evidence,
+        "PostgreSQL Runtime State Migration control evidence changed after its recorded phase"
+    );
     anyhow::ensure!(
         namespace_digest(connection, schema).await? == expected_digest,
         "PostgreSQL Runtime State Namespace changed after its recorded migration phase"
     );
     Ok(Some(RuntimeStateMigrationProgress {
-        phase: RuntimeStateMigrationPhase::parse(&row.try_get::<String, _>("phase")?)?,
-        fencing_token: row.try_get("fencing_token")?,
+        phase: RuntimeStateMigrationPhase::parse(&phase)?,
+        fencing_token,
     }))
 }
 
@@ -94,9 +121,25 @@ pub(super) async fn namespace_digest(
     connection: &mut sqlx::PgConnection,
     schema: &str,
 ) -> anyhow::Result<String> {
+    sqlx::query(
+        "SELECT set_config('TimeZone', 'UTC', true), \
+         set_config('DateStyle', 'ISO, YMD', true), \
+         set_config('bytea_output', 'hex', true), \
+         set_config('extra_float_digits', '3', true), \
+         set_config('lc_numeric', 'C', true)",
+    )
+    .execute(&mut *connection)
+    .await
+    .map_err(|error| {
+        map_sql_error(
+            schema,
+            "canonicalize Runtime State Migration evidence",
+            error,
+        )
+    })?;
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = $1 \
-         AND tablename NOT IN ('_codex_runtime_state_migrations', 'runtime_state_migration') \
+         AND tablename <> '_codex_runtime_state_migrations' \
          ORDER BY tablename",
     )
     .bind(schema)
@@ -107,8 +150,14 @@ pub(super) async fn namespace_digest(
     for table in tables {
         let qualified = qualified_table(schema, &table);
         hash_field(&mut hasher, table.as_bytes());
+        let record = if table == "runtime_state_migration" {
+            "(to_jsonb(records) - 'phase_evidence')::text"
+        } else {
+            "to_jsonb(records)::text"
+        };
         let mut rows = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
-            "SELECT to_jsonb(records)::text AS record FROM {qualified} AS records ORDER BY record"
+            "SELECT record FROM (SELECT {record} AS record FROM {qualified} AS records) \
+             AS canonical_records ORDER BY record COLLATE \"C\""
         )))
         .fetch(&mut *connection);
         while let Some(row) = rows.try_next().await.map_err(|error| {

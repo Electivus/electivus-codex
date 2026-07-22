@@ -50,6 +50,7 @@ mod items;
 mod lifecycle;
 mod list_threads;
 mod metadata;
+mod migration;
 mod model_context;
 mod projection;
 mod resume;
@@ -66,6 +67,7 @@ pub(super) const WRITER_LEASE_DURATION: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 pub struct PostgresThreadStore {
     pub(super) pool: sqlx::PgPool,
+    schema: String,
     pub(super) tables: PostgresThreadTables,
     pub(super) writer_id: String,
     pub(super) live_writers: Arc<Mutex<HashMap<ThreadId, ActiveWriter>>>,
@@ -80,6 +82,7 @@ pub(super) struct PostgresThreadTables {
     pub(super) items: String,
     pub(super) turns: String,
     pub(super) search_content: String,
+    pub(super) spawn_edges: String,
 }
 
 #[derive(Clone)]
@@ -94,16 +97,18 @@ pub(super) struct ActiveWriter {
 impl PostgresThreadStore {
     pub fn new(runtime_pool: &codex_state::PostgresRuntimeStatePool) -> Self {
         let (pool, schema) = runtime_pool.thread_store_connection();
-        let schema = format!("\"{schema}\"");
+        let qualified_schema = format!("\"{schema}\"");
         Self {
             pool,
+            schema,
             tables: PostgresThreadTables {
-                threads: format!("{schema}.threads"),
-                history: format!("{schema}.thread_history"),
-                append_batches: format!("{schema}.thread_append_batches"),
-                items: format!("{schema}.thread_items"),
-                turns: format!("{schema}.thread_turns"),
-                search_content: format!("{schema}.thread_search_content"),
+                threads: format!("{qualified_schema}.threads"),
+                history: format!("{qualified_schema}.thread_history"),
+                append_batches: format!("{qualified_schema}.thread_append_batches"),
+                items: format!("{qualified_schema}.thread_items"),
+                turns: format!("{qualified_schema}.thread_turns"),
+                search_content: format!("{qualified_schema}.thread_search_content"),
+                spawn_edges: format!("{qualified_schema}.thread_spawn_edges"),
             },
             writer_id: Uuid::now_v7().to_string(),
             live_writers: Arc::new(Mutex::new(HashMap::new())),
@@ -205,6 +210,18 @@ impl PostgresThreadStore {
             }
             return Err(database_error("create", error));
         }
+        if let Some(parent_thread_id) = params.parent_thread_id {
+            sqlx::query(AssertSqlSafe(format!(
+                "INSERT INTO {} (parent_thread_id, child_thread_id, status) \
+                 VALUES ($1, $2, 'open')",
+                self.tables.spawn_edges
+            )))
+            .bind(parent_thread_id.to_string())
+            .bind(params.thread_id.to_string())
+            .execute(transaction.as_mut())
+            .await
+            .map_err(|error| database_error("create", error))?;
+        }
         sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO {} (thread_id, ordinal, item, recorded_at) VALUES ($1, 0, $2, $3)",
             self.tables.history
@@ -284,6 +301,10 @@ impl PostgresThreadStore {
 impl codex_state::RuntimeStateThreadProjectionMaterializer for PostgresThreadStore {
     type Error = ThreadStoreError;
 
+    fn destination_schema(&self) -> &str {
+        &self.schema
+    }
+
     async fn materialize(
         &self,
         connection: &mut sqlx::PgConnection,
@@ -299,7 +320,7 @@ impl codex_state::RuntimeStateThreadProjectionMaterializer for PostgresThreadSto
             .fetch_one(&mut *connection)
             .await
             .map_err(|error| database_error("materialize migrated thread projections", error))?;
-            projection::rebuild_history_projections(
+            projection::rebuild_history_projections_from_lines(
                 self,
                 connection,
                 thread.metadata().id,
@@ -310,8 +331,10 @@ impl codex_state::RuntimeStateThreadProjectionMaterializer for PostgresThreadSto
                     .map_err(|error| {
                         database_error("materialize migrated thread projections", error)
                     })?,
+                thread.canonical_history().lines(),
             )
             .await?;
+            migration::validate_migrated_thread_projections(self, connection, thread).await?;
         }
         Ok(())
     }

@@ -40,6 +40,12 @@ pub async fn import_runtime_state_threads(
     projection_materializer: &impl RuntimeStateThreadProjectionMaterializer,
 ) -> anyhow::Result<RuntimeStateMigrationProgress> {
     anyhow::ensure!(
+        projection_materializer.destination_schema() == destination.schema(),
+        "Runtime State Migration projection materializer targets PostgreSQL schema `{}` instead of destination schema `{}`",
+        projection_materializer.destination_schema(),
+        destination.schema()
+    );
+    anyhow::ensure!(
         expected_inventory.destination_schema == destination.schema()
             && expected_inventory.destination_schema_version == MAXIMUM_COMPATIBLE_SCHEMA_VERSION,
         "Runtime State Migration inventory does not match the current PostgreSQL destination"
@@ -126,9 +132,9 @@ async fn import_snapshot(
         .materialize(transaction.as_mut(), snapshot)
         .await
         .map_err(anyhow::Error::new)?;
-    let namespace_digest = namespace_digest(transaction.as_mut(), schema).await?;
     let migration = qualified_table(schema, "runtime_state_migration");
-    let evidence = json!({
+    let mut evidence = json!({
+        "sourceIdentity": source_identity,
         "threads": snapshot.threads.len(),
         "historyLines": snapshot
             .threads
@@ -136,7 +142,9 @@ async fn import_snapshot(
             .map(|thread| thread.canonical_history.lines().len())
             .sum::<usize>(),
         "sourceFingerprint": source_fingerprint,
-        "namespaceDigest": namespace_digest,
+        "phase": "threads_imported",
+        "ready": false,
+        "fencingToken": 1,
     });
     sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO {migration} (source_identity, source_fingerprint, phase, ready, phase_evidence, fencing_token) \
@@ -144,10 +152,19 @@ async fn import_snapshot(
     )))
     .bind(source_identity)
     .bind(source_fingerprint)
-    .bind(evidence)
+    .bind(&evidence)
     .execute(transaction.as_mut())
     .await
     .map_err(|error| map_sql_error(schema, "record thread migration phase", error))?;
+    let namespace_digest = namespace_digest(transaction.as_mut(), schema).await?;
+    evidence["namespaceDigest"] = Value::String(namespace_digest);
+    sqlx::query(AssertSqlSafe(format!(
+        "UPDATE {migration} SET phase_evidence = $1 WHERE singleton"
+    )))
+    .bind(evidence)
+    .execute(transaction.as_mut())
+    .await
+    .map_err(|error| map_sql_error(schema, "seal thread migration evidence", error))?;
     transaction
         .commit()
         .await
@@ -238,6 +255,17 @@ async fn write_thread(
     .execute(&mut *connection)
     .await
     .map_err(|error| map_sql_error(schema, "import thread metadata", error))?;
+    if let Some(polluted_at_stream_version) = thread.polluted_at_stream_version {
+        let overrides = qualified_table(schema, "memory_thread_mode_overrides");
+        sqlx::query(AssertSqlSafe(format!(
+            "INSERT INTO {overrides} (thread_id, polluted_at_stream_version) VALUES ($1, $2)"
+        )))
+        .bind(metadata.id.to_string())
+        .bind(polluted_at_stream_version)
+        .execute(&mut *connection)
+        .await
+        .map_err(|error| map_sql_error(schema, "import thread memory pollution", error))?;
+    }
     write_history(connection, schema, thread).await?;
     Ok(())
 }

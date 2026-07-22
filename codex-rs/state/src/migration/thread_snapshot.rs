@@ -19,6 +19,7 @@ use codex_protocol::dynamic_tools::group_dynamic_tools_by_namespace;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::ThreadMemoryMode;
+use serde::Serialize;
 use serde_json::Value;
 use sqlx::Row;
 use std::collections::BTreeMap;
@@ -26,18 +27,23 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
 
+const MAX_CANONICAL_HISTORY_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Reads Canonical Thread History without giving migration code write access to its representation.
 pub trait CanonicalThreadHistoryReader {
-    /// Returns parsed records in source order and the number of rejected source records.
+    /// Returns parsed records, rejected-record count, and uncompressed source bytes consumed.
     fn read<'a>(
         &'a self,
         path: &'a Path,
-    ) -> impl std::future::Future<Output = anyhow::Result<(Vec<RolloutLine>, usize)>> + Send + 'a;
+        maximum_source_bytes: u64,
+    ) -> impl std::future::Future<Output = anyhow::Result<(Vec<RolloutLine>, usize, u64)>> + Send + 'a;
 
     /// Derives canonical thread metadata through the rollout subsystem's compatibility parser.
     fn extract_metadata<'a>(
         &'a self,
         path: &'a Path,
+        _lines: &'a [RolloutLine],
+        _rejected_line_count: usize,
     ) -> impl std::future::Future<Output = anyhow::Result<ExtractionOutcome>> + Send + 'a {
         async move {
             anyhow::bail!(
@@ -85,6 +91,7 @@ impl RuntimeStateThreadSnapshot {
 pub struct ThreadMigrationSnapshot {
     pub(super) metadata: ThreadMetadata,
     pub(super) memory_mode: ThreadMemoryMode,
+    pub(super) polluted_at_stream_version: Option<i64>,
     pub(super) canonical_history: CanonicalThreadHistorySnapshot,
     pub(super) dynamic_tools: Vec<DynamicToolSpec>,
     pub(super) projection_state: Option<ThreadHistoryProjectionStateSnapshot>,
@@ -107,6 +114,21 @@ impl ThreadMigrationSnapshot {
 
     pub fn dynamic_tools(&self) -> &[DynamicToolSpec] {
         &self.dynamic_tools
+    }
+
+    /// Local persisted projection cursor, when one exists.
+    pub fn projection_state(&self) -> Option<&ThreadHistoryProjectionStateSnapshot> {
+        self.projection_state.as_ref()
+    }
+
+    /// Local persisted turn projections used for migration parity validation.
+    pub fn turns(&self) -> &[ThreadTurnProjectionSnapshot] {
+        &self.turns
+    }
+
+    /// Local persisted item projections used for migration parity validation.
+    pub fn items(&self) -> &[ThreadItemProjectionSnapshot] {
+        &self.items
     }
 }
 
@@ -157,8 +179,15 @@ pub struct ThreadHistoryProjectionStateSnapshot {
     pub(super) next_rollout_ordinal: u64,
 }
 
+impl ThreadHistoryProjectionStateSnapshot {
+    /// First canonical rollout ordinal not reflected in the local projection.
+    pub fn next_rollout_ordinal(&self) -> u64 {
+        self.next_rollout_ordinal
+    }
+}
+
 /// Persisted local turn projection in canonical rollout order.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct ThreadTurnProjectionSnapshot {
     pub(super) turn_id: String,
     pub(super) rollout_ordinal: u64,
@@ -172,7 +201,7 @@ pub struct ThreadTurnProjectionSnapshot {
 }
 
 /// Persisted local app-server item projection in canonical rollout order.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct ThreadItemProjectionSnapshot {
     pub(super) turn_id: String,
     pub(super) item_id: String,
@@ -247,6 +276,7 @@ async fn snapshot(
     .fetch_all(state_pool)
     .await?;
     let mut threads = Vec::with_capacity(rows.len());
+    let mut remaining_history_bytes = MAX_CANONICAL_HISTORY_SOURCE_BYTES;
     let rollout_files = inventory
         .rollout_files
         .iter()
@@ -257,8 +287,7 @@ async fn snapshot(
         .collect::<BTreeMap<_, _>>();
     let mut referenced_rollouts = HashSet::new();
     for row in rows {
-        let memory_mode = serde_json::from_value(Value::String(row.try_get("memory_mode")?))
-            .context("decode thread memory mode")?;
+        let source_memory_mode: String = row.try_get("memory_mode")?;
         let metadata = ThreadMetadata::try_from(ThreadRow::try_from_row(&row)?)?;
         let relative_path =
             source_validation::relative_rollout_path(source.home(), &metadata.rollout_path)?;
@@ -270,10 +299,13 @@ async fn snapshot(
         })?;
         referenced_rollouts.insert(relative_path);
         let rollout_path = source.home().join(physical_path);
-        let (lines, rejected_line_count) = history_reader
-            .read(&rollout_path)
+        let (lines, rejected_line_count, source_bytes) = history_reader
+            .read(&rollout_path, remaining_history_bytes)
             .await
             .with_context(|| format!("read Canonical Thread History for {}", metadata.id))?;
+        remaining_history_bytes = remaining_history_bytes.checked_sub(source_bytes).context(
+            "Canonical Thread History reader exceeded its bounded migration source budget",
+        )?;
         anyhow::ensure!(
             rejected_line_count == 0,
             "Canonical Thread History for {} contains {rejected_line_count} unsupported or malformed record(s); upgrade Codex or repair the rollout before migrating",
@@ -285,10 +317,13 @@ async fn snapshot(
             "thread {} metadata does not match the first SessionMeta in its rollout",
             metadata.id
         );
+        let (memory_mode, polluted_at_stream_version) =
+            migration_memory_state(&source_memory_mode, &lines)?;
         threads.push(
             read_thread_snapshot(
                 metadata,
                 memory_mode,
+                polluted_at_stream_version,
                 CanonicalThreadHistorySnapshot::new(lines, rejected_line_count),
                 state_pool,
                 history_pool,
@@ -301,7 +336,12 @@ async fn snapshot(
             continue;
         }
         let rollout_path = source.home().join(&physical_path);
-        let (lines, rejected_line_count) = history_reader.read(&rollout_path).await?;
+        let (lines, rejected_line_count, source_bytes) = history_reader
+            .read(&rollout_path, remaining_history_bytes)
+            .await?;
+        remaining_history_bytes = remaining_history_bytes.checked_sub(source_bytes).context(
+            "Canonical Thread History reader exceeded its bounded migration source budget",
+        )?;
         anyhow::ensure!(
             rejected_line_count == 0,
             "Canonical Thread History at {} contains {rejected_line_count} unsupported or malformed record(s); upgrade Codex or repair the rollout before migrating",
@@ -313,7 +353,9 @@ async fn snapshot(
                 rollout_path.display()
             )
         })?;
-        let mut outcome = history_reader.extract_metadata(&rollout_path).await?;
+        let mut outcome = history_reader
+            .extract_metadata(&rollout_path, &lines, rejected_line_count)
+            .await?;
         anyhow::ensure!(
             outcome.metadata.id == thread_id,
             "rollout-only thread metadata does not match SessionMeta for {thread_id}"
@@ -321,15 +363,13 @@ async fn snapshot(
         if logical_path.starts_with("archived_sessions") && outcome.metadata.archived_at.is_none() {
             outcome.metadata.archived_at = Some(outcome.metadata.updated_at);
         }
-        let memory_mode = outcome
-            .memory_mode
-            .map(|mode| serde_json::from_value(Value::String(mode)))
-            .transpose()?
-            .unwrap_or(ThreadMemoryMode::Enabled);
+        let (memory_mode, polluted_at_stream_version) =
+            migration_memory_state(outcome.memory_mode.as_deref().unwrap_or("enabled"), &lines)?;
         threads.push(
             read_thread_snapshot(
                 outcome.metadata,
                 memory_mode,
+                polluted_at_stream_version,
                 CanonicalThreadHistorySnapshot::new(lines, rejected_line_count),
                 state_pool,
                 history_pool,
@@ -337,6 +377,13 @@ async fn snapshot(
             .await?,
         );
     }
+    let mut unique_thread_ids = HashSet::new();
+    anyhow::ensure!(
+        threads
+            .iter()
+            .all(|thread| unique_thread_ids.insert(thread.metadata.id)),
+        "multiple rollout files resolve to the same canonical thread ID"
+    );
     let thread_ids = threads
         .iter()
         .map(|thread| thread.metadata.id)
@@ -372,9 +419,27 @@ fn session_meta_id(lines: &[RolloutLine]) -> Option<ThreadId> {
     })
 }
 
+fn migration_memory_state(
+    source_mode: &str,
+    lines: &[RolloutLine],
+) -> anyhow::Result<(ThreadMemoryMode, Option<i64>)> {
+    match source_mode {
+        "polluted" => Ok((
+            ThreadMemoryMode::Enabled,
+            Some(i64::try_from(lines.len()).context("Canonical Thread History is too large")?),
+        )),
+        _ => Ok((
+            serde_json::from_value(Value::String(source_mode.to_string()))
+                .context("decode thread memory mode")?,
+            None,
+        )),
+    }
+}
+
 async fn read_thread_snapshot(
     metadata: ThreadMetadata,
     memory_mode: ThreadMemoryMode,
+    polluted_at_stream_version: Option<i64>,
     canonical_history: CanonicalThreadHistorySnapshot,
     state_pool: &sqlx::SqlitePool,
     history_pool: &sqlx::SqlitePool,
@@ -455,9 +520,8 @@ async fn read_thread_snapshot(
         canonical_history
             .lines
             .iter()
-            .rev()
             .find_map(|line| match &line.item {
-                RolloutItem::SessionMeta(meta) => meta.meta.dynamic_tools.clone(),
+                RolloutItem::SessionMeta(meta) => Some(&meta.meta),
                 RolloutItem::ResponseItem(_)
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -466,6 +530,7 @@ async fn read_thread_snapshot(
                 | RolloutItem::WorldState(_)
                 | RolloutItem::EventMsg(_) => None,
             })
+            .and_then(|meta| meta.dynamic_tools.clone())
             .unwrap_or_default()
     } else {
         group_dynamic_tools_by_namespace(tools)
@@ -473,6 +538,7 @@ async fn read_thread_snapshot(
     Ok(ThreadMigrationSnapshot {
         metadata,
         memory_mode,
+        polluted_at_stream_version,
         canonical_history,
         dynamic_tools,
         projection_state,

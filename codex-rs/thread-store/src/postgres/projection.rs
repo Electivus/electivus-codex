@@ -83,6 +83,86 @@ pub(super) async fn rebuild_history_projections(
     stream_version: i64,
     history_projection_start_ordinal: Option<i64>,
 ) -> ThreadStoreResult<()> {
+    clear_history_projections(store, connection, thread_id).await?;
+    let mut expected_ordinal = 0_i64;
+    loop {
+        let rows = sqlx::query_as::<_, (i64, Value, DateTime<Utc>)>(AssertSqlSafe(format!(
+            "SELECT ordinal, item, recorded_at FROM {} \
+             WHERE thread_id = $1 AND ordinal >= $2 ORDER BY ordinal ASC LIMIT 256",
+            store.tables.history
+        )))
+        .bind(thread_id.to_string())
+        .bind(expected_ordinal)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(|error| database_error("rebuild thread history projections", error))?;
+        if rows.is_empty() {
+            break;
+        }
+        for (ordinal, item, recorded_at) in rows {
+            if ordinal != expected_ordinal {
+                return Err(invalid_canonical_history(thread_id));
+            }
+            let item = serde_json::from_value(item).map_err(serialization_error)?;
+            apply_history_projections(
+                store,
+                connection,
+                thread_id,
+                ordinal,
+                recorded_at,
+                history_projection_start_ordinal,
+                std::slice::from_ref(&item),
+            )
+            .await?;
+            expected_ordinal = expected_ordinal
+                .checked_add(1)
+                .ok_or_else(|| projection_too_large(()))?;
+        }
+    }
+    if expected_ordinal != stream_version {
+        return Err(invalid_canonical_history(thread_id));
+    }
+    finish_history_projection(store, connection, thread_id, stream_version).await
+}
+
+pub(super) async fn rebuild_history_projections_from_lines(
+    store: &PostgresThreadStore,
+    connection: &mut PgConnection,
+    thread_id: codex_protocol::ThreadId,
+    stream_version: i64,
+    history_projection_start_ordinal: Option<i64>,
+    lines: &[RolloutLine],
+) -> ThreadStoreResult<()> {
+    if i64::try_from(lines.len()).map_err(projection_too_large)? != stream_version {
+        return Err(invalid_canonical_history(thread_id));
+    }
+    clear_history_projections(store, connection, thread_id).await?;
+    for (ordinal, line) in lines.iter().enumerate() {
+        let ordinal = i64::try_from(ordinal).map_err(projection_too_large)?;
+        let recorded_at = DateTime::parse_from_rfc3339(&line.timestamp)
+            .map_err(|error| ThreadStoreError::Internal {
+                message: format!("invalid canonical history timestamp: {error}"),
+            })?
+            .to_utc();
+        apply_history_projections(
+            store,
+            connection,
+            thread_id,
+            ordinal,
+            recorded_at,
+            history_projection_start_ordinal,
+            std::slice::from_ref(&line.item),
+        )
+        .await?;
+    }
+    finish_history_projection(store, connection, thread_id, stream_version).await
+}
+
+async fn clear_history_projections(
+    store: &PostgresThreadStore,
+    connection: &mut PgConnection,
+    thread_id: codex_protocol::ThreadId,
+) -> ThreadStoreResult<()> {
     for table in [
         &store.tables.items,
         &store.tables.turns,
@@ -96,41 +176,15 @@ pub(super) async fn rebuild_history_projections(
         .await
         .map_err(|error| database_error("rebuild thread history projections", error))?;
     }
-    let rows = sqlx::query(AssertSqlSafe(format!(
-        "SELECT ordinal, item, recorded_at FROM {} WHERE thread_id = $1 ORDER BY ordinal ASC",
-        store.tables.history
-    )))
-    .bind(thread_id.to_string())
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(|error| database_error("rebuild thread history projections", error))?;
-    if i64::try_from(rows.len()).map_err(projection_too_large)? != stream_version {
-        return Err(invalid_canonical_history(thread_id));
-    }
-    for (expected_ordinal, row) in rows.into_iter().enumerate() {
-        let expected_ordinal = i64::try_from(expected_ordinal).map_err(projection_too_large)?;
-        let ordinal = row
-            .try_get::<i64, _>("ordinal")
-            .map_err(|error| database_error("rebuild thread history projections", error))?;
-        if ordinal != expected_ordinal {
-            return Err(invalid_canonical_history(thread_id));
-        }
-        let item = row
-            .try_get::<Value, _>("item")
-            .map_err(|error| database_error("rebuild thread history projections", error))?;
-        let item = serde_json::from_value(item).map_err(serialization_error)?;
-        apply_history_projections(
-            store,
-            connection,
-            thread_id,
-            ordinal,
-            row.try_get("recorded_at")
-                .map_err(|error| database_error("rebuild thread history projections", error))?,
-            history_projection_start_ordinal,
-            std::slice::from_ref(&item),
-        )
-        .await?;
-    }
+    Ok(())
+}
+
+async fn finish_history_projection(
+    store: &PostgresThreadStore,
+    connection: &mut PgConnection,
+    thread_id: codex_protocol::ThreadId,
+    stream_version: i64,
+) -> ThreadStoreResult<()> {
     sqlx::query(AssertSqlSafe(format!(
         "UPDATE {} SET history_projection_version = $1 WHERE thread_id = $2",
         store.tables.threads

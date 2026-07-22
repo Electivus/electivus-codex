@@ -158,6 +158,14 @@ pub(super) async fn delete_thread(
         .begin()
         .await
         .map_err(|error| database_error("delete thread", error))?;
+    sqlx::query(AssertSqlSafe(format!(
+        "DELETE FROM {} WHERE parent_thread_id = $1 OR child_thread_id = $1",
+        store.tables.spawn_edges
+    )))
+    .bind(params.thread_id.to_string())
+    .execute(transaction.as_mut())
+    .await
+    .map_err(|error| database_error("delete thread", error))?;
     let deleted = sqlx::query(AssertSqlSafe(format!(
         "DELETE FROM {} WHERE thread_id = $1",
         store.tables.threads

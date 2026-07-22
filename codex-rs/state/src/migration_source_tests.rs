@@ -125,6 +125,24 @@ async fn postgres_contract_preflight_rejects_invalid_rollout_references_without_
     assert!(error.contains("contains invalid JSON at line 1"), "{error}");
     std::fs::remove_dir_all(invalid)?;
 
+    let ambiguous = test_support::source_with_rollout("rollout-ambiguous", |source| {
+        source.join("sessions/ambiguous.jsonl")
+    })
+    .await?;
+    std::fs::create_dir_all(ambiguous.join("sessions"))?;
+    for extension in ["jsonl", "jsonl.zst"] {
+        std::fs::write(
+            ambiguous.join(format!("sessions/ambiguous.{extension}")),
+            b"",
+        )?;
+    }
+    let error = assert_rejected_unchanged(&ambiguous, &destination).await?;
+    assert!(
+        error.contains("ambiguous physical rollout files"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(ambiguous)?;
+
     destination.cleanup().await?;
     Ok(())
 }

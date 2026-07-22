@@ -60,9 +60,23 @@ async fn postgres_contract_runtime_state_thread_retry_rejects_changed_destinatio
             "thread_search_content",
             "content = content || ' tampered'",
         ),
+        (
+            "migration_phase",
+            "runtime_state_migration",
+            "phase = 'operational_imported'",
+        ),
+        (
+            "migration_fence",
+            "runtime_state_migration",
+            "fencing_token = fencing_token + 1",
+        ),
+        (
+            "migration_evidence_extra",
+            "runtime_state_migration",
+            "phase_evidence = phase_evidence || '{\"unexpected\":true}'::jsonb",
+        ),
     ] {
-        let fixture =
-            PostgresThreadStoreFixture::new(&format!("runtime_migration_tampering_{label}"))?;
+        let fixture = PostgresThreadStoreFixture::new(&format!("mig_tamper_{label}"))?;
         fixture.migrate().await?;
         let inventory =
             preflight_runtime_state_migration(source.config.clone(), fixture.config.clone())
@@ -80,6 +94,56 @@ async fn postgres_contract_runtime_state_thread_retry_rejects_changed_destinatio
         fixture.cleanup().await?;
         retry.expect_err("retry must reject changed destination state");
     }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_runtime_state_thread_import_diagnoses_stale_local_projections()
+-> Result<(), Box<dyn std::error::Error>> {
+    let lagging_source = migration_source(LineageFixture::Valid).await?;
+    assert_stale_projection(
+        &lagging_source,
+        "runtime_migration_lagging_projection",
+        "UPDATE thread_history_projection_state \
+         SET next_rollout_ordinal = next_rollout_ordinal - 1 WHERE thread_id = ?",
+        "projection cursor",
+    )
+    .await?;
+
+    let rollback_source = migration_source(LineageFixture::Valid).await?;
+    assert_stale_projection(
+        &rollback_source,
+        "runtime_migration_rollback_projection",
+        "INSERT INTO thread_turns \
+         (thread_id, turn_id, rollout_ordinal, status) VALUES (?, 'rolled-back-turn', 0, 'completed')",
+        "differ from eager Canonical Thread History projection",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn assert_stale_projection(
+    source: &MigrationSource,
+    destination: &str,
+    mutation: &'static str,
+    expected_error: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let history_pool = codex_state::open_thread_history_db(source.config.home()).await?;
+    sqlx::query(mutation)
+        .bind(source.thread_id.to_string())
+        .execute(&history_pool)
+        .await?;
+    history_pool.close().await;
+    let fixture = PostgresThreadStoreFixture::new(destination)?;
+    fixture.migrate().await?;
+    let inventory =
+        preflight_runtime_state_migration(source.config.clone(), fixture.config.clone()).await?;
+    let error = import_threads(source, &fixture, &inventory)
+        .await
+        .expect_err("a stale local projection must be rejected");
+    assert!(format!("{error:#}").contains(expected_error), "{error:#}");
+    fixture.cleanup().await?;
     Ok(())
 }
 

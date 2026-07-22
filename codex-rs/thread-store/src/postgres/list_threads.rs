@@ -50,15 +50,14 @@ pub(super) async fn list_threads(
     if let Some(ThreadRelationFilter::DescendantsOf(ancestor_thread_id)) = params.relation_filter {
         query.push(format!(
             "WITH RECURSIVE descendants(thread_id) AS (\
-             SELECT thread_id FROM {} WHERE projection ->> 'parent_thread_id' = ",
-            store.tables.threads
+             SELECT child_thread_id FROM {} WHERE parent_thread_id = ",
+            store.tables.spawn_edges
         ));
         query.push_bind(ancestor_thread_id.to_string());
         query.push(format!(
-            " UNION SELECT child.thread_id FROM {} AS child \
-             JOIN descendants AS parent \
-             ON child.projection ->> 'parent_thread_id' = parent.thread_id) ",
-            store.tables.threads
+            " UNION SELECT edge.child_thread_id FROM {} AS edge \
+                 JOIN descendants AS parent ON edge.parent_thread_id = parent.thread_id) ",
+            store.tables.spawn_edges
         ));
     }
     query.push(format!(
@@ -78,6 +77,10 @@ pub(super) async fn list_threads(
         query.push("threads.archived_at IS NULL");
     }
     query.push(" AND COALESCE(threads.projection ->> 'preview', '') <> ''");
+    if let Some(ThreadRelationFilter::DescendantsOf(ancestor_thread_id)) = params.relation_filter {
+        query.push(" AND threads.thread_id <> ");
+        query.push_bind(ancestor_thread_id.to_string());
+    }
     if !params.allowed_sources.is_empty() {
         query.push(" AND threads.projection -> 'source' IN (");
         let mut separated = query.separated(", ");
@@ -118,8 +121,13 @@ pub(super) async fn list_threads(
         query.push(") > 0)");
     }
     if let Some(ThreadRelationFilter::DirectChildrenOf(parent_thread_id)) = params.relation_filter {
-        query.push(" AND threads.projection ->> 'parent_thread_id' = ");
+        query.push(format!(
+            " AND threads.thread_id IN (\
+             SELECT child_thread_id FROM {} WHERE parent_thread_id = ",
+            store.tables.spawn_edges
+        ));
         query.push_bind(parent_thread_id.to_string());
+        query.push(")");
     }
     if let Some(cursor) = cursor.as_ref() {
         query.push(" AND (");

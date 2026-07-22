@@ -5,6 +5,7 @@ use anyhow::Context;
 use std::collections::HashSet;
 use std::io::BufRead;
 use std::io::BufReader;
+use std::io::Read;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
@@ -13,6 +14,7 @@ const STATE_TABLES: &str = "_sqlx_migrations,backfill_state,external_agent_confi
 const GOALS_TABLES: &str = "_sqlx_migrations,thread_goal_accounting_events,thread_goal_continuation_deferrals,thread_goals";
 const THREAD_HISTORY_TABLES: &str =
     "_sqlx_migrations,thread_history_projection_state,thread_items,thread_turns";
+const MAX_ROLLOUT_VALIDATION_BYTES: u64 = 256 * 1024 * 1024;
 
 pub(super) async fn validate_database_schema(
     label: &str,
@@ -72,7 +74,12 @@ pub(super) async fn validate_rollout_files(
         );
     }
     for rollout in rollout_files {
-        validate_json_lines(source.home(), &rollout.relative_path).await?;
+        validate_json_lines(
+            source.home(),
+            &rollout.relative_path,
+            MAX_ROLLOUT_VALIDATION_BYTES,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -138,23 +145,44 @@ pub(super) fn logical_rollout_path(path: &Path) -> Option<PathBuf> {
     .then(|| path.with_extension(""))
 }
 
-async fn validate_json_lines(source_home: &Path, relative_path: &Path) -> anyhow::Result<()> {
+pub(super) async fn validate_json_lines(
+    source_home: &Path,
+    relative_path: &Path,
+    maximum_bytes: u64,
+) -> anyhow::Result<()> {
     let path = source_home.join(relative_path);
     tokio::task::spawn_blocking(move || {
         let file = std::fs::File::open(&path)
             .with_context(|| format!("open rollout JSONL {}", path.display()))?;
-        let reader: Box<dyn BufRead> =
+        let mut reader: Box<dyn BufRead> =
             if path.extension().is_some_and(|extension| extension == "zst") {
                 Box::new(BufReader::new(zstd::stream::read::Decoder::new(file)?))
             } else {
                 Box::new(BufReader::new(file))
             };
-        for (line_number, line) in reader.lines().enumerate() {
-            let line = line.with_context(|| format!("read rollout JSONL {}", path.display()))?;
-            serde_json::from_str::<serde_json::Value>(&line).with_context(|| {
+        let mut remaining_bytes = maximum_bytes;
+        for line_number in 1_usize.. {
+            let mut line = Vec::new();
+            let bytes = BufRead::read_until(
+                &mut Read::take(&mut *reader, remaining_bytes.saturating_add(1)),
+                b'\n',
+                &mut line,
+            )
+            .with_context(|| format!("read rollout JSONL {}", path.display()))?;
+            let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+            anyhow::ensure!(
+                bytes <= remaining_bytes,
+                "rollout JSONL {} exceeds the {maximum_bytes}-byte decoded validation budget",
+                path.display()
+            );
+            if bytes == 0 {
+                break;
+            }
+            remaining_bytes -= bytes;
+            serde_json::from_slice::<serde_json::Value>(&line).with_context(|| {
                 format!(
-                    "rollout JSONL {} contains invalid JSON at line {}; restore a valid artifact before retrying",
-                    path.display(), line_number + 1
+                    "rollout JSONL {} contains invalid JSON at line {line_number}; restore a valid artifact before retrying",
+                    path.display()
                 )
             })?;
         }

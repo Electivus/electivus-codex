@@ -40,12 +40,22 @@ struct FixtureHistoryReader {
 }
 
 impl CanonicalThreadHistoryReader for FixtureHistoryReader {
-    async fn read(&self, path: &Path) -> anyhow::Result<(Vec<RolloutLine>, usize)> {
-        self.histories
+    async fn read(
+        &self,
+        path: &Path,
+        maximum_source_bytes: u64,
+    ) -> anyhow::Result<(Vec<RolloutLine>, usize, u64)> {
+        let lines = self
+            .histories
             .get(path)
             .cloned()
-            .map(|lines| (lines, 0))
-            .ok_or_else(|| anyhow::anyhow!("missing fixture history: {}", path.display()))
+            .ok_or_else(|| anyhow::anyhow!("missing fixture history: {}", path.display()))?;
+        let source_bytes = serde_json::to_vec(&lines)?.len().try_into()?;
+        anyhow::ensure!(
+            source_bytes <= maximum_source_bytes,
+            "fixture exceeds read budget"
+        );
+        Ok((lines, 0, source_bytes))
     }
 }
 
@@ -73,7 +83,7 @@ async fn snapshot_preserves_complete_legacy_and_current_thread_domain_read_only(
     legacy.git_origin_url = Some("https://example.test/legacy.git".to_string());
     runtime.upsert_thread(&legacy).await?;
     runtime
-        .set_thread_memory_mode(legacy_id, "disabled")
+        .set_thread_memory_mode(legacy_id, "polluted")
         .await?;
 
     let mut current = test_thread_metadata(&source, current_id, source.join("current-cwd"));
@@ -97,11 +107,20 @@ async fn snapshot_preserves_complete_legacy_and_current_thread_domain_read_only(
     seed_thread_history_projections(&source, current_id).await?;
     let source_before = test_support::snapshot_source(&source)?;
 
-    let legacy_history = vec![rollout_line(
-        "2026-07-21T10:00:00Z",
-        None,
-        RolloutItem::SessionMeta(session_meta(legacy_id, &legacy, None)),
-    )];
+    let mut inherited_meta = session_meta(legacy_id, &legacy, None);
+    inherited_meta.meta.dynamic_tools = Some(dynamic_tools_fixture());
+    let legacy_history = vec![
+        rollout_line(
+            "2026-07-21T10:00:00Z",
+            None,
+            RolloutItem::SessionMeta(session_meta(legacy_id, &legacy, None)),
+        ),
+        rollout_line(
+            "2026-07-21T10:01:00Z",
+            None,
+            RolloutItem::SessionMeta(inherited_meta),
+        ),
+    ];
     let mut current_meta = session_meta(current_id, &current, Some(legacy_id));
     current_meta.meta.history_mode = ThreadHistoryMode::Paginated;
     current_meta.meta.history_base = Some(HistoryPosition {
@@ -142,7 +161,8 @@ async fn snapshot_preserves_complete_legacy_and_current_thread_domain_read_only(
         threads: vec![
             ThreadMigrationSnapshot {
                 metadata: legacy,
-                memory_mode: ThreadMemoryMode::Disabled,
+                memory_mode: ThreadMemoryMode::Enabled,
+                polluted_at_stream_version: Some(2),
                 canonical_history: super::CanonicalThreadHistorySnapshot::new(legacy_history, 0),
                 dynamic_tools: Vec::new(),
                 projection_state: None,
@@ -152,6 +172,7 @@ async fn snapshot_preserves_complete_legacy_and_current_thread_domain_read_only(
             ThreadMigrationSnapshot {
                 metadata: current,
                 memory_mode: ThreadMemoryMode::Enabled,
+                polluted_at_stream_version: None,
                 canonical_history: super::CanonicalThreadHistorySnapshot::new(current_history, 0),
                 dynamic_tools: dynamic_tools_fixture(),
                 projection_state: Some(ThreadHistoryProjectionStateSnapshot {

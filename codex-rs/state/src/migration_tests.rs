@@ -15,6 +15,27 @@ use std::time::SystemTime;
 use super::test_support;
 
 #[tokio::test]
+async fn rollout_validation_bounds_plain_and_compressed_decoded_lines() -> anyhow::Result<()> {
+    let source = test_support::initialized_source("rollout-validation-budget").await?;
+    let _cleanup = scopeguard::guard(source.clone(), |path| {
+        let _ = std::fs::remove_dir_all(path);
+    });
+    for (name, contents) in [
+        ("oversized.jsonl", b"{}\n".to_vec()),
+        (
+            "oversized.jsonl.zst",
+            zstd::stream::encode_all(b"{}\n".as_slice(), /*level*/ 0)?,
+        ),
+    ] {
+        std::fs::write(source.join(name), contents)?;
+        super::source_validation::validate_json_lines(&source, std::path::Path::new(name), 1)
+            .await
+            .expect_err("decoded line must respect the validation budget");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
 async fn postgres_contract_preflight_inventories_all_source_authorities() -> anyhow::Result<()> {
     let source = std::env::temp_dir().join(format!(
