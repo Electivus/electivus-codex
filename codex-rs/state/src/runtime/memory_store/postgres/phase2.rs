@@ -102,4 +102,84 @@ impl PostgresMemoryStore {
             input_watermark,
         })
     }
+
+    pub(crate) async fn heartbeat_global_phase2_job(
+        &self,
+        ownership_token: &str,
+        lease_seconds: i64,
+    ) -> anyhow::Result<bool> {
+        let rows_affected = sqlx::query(AssertSqlSafe(format!(
+            "WITH db_clock AS ( \
+             SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint AS now \
+             ) UPDATE {} AS job SET lease_until = db_clock.now + $1 FROM db_clock \
+             WHERE job.kind = $2 AND job.job_key = $3 AND job.status = 'running' \
+             AND job.ownership_token = $4 AND job.lease_until > db_clock.now",
+            self.jobs_table
+        )))
+        .bind(lease_seconds.max(0))
+        .bind(JOB_KIND_MEMORY_CONSOLIDATE_GLOBAL)
+        .bind(MEMORY_CONSOLIDATION_JOB_KEY)
+        .bind(ownership_token)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(rows_affected > 0)
+    }
+
+    pub(crate) async fn mark_global_phase2_job_failed(
+        &self,
+        ownership_token: &str,
+        failure_reason: &str,
+        retry_delay_seconds: i64,
+    ) -> anyhow::Result<bool> {
+        let rows_affected = sqlx::query(AssertSqlSafe(format!(
+            "WITH db_clock AS ( \
+             SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint AS now \
+             ) UPDATE {} AS job SET status = 'error', finished_at = db_clock.now, \
+             lease_until = NULL, retry_at = db_clock.now + $1, \
+             retry_remaining = GREATEST(job.retry_remaining - 1, 0), last_error = $2 \
+             FROM db_clock WHERE job.kind = $3 AND job.job_key = $4 \
+             AND job.status = 'running' AND job.ownership_token = $5 \
+             AND job.lease_until > db_clock.now",
+            self.jobs_table
+        )))
+        .bind(retry_delay_seconds.max(0))
+        .bind(failure_reason)
+        .bind(JOB_KIND_MEMORY_CONSOLIDATE_GLOBAL)
+        .bind(MEMORY_CONSOLIDATION_JOB_KEY)
+        .bind(ownership_token)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(rows_affected > 0)
+    }
+
+    pub(crate) async fn mark_global_phase2_job_failed_if_unowned(
+        &self,
+        ownership_token: &str,
+        failure_reason: &str,
+        retry_delay_seconds: i64,
+    ) -> anyhow::Result<bool> {
+        let rows_affected = sqlx::query(AssertSqlSafe(format!(
+            "WITH db_clock AS ( \
+             SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint AS now \
+             ) UPDATE {} AS job SET status = 'error', finished_at = db_clock.now, \
+             lease_until = NULL, retry_at = db_clock.now + $1, \
+             retry_remaining = GREATEST(job.retry_remaining - 1, 0), last_error = $2 \
+             FROM db_clock WHERE job.kind = $3 AND job.job_key = $4 \
+             AND job.status = 'running' AND (job.ownership_token IS NULL OR ( \
+             job.ownership_token = $5 AND (job.lease_until IS NULL \
+             OR job.lease_until <= db_clock.now)))",
+            self.jobs_table
+        )))
+        .bind(retry_delay_seconds.max(0))
+        .bind(failure_reason)
+        .bind(JOB_KIND_MEMORY_CONSOLIDATE_GLOBAL)
+        .bind(MEMORY_CONSOLIDATION_JOB_KEY)
+        .bind(ownership_token)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(rows_affected > 0)
+    }
 }

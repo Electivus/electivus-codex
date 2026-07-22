@@ -18,6 +18,7 @@ use crate::runtime::memory_store_contract_tests::run_stage1_claim_and_output_con
 use crate::runtime::memory_store_contract_tests::run_stage1_retry_and_lease_contract;
 use crate::runtime::memory_store_output_contract_tests::run_postgres_stage1_output_data_contract;
 use crate::runtime::memory_store_phase2_contract_tests::run_phase2_enqueue_and_claim_contract;
+use crate::runtime::memory_store_phase2_contract_tests::run_phase2_heartbeat_and_failure_contract;
 use crate::runtime::memory_store_startup_contract_tests::run_postgres_stage1_startup_contract;
 use crate::runtime::remote_control_contract_tests::run_remote_control_enrollment_contract;
 use anyhow::Context;
@@ -133,6 +134,7 @@ async fn postgres_contract_phase2_enqueue_and_claim_are_shared_between_replicas(
     );
 
     run_phase2_enqueue_and_claim_contract(&first, &second).await?;
+    run_phase2_heartbeat_and_failure_contract(&first, &second).await?;
 
     first.close().await;
     second.close().await;

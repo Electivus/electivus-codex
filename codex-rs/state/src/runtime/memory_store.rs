@@ -326,9 +326,18 @@ impl MemoryStore {
         ownership_token: &str,
         lease_seconds: i64,
     ) -> anyhow::Result<bool> {
-        self.sqlite("heartbeat global memory consolidation")?
-            .heartbeat_global_phase2_job(ownership_token, lease_seconds)
-            .await
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => {
+                store
+                    .heartbeat_global_phase2_job(ownership_token, lease_seconds)
+                    .await
+            }
+            MemoryStoreBackend::Sqlite(store) => {
+                store
+                    .heartbeat_global_phase2_job(ownership_token, lease_seconds)
+                    .await
+            }
+        }
     }
 
     pub async fn mark_global_phase2_job_succeeded(
@@ -352,9 +361,26 @@ impl MemoryStore {
         failure_reason: &str,
         retry_delay_seconds: i64,
     ) -> anyhow::Result<bool> {
-        self.sqlite("fail global memory consolidation")?
-            .mark_global_phase2_job_failed(ownership_token, failure_reason, retry_delay_seconds)
-            .await
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => {
+                store
+                    .mark_global_phase2_job_failed(
+                        ownership_token,
+                        failure_reason,
+                        retry_delay_seconds,
+                    )
+                    .await
+            }
+            MemoryStoreBackend::Sqlite(store) => {
+                store
+                    .mark_global_phase2_job_failed(
+                        ownership_token,
+                        failure_reason,
+                        retry_delay_seconds,
+                    )
+                    .await
+            }
+        }
     }
 
     pub async fn mark_global_phase2_job_failed_if_unowned(
@@ -363,13 +389,26 @@ impl MemoryStore {
         failure_reason: &str,
         retry_delay_seconds: i64,
     ) -> anyhow::Result<bool> {
-        self.sqlite("recover failed global memory consolidation")?
-            .mark_global_phase2_job_failed_if_unowned(
-                ownership_token,
-                failure_reason,
-                retry_delay_seconds,
-            )
-            .await
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => {
+                store
+                    .mark_global_phase2_job_failed_if_unowned(
+                        ownership_token,
+                        failure_reason,
+                        retry_delay_seconds,
+                    )
+                    .await
+            }
+            MemoryStoreBackend::Sqlite(store) => {
+                store
+                    .mark_global_phase2_job_failed_if_unowned(
+                        ownership_token,
+                        failure_reason,
+                        retry_delay_seconds,
+                    )
+                    .await
+            }
+        }
     }
 
     #[cfg(test)]

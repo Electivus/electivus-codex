@@ -1226,17 +1226,16 @@ WHERE kind = ? AND job_key = ?
         ownership_token: &str,
         lease_seconds: i64,
     ) -> anyhow::Result<bool> {
-        let now = Utc::now().timestamp();
-        let lease_until = now.saturating_add(lease_seconds.max(0));
         let rows_affected = sqlx::query(
             r#"
 UPDATE jobs
-SET lease_until = ?
+SET lease_until = CAST(strftime('%s', 'now') AS INTEGER) + ?
 WHERE kind = ? AND job_key = ?
   AND status = 'running' AND ownership_token = ?
+  AND lease_until > CAST(strftime('%s', 'now') AS INTEGER)
             "#,
         )
-        .bind(lease_until)
+        .bind(lease_seconds.max(0))
         .bind(JOB_KIND_MEMORY_CONSOLIDATE_GLOBAL)
         .bind(MEMORY_CONSOLIDATION_JOB_KEY)
         .bind(ownership_token)
@@ -1319,24 +1318,22 @@ WHERE thread_id = ? AND source_updated_at = ?
         failure_reason: &str,
         retry_delay_seconds: i64,
     ) -> anyhow::Result<bool> {
-        let now = Utc::now().timestamp();
-        let retry_at = now.saturating_add(retry_delay_seconds.max(0));
         let rows_affected = sqlx::query(
             r#"
 UPDATE jobs
 SET
     status = 'error',
-    finished_at = ?,
+    finished_at = CAST(strftime('%s', 'now') AS INTEGER),
     lease_until = NULL,
-    retry_at = ?,
+    retry_at = CAST(strftime('%s', 'now') AS INTEGER) + ?,
     retry_remaining = max(retry_remaining - 1, 0),
     last_error = ?
 WHERE kind = ? AND job_key = ?
   AND status = 'running' AND ownership_token = ?
+  AND lease_until > CAST(strftime('%s', 'now') AS INTEGER)
             "#,
         )
-        .bind(now)
-        .bind(retry_at)
+        .bind(retry_delay_seconds.max(0))
         .bind(failure_reason)
         .bind(JOB_KIND_MEMORY_CONSOLIDATE_GLOBAL)
         .bind(MEMORY_CONSOLIDATION_JOB_KEY)
@@ -1352,33 +1349,36 @@ WHERE kind = ? AND job_key = ?
     ///
     /// Query behavior:
     /// - same state transition as [`Self::mark_global_phase2_job_failed`]
-    /// - matches rows where `ownership_token = ? OR ownership_token IS NULL`
-    /// - allows recovering a stuck unowned running row
+    /// - allows a null-token row or an expired row still bearing the caller's token
+    /// - never overwrites a running row with a fresh owned lease
     pub async fn mark_global_phase2_job_failed_if_unowned(
         &self,
         ownership_token: &str,
         failure_reason: &str,
         retry_delay_seconds: i64,
     ) -> anyhow::Result<bool> {
-        let now = Utc::now().timestamp();
-        let retry_at = now.saturating_add(retry_delay_seconds.max(0));
         let rows_affected = sqlx::query(
             r#"
 UPDATE jobs
 SET
     status = 'error',
-    finished_at = ?,
+    finished_at = CAST(strftime('%s', 'now') AS INTEGER),
     lease_until = NULL,
-    retry_at = ?,
+    retry_at = CAST(strftime('%s', 'now') AS INTEGER) + ?,
     retry_remaining = max(retry_remaining - 1, 0),
     last_error = ?
 WHERE kind = ? AND job_key = ?
   AND status = 'running'
-  AND (ownership_token = ? OR ownership_token IS NULL)
+  AND (
+    ownership_token IS NULL
+    OR (
+      ownership_token = ?
+      AND (lease_until IS NULL OR lease_until <= CAST(strftime('%s', 'now') AS INTEGER))
+    )
+  )
             "#,
         )
-        .bind(now)
-        .bind(retry_at)
+        .bind(retry_delay_seconds.max(0))
         .bind(failure_reason)
         .bind(JOB_KIND_MEMORY_CONSOLIDATE_GLOBAL)
         .bind(MEMORY_CONSOLIDATION_JOB_KEY)
