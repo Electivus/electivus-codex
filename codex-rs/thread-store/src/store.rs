@@ -129,6 +129,11 @@ pub trait ThreadStore: Any + Send + Sync {
         false
     }
 
+    /// Whether rollback markers atomically update this store's paginated history projections.
+    fn supports_paginated_rollback(&self) -> bool {
+        false
+    }
+
     /// Searches stored threads and returns search-only preview metadata.
     fn search_threads(
         &self,

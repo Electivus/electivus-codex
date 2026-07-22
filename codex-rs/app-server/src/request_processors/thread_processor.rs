@@ -1797,15 +1797,19 @@ impl ThreadRequestProcessor {
         }
 
         let (thread_id, thread) = self.load_thread(&thread_id).await?;
-        if matches!(
-            thread.config_snapshot().await.history_mode,
-            ThreadHistoryMode::Paginated
-        ) {
+        let config_snapshot = thread.config_snapshot().await;
+        if config_snapshot.ephemeral {
+            return Err(invalid_request(
+                "thread rollback requires persisted thread history",
+            ));
+        }
+        if matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated)
+            && !self.thread_store.supports_paginated_rollback()
+        {
             return Err(invalid_request(
                 "paginated threads do not support thread/rollback",
             ));
         }
-
         let request = request_id.clone();
 
         let rollback_already_in_progress = {

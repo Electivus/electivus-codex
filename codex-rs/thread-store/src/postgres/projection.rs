@@ -4,6 +4,7 @@ use chrono::Utc;
 use codex_app_server_protocol::ThreadHistoryTurnChange;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::project_rollout_line;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -156,6 +157,10 @@ pub(super) async fn apply_history_projections(
         let rollout_ordinal = first_ordinal
             .checked_add(offset)
             .ok_or_else(|| projection_too_large(()))?;
+        if let RolloutItem::EventMsg(EventMsg::ThreadRolledBack(event)) = item {
+            apply_rollback_projection(store, transaction, thread_id, event.num_turns).await?;
+            continue;
+        }
         super::search_threads::apply_projection(
             store,
             transaction,
@@ -198,6 +203,63 @@ pub(super) async fn apply_history_projections(
             .map_err(|error| database_error("project thread items", error))?;
         }
     }
+    Ok(())
+}
+
+async fn apply_rollback_projection(
+    store: &PostgresThreadStore,
+    transaction: &mut Transaction<'_, Postgres>,
+    thread_id: codex_protocol::ThreadId,
+    num_turns: u32,
+) -> ThreadStoreResult<()> {
+    if num_turns == 0 {
+        return Ok(());
+    }
+    let rollback_start: Option<i64> = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT MIN(rollout_ordinal) FROM (\
+            SELECT rollout_ordinal FROM {} WHERE thread_id = $1 \
+            ORDER BY rollout_ordinal DESC LIMIT $2\
+         ) AS rolled_back_turns",
+        store.tables.turns
+    )))
+    .bind(thread_id.to_string())
+    .bind(i64::from(num_turns))
+    .fetch_one(transaction.as_mut())
+    .await
+    .map_err(|error| database_error("project thread rollback", error))?;
+    let Some(rollback_start) = rollback_start else {
+        return Ok(());
+    };
+
+    sqlx::query(AssertSqlSafe(format!(
+        "DELETE FROM {} WHERE thread_id = $1 AND rollout_ordinal >= $2",
+        store.tables.search_content
+    )))
+    .bind(thread_id.to_string())
+    .bind(rollback_start)
+    .execute(transaction.as_mut())
+    .await
+    .map_err(|error| database_error("project thread rollback", error))?;
+    sqlx::query(AssertSqlSafe(format!(
+        "DELETE FROM {} WHERE thread_id = $1 AND turn_id IN (\
+            SELECT turn_id FROM {} WHERE thread_id = $1 AND rollout_ordinal >= $2\
+         )",
+        store.tables.items, store.tables.turns
+    )))
+    .bind(thread_id.to_string())
+    .bind(rollback_start)
+    .execute(transaction.as_mut())
+    .await
+    .map_err(|error| database_error("project thread rollback", error))?;
+    sqlx::query(AssertSqlSafe(format!(
+        "DELETE FROM {} WHERE thread_id = $1 AND rollout_ordinal >= $2",
+        store.tables.turns
+    )))
+    .bind(thread_id.to_string())
+    .bind(rollback_start)
+    .execute(transaction.as_mut())
+    .await
+    .map_err(|error| database_error("project thread rollback", error))?;
     Ok(())
 }
 

@@ -383,6 +383,9 @@ impl ThreadStore for PostgresThreadStore {
     fn supports_paginated_history_lists(&self) -> bool {
         true
     }
+    fn supports_paginated_rollback(&self) -> bool {
+        true
+    }
     fn search_threads(
         &self,
         params: SearchThreadsParams,

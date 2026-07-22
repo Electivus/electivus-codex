@@ -1,8 +1,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use anyhow::Context;
 use anyhow::Result;
+use app_test_support::create_mock_responses_server_repeating_assistant;
 use codex_app_server::in_process::InProcessClientHandle;
+use codex_app_server::in_process::InProcessServerEvent;
 use codex_app_server_protocol as api;
 use codex_protocol::ThreadId;
 use codex_protocol::items::AgentMessageContent;
@@ -10,7 +13,9 @@ use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::RolloutItem;
@@ -27,13 +32,16 @@ use codex_thread_store as store;
 use codex_thread_store::ThreadStore;
 use pretty_assertions::assert_eq;
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 use sqlx::AssertSqlSafe;
 use tempfile::TempDir;
+use tokio::time::timeout;
 use uuid::Uuid;
 
 use super::remote_thread_store::start_in_process_server_with_thread_store;
 
 const DATABASE_URL_ENV: &str = "CODEX_TEST_POSTGRES_URL";
+const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
@@ -45,7 +53,7 @@ async fn postgres_store_serves_database_native_v2_history_flows() -> Result<()> 
     let writer = store::PostgresThreadStore::new(&writer_pool);
     let codex_home = TempDir::new()?;
     let thread_id = ThreadId::new();
-    seed_thread(&writer, thread_id, codex_home.path()).await?;
+    seed_thread(&writer, thread_id, codex_home.path(), "openai").await?;
 
     let thread_store: Arc<dyn store::ThreadStore> =
         Arc::new(store::PostgresThreadStore::new(&reader_pool));
@@ -328,6 +336,314 @@ async fn postgres_store_serves_database_native_v2_history_flows() -> Result<()> 
     fixture.cleanup().await
 }
 
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_paginated_rollback_is_visible_across_replicas() -> Result<()> {
+    let fixture = PostgresFixture::new()?;
+    fixture.migrate().await?;
+    let origin_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let origin = store::PostgresThreadStore::new(&origin_pool);
+    let model_server =
+        create_mock_responses_server_repeating_assistant("after rollback answer").await;
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        format!(
+            r#"
+model = "mock-model"
+model_provider = "mock_provider"
+approval_policy = "never"
+sandbox_mode = "read-only"
+
+[model_providers.mock_provider]
+name = "Mock provider"
+base_url = "{}/v1"
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+
+[features]
+plugins = false
+"#,
+            model_server.uri()
+        ),
+    )?;
+    let thread_id = ThreadId::new();
+    seed_thread(&origin, thread_id, codex_home.path(), "mock_provider").await?;
+    let before_rollback = origin
+        .read_thread(store::ReadThreadParams {
+            thread_id,
+            include_archived: false,
+            include_history: false,
+        })
+        .await?;
+    origin_pool.close().await;
+
+    let rollback_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let rollback_store: Arc<dyn store::ThreadStore> =
+        Arc::new(store::PostgresThreadStore::new(&rollback_pool));
+    let rollback_client =
+        start_in_process_server_with_thread_store(codex_home.path(), rollback_store).await?;
+    let resumed: api::ThreadResumeResponse = request(
+        &rollback_client,
+        api::ClientRequest::ThreadResume {
+            request_id: request_id(1),
+            params: api::ThreadResumeParams {
+                thread_id: thread_id.to_string(),
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    assert_eq!(
+        turn_ids_from(&resumed.thread.turns),
+        vec!["turn-1", "turn-2"]
+    );
+
+    let rolled_back: api::ThreadRollbackResponse = request(
+        &rollback_client,
+        api::ClientRequest::ThreadRollback {
+            request_id: request_id(2),
+            params: api::ThreadRollbackParams {
+                thread_id: thread_id.to_string(),
+                num_turns: 1,
+            },
+        },
+    )
+    .await?;
+    assert_eq!(rolled_back.thread.path, None);
+    assert_eq!(rolled_back.thread.status, api::ThreadStatus::Idle);
+    assert_eq!(turn_ids_from(&rolled_back.thread.turns), vec!["turn-1"]);
+    assert_eq!(
+        item_ids_from(&rolled_back.thread.turns),
+        vec!["user-1", "agent-1"]
+    );
+    fixture.damage_history_projections(thread_id).await?;
+
+    let reader_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let reader_store = Arc::new(store::PostgresThreadStore::new(&reader_pool));
+    let mut reader_client = start_in_process_server_with_thread_store(
+        codex_home.path(),
+        Arc::clone(&reader_store) as Arc<dyn store::ThreadStore>,
+    )
+    .await?;
+    let read: api::ThreadReadResponse = request(
+        &reader_client,
+        api::ClientRequest::ThreadRead {
+            request_id: request_id(3),
+            params: api::ThreadReadParams {
+                thread_id: thread_id.to_string(),
+                include_turns: false,
+            },
+        },
+    )
+    .await?;
+    assert_eq!(read.thread.id, thread_id.to_string());
+    assert_eq!(read.thread.preview, "database native needle");
+
+    let list: api::ThreadListResponse = request(
+        &reader_client,
+        api::ClientRequest::ThreadList {
+            request_id: request_id(4),
+            params: api::ThreadListParams {
+                cursor: None,
+                limit: Some(10),
+                sort_key: Some(api::ThreadSortKey::CreatedAt),
+                sort_direction: Some(api::SortDirection::Asc),
+                model_providers: Some(Vec::new()),
+                source_kinds: Some(vec![api::ThreadSourceKind::Exec]),
+                archived: Some(false),
+                cwd: None,
+                use_state_db_only: true,
+                search_term: None,
+                parent_thread_id: None,
+                ancestor_thread_id: None,
+            },
+        },
+    )
+    .await?;
+    assert_eq!(list.data.len(), 1);
+    assert_eq!(list.data[0].id, thread_id.to_string());
+    assert_eq!(list.data[0].preview, "database native needle");
+
+    let turns: api::ThreadTurnsListResponse = request(
+        &reader_client,
+        api::ClientRequest::ThreadTurnsList {
+            request_id: request_id(5),
+            params: api::ThreadTurnsListParams {
+                thread_id: thread_id.to_string(),
+                cursor: None,
+                limit: Some(10),
+                sort_direction: Some(api::SortDirection::Asc),
+                items_view: Some(api::TurnItemsView::Full),
+            },
+        },
+    )
+    .await?;
+    assert_eq!(turn_ids(&turns), vec!["turn-1"]);
+    assert_eq!(item_ids_from(&turns.data), vec!["user-1", "agent-1"]);
+
+    let items: api::ThreadItemsListResponse = request(
+        &reader_client,
+        api::ClientRequest::ThreadItemsList {
+            request_id: request_id(6),
+            params: api::ThreadItemsListParams {
+                thread_id: thread_id.to_string(),
+                turn_id: None,
+                cursor: None,
+                limit: Some(10),
+                sort_direction: Some(api::SortDirection::Asc),
+            },
+        },
+    )
+    .await?;
+    assert_eq!(item_ids(&items), vec!["user-1", "agent-1"]);
+
+    let search: api::ThreadSearchResponse = request(
+        &reader_client,
+        api::ClientRequest::ThreadSearch {
+            request_id: request_id(7),
+            params: api::ThreadSearchParams {
+                cursor: None,
+                limit: Some(10),
+                sort_key: None,
+                sort_direction: None,
+                source_kinds: None,
+                archived: Some(false),
+                search_term: "second needle".to_string(),
+            },
+        },
+    )
+    .await?;
+    assert_eq!(search.data, Vec::new());
+    let occurrences: api::ThreadSearchOccurrencesResponse = request(
+        &reader_client,
+        api::ClientRequest::ThreadSearchOccurrences {
+            request_id: request_id(8),
+            params: api::ThreadSearchOccurrencesParams {
+                thread_id: thread_id.to_string(),
+                search_term: "second needle".to_string(),
+                cursor: None,
+                limit: Some(10),
+            },
+        },
+    )
+    .await?;
+    assert_eq!(occurrences.data, Vec::new());
+
+    let persisted = reader_store
+        .read_thread(store::ReadThreadParams {
+            thread_id,
+            include_archived: false,
+            include_history: true,
+        })
+        .await?;
+    assert_eq!(persisted.preview, before_rollback.preview);
+    assert_eq!(persisted.name, before_rollback.name);
+    assert_eq!(persisted.recency_at, before_rollback.recency_at);
+    assert!(persisted.updated_at >= before_rollback.updated_at);
+    let canonical = persisted
+        .history
+        .context("rolled-back thread should retain canonical history")?;
+    assert_eq!(
+        canonical
+            .items
+            .iter()
+            .filter(|item| matches!(item, RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_))))
+            .count(),
+        1
+    );
+    assert!(canonical.items.iter().any(|item| matches!(
+        item,
+        RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) if event.turn_id == "turn-2"
+    )));
+
+    rollback_client.shutdown().await?;
+    rollback_pool.close().await;
+    let resumed: api::ThreadResumeResponse = request(
+        &reader_client,
+        api::ClientRequest::ThreadResume {
+            request_id: request_id(9),
+            params: api::ThreadResumeParams {
+                thread_id: thread_id.to_string(),
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    assert_eq!(turn_ids_from(&resumed.thread.turns), vec!["turn-1"]);
+    let started: api::TurnStartResponse = request(
+        &reader_client,
+        api::ClientRequest::TurnStart {
+            request_id: request_id(10),
+            params: api::TurnStartParams {
+                thread_id: thread_id.to_string(),
+                input: vec![api::UserInput::Text {
+                    text: "after rollback".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let Some(event) = reader_client.next_event().await else {
+                anyhow::bail!("reader replica stopped before turn/completed");
+            };
+            if let InProcessServerEvent::ServerNotification(api::ServerNotification::TurnCompleted(
+                completed,
+            )) = event
+                && completed.thread_id == thread_id.to_string()
+            {
+                return Ok::<(), anyhow::Error>(());
+            }
+        }
+    })
+    .await??;
+    let requests = model_server
+        .received_requests()
+        .await
+        .context("failed to read mock model requests")?;
+    let model_request = requests
+        .iter()
+        .rev()
+        .find(|request| request.url.path().ends_with("/responses"))
+        .context("missing post-rollback model request")?;
+    let model_input = model_request
+        .body_json::<Value>()?
+        .get("input")
+        .context("model request should include input")?
+        .to_string();
+    assert!(model_input.contains("database native needle"));
+    assert!(model_input.contains("after rollback"));
+    assert!(!model_input.contains("second needle"));
+    let after_append: api::ThreadTurnsListResponse = request(
+        &reader_client,
+        api::ClientRequest::ThreadTurnsList {
+            request_id: request_id(11),
+            params: api::ThreadTurnsListParams {
+                thread_id: thread_id.to_string(),
+                cursor: None,
+                limit: Some(10),
+                sort_direction: Some(api::SortDirection::Asc),
+                items_view: Some(api::TurnItemsView::Full),
+            },
+        },
+    )
+    .await?;
+    assert_eq!(
+        turn_ids(&after_append),
+        vec!["turn-1", started.turn.id.as_str()]
+    );
+    assert!(!codex_home.path().join("sessions").exists());
+
+    reader_client.shutdown().await?;
+    reader_pool.close().await;
+    fixture.cleanup().await
+}
+
 async fn request<T: DeserializeOwned>(
     client: &InProcessClientHandle,
     request: api::ClientRequest,
@@ -412,6 +728,7 @@ async fn seed_thread(
     store: &store::PostgresThreadStore,
     thread_id: ThreadId,
     cwd: &Path,
+    model_provider: &str,
 ) -> Result<()> {
     store
         .create_thread(store::CreateThreadParams {
@@ -432,7 +749,7 @@ async fn seed_thread(
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: store::ThreadPersistenceMetadata {
                 cwd: Some(cwd.to_path_buf()),
-                model_provider: "openai".to_string(),
+                model_provider: model_provider.to_string(),
                 memory_mode: ThreadMemoryMode::Enabled,
             },
         })
@@ -508,6 +825,15 @@ fn turn(
                 }],
             }),
         ),
+        RolloutItem::ResponseItem(ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: user_text.to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }),
         completed_item(
             thread_id,
             turn_id,
@@ -520,6 +846,15 @@ fn turn(
                 memory_citation: None,
             }),
         ),
+        RolloutItem::ResponseItem(ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: format!("final {user_text}"),
+            }],
+            phase: Some(MessagePhase::FinalAnswer),
+            internal_chat_message_metadata_passthrough: None,
+        }),
         RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: turn_id.to_string(),
             last_agent_message: None,
@@ -569,6 +904,30 @@ impl PostgresFixture {
             PostgresNamespaceAction::Migrate,
         )
         .await?;
+        Ok(())
+    }
+
+    async fn damage_history_projections(&self, thread_id: ThreadId) -> Result<()> {
+        let pool = sqlx::PgPool::connect(&self.database_url).await?;
+        let schema = &self.schema;
+        let mut transaction = pool.begin().await?;
+        for table in ["thread_items", "thread_turns", "thread_search_content"] {
+            sqlx::query(AssertSqlSafe(format!(
+                "DELETE FROM \"{schema}\".{table} WHERE thread_id = $1"
+            )))
+            .bind(thread_id.to_string())
+            .execute(transaction.as_mut())
+            .await?;
+        }
+        let checkpoint = sqlx::query_scalar::<_, Option<i64>>(AssertSqlSafe(format!(
+            "SELECT history_projection_version FROM \"{schema}\".threads WHERE thread_id = $1"
+        )))
+        .bind(thread_id.to_string())
+        .fetch_one(transaction.as_mut())
+        .await?;
+        assert_eq!(checkpoint, None);
+        transaction.commit().await?;
+        pool.close().await;
         Ok(())
     }
 
