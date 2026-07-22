@@ -6,6 +6,9 @@ use sqlx::PgPool;
 use sqlx::Row;
 use uuid::Uuid;
 
+#[path = "postgres/outputs.rs"]
+mod outputs;
+
 const DEFAULT_RETRY_REMAINING: i64 = 3;
 const JOB_KIND_MEMORY_CONSOLIDATE_GLOBAL: &str = "memory_consolidate_global";
 const JOB_KIND_MEMORY_STAGE1: &str = "memory_stage1";
@@ -13,18 +16,22 @@ const MEMORY_CONSOLIDATION_JOB_KEY: &str = "global";
 
 #[derive(Clone)]
 pub(super) struct PostgresMemoryStore {
+    history_table: String,
     jobs_table: String,
     outputs_table: String,
     pool: PgPool,
     schema: String,
+    threads_table: String,
 }
 
 impl PostgresMemoryStore {
     pub(super) fn new(pool: PgPool, schema: String) -> Self {
         Self {
+            history_table: qualified_table(&schema, "thread_history"),
             jobs_table: qualified_table(&schema, "memory_jobs"),
             outputs_table: qualified_table(&schema, "memory_stage1_outputs"),
             pool,
+            threads_table: qualified_table(&schema, "threads"),
             schema,
         }
     }

@@ -16,6 +16,7 @@ use crate::runtime::logs_contract_tests::run_replica_visibility_contract;
 use crate::runtime::logs_contract_tests::run_startup_retention_contract;
 use crate::runtime::memory_store_contract_tests::run_stage1_claim_and_output_contract;
 use crate::runtime::memory_store_contract_tests::run_stage1_retry_and_lease_contract;
+use crate::runtime::memory_store_output_contract_tests::run_postgres_stage1_output_data_contract;
 use crate::runtime::remote_control_contract_tests::run_remote_control_enrollment_contract;
 use anyhow::Context;
 use anyhow::Result;
@@ -81,6 +82,21 @@ async fn postgres_contract_stage1_claims_and_outputs_are_shared_between_replicas
 
     first.close().await;
     second.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_stage1_output_data_matches_sqlite() -> Result<()> {
+    let database_url = test_database_url()?;
+    let mut fixture = PostgresContractFixture::new(database_url, "stage1_output_data")?;
+    fixture.manage(PostgresNamespaceAction::Migrate).await?;
+    run_postgres_stage1_output_data_contract(
+        fixture.connect_pool().await?,
+        fixture.connect_pool().await?,
+        fixture.schema(),
+    )
+    .await?;
     fixture.cleanup().await
 }
 

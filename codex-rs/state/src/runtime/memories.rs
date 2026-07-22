@@ -65,8 +65,10 @@ impl SqliteMemoryStore {
             return Ok(0);
         }
 
-        let now = Utc::now().timestamp();
         let mut tx = self.pool.begin().await?;
+        let now: i64 = sqlx::query_scalar("SELECT CAST(strftime('%s', 'now') AS INTEGER)")
+            .fetch_one(&mut *tx)
+            .await?;
         let mut updated_rows = 0;
 
         for thread_id in thread_ids {
@@ -391,7 +393,10 @@ ORDER BY so.source_updated_at DESC, so.thread_id DESC
             return Ok(0);
         }
 
-        let cutoff = (Utc::now() - Duration::days(max_unused_days.max(0))).timestamp();
+        let now: i64 = sqlx::query_scalar("SELECT CAST(strftime('%s', 'now') AS INTEGER)")
+            .fetch_one(self.pool.as_ref())
+            .await?;
+        let cutoff = now.saturating_sub(max_unused_days.max(0).saturating_mul(24 * 60 * 60));
         let rows_affected = sqlx::query(
             r#"
 DELETE FROM stage1_outputs
@@ -440,7 +445,10 @@ WHERE thread_id IN (
         if n == 0 {
             return Ok(Vec::new());
         }
-        let cutoff = (Utc::now() - Duration::days(max_unused_days.max(0))).timestamp();
+        let now: i64 = sqlx::query_scalar("SELECT CAST(strftime('%s', 'now') AS INTEGER)")
+            .fetch_one(self.pool.as_ref())
+            .await?;
+        let cutoff = now.saturating_sub(max_unused_days.max(0).saturating_mul(24 * 60 * 60));
 
         let page_size = n.clamp(1, PHASE2_INPUT_SELECTION_PAGE_SIZE);
         let page_size_i64 = i64::try_from(page_size).unwrap_or(i64::MAX);

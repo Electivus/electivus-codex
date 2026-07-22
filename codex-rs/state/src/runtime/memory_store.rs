@@ -56,9 +56,12 @@ impl MemoryStore {
         &self,
         thread_ids: &[ThreadId],
     ) -> anyhow::Result<usize> {
-        self.sqlite("record stage-one output usage")?
-            .record_stage1_output_usage(thread_ids)
-            .await
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => {
+                store.record_stage1_output_usage(thread_ids).await
+            }
+            MemoryStoreBackend::Sqlite(store) => store.record_stage1_output_usage(thread_ids).await,
+        }
     }
     pub async fn claim_stage1_jobs_for_startup(
         &self,
@@ -78,9 +81,10 @@ impl MemoryStore {
         &self,
         n: usize,
     ) -> anyhow::Result<Vec<Stage1Output>> {
-        self.sqlite("list stage-one outputs")?
-            .list_stage1_outputs_for_global(n)
-            .await
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => store.list_stage1_outputs_for_global(n).await,
+            MemoryStoreBackend::Sqlite(store) => store.list_stage1_outputs_for_global(n).await,
+        }
     }
 
     pub async fn prune_stage1_outputs_for_retention(
@@ -88,9 +92,18 @@ impl MemoryStore {
         max_unused_days: i64,
         limit: usize,
     ) -> anyhow::Result<usize> {
-        self.sqlite("prune stage-one outputs")?
-            .prune_stage1_outputs_for_retention(max_unused_days, limit)
-            .await
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => {
+                store
+                    .prune_stage1_outputs_for_retention(max_unused_days, limit)
+                    .await
+            }
+            MemoryStoreBackend::Sqlite(store) => {
+                store
+                    .prune_stage1_outputs_for_retention(max_unused_days, limit)
+                    .await
+            }
+        }
     }
 
     pub async fn get_phase2_input_selection(
@@ -98,9 +111,14 @@ impl MemoryStore {
         n: usize,
         max_unused_days: i64,
     ) -> anyhow::Result<Vec<Stage1Output>> {
-        self.sqlite("select phase-two inputs")?
-            .get_phase2_input_selection(n, max_unused_days)
-            .await
+        match &self.backend {
+            MemoryStoreBackend::Postgres(store) => {
+                store.get_phase2_input_selection(n, max_unused_days).await
+            }
+            MemoryStoreBackend::Sqlite(store) => {
+                store.get_phase2_input_selection(n, max_unused_days).await
+            }
+        }
     }
 
     pub async fn mark_thread_memory_mode_polluted(
