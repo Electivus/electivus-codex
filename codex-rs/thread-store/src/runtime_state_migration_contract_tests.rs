@@ -1,11 +1,16 @@
 use crate::ListItemsParams;
 use crate::ListThreadsParams;
 use crate::ListTurnsParams;
+use crate::LoadThreadHistoryParams;
+use crate::LocalThreadStore;
+use crate::LocalThreadStoreConfig;
 use crate::PostgresThreadStore;
 use crate::ReadThreadParams;
+use crate::ResumeThreadParams;
 use crate::SearchThreadsParams;
 use crate::SortDirection;
 use crate::StoredTurnItemsView;
+use crate::ThreadPersistenceMetadata;
 use crate::ThreadRelationFilter;
 use crate::ThreadSortKey;
 use crate::ThreadStore;
@@ -28,8 +33,10 @@ use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::TokenUsage;
+use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::user_input::UserInput;
 use codex_state::BackfillState;
 use codex_state::BackfillStatus;
@@ -58,6 +65,21 @@ pub(super) struct MigrationSource {
     legacy_id: ThreadId,
     legacy_history: Vec<RolloutLine>,
     rollout_path: std::path::PathBuf,
+    public_view: ThreadPublicView,
+    backfill: BackfillState,
+}
+
+#[derive(Debug, PartialEq)]
+struct ThreadPublicView {
+    active_threads: serde_json::Value,
+    archived_threads: serde_json::Value,
+    children: serde_json::Value,
+    legacy_thread: serde_json::Value,
+    current_thread: serde_json::Value,
+    searched_threads: serde_json::Value,
+    turns: serde_json::Value,
+    items: serde_json::Value,
+    legacy_history: serde_json::Value,
 }
 
 #[tokio::test]
@@ -67,6 +89,8 @@ async fn runtime_state_thread_import_is_visible_to_another_pool()
     let source = migration_source(LineageFixture::Valid).await?;
     let fixture = PostgresThreadStoreFixture::new("runtime_migration")?;
     fixture.migrate().await?;
+    let replica_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let replica = PostgresThreadStore::new(&replica_pool);
     let inventory =
         preflight_runtime_state_migration(source.config.clone(), fixture.config.clone()).await?;
     let progress = import_runtime_state_threads(
@@ -74,6 +98,7 @@ async fn runtime_state_thread_import_is_visible_to_another_pool()
         &fixture.config,
         &inventory,
         &codex_rollout::CanonicalRolloutHistoryReader,
+        &replica,
     )
     .await?;
     assert_eq!(
@@ -86,14 +111,13 @@ async fn runtime_state_thread_import_is_visible_to_another_pool()
             &fixture.config,
             &inventory,
             &codex_rollout::CanonicalRolloutHistoryReader,
+            &replica,
         )
         .await?,
         progress
     );
 
-    let replica_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
     let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let replica = PostgresThreadStore::new(&replica_pool);
     let second = PostgresThreadStore::new(&second_pool);
     let imported = replica
         .read_thread(ReadThreadParams {
@@ -114,7 +138,7 @@ async fn runtime_state_thread_import_is_visible_to_another_pool()
         serde_json::to_value(&imported)?
     );
     assert_eq!(imported.name.as_deref(), Some("Migrated thread"));
-    assert_eq!(imported.preview, "migration preview");
+    assert_eq!(imported.preview, "migration needle");
     assert_eq!(
         imported.token_usage,
         Some(TokenUsage {
@@ -122,16 +146,51 @@ async fn runtime_state_thread_import_is_visible_to_another_pool()
             ..Default::default()
         })
     );
+    let imported_history = imported.history.as_ref().ok_or("history")?;
     assert_eq!(
-        serde_json::to_value(imported.history.ok_or("history")?.items)?,
+        serde_json::to_value(&imported_history.items)?,
         serde_json::to_value(
             source
                 .history
-                .into_iter()
-                .map(|line| line.item)
+                .iter()
+                .map(|line| line.item.clone())
                 .collect::<Vec<_>>()
         )?
     );
+    let session_meta = imported_history
+        .items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::SessionMeta(meta) => Some(&meta.meta),
+            _ => None,
+        })
+        .ok_or("session meta")?;
+    assert_eq!(
+        (
+            session_meta.forked_from_id,
+            session_meta.parent_thread_id,
+            session_meta.memory_mode.as_deref(),
+            session_meta.history_base,
+            session_meta.dynamic_tools.as_ref().map(Vec::len),
+        ),
+        (
+            Some(source.legacy_id),
+            Some(source.legacy_id),
+            Some("disabled"),
+            Some(HistoryPosition {
+                thread_id: source.legacy_id,
+                end_ordinal_exclusive: 4,
+                end_byte_offset: 256,
+            }),
+            Some(1),
+        )
+    );
+    assert!(imported_history.items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(event)) if event.num_turns == 1
+        )
+    }));
     let listed = second
         .list_threads(ListThreadsParams {
             page_size: 10,
@@ -215,14 +274,13 @@ async fn runtime_state_thread_import_is_visible_to_another_pool()
     assert_eq!(items.items.len(), 1);
     let backfill = replica_pool.backfill_coordinator().state().await?;
     assert_eq!(backfill, second_pool.backfill_coordinator().state().await?);
+    assert_eq!(backfill.status, BackfillStatus::Complete);
     assert_eq!(
-        backfill,
-        BackfillState {
-            status: BackfillStatus::Pending,
-            last_watermark: None,
-            last_success_at: None,
-        }
+        backfill.last_watermark.as_deref(),
+        Some("archived_sessions/rollout.jsonl")
     );
+    assert!(backfill.last_success_at.is_some());
+    assert_eq!(backfill, source.backfill);
     let legacy = second
         .read_thread(ReadThreadParams {
             thread_id: source.legacy_id,
@@ -236,8 +294,8 @@ async fn runtime_state_thread_import_is_visible_to_another_pool()
         serde_json::to_value(
             source
                 .legacy_history
-                .into_iter()
-                .map(|line| line.item)
+                .iter()
+                .map(|line| line.item.clone())
                 .collect::<Vec<_>>()
         )?
     );
@@ -248,7 +306,22 @@ async fn runtime_state_thread_import_is_visible_to_another_pool()
     .bind(source.thread_id.to_string())
     .fetch_all(&pool)
     .await?;
-    assert_eq!(source_ordinals, vec![0, 3, 10, 11, 12]);
+    assert_eq!(source_ordinals, vec![0, 1, 2, 3, 4, 5]);
+    assert_eq!(
+        thread_public_view(&replica, source.legacy_id, source.thread_id).await?,
+        source.public_view
+    );
+    assert_eq!(
+        import_runtime_state_threads(
+            &source.config,
+            &fixture.config,
+            &inventory,
+            &codex_rollout::CanonicalRolloutHistoryReader,
+            &replica,
+        )
+        .await?,
+        progress
+    );
     replica_pool.close().await;
     second_pool.close().await;
     fixture.cleanup().await?;
@@ -266,6 +339,8 @@ async fn runtime_state_thread_import_rolls_back_every_record_on_constraint_failu
     );
     let fixture = PostgresThreadStoreFixture::new("runtime_migration_rollback")?;
     fixture.migrate().await?;
+    let replica_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let replica = PostgresThreadStore::new(&replica_pool);
     let inventory =
         preflight_runtime_state_migration(source.config.clone(), fixture.config.clone()).await?;
     import_runtime_state_threads(
@@ -273,12 +348,11 @@ async fn runtime_state_thread_import_rolls_back_every_record_on_constraint_failu
         &fixture.config,
         &inventory,
         &codex_rollout::CanonicalRolloutHistoryReader,
+        &replica,
     )
     .await
     .expect_err("orphan lineage must fail the import transaction");
 
-    let replica_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let replica = PostgresThreadStore::new(&replica_pool);
     let thread_absent = matches!(
         replica
             .read_thread(ReadThreadParams {
@@ -314,7 +388,7 @@ pub(super) async fn migration_source(
     let source = tempfile::tempdir()?;
     let thread_id = ThreadId::from_string("019c84d0-3333-7777-8333-333333333333")?;
     let legacy_id = ThreadId::from_string("019c84d0-2222-7777-8222-222222222222")?;
-    let rollout_path = source.path().join("sessions/2026/07/22/rollout.jsonl");
+    let rollout_path = source.path().join("archived_sessions/rollout.jsonl");
     let legacy_path = source.path().join("sessions/2026/07/21/legacy.jsonl");
     std::fs::create_dir_all(rollout_path.parent().ok_or("rollout parent")?)?;
     std::fs::create_dir_all(legacy_path.parent().ok_or("legacy rollout parent")?)?;
@@ -340,7 +414,8 @@ pub(super) async fn migration_source(
     let created_at = Utc
         .with_ymd_and_hms(2026, 7, 22, 10, 0, 0)
         .single()
-        .ok_or("time")?;
+        .ok_or("time")?
+        + chrono::Duration::milliseconds(123);
     let mut metadata = ThreadMetadataBuilder::new(
         thread_id,
         rollout_path.clone(),
@@ -350,9 +425,12 @@ pub(super) async fn migration_source(
     .build("test-provider");
     metadata.history_mode = ThreadHistoryMode::Paginated;
     metadata.name = Some("Migrated thread".to_string());
-    metadata.preview = Some("migration preview".to_string());
+    metadata.preview = Some("migration needle".to_string());
+    metadata.first_user_message = metadata.preview.clone();
     metadata.tokens_used = 987;
-    metadata.archived_at = Some(created_at + chrono::Duration::hours(1));
+    metadata.archived_at = Some(metadata.updated_at);
+    metadata.cwd = source.path().to_path_buf();
+    metadata.cli_version = "0.0.0".to_string();
     metadata.git_sha = Some("abc987".to_string());
     metadata.git_branch = Some("migration".to_string());
     metadata.git_origin_url = Some("https://example.test/repo.git".to_string());
@@ -365,6 +443,8 @@ pub(super) async fn migration_source(
     )
     .build("test-provider");
     legacy.title = "Legacy thread".to_string();
+    legacy.first_user_message = Some("legacy preview".to_string());
+    legacy.preview = legacy.first_user_message.clone();
     runtime.upsert_thread(&legacy).await?;
     runtime
         .upsert_thread_spawn_edge(
@@ -385,17 +465,180 @@ pub(super) async fn migration_source(
             )
             .await?;
     }
+    let config = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(source.path())?);
+    let local = LocalThreadStore::new(
+        LocalThreadStoreConfig {
+            codex_home: source.path().to_path_buf(),
+            sqlite_home: source.path().to_path_buf(),
+            default_model_provider_id: "test-provider".to_string(),
+        },
+        Some(runtime.clone()),
+    );
+    local
+        .resume_thread(ResumeThreadParams {
+            thread_id,
+            rollout_path: Some(rollout_path.clone()),
+            history: None,
+            include_archived: true,
+            metadata: ThreadPersistenceMetadata {
+                cwd: Some(source.path().to_path_buf()),
+                model_provider: "test-provider".to_string(),
+                memory_mode: ThreadMemoryMode::Disabled,
+            },
+        })
+        .await?;
+    local.shutdown_thread(thread_id).await?;
+    runtime
+        .mark_backfill_complete(Some("archived_sessions/rollout.jsonl"))
+        .await?;
+    let public_view = thread_public_view(&local, legacy_id, thread_id).await?;
+    let backfill = runtime.backfill_coordinator().state().await?;
+    drop(local);
     runtime.close().await;
+    open_thread_history_db(source.path()).await?.close().await;
     std::fs::write(source.path().join("config.toml"), b"model = \"gpt-5\"\n")?;
     Ok(MigrationSource {
-        config: SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(source.path())?),
+        config,
         _temp: source,
         thread_id,
         history,
         legacy_id,
         legacy_history,
         rollout_path,
+        public_view,
+        backfill,
     })
+}
+
+async fn thread_public_view(
+    store: &impl ThreadStore,
+    legacy_id: ThreadId,
+    current_id: ThreadId,
+) -> Result<ThreadPublicView, Box<dyn std::error::Error>> {
+    let active_threads = store.list_threads(list_params(/*archived*/ false)).await?;
+    let archived_threads = store.list_threads(list_params(/*archived*/ true)).await?;
+    let children = store
+        .list_threads(ListThreadsParams {
+            relation_filter: Some(ThreadRelationFilter::DirectChildrenOf(legacy_id)),
+            ..list_params(/*archived*/ true)
+        })
+        .await?;
+    let legacy_thread = store
+        .read_thread(ReadThreadParams {
+            thread_id: legacy_id,
+            include_archived: false,
+            include_history: true,
+        })
+        .await?;
+    let current_thread = store
+        .read_thread(ReadThreadParams {
+            thread_id: current_id,
+            include_archived: true,
+            include_history: false,
+        })
+        .await?;
+    let searched_threads = store
+        .search_threads(SearchThreadsParams {
+            page_size: 10,
+            cursor: None,
+            sort_key: ThreadSortKey::CreatedAt,
+            sort_direction: SortDirection::Asc,
+            allowed_sources: Vec::new(),
+            archived: true,
+            search_term: "migration needle".to_string(),
+        })
+        .await?;
+    let turns = store
+        .list_turns(ListTurnsParams {
+            thread_id: current_id,
+            include_archived: true,
+            cursor: None,
+            page_size: 10,
+            sort_direction: SortDirection::Asc,
+            items_view: StoredTurnItemsView::Summary,
+        })
+        .await?;
+    let items = store
+        .list_items(ListItemsParams {
+            thread_id: current_id,
+            turn_id: None,
+            include_archived: true,
+            cursor: None,
+            page_size: 10,
+            sort_direction: SortDirection::Asc,
+        })
+        .await?;
+    let legacy_history = store
+        .load_history(LoadThreadHistoryParams {
+            thread_id: legacy_id,
+            include_archived: false,
+        })
+        .await?;
+    Ok(ThreadPublicView {
+        active_threads: normalized_value(active_threads)?,
+        archived_threads: normalized_value(archived_threads)?,
+        children: normalized_value(children)?,
+        legacy_thread: normalized_value(legacy_thread)?,
+        current_thread: normalized_value(current_thread)?,
+        searched_threads: normalized_value(searched_threads)?,
+        turns: normalized_value(turns)?,
+        items: normalized_value(items)?,
+        legacy_history: normalized_value(legacy_history)?,
+    })
+}
+
+fn list_params(archived: bool) -> ListThreadsParams {
+    ListThreadsParams {
+        page_size: 10,
+        cursor: None,
+        sort_key: ThreadSortKey::CreatedAt,
+        sort_direction: SortDirection::Asc,
+        allowed_sources: Vec::new(),
+        model_providers: Some(Vec::new()),
+        cwd_filters: None,
+        archived,
+        search_term: None,
+        relation_filter: None,
+        use_state_db_only: true,
+    }
+}
+
+fn normalized_value(value: impl serde::Serialize) -> Result<serde_json::Value, serde_json::Error> {
+    let mut value = serde_json::to_value(value)?;
+    normalize_backend_paths(&mut value);
+    Ok(value)
+}
+
+fn normalize_backend_paths(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                normalize_backend_paths(value);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            if let Some(rollout_path) = fields.get_mut("rollout_path") {
+                *rollout_path = serde_json::Value::Null;
+            }
+            if let Some(serde_json::Value::Array(bytes)) = fields.get_mut("item_json") {
+                let bytes = bytes
+                    .iter()
+                    .filter_map(serde_json::Value::as_u64)
+                    .filter_map(|byte| u8::try_from(byte).ok())
+                    .collect::<Vec<_>>();
+                if let Ok(item) = serde_json::from_slice(bytes.as_slice()) {
+                    fields.insert("item_json".to_string(), item);
+                }
+            }
+            for value in fields.values_mut() {
+                normalize_backend_paths(value);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
 }
 
 fn legacy_history(thread_id: ThreadId, source: &std::path::Path) -> Vec<RolloutLine> {
@@ -466,24 +709,32 @@ fn history(thread_id: ThreadId, source: &std::path::Path) -> Vec<RolloutLine> {
         },
         RolloutLine {
             timestamp: "2026-07-22T10:01:00.456Z".to_string(),
-            ordinal: Some(3),
+            ordinal: Some(1),
             item: RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
                 num_turns: 1,
             })),
         },
         RolloutLine {
             timestamp: "2026-07-22T10:02:00.000Z".to_string(),
-            ordinal: Some(10),
-            item: completed_item,
+            ordinal: Some(2),
+            item: RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                message: "migration needle".to_string(),
+                ..Default::default()
+            })),
         },
         RolloutLine {
             timestamp: "2026-07-22T10:03:00.000Z".to_string(),
-            ordinal: Some(11),
+            ordinal: Some(3),
             item: turn_started("turn-migration", 10),
         },
         RolloutLine {
             timestamp: "2026-07-22T10:04:00.000Z".to_string(),
-            ordinal: Some(12),
+            ordinal: Some(4),
+            item: completed_item,
+        },
+        RolloutLine {
+            timestamp: "2026-07-22T10:05:00.000Z".to_string(),
+            ordinal: Some(5),
             item: turn_complete("turn-migration", 10, 20, None),
         },
     ]

@@ -165,7 +165,7 @@ async fn rebuild_stale_search_projections(
             })?;
         super::projection::rebuild_history_projections(
             store,
-            transaction,
+            transaction.as_mut(),
             thread_id,
             row.try_get("stream_version")
                 .map_err(|error| database_error("search threads", error))?,
@@ -200,7 +200,7 @@ fn search_result_from_row(
 
 pub(super) async fn apply_projection(
     store: &PostgresThreadStore,
-    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    connection: &mut sqlx::PgConnection,
     thread_id: ThreadId,
     rollout_ordinal: i64,
     item: &RolloutItem,
@@ -224,7 +224,7 @@ pub(super) async fn apply_projection(
     .bind(folded_content)
     .bind(normalized_content)
     .bind(normalized_folded_content)
-    .execute(transaction.as_mut())
+    .execute(&mut *connection)
     .await
     .map_err(|error| database_error("project thread search content", error))?;
     Ok(())

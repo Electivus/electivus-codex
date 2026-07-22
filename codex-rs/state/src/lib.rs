@@ -27,6 +27,7 @@ pub use migration::CanonicalThreadHistorySnapshot;
 pub use migration::RuntimeStateMigrationInventory;
 pub use migration::RuntimeStateMigrationPhase;
 pub use migration::RuntimeStateMigrationProgress;
+pub use migration::RuntimeStateThreadProjectionMaterializer;
 pub use migration::RuntimeStateThreadSnapshot;
 pub use migration::SourceFileInventory;
 pub use migration::SqliteDatabaseInventory;

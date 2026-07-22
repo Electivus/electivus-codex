@@ -1,5 +1,6 @@
 use crate::postgres::map_sql_error;
 use crate::postgres::qualified_table;
+use futures::TryStreamExt;
 use sha2::Digest;
 use sha2::Sha256;
 use sqlx::AssertSqlSafe;
@@ -84,6 +85,11 @@ pub(super) async fn existing_progress(
     }))
 }
 
+/// Hash every namespace row in a deterministic order without aggregating a table client-side.
+///
+/// Client memory is bounded by one PostgreSQL row serialized as JSONB text. A single unusually
+/// large row still requires memory proportional to that row, and PostgreSQL may use `work_mem` or
+/// spill to disk while ordering rows; the digest never builds a whole-table JSON value.
 pub(super) async fn namespace_digest(
     connection: &mut sqlx::PgConnection,
     schema: &str,
@@ -100,14 +106,16 @@ pub(super) async fn namespace_digest(
     let mut hasher = Sha256::new();
     for table in tables {
         let qualified = qualified_table(schema, &table);
-        let rows: String = sqlx::query_scalar(AssertSqlSafe(format!(
-            "SELECT COALESCE(jsonb_agg(to_jsonb(records) ORDER BY to_jsonb(records)::text), '[]'::jsonb)::text FROM {qualified} AS records"
-        )))
-        .fetch_one(&mut *connection)
-        .await
-        .map_err(|error| map_sql_error(schema, "read Runtime State Migration evidence", error))?;
         hash_field(&mut hasher, table.as_bytes());
-        hash_field(&mut hasher, rows.as_bytes());
+        let mut rows = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+            "SELECT to_jsonb(records)::text AS record FROM {qualified} AS records ORDER BY record"
+        )))
+        .fetch(&mut *connection);
+        while let Some(row) = rows.try_next().await.map_err(|error| {
+            map_sql_error(schema, "read Runtime State Migration evidence", error)
+        })? {
+            hash_field(&mut hasher, row.as_bytes());
+        }
     }
     Ok(format!("{:x}", hasher.finalize()))
 }

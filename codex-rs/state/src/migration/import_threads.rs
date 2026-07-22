@@ -2,6 +2,7 @@ use super::CanonicalThreadHistoryReader;
 use super::RuntimeStateMigrationInventory;
 use super::RuntimeStateMigrationPhase;
 use super::RuntimeStateMigrationProgress;
+use super::RuntimeStateThreadProjectionMaterializer;
 use super::RuntimeStateThreadSnapshot;
 use super::ThreadMigrationSnapshot;
 use super::destination_validation;
@@ -36,6 +37,7 @@ pub async fn import_runtime_state_threads(
     destination: &PostgresNamespaceConfig,
     expected_inventory: &RuntimeStateMigrationInventory,
     history_reader: &impl CanonicalThreadHistoryReader,
+    projection_materializer: &impl RuntimeStateThreadProjectionMaterializer,
 ) -> anyhow::Result<RuntimeStateMigrationProgress> {
     anyhow::ensure!(
         expected_inventory.destination_schema == destination.schema()
@@ -56,6 +58,7 @@ pub async fn import_runtime_state_threads(
         &source_identity,
         &source_fingerprint,
         &pool,
+        projection_materializer,
     )
     .await;
     pool.close().await;
@@ -84,6 +87,7 @@ async fn import_snapshot(
     source_identity: &str,
     source_fingerprint: &str,
     pool: &sqlx::PgPool,
+    projection_materializer: &impl RuntimeStateThreadProjectionMaterializer,
 ) -> anyhow::Result<RuntimeStateMigrationProgress> {
     let schema = destination.schema();
     let mut transaction = pool
@@ -117,6 +121,10 @@ async fn import_snapshot(
     }
     destination_validation::ensure_empty(transaction.as_mut(), schema).await?;
     write_threads(transaction.as_mut(), schema, snapshot).await?;
+    projection_materializer
+        .materialize(transaction.as_mut(), snapshot)
+        .await
+        .map_err(anyhow::Error::new)?;
     let namespace_digest = namespace_digest(transaction.as_mut(), schema).await?;
     let migration = qualified_table(schema, "runtime_state_migration");
     let evidence = json!({
@@ -230,7 +238,7 @@ async fn write_thread(
     .await
     .map_err(|error| map_sql_error(schema, "import thread metadata", error))?;
     write_history(connection, schema, thread).await?;
-    write_projections(connection, schema, thread).await
+    Ok(())
 }
 
 fn thread_projection(
@@ -262,6 +270,7 @@ fn thread_projection(
         .unwrap_or_else(|_| Value::String(metadata.source.clone()));
     let approval_mode = serde_json::from_str(&metadata.approval_mode)
         .unwrap_or_else(|_| Value::String(metadata.approval_mode.clone()));
+    let archived_at = metadata.archived_at.map(|_| metadata.updated_at);
     let permission_profile = serde_json::from_str::<PermissionProfile>(&metadata.sandbox_policy)
         .or_else(|_| {
             serde_json::from_str::<SandboxPolicy>(&metadata.sandbox_policy).map(|policy| {
@@ -283,7 +292,7 @@ fn thread_projection(
         "created_at": metadata.created_at,
         "updated_at": metadata.updated_at,
         "recency_at": metadata.recency_at,
-        "archived_at": metadata.archived_at,
+        "archived_at": archived_at,
         "cwd": metadata.cwd,
         "cli_version": metadata.cli_version,
         "source": source,
@@ -295,14 +304,14 @@ fn thread_projection(
         "git_info": git_info,
         "approval_mode": approval_mode,
         "permission_profile": permission_profile,
-        "token_usage": {
+        "token_usage": (metadata.tokens_used != 0).then(|| json!({
             "input_tokens": 0,
             "cached_input_tokens": 0,
             "cache_write_input_tokens": 0,
             "output_tokens": 0,
             "reasoning_output_tokens": 0,
             "total_tokens": metadata.tokens_used,
-        },
+        })),
         "first_user_message": metadata.first_user_message,
         "history": null,
         "memory_mode": thread.memory_mode,
@@ -338,48 +347,6 @@ async fn write_history(
         .execute(&mut *connection)
         .await
         .map_err(|error| map_sql_error(schema, "import Canonical Thread History", error))?;
-    }
-    Ok(())
-}
-
-async fn write_projections(
-    connection: &mut sqlx::PgConnection,
-    schema: &str,
-    thread: &ThreadMigrationSnapshot,
-) -> anyhow::Result<()> {
-    let turns = qualified_table(schema, "thread_turns");
-    for turn in &thread.turns {
-        sqlx::query(AssertSqlSafe(format!(
-            "INSERT INTO {turns} (thread_id, turn_id, rollout_ordinal, status, error, started_at, completed_at, duration_ms) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
-        )))
-        .bind(thread.metadata.id.to_string())
-        .bind(&turn.turn_id)
-        .bind(i64::try_from(turn.rollout_ordinal)?)
-        .bind(&turn.status)
-        .bind(&turn.error)
-        .bind(turn.started_at)
-        .bind(turn.completed_at)
-        .bind(turn.duration_ms)
-        .execute(&mut *connection)
-        .await
-        .map_err(|error| map_sql_error(schema, "import thread turn projections", error))?;
-    }
-    let items = qualified_table(schema, "thread_items");
-    for item in &thread.items {
-        sqlx::query(AssertSqlSafe(format!(
-            "INSERT INTO {items} (thread_id, turn_id, item_id, rollout_ordinal, created_at_ms, item) \
-             VALUES ($1, $2, $3, $4, $5, $6)"
-        )))
-        .bind(thread.metadata.id.to_string())
-        .bind(&item.turn_id)
-        .bind(&item.item_id)
-        .bind(i64::try_from(item.rollout_ordinal)?)
-        .bind(item.created_at_ms)
-        .bind(&item.item)
-        .execute(&mut *connection)
-        .await
-        .map_err(|error| map_sql_error(schema, "import thread item projections", error))?;
     }
     Ok(())
 }

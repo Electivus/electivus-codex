@@ -10,6 +10,7 @@ use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::ThreadHistoryMode;
 use serde_json::Value;
 use sqlx::AssertSqlSafe;
+use sqlx::PgConnection;
 use sqlx::Postgres;
 use sqlx::Row;
 use sqlx::Transaction;
@@ -64,7 +65,7 @@ pub(super) async fn begin_consistent_read(
     if projection_version != Some(stream_version) {
         rebuild_history_projections(
             store,
-            &mut transaction,
+            transaction.as_mut(),
             thread_id,
             stream_version,
             row.try_get("history_projection_start_ordinal")
@@ -77,7 +78,7 @@ pub(super) async fn begin_consistent_read(
 
 pub(super) async fn rebuild_history_projections(
     store: &PostgresThreadStore,
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     thread_id: codex_protocol::ThreadId,
     stream_version: i64,
     history_projection_start_ordinal: Option<i64>,
@@ -91,7 +92,7 @@ pub(super) async fn rebuild_history_projections(
             "DELETE FROM {table} WHERE thread_id = $1"
         )))
         .bind(thread_id.to_string())
-        .execute(transaction.as_mut())
+        .execute(&mut *connection)
         .await
         .map_err(|error| database_error("rebuild thread history projections", error))?;
     }
@@ -100,7 +101,7 @@ pub(super) async fn rebuild_history_projections(
         store.tables.history
     )))
     .bind(thread_id.to_string())
-    .fetch_all(transaction.as_mut())
+    .fetch_all(&mut *connection)
     .await
     .map_err(|error| database_error("rebuild thread history projections", error))?;
     if i64::try_from(rows.len()).map_err(projection_too_large)? != stream_version {
@@ -120,7 +121,7 @@ pub(super) async fn rebuild_history_projections(
         let item = serde_json::from_value(item).map_err(serialization_error)?;
         apply_history_projections(
             store,
-            transaction,
+            connection,
             thread_id,
             ordinal,
             row.try_get("recorded_at")
@@ -136,7 +137,7 @@ pub(super) async fn rebuild_history_projections(
     )))
     .bind(stream_version)
     .bind(thread_id.to_string())
-    .execute(transaction.as_mut())
+    .execute(&mut *connection)
     .await
     .map_err(|error| database_error("rebuild thread history projections", error))?;
     Ok(())
@@ -144,7 +145,7 @@ pub(super) async fn rebuild_history_projections(
 
 pub(super) async fn apply_history_projections(
     store: &PostgresThreadStore,
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     thread_id: codex_protocol::ThreadId,
     first_ordinal: i64,
     recorded_at: DateTime<Utc>,
@@ -158,12 +159,12 @@ pub(super) async fn apply_history_projections(
             .checked_add(offset)
             .ok_or_else(|| projection_too_large(()))?;
         if let RolloutItem::EventMsg(EventMsg::ThreadRolledBack(event)) = item {
-            apply_rollback_projection(store, transaction, thread_id, event.num_turns).await?;
+            apply_rollback_projection(store, connection, thread_id, event.num_turns).await?;
             continue;
         }
         super::search_threads::apply_projection(
             store,
-            transaction,
+            connection,
             thread_id,
             rollout_ordinal,
             item,
@@ -181,7 +182,7 @@ pub(super) async fn apply_history_projections(
         };
         let changes = project_rollout_line(&line);
         for change in changes.changed_turns {
-            apply_turn_projection(store, transaction, thread_id, rollout_ordinal, change).await?;
+            apply_turn_projection(store, connection, thread_id, rollout_ordinal, change).await?;
         }
         for change in changes.changed_items {
             let item_id = change.item.id().to_string();
@@ -198,7 +199,7 @@ pub(super) async fn apply_history_projections(
             .bind(rollout_ordinal)
             .bind(recorded_at.timestamp_millis())
             .bind(item)
-            .execute(transaction.as_mut())
+            .execute(&mut *connection)
             .await
             .map_err(|error| database_error("project thread items", error))?;
         }
@@ -208,7 +209,7 @@ pub(super) async fn apply_history_projections(
 
 async fn apply_rollback_projection(
     store: &PostgresThreadStore,
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     thread_id: codex_protocol::ThreadId,
     num_turns: u32,
 ) -> ThreadStoreResult<()> {
@@ -224,7 +225,7 @@ async fn apply_rollback_projection(
     )))
     .bind(thread_id.to_string())
     .bind(i64::from(num_turns))
-    .fetch_one(transaction.as_mut())
+    .fetch_one(&mut *connection)
     .await
     .map_err(|error| database_error("project thread rollback", error))?;
     let Some(rollback_start) = rollback_start else {
@@ -237,7 +238,7 @@ async fn apply_rollback_projection(
     )))
     .bind(thread_id.to_string())
     .bind(rollback_start)
-    .execute(transaction.as_mut())
+    .execute(&mut *connection)
     .await
     .map_err(|error| database_error("project thread rollback", error))?;
     sqlx::query(AssertSqlSafe(format!(
@@ -248,7 +249,7 @@ async fn apply_rollback_projection(
     )))
     .bind(thread_id.to_string())
     .bind(rollback_start)
-    .execute(transaction.as_mut())
+    .execute(&mut *connection)
     .await
     .map_err(|error| database_error("project thread rollback", error))?;
     sqlx::query(AssertSqlSafe(format!(
@@ -257,7 +258,7 @@ async fn apply_rollback_projection(
     )))
     .bind(thread_id.to_string())
     .bind(rollback_start)
-    .execute(transaction.as_mut())
+    .execute(&mut *connection)
     .await
     .map_err(|error| database_error("project thread rollback", error))?;
     Ok(())
@@ -265,7 +266,7 @@ async fn apply_rollback_projection(
 
 async fn apply_turn_projection(
     store: &PostgresThreadStore,
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     thread_id: codex_protocol::ThreadId,
     rollout_ordinal: i64,
     change: ThreadHistoryTurnChange,
@@ -287,7 +288,7 @@ async fn apply_turn_projection(
     .bind(change.started_at)
     .bind(change.completed_at)
     .bind(change.duration_ms)
-    .execute(transaction.as_mut())
+    .execute(&mut *connection)
     .await
     .map_err(|error| database_error("project thread turns", error))?;
     Ok(())

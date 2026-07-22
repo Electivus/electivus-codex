@@ -281,6 +281,42 @@ impl PostgresThreadStore {
     }
 }
 
+impl codex_state::RuntimeStateThreadProjectionMaterializer for PostgresThreadStore {
+    type Error = ThreadStoreError;
+
+    async fn materialize(
+        &self,
+        connection: &mut sqlx::PgConnection,
+        snapshot: &codex_state::RuntimeStateThreadSnapshot,
+    ) -> Result<(), Self::Error> {
+        for thread in snapshot.threads() {
+            let row = sqlx::query(AssertSqlSafe(format!(
+                "SELECT stream_version, history_projection_start_ordinal FROM {} \
+                 WHERE thread_id = $1",
+                self.tables.threads
+            )))
+            .bind(thread.metadata().id.to_string())
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|error| database_error("materialize migrated thread projections", error))?;
+            projection::rebuild_history_projections(
+                self,
+                connection,
+                thread.metadata().id,
+                row.try_get("stream_version").map_err(|error| {
+                    database_error("materialize migrated thread projections", error)
+                })?,
+                row.try_get("history_projection_start_ordinal")
+                    .map_err(|error| {
+                        database_error("materialize migrated thread projections", error)
+                    })?,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+}
+
 impl ThreadStore for PostgresThreadStore {
     fn as_any(&self) -> &dyn std::any::Any {
         self

@@ -36,6 +36,22 @@ pub use thread_snapshot::ThreadSpawnEdgeSnapshot;
 pub use thread_snapshot::ThreadTurnProjectionSnapshot;
 pub use thread_snapshot::snapshot_runtime_state_migration_threads;
 
+/// Materializes rebuildable PostgreSQL thread projections during migration.
+///
+/// Implementations must derive every projection from the Canonical Thread History in `snapshot`
+/// and use `connection` for every write so projection materialization remains part of the import
+/// transaction. This keeps the migration crate independent of a concrete thread-store backend
+/// while allowing that backend to reuse its normal projection logic.
+pub trait RuntimeStateThreadProjectionMaterializer {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    fn materialize<'a>(
+        &'a self,
+        connection: &'a mut sqlx::PgConnection,
+        snapshot: &'a RuntimeStateThreadSnapshot,
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'a;
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SourceInventory {
     databases: Vec<SqliteDatabaseInventory>,
