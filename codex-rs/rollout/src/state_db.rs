@@ -81,7 +81,7 @@ async fn try_init_with_roots(
         codex_home,
         sqlite_home,
         default_model_provider_id,
-        /*backfill_lease_seconds*/ None,
+        /*backfill_lease_duration*/ None,
     )
     .await
 }
@@ -91,13 +91,13 @@ async fn try_init_with_roots_and_backfill_lease(
     codex_home: PathBuf,
     sqlite_home: PathBuf,
     default_model_provider_id: String,
-    backfill_lease_seconds: i64,
+    backfill_lease_duration: Duration,
 ) -> anyhow::Result<StateDbHandle> {
     try_init_with_roots_inner(
         codex_home,
         sqlite_home,
         default_model_provider_id,
-        Some(backfill_lease_seconds),
+        Some(backfill_lease_duration),
     )
     .await
 }
@@ -106,7 +106,7 @@ async fn try_init_with_roots_inner(
     codex_home: PathBuf,
     sqlite_home: PathBuf,
     default_model_provider_id: String,
-    backfill_lease_seconds: Option<i64>,
+    backfill_lease_duration: Option<Duration>,
 ) -> anyhow::Result<StateDbHandle> {
     let runtime =
         codex_state::StateRuntime::init(sqlite_home.clone(), default_model_provider_id.clone())
@@ -118,11 +118,13 @@ async fn try_init_with_roots_inner(
                 )
             })?;
     let backfill_gate_started = Instant::now();
+    let backfill_owner_id = format!("startup-backfill-{}", uuid::Uuid::new_v4());
     let backfill_gate_result = wait_for_backfill_gate(
         runtime.as_ref(),
         codex_home.as_path(),
         default_model_provider_id.as_str(),
-        backfill_lease_seconds,
+        backfill_lease_duration,
+        &backfill_owner_id,
     )
     .await;
     codex_state::record_backfill_gate(
@@ -141,12 +143,14 @@ async fn wait_for_backfill_gate(
     runtime: &codex_state::StateRuntime,
     codex_home: &Path,
     default_model_provider_id: &str,
-    backfill_lease_seconds: Option<i64>,
+    backfill_lease_duration: Option<Duration>,
+    backfill_owner_id: &str,
 ) -> anyhow::Result<()> {
     let wait_started = Instant::now();
     let mut reported_wait = false;
+    let backfill_coordinator = runtime.backfill_coordinator();
     loop {
-        let backfill_state = runtime.get_backfill_state().await.map_err(|err| {
+        let backfill_state = backfill_coordinator.state().await.map_err(|err| {
             anyhow::anyhow!(
                 "failed to read backfill state at {}: {err}",
                 codex_home.display()
@@ -156,18 +160,25 @@ async fn wait_for_backfill_gate(
             return Ok(());
         }
 
-        if let Some(backfill_lease_seconds) = backfill_lease_seconds {
+        if let Some(backfill_lease_duration) = backfill_lease_duration {
             metadata::backfill_sessions_with_lease(
                 runtime,
                 codex_home,
                 default_model_provider_id,
-                backfill_lease_seconds,
+                backfill_lease_duration,
+                backfill_owner_id,
             )
             .await;
         } else {
-            metadata::backfill_sessions(runtime, codex_home, default_model_provider_id).await;
+            metadata::backfill_sessions_with_owner(
+                runtime,
+                codex_home,
+                default_model_provider_id,
+                backfill_owner_id,
+            )
+            .await;
         }
-        let backfill_state = runtime.get_backfill_state().await.map_err(|err| {
+        let backfill_state = backfill_coordinator.state().await.map_err(|err| {
             anyhow::anyhow!(
                 "failed to read backfill state at {} after startup backfill: {err}",
                 codex_home.display()
@@ -256,7 +267,7 @@ async fn require_backfill_complete(
     runtime: StateDbHandle,
     codex_home: &Path,
 ) -> Option<StateDbHandle> {
-    match runtime.get_backfill_state().await {
+    match runtime.backfill_coordinator().state().await {
         Ok(state) if state.status == codex_state::BackfillStatus::Complete => Some(runtime),
         Ok(state) => {
             warn!(

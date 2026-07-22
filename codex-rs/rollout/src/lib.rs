@@ -4,6 +4,7 @@ use std::sync::LazyLock;
 
 use codex_protocol::protocol::SessionSource;
 
+mod backfill_lease;
 pub(crate) mod compression;
 pub(crate) mod config;
 pub(crate) mod list;
