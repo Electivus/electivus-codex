@@ -454,6 +454,9 @@ async fn inventory_file(
 #[path = "migration_destination_tests.rs"]
 mod destination_tests;
 #[cfg(test)]
+#[path = "migration_operational_contract_tests.rs"]
+mod operational_contract_tests;
+#[cfg(test)]
 #[path = "migration_redaction_tests.rs"]
 mod redaction_tests;
 #[cfg(test)]
