@@ -104,8 +104,9 @@ pub use goals::GoalStoreOperation;
 pub use goals::GoalStoreResult;
 pub use goals::GoalUpdate;
 pub(crate) use log_store::LogStore;
-#[cfg(test)]
-pub(crate) use memory_store::MemoryArtifact;
+pub use memory_store::MemoryArtifact;
+pub use memory_store::MemoryArtifactSet;
+pub use memory_store::MemoryGeneration;
 pub use memory_store::MemoryStore;
 pub use recovery::RuntimeDbBackup;
 pub use recovery::backup_runtime_db_for_fresh_start;

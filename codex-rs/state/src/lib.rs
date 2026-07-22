@@ -34,6 +34,9 @@ pub use runtime::BackfillClaimOutcome;
 pub use runtime::BackfillCoordinator;
 pub use runtime::BackfillLease;
 pub use runtime::BackfillLeaseUpdate;
+pub use runtime::MemoryArtifact;
+pub use runtime::MemoryArtifactSet;
+pub use runtime::MemoryGeneration;
 pub use runtime::RuntimeStateBackendConfig;
 /// Preferred entrypoint: owns configuration and metrics.
 pub use runtime::StateRuntime;

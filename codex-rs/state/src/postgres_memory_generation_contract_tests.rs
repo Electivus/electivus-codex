@@ -4,27 +4,29 @@ use super::test_support::PostgresContractFixture;
 use super::test_support::test_database_url;
 use crate::Phase2JobClaimOutcome;
 use crate::runtime::MemoryArtifact;
+use crate::runtime::MemoryArtifactSet;
 use anyhow::Context;
 use anyhow::Result;
 use codex_protocol::ThreadId;
 use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
 
-fn artifacts(version: &str) -> Vec<MemoryArtifact> {
-    vec![
-        MemoryArtifact {
-            path: "MEMORY.md".to_string(),
-            contents: format!("# {version} memory\n").into_bytes(),
-        },
-        MemoryArtifact {
-            path: "memory_summary.md".to_string(),
-            contents: format!("v1\n\n{version} summary\n").into_bytes(),
-        },
-        MemoryArtifact {
-            path: "skills/example/SKILL.md".to_string(),
-            contents: format!("# {version} skill\n").into_bytes(),
-        },
-    ]
+fn artifacts(version: &str) -> MemoryArtifactSet {
+    MemoryArtifactSet::new(vec![
+        MemoryArtifact::new("MEMORY.md", format!("# {version} memory\n").into_bytes())
+            .expect("valid memory artifact"),
+        MemoryArtifact::new(
+            "memory_summary.md",
+            format!("v1\n\n{version} summary\n").into_bytes(),
+        )
+        .expect("valid memory summary artifact"),
+        MemoryArtifact::new(
+            "skills/example/SKILL.md",
+            format!("# {version} skill\n").into_bytes(),
+        )
+        .expect("valid skill artifact"),
+    ])
+    .expect("valid memory artifact set")
 }
 
 async fn claim(store: &crate::MemoryStore, input_watermark: i64) -> Result<(String, i64)> {
@@ -60,8 +62,13 @@ async fn postgres_contract_publishes_complete_fenced_memory_generations() -> Res
 
     let (first_token, first_watermark) = claim(&writer, 10).await?;
     let first_artifacts = artifacts("first");
-    let first_generation = writer
-        .publish_memory_generation(&first_token, first_watermark, &[], &first_artifacts)
+    assert!(
+        writer
+            .complete_global_consolidation(&first_token, first_watermark, &[], &first_artifacts,)
+            .await?
+    );
+    let first_generation = reader
+        .load_active_memory_generation()
         .await?
         .context("current owner should publish the first generation")?;
     assert_eq!(
@@ -82,7 +89,7 @@ async fn postgres_contract_publishes_complete_fenced_memory_generations() -> Res
     let second_artifacts_for_publish = second_artifacts.clone();
     let publish = tokio::spawn(async move {
         writer_for_publish
-            .publish_memory_generation(
+            .complete_global_consolidation(
                 &second_token,
                 second_watermark,
                 &[],
@@ -97,14 +104,19 @@ async fn postgres_contract_publishes_complete_fenced_memory_generations() -> Res
             .await?
             .context("the first generation should remain readable")?;
         assert!(
-            observed.artifacts == first_generation.artifacts
-                || observed.artifacts == second_artifacts,
+            observed.artifacts() == first_generation.artifacts()
+                || observed.artifacts() == second_artifacts.artifacts(),
             "reader observed a cross-generation artifact mixture: {observed:?}"
         );
     }
-    let second_generation = publish
-        .await
-        .context("join second generation publication")??
+    assert!(
+        publish
+            .await
+            .context("join second generation publication")??
+    );
+    let second_generation = reader
+        .load_active_memory_generation()
+        .await?
         .context("current owner should publish the second generation")?;
     assert_eq!(
         reader.load_active_memory_generation().await?,
@@ -130,9 +142,9 @@ async fn postgres_contract_publishes_complete_fenced_memory_generations() -> Res
 
     assert_eq!(
         writer
-            .publish_memory_generation(&stale_token, 30, &[], &artifacts("stale"))
+            .complete_global_consolidation(&stale_token, 30, &[], &artifacts("stale"))
             .await?,
-        None
+        false
     );
     assert_eq!(
         reader.load_active_memory_generation().await?,

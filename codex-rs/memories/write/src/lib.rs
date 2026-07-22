@@ -10,6 +10,7 @@ mod guard;
 mod metrics;
 mod phase1;
 mod phase2;
+mod phase2_completion;
 mod prompts;
 mod runtime;
 mod start;
@@ -113,6 +114,9 @@ mod workspace_diff {
     pub(super) const FILENAME: &str = "phase2_workspace_diff.md";
     pub(super) const MAX_BYTES: usize = 4 * 1024 * 1024;
 }
+
+mod workspace_artifacts;
+pub(crate) use workspace_artifacts::collect_memory_artifacts;
 
 pub fn memory_root(codex_home: &AbsolutePathBuf) -> AbsolutePathBuf {
     codex_home.join("memories")

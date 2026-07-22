@@ -2,6 +2,8 @@ use super::MemoryStore;
 use super::StateRuntime;
 use super::test_support::test_thread_metadata;
 use super::test_support::unique_temp_dir;
+use crate::MemoryArtifact;
+use crate::MemoryArtifactSet;
 use crate::Phase2JobClaimOutcome;
 use crate::Stage1JobClaimOutcome;
 use crate::Stage1Output;
@@ -320,5 +322,42 @@ async fn sqlite_phase2_success_satisfies_shared_contract() -> Result<()> {
     .await?;
     first.close().await;
     second.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlite_consolidation_completion_preserves_filesystem_authority() -> Result<()> {
+    let codex_home = unique_temp_dir();
+    let _cleanup = scopeguard::guard(codex_home.clone(), |path| {
+        let _ = std::fs::remove_dir_all(path);
+    });
+    let runtime = StateRuntime::init(codex_home, "test-provider".to_string()).await?;
+    runtime
+        .memories()
+        .enqueue_global_consolidation(/*input_watermark*/ 10)
+        .await?;
+    let token = claimed_token(
+        runtime
+            .memories()
+            .try_claim_global_phase2_job(ThreadId::new(), /*lease_seconds*/ 60)
+            .await?,
+        /*input_watermark*/ 10,
+    );
+    let artifacts = MemoryArtifactSet::new(vec![MemoryArtifact::new(
+        "MEMORY.md",
+        b"filesystem authority\n".to_vec(),
+    )?])?;
+
+    assert!(
+        runtime
+            .memories()
+            .complete_global_consolidation(&token, /*completed_watermark*/ 10, &[], &artifacts)
+            .await?
+    );
+    assert_eq!(
+        runtime.memories().load_active_memory_generation().await?,
+        None
+    );
+    runtime.close().await;
     Ok(())
 }
