@@ -164,6 +164,11 @@ async fn extract_metadata_from_rollout_returns_latest_memory_mode() {
         multi_agent_version: None,
         ..session_meta.clone()
     };
+    let ancestor_meta = SessionMeta {
+        id: ThreadId::from_string(&Uuid::new_v4().to_string()).expect("ancestor thread id"),
+        memory_mode: Some("disabled".to_string()),
+        ..session_meta.clone()
+    };
     let lines = vec![
         RolloutLine {
             timestamp: "2026-01-27T12:34:56Z".to_string(),
@@ -178,6 +183,14 @@ async fn extract_metadata_from_rollout_returns_latest_memory_mode() {
             ordinal: None,
             item: RolloutItem::SessionMeta(SessionMetaLine {
                 meta: polluted_meta,
+                git: None,
+            }),
+        },
+        RolloutLine {
+            timestamp: "2026-01-27T12:36:00Z".to_string(),
+            ordinal: None,
+            item: RolloutItem::SessionMeta(SessionMetaLine {
+                meta: ancestor_meta,
                 git: None,
             }),
         },

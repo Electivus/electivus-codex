@@ -74,11 +74,12 @@ pub(crate) fn builder_from_session_meta(
     Some(builder)
 }
 
-pub fn builder_from_items(
-    items: &[RolloutItem],
+pub fn builder_from_items<'a>(
+    items: impl IntoIterator<Item = &'a RolloutItem>,
     rollout_path: &Path,
 ) -> Option<ThreadMetadataBuilder> {
-    if let Some(session_meta) = items.iter().find_map(|item| match item {
+    let mut items = items.into_iter();
+    if let Some(session_meta) = items.find_map(|item| match item {
         RolloutItem::SessionMeta(meta_line) => Some(meta_line),
         RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
@@ -112,30 +113,43 @@ pub async fn extract_metadata_from_rollout(
 ) -> anyhow::Result<ExtractionOutcome> {
     let (items, _thread_id, parse_errors) =
         RolloutRecorder::load_rollout_items(rollout_path).await?;
-    if items.is_empty() {
+    extract_metadata_from_items(rollout_path, items.iter(), parse_errors, default_provider).await
+}
+
+pub(crate) async fn extract_metadata_from_items<'a>(
+    rollout_path: &Path,
+    items: impl Clone + DoubleEndedIterator<Item = &'a RolloutItem>,
+    parse_errors: usize,
+    default_provider: &str,
+) -> anyhow::Result<ExtractionOutcome> {
+    if items.clone().next().is_none() {
         return Err(anyhow::anyhow!(
             "empty session file: {}",
             rollout_path.display()
         ));
     }
-    let builder = builder_from_items(items.as_slice(), rollout_path).ok_or_else(|| {
+    let builder = builder_from_items(items.clone(), rollout_path).ok_or_else(|| {
         anyhow::anyhow!(
             "rollout missing metadata builder: {}",
             rollout_path.display()
         )
     })?;
     let mut metadata = builder.build(default_provider);
-    for item in &items {
+    for item in items.clone() {
         apply_rollout_item(&mut metadata, item, default_provider);
     }
     if let Some(updated_at) = file_modified_time_utc(rollout_path).await {
         metadata.updated_at = updated_at;
         metadata.recency_at = updated_at;
     }
+    let thread_id = metadata.id;
     Ok(ExtractionOutcome {
         metadata,
-        memory_mode: items.iter().rev().find_map(|item| match item {
-            RolloutItem::SessionMeta(meta_line) => meta_line.meta.memory_mode.clone(),
+        memory_mode: items.rev().find_map(|item| match item {
+            RolloutItem::SessionMeta(meta_line) if meta_line.meta.id == thread_id => {
+                meta_line.meta.memory_mode.clone()
+            }
+            RolloutItem::SessionMeta(_) => None,
             RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }

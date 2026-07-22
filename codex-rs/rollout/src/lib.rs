@@ -95,17 +95,26 @@ impl codex_state::CanonicalThreadHistoryReader for CanonicalRolloutHistoryReader
     async fn read(
         &self,
         path: &std::path::Path,
-    ) -> anyhow::Result<(Vec<codex_protocol::protocol::RolloutLine>, usize)> {
-        let (lines, _thread_id, rejected_line_count) =
-            RolloutRecorder::load_rollout_lines(path).await?;
-        Ok((lines, rejected_line_count))
+        maximum_source_bytes: u64,
+    ) -> anyhow::Result<(Vec<codex_protocol::protocol::RolloutLine>, usize, u64)> {
+        let (lines, _thread_id, rejected_line_count, source_bytes) =
+            RolloutRecorder::load_rollout_lines_bounded(path, maximum_source_bytes).await?;
+        Ok((lines, rejected_line_count, source_bytes))
     }
 
     async fn extract_metadata(
         &self,
         path: &std::path::Path,
+        lines: &[codex_protocol::protocol::RolloutLine],
+        rejected_line_count: usize,
     ) -> anyhow::Result<codex_state::ExtractionOutcome> {
-        metadata::extract_metadata_from_rollout(path, "").await
+        metadata::extract_metadata_from_items(
+            path,
+            lines.iter().map(|line| &line.item),
+            rejected_line_count,
+            "",
+        )
+        .await
     }
 
     async fn find_thread_names(

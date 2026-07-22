@@ -307,6 +307,28 @@ async fn load_rollout_items_defaults_legacy_session_id() -> std::io::Result<()> 
 }
 
 #[tokio::test]
+async fn bounded_rollout_load_rejects_oversized_and_blank_decoded_lines() -> std::io::Result<()> {
+    let home = TempDir::new()?;
+    for (name, contents) in [("record", b"{}\n".as_slice()), ("blank", b" \n")] {
+        let plain = home.path().join(format!("{name}.jsonl"));
+        let compressed = plain.with_extension("jsonl.zst");
+        fs::write(&plain, contents)?;
+        fs::write(
+            &compressed,
+            zstd::stream::encode_all(contents, /*level*/ 0)?,
+        )?;
+        for path in [plain, compressed] {
+            assert!(
+                RolloutRecorder::load_rollout_lines_bounded(&path, 1)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_rollout_lines_preserves_complete_legacy_and_current_domain_items()
 -> std::io::Result<()> {
     let home = TempDir::new().expect("temp dir");

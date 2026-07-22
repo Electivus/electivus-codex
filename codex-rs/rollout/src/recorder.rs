@@ -973,13 +973,28 @@ impl RolloutRecorder {
     pub async fn load_rollout_lines(
         path: &Path,
     ) -> std::io::Result<(Vec<RolloutLine>, Option<ThreadId>, usize)> {
+        let (lines, thread_id, parse_errors, _) =
+            Self::load_rollout_lines_bounded(path, u64::MAX).await?;
+        Ok((lines, thread_id, parse_errors))
+    }
+
+    /// Loads complete rollout records while bounding uncompressed source retained by migration.
+    pub async fn load_rollout_lines_bounded(
+        path: &Path,
+        maximum_source_bytes: u64,
+    ) -> std::io::Result<(Vec<RolloutLine>, Option<ThreadId>, usize, u64)> {
         trace!("Resuming rollout from {path:?}");
         let mut lines = Vec::new();
         let mut thread_id: Option<ThreadId> = None;
         let mut parse_errors = 0usize;
+        let mut source_bytes = 0_u64;
         let mut reader = compression::open_rollout_line_reader(path).await?;
         let mut saw_non_empty_line = false;
-        while let Some(line) = reader.next_line().await? {
+        while let Some((line, line_bytes)) = reader
+            .next_line_bounded(maximum_source_bytes.saturating_sub(source_bytes))
+            .await?
+        {
+            source_bytes = source_bytes.saturating_add(line_bytes);
             if line.trim().is_empty() {
                 continue;
             }
@@ -1031,7 +1046,7 @@ impl RolloutRecorder {
             thread_id,
             parse_errors,
         );
-        Ok((lines, thread_id, parse_errors))
+        Ok((lines, thread_id, parse_errors, source_bytes))
     }
 
     pub async fn get_rollout_history(path: &Path) -> std::io::Result<InitialHistory> {
