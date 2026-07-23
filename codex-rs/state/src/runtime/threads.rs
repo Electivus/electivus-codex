@@ -16,15 +16,6 @@ pub use metadata::ThreadResumeMetadata;
 pub use query::ThreadFilterOptions;
 pub(super) use query::push_thread_filters;
 
-
-
-
-
-
-
-
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
