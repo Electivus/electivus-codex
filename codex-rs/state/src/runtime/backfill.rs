@@ -199,7 +199,7 @@ fn backfill_coordination_error(operation: &'static str) -> anyhow::Error {
 
 impl StateRuntime {
     pub fn backfill_coordinator(&self) -> BackfillCoordinator {
-        BackfillCoordinator::from_sqlite(Arc::clone(&self.pool))
+        self.backfill.clone()
     }
 
     pub async fn get_backfill_state(&self) -> anyhow::Result<crate::BackfillState> {
@@ -211,7 +211,7 @@ FROM backfill_state
 WHERE id = 1
             "#,
         )
-        .fetch_one(self.pool.as_ref())
+        .fetch_one(self.sqlite_pool()?)
         .await?;
         crate::BackfillState::try_from_row(&row)
     }
@@ -239,7 +239,7 @@ WHERE id = 1
         .bind(crate::BackfillStatus::Complete.as_str())
         .bind(crate::BackfillStatus::Running.as_str())
         .bind(lease_cutoff)
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         Ok(result.rows_affected() == 1)
     }
@@ -256,7 +256,7 @@ WHERE id = 1
         )
         .bind(crate::BackfillStatus::Running.as_str())
         .bind(Utc::now().timestamp())
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         Ok(())
     }
@@ -274,7 +274,7 @@ WHERE id = 1
         .bind(crate::BackfillStatus::Running.as_str())
         .bind(watermark)
         .bind(Utc::now().timestamp())
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         Ok(())
     }
@@ -298,13 +298,13 @@ WHERE id = 1
         .bind(last_watermark)
         .bind(now)
         .bind(now)
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         Ok(())
     }
 
     async fn ensure_backfill_state_row(&self) -> anyhow::Result<()> {
-        super::ensure_backfill_state_row_in_pool(self.pool.as_ref()).await
+        super::ensure_backfill_state_row_in_pool(self.sqlite_pool()?).await
     }
 }
 
@@ -320,7 +320,7 @@ mod tests {
     #[tokio::test]
     async fn backfill_state_persists_progress_and_completion() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
 
@@ -373,7 +373,7 @@ mod tests {
     #[tokio::test]
     async fn get_backfill_state_succeeds_while_another_connection_holds_writer_slot() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
         let write_pool = crate::SqliteConfig::new_for_testing(codex_home.as_path().abs())
@@ -402,11 +402,11 @@ mod tests {
     #[tokio::test]
     async fn get_backfill_state_repairs_a_missing_singleton_row() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
         sqlx::query("DELETE FROM backfill_state WHERE id = 1")
-            .execute(runtime.pool.as_ref())
+            .execute(runtime.sqlite_pool().expect("SQLite runtime"))
             .await
             .expect("delete backfill state row");
 
@@ -417,7 +417,7 @@ mod tests {
         assert_eq!(state, crate::BackfillState::default());
         let row_count =
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM backfill_state WHERE id = 1")
-                .fetch_one(runtime.pool.as_ref())
+                .fetch_one(runtime.sqlite_pool().expect("SQLite runtime"))
                 .await
                 .expect("count repaired backfill state rows");
         assert_eq!(row_count, 1);
@@ -428,7 +428,7 @@ mod tests {
     #[tokio::test]
     async fn backfill_claim_is_singleton_until_stale_and_blocked_when_complete() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
 
@@ -454,7 +454,7 @@ WHERE id = 1
         )
         .bind(crate::BackfillStatus::Running.as_str())
         .bind(stale_updated_at)
-        .execute(runtime.pool.as_ref())
+        .execute(runtime.sqlite_pool().expect("SQLite runtime"))
         .await
         .expect("force stale backfill lease");
 

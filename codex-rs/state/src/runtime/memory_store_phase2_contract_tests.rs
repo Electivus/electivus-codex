@@ -246,8 +246,8 @@ async fn sqlite_phase2_enqueue_and_claim_satisfies_shared_contract() -> Result<(
     let _cleanup = scopeguard::guard(codex_home.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
     });
-    let first = StateRuntime::init(codex_home.clone(), "test-provider".to_string()).await?;
-    let second = StateRuntime::init(codex_home, "test-provider".to_string()).await?;
+    let first = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string()).await?;
+    let second = StateRuntime::init_sqlite(codex_home, "test-provider".to_string()).await?;
 
     run_phase2_enqueue_and_claim_contract(first.memories(), second.memories()).await?;
     run_phase2_heartbeat_and_failure_contract(first.memories(), second.memories()).await?;

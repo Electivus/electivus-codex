@@ -82,7 +82,8 @@ async fn runtime_db_path_for_corruption_error_returns_failed_database_path() -> 
     let path = super::super::state_db_path(sqlite_home.as_path());
     tokio::fs::write(path.as_path(), b"not sqlite").await?;
 
-    let err = match super::super::StateRuntime::init(sqlite_home, "openai".to_string()).await {
+    let err = match super::super::StateRuntime::init_sqlite(sqlite_home, "openai".to_string()).await
+    {
         Ok(_) => panic!("malformed sqlite should fail to initialize"),
         Err(err) => err,
     };

@@ -370,8 +370,8 @@ async fn sqlite_stage1_claim_and_output_satisfies_shared_contract() -> Result<()
     let _cleanup = scopeguard::guard(codex_home.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
     });
-    let first = StateRuntime::init(codex_home.clone(), "test-provider".to_string()).await?;
-    let second = StateRuntime::init(codex_home, "test-provider".to_string()).await?;
+    let first = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string()).await?;
+    let second = StateRuntime::init_sqlite(codex_home, "test-provider".to_string()).await?;
     let thread_id = ThreadId::new();
     first
         .upsert_thread(&test_thread_metadata(

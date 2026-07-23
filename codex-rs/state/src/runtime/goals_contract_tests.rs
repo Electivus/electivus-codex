@@ -545,8 +545,8 @@ async fn sqlite_goal_lifecycle_satisfies_shared_contract() -> Result<()> {
     let _cleanup = scopeguard::guard(codex_home.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
     });
-    let writer = StateRuntime::init(codex_home.clone(), "test-provider".to_string()).await?;
-    let reader = StateRuntime::init(codex_home, "test-provider".to_string()).await?;
+    let writer = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string()).await?;
+    let reader = StateRuntime::init_sqlite(codex_home, "test-provider".to_string()).await?;
     let thread_id = ThreadId::new();
     writer
         .upsert_thread(&test_thread_metadata(
@@ -569,7 +569,7 @@ async fn sqlite_goal_errors_expose_the_runtime_state_contract() -> Result<()> {
     let _cleanup = scopeguard::guard(codex_home.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
     });
-    let runtime = StateRuntime::init(codex_home, "test-provider".to_string()).await?;
+    let runtime = StateRuntime::init_sqlite(codex_home, "test-provider".to_string()).await?;
     let thread_id = ThreadId::new();
 
     let error = provoke_goal_accounting_conflict(runtime.thread_goals(), thread_id).await?;

@@ -230,7 +230,7 @@ mod tests {
     #[tokio::test]
     async fn remote_control_enrollment_round_trips_by_target_and_account() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
 
@@ -310,7 +310,7 @@ mod tests {
     #[tokio::test]
     async fn delete_remote_control_enrollment_removes_only_matching_entry() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
 
@@ -390,7 +390,7 @@ mod tests {
     #[tokio::test]
     async fn remote_control_facade_errors_are_backend_independent_and_sanitized() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home, "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home, "test-provider".to_string())
             .await
             .expect("initialize runtime");
         let store = runtime.remote_control_enrollment_store();
@@ -456,7 +456,7 @@ mod tests {
         .expect("insert legacy enrollment");
         pool.close().await;
 
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
         let actual = runtime

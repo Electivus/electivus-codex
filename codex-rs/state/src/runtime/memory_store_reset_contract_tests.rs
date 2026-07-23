@@ -13,6 +13,7 @@ use codex_protocol::ThreadId;
 use pretty_assertions::assert_eq;
 use sqlx::Row;
 use std::future::Future;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MemoryResetSnapshot {
@@ -175,8 +176,9 @@ async fn sqlite_memory_reset_satisfies_shared_contract() -> Result<()> {
     let _cleanup = scopeguard::guard(codex_home.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
     });
-    let writer = StateRuntime::init(codex_home.clone(), "test-provider".to_string()).await?;
-    let resetter = StateRuntime::init(codex_home.clone(), "test-provider".to_string()).await?;
+    let writer = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string()).await?;
+    let resetter =
+        StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string()).await?;
     let output_thread_id = ThreadId::new();
     let disabled_thread_id = ThreadId::new();
     for thread_id in [output_thread_id, disabled_thread_id] {
@@ -192,7 +194,7 @@ async fn sqlite_memory_reset_satisfies_shared_contract() -> Result<()> {
         .set_thread_memory_mode(disabled_thread_id, "disabled")
         .await?;
     let memory_pool = writer.memories().sqlite_pool_for_tests().clone();
-    let state_pool = writer.pool.clone();
+    let state_pool = Arc::clone(writer.sqlite_pool_arc().expect("SQLite runtime"));
     let age_pool = memory_pool.clone();
     let snapshot = move || {
         let memory_pool = memory_pool.clone();

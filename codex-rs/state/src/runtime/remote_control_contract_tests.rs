@@ -95,8 +95,8 @@ async fn sqlite_remote_control_enrollments_satisfy_shared_contract() -> Result<(
     let _cleanup = scopeguard::guard(codex_home.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
     });
-    let writer = StateRuntime::init(codex_home.clone(), "test-provider".to_string()).await?;
-    let reader = StateRuntime::init(codex_home, "test-provider".to_string()).await?;
+    let writer = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string()).await?;
+    let reader = StateRuntime::init_sqlite(codex_home, "test-provider".to_string()).await?;
 
     run_remote_control_enrollment_contract(
         &writer.remote_control_enrollment_store(),

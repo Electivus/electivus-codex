@@ -111,8 +111,8 @@ async fn sqlite_backfill_coordination_satisfies_shared_contract() -> Result<()> 
     let _cleanup = scopeguard::guard(codex_home.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
     });
-    let first = StateRuntime::init(codex_home.clone(), "test-provider".to_string()).await?;
-    let second = StateRuntime::init(codex_home, "test-provider".to_string()).await?;
+    let first = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string()).await?;
+    let second = StateRuntime::init_sqlite(codex_home, "test-provider".to_string()).await?;
 
     run_backfill_coordination_contract(
         &first.backfill_coordinator(),

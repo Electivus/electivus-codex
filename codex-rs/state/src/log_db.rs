@@ -582,7 +582,7 @@ mod tests {
     #[tokio::test]
     async fn sqlite_feedback_logs_match_feedback_formatter_shape() {
         let codex_home = temp_codex_home();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
         let writer = SharedWriter::default();
@@ -640,7 +640,7 @@ mod tests {
     #[tokio::test]
     async fn flush_persists_logs_for_query() {
         let codex_home = temp_codex_home();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
         let layer = start(runtime.clone());
@@ -671,7 +671,7 @@ mod tests {
     #[tokio::test]
     async fn configured_batch_size_flushes_without_explicit_flush() {
         let codex_home = temp_codex_home();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
         let layer = LogDbLayer::start_with_config(
@@ -720,7 +720,7 @@ mod tests {
     #[tokio::test]
     async fn configured_flush_interval_persists_buffered_logs() {
         let codex_home = temp_codex_home();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
         let layer = LogDbLayer::start_with_config(

@@ -284,8 +284,8 @@ async fn sqlite_phase2_success_satisfies_shared_contract() -> Result<()> {
     let _cleanup = scopeguard::guard(codex_home.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
     });
-    let first = StateRuntime::init(codex_home.clone(), "test-provider".to_string()).await?;
-    let second = StateRuntime::init(codex_home, "test-provider".to_string()).await?;
+    let first = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string()).await?;
+    let second = StateRuntime::init_sqlite(codex_home, "test-provider".to_string()).await?;
     let thread_ids = phase2_success_thread_ids()?;
     for (index, thread_id) in thread_ids.into_iter().enumerate() {
         first
@@ -332,7 +332,7 @@ async fn sqlite_consolidation_completion_preserves_filesystem_authority() -> Res
     let _cleanup = scopeguard::guard(codex_home.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
     });
-    let runtime = StateRuntime::init(codex_home, "test-provider".to_string()).await?;
+    let runtime = StateRuntime::init_sqlite(codex_home, "test-provider".to_string()).await?;
     assert_eq!(
         runtime
             .memories()

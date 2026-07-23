@@ -62,11 +62,48 @@ impl PostgresLogStore {
             .await
             .map_err(|error| map_sql_error(&self.schema, "lock log partition", error))?;
         }
+        let thread_ids = entries
+            .iter()
+            .filter_map(|entry| entry.thread_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let canonical_thread_ids = if thread_ids.is_empty() {
+            BTreeSet::new()
+        } else {
+            let threads = qualified_table(&self.schema, "threads");
+            sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
+                "SELECT thread_id FROM {threads} WHERE thread_id = ANY($1) \
+                     ORDER BY thread_id FOR KEY SHARE"
+            )))
+            .bind(&thread_ids)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(|error| {
+                map_sql_error(&self.schema, "lock canonical threads for log insert", error)
+            })?
+            .into_iter()
+            .collect()
+        };
+        let entries_to_insert = entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .thread_id
+                    .as_ref()
+                    .is_none_or(|thread_id| canonical_thread_ids.contains(thread_id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            !entries_to_insert.is_empty(),
+            "Runtime State could not complete the `insert thread logs` operation; verify canonical thread state, then retry"
+        );
         let mut builder = QueryBuilder::<Postgres>::new(format!(
             "INSERT INTO {} (ts, ts_nanos, level, target, feedback_log_body, thread_id, process_uuid, module_path, file, line, estimated_bytes) ",
             self.table
         ));
-        builder.push_values(entries, |mut row, entry| {
+        builder.push_values(&entries_to_insert, |mut row, entry| {
             let feedback_log_body = entry.feedback_log_body.as_ref().or(entry.message.as_ref());
             row.push_bind(entry.ts)
                 .push_bind(entry.ts_nanos)
@@ -85,7 +122,8 @@ impl PostgresLogStore {
             .execute(&mut *transaction)
             .await
             .map_err(|error| map_sql_error(&self.schema, "insert logs", error))?;
-        self.prune_partitions(entries, &mut transaction).await?;
+        self.prune_partitions(&entries_to_insert, &mut transaction)
+            .await?;
         transaction
             .commit()
             .await

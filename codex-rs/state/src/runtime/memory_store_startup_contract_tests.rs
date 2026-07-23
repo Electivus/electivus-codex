@@ -231,7 +231,7 @@ async fn seed_sqlite(runtime: &StateRuntime, seeds: &[StartupSeed]) -> Result<()
         .bind(seed.metadata.updated_at.timestamp_millis())
         .bind(seed.metadata.recency_at.timestamp_millis())
         .bind(seed.metadata.id.to_string())
-        .execute(runtime.pool.as_ref())
+        .execute(runtime.sqlite_pool().expect("SQLite runtime"))
         .await?;
     }
     Ok(())
@@ -338,11 +338,13 @@ async fn sqlite_stage1_startup_satisfies_shared_contract() -> Result<()> {
     let _cleanup = scopeguard::guard(codex_home.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
     });
-    let writer = StateRuntime::init(codex_home.clone(), "startup-provider".to_string()).await?;
-    let reader = StateRuntime::init(codex_home.clone(), "startup-provider".to_string()).await?;
+    let writer =
+        StateRuntime::init_sqlite(codex_home.clone(), "startup-provider".to_string()).await?;
+    let reader =
+        StateRuntime::init_sqlite(codex_home.clone(), "startup-provider".to_string()).await?;
     let now = DateTime::from_timestamp(
         sqlx::query_scalar::<_, i64>("SELECT CAST(strftime('%s', 'now') AS INTEGER)")
-            .fetch_one(writer.pool.as_ref())
+            .fetch_one(writer.sqlite_pool().expect("SQLite runtime"))
             .await?,
         /*nsecs*/ 0,
     )

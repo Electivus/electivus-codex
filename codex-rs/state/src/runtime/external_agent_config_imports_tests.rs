@@ -72,7 +72,7 @@ fn external_agent_memory_import_overlay_applies_later_project_replacements() -> 
 
 #[tokio::test]
 async fn sqlite_matches_external_agent_config_import_contract() -> anyhow::Result<()> {
-    let runtime = StateRuntime::init(unique_temp_dir(), "test-provider".to_string()).await?;
+    let runtime = StateRuntime::init_sqlite(unique_temp_dir(), "test-provider".to_string()).await?;
 
     crate::runtime::external_agent_config_imports_contract_tests::run_external_agent_config_import_contract(
         &runtime.external_agent_config_imports,
@@ -83,7 +83,7 @@ async fn sqlite_matches_external_agent_config_import_contract() -> anyhow::Resul
 
 #[tokio::test]
 async fn records_completion_by_import_id() -> anyhow::Result<()> {
-    let runtime = StateRuntime::init(unique_temp_dir(), "test-provider".to_string()).await?;
+    let runtime = StateRuntime::init_sqlite(unique_temp_dir(), "test-provider".to_string()).await?;
 
     runtime
         .record_external_agent_config_import_completed(
@@ -202,7 +202,7 @@ async fn records_completion_by_import_id() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn reads_all_history_records() -> anyhow::Result<()> {
-    let runtime = StateRuntime::init(unique_temp_dir(), "test-provider".to_string()).await?;
+    let runtime = StateRuntime::init_sqlite(unique_temp_dir(), "test-provider".to_string()).await?;
 
     runtime
         .record_external_agent_config_import_completed("import-1", &[], &[])
@@ -228,7 +228,7 @@ async fn reads_all_history_records() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn sqlite_memory_import_completion_enqueues_consolidation() -> anyhow::Result<()> {
-    let runtime = StateRuntime::init(unique_temp_dir(), "test-provider".to_string()).await?;
+    let runtime = StateRuntime::init_sqlite(unique_temp_dir(), "test-provider".to_string()).await?;
     let memory_import = ExternalAgentMemoryImport::new(
         vec!["project-a".to_string()],
         MemoryArtifactSet::new(vec![MemoryArtifact::new(

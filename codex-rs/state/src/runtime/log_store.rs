@@ -21,8 +21,7 @@ use sqlite::SqliteLogStore;
 
 /// Storage-neutral facade for runtime log operations.
 ///
-/// Backends own their SQL and row decoding. SQLite is the only available
-/// backend until PostgreSQL satisfies this complete contract.
+/// Backends own their SQL and row decoding.
 #[derive(Clone)]
 pub(crate) struct LogStore {
     backend: LogStoreBackend,
@@ -41,13 +40,6 @@ impl LogStore {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "PostgreSQL runtime state selection lands in issue #31"
-        )
-    )]
     pub(crate) fn from_postgres(pool: PgPool, schema: String) -> Self {
         Self {
             backend: LogStoreBackend::Postgres(PostgresLogStore::new(pool, schema)),
