@@ -343,6 +343,30 @@ jobs:
           python-version: "3.11"
           architecture: x64
 
+      - name: Install Windows SDK debugging tools for x64 host tools
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $installer = Get-ItemProperty HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* |
+            Where-Object { $_.DisplayName -match "Windows Software Development Kit" } |
+            Sort-Object DisplayVersion -Descending |
+            Select-Object -First 1
+          if (-not $installer.BundleCachePath) {
+            throw "Could not locate the installed Windows SDK bundle"
+          }
+
+          $process = Start-Process -FilePath $installer.BundleCachePath `
+            -ArgumentList @("/features", "OptionId.WindowsDesktopDebuggers", "/q", "/norestart") `
+            -Wait -PassThru
+          if ($process.ExitCode -notin 0, 3010) {
+            throw "Windows SDK debugger installation failed with exit code $($process.ExitCode)"
+          }
+
+          $debuggerDll = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\Debuggers\x64\dbghelp.dll"
+          if (-not (Test-Path $debuggerDll)) {
+            throw "Windows SDK debugger installation did not provide $debuggerDll"
+          }
+
       - name: Set up Codex Rust toolchain for Cargo smoke
         uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:

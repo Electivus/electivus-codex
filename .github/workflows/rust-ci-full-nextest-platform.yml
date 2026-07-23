@@ -71,6 +71,20 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Free disk space for the Rust test archive (Linux)
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/.ghcup \
+            /usr/local/lib/android \
+            /usr/share/dotnet
+          df -h /
+
       - uses: ./.github/actions/setup-ci
 
       - name: Install Linux build dependencies
