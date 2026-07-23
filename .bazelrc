@@ -32,6 +32,9 @@ common:macos --test_env=PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr
 common:windows --test_env=SYSTEMROOT
 common:windows --test_env=COMSPEC
 common:windows --test_env=WINDIR
+# Forward the time-bounded Electivus hosted-runner capability exclusion when
+# its workflow explicitly enables it. Unset variables remain unset.
+common:windows --test_env=ELECTIVUS_EXCLUDE_WINDOWS_LEGACY_DELETE_BOUNDARY
 # Rust's libtest harness runs test bodies on std-spawned threads. The default
 # 2 MiB stack can be too small for large async test futures on Windows CI; see
 # https://github.com/openai/codex/pull/19067 for the motivating failure.
