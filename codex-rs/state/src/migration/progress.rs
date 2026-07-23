@@ -1,4 +1,5 @@
 use super::import_memory::memory_evidence;
+use super::thread_evidence::thread_content_evidence;
 use crate::postgres::map_sql_error;
 use crate::postgres::qualified_table;
 use futures::TryStreamExt;
@@ -53,6 +54,11 @@ pub struct RuntimeStateMigrationProgress {
     pub(super) fencing_token: i64,
 }
 
+enum ProgressRead {
+    Inspect,
+    Lock,
+}
+
 impl RuntimeStateMigrationProgress {
     pub fn phase(&self) -> RuntimeStateMigrationPhase {
         self.phase
@@ -69,10 +75,47 @@ pub(super) async fn existing_progress(
     source_identity: &str,
     source_fingerprint: &str,
 ) -> anyhow::Result<Option<RuntimeStateMigrationProgress>> {
+    read_progress(
+        connection,
+        schema,
+        source_identity,
+        source_fingerprint,
+        ProgressRead::Lock,
+    )
+    .await
+}
+
+pub(super) async fn inspect_existing_progress(
+    connection: &mut sqlx::PgConnection,
+    schema: &str,
+    source_identity: &str,
+    source_fingerprint: &str,
+) -> anyhow::Result<Option<RuntimeStateMigrationProgress>> {
+    read_progress(
+        connection,
+        schema,
+        source_identity,
+        source_fingerprint,
+        ProgressRead::Inspect,
+    )
+    .await
+}
+
+async fn read_progress(
+    connection: &mut sqlx::PgConnection,
+    schema: &str,
+    source_identity: &str,
+    source_fingerprint: &str,
+    read: ProgressRead,
+) -> anyhow::Result<Option<RuntimeStateMigrationProgress>> {
     let migration = qualified_table(schema, "runtime_state_migration");
+    let lock = match read {
+        ProgressRead::Inspect => "",
+        ProgressRead::Lock => " FOR UPDATE",
+    };
     let row = sqlx::query(AssertSqlSafe(format!(
         "SELECT source_identity, source_fingerprint, phase, ready, phase_evidence, fencing_token \
-         FROM {migration} WHERE singleton FOR UPDATE"
+         FROM {migration} WHERE singleton{lock}"
     )))
     .fetch_optional(&mut *connection)
     .await
@@ -139,6 +182,7 @@ pub(super) async fn phase_evidence(
     .fetch_one(&mut *connection)
     .await
     .map_err(|error| map_sql_error(schema, "validate Runtime State Migration evidence", error))?;
+    let thread_content = thread_content_evidence(connection, schema).await?;
     let mut evidence = serde_json::json!({
         "sourceIdentity": metadata.source_identity,
         "sourceFingerprint": metadata.source_fingerprint,
@@ -147,6 +191,9 @@ pub(super) async fn phase_evidence(
         "fencingToken": metadata.fencing_token,
         "threads": counts.0,
         "historyLines": counts.1,
+        "threadsContentHash": thread_content.threads_hash,
+        "historyContentHash": thread_content.history_hash,
+        "threadCoordinationContentHash": thread_content.coordination_hash,
         "namespaceDigest": metadata.namespace_digest,
     });
     if metadata.phase != RuntimeStateMigrationPhase::ThreadsImported {

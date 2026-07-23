@@ -93,6 +93,7 @@ async fn import_snapshot(
     }
 
     write_operational_state(transaction.as_mut(), schema, snapshot).await?;
+    validate_operational_state(transaction.as_mut(), schema, snapshot).await?;
     let migration = qualified_table(schema, "runtime_state_migration");
     sqlx::query(AssertSqlSafe(format!(
         "UPDATE {migration} SET phase = 'operational_imported', ready = FALSE, \
@@ -131,6 +132,59 @@ async fn import_snapshot(
         phase: RuntimeStateMigrationPhase::OperationalImported,
         fencing_token: 2,
     })
+}
+
+async fn validate_operational_state(
+    connection: &mut sqlx::PgConnection,
+    schema: &str,
+    expected: &OperationalSnapshot,
+) -> anyhow::Result<()> {
+    let logs = qualified_table(schema, "logs");
+    let goals = qualified_table(schema, "thread_goals");
+    let deferrals = qualified_table(schema, "thread_goal_continuation_deferrals");
+    let events = qualified_table(schema, "thread_goal_accounting_events");
+    let enrollments = qualified_table(schema, "remote_control_enrollments");
+    let imports = qualified_table(schema, "external_agent_config_imports");
+    let actual = OperationalSnapshot {
+        logs: sqlx::query_as(AssertSqlSafe(format!(
+            "SELECT id, ts, ts_nanos, level, target, feedback_log_body, module_path, file, line, \
+             thread_id, process_uuid, estimated_bytes FROM {logs} ORDER BY id"
+        )))
+        .fetch_all(&mut *connection)
+        .await?,
+        goals: sqlx::query_as(AssertSqlSafe(format!(
+            "SELECT goals.thread_id, goals.goal_id, goals.objective, goals.status, \
+             goals.token_budget, goals.tokens_used, goals.time_used_seconds, goals.created_at_ms, \
+             goals.updated_at_ms, EXISTS(SELECT 1 FROM {deferrals} deferrals WHERE \
+             deferrals.thread_id = goals.thread_id) AS continuation_deferred \
+             FROM {goals} goals ORDER BY thread_id"
+        )))
+        .fetch_all(&mut *connection)
+        .await?,
+        accounting_events: sqlx::query_as(AssertSqlSafe(format!(
+            "SELECT thread_id, event_id, goal_id, time_delta_seconds, token_delta, mode \
+             FROM {events} ORDER BY thread_id, event_id"
+        )))
+        .fetch_all(&mut *connection)
+        .await?,
+        enrollments: sqlx::query_as(AssertSqlSafe(format!(
+            "SELECT websocket_url, account_id, app_server_client_name, server_id, environment_id, \
+             server_name, remote_control_enabled, updated_at FROM {enrollments} \
+             ORDER BY websocket_url, account_id, app_server_client_name"
+        )))
+        .fetch_all(&mut *connection)
+        .await?,
+        imports: sqlx::query_as(AssertSqlSafe(format!(
+            "SELECT import_id, completed_at_ms, successes, failures FROM {imports} ORDER BY import_id"
+        )))
+        .fetch_all(&mut *connection)
+        .await?,
+    };
+    anyhow::ensure!(
+        actual == *expected,
+        "imported operational Runtime State does not exactly match its SQLite source snapshot"
+    );
+    Ok(())
 }
 
 async fn write_operational_state(

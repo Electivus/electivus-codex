@@ -5,6 +5,7 @@ use crate::state_db_path;
 use anyhow::Context;
 use serde_json::Value;
 
+#[derive(Debug, Eq, PartialEq)]
 pub(super) struct OperationalSnapshot {
     pub(super) logs: Vec<OperationalLogSnapshot>,
     pub(super) goals: Vec<OperationalGoalSnapshot>,
@@ -13,7 +14,7 @@ pub(super) struct OperationalSnapshot {
     pub(super) imports: Vec<OperationalExternalAgentImportSnapshot>,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
 pub(super) struct OperationalLogSnapshot {
     pub(super) id: i64,
     pub(super) ts: i64,
@@ -29,7 +30,7 @@ pub(super) struct OperationalLogSnapshot {
     pub(super) estimated_bytes: i64,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
 pub(super) struct OperationalGoalSnapshot {
     pub(super) thread_id: String,
     pub(super) goal_id: String,
@@ -43,7 +44,7 @@ pub(super) struct OperationalGoalSnapshot {
     pub(super) continuation_deferred: bool,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
 pub(super) struct OperationalGoalAccountingEventSnapshot {
     pub(super) thread_id: String,
     pub(super) event_id: String,
@@ -53,7 +54,7 @@ pub(super) struct OperationalGoalAccountingEventSnapshot {
     pub(super) mode: String,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
 pub(super) struct OperationalRemoteControlEnrollmentSnapshot {
     pub(super) websocket_url: String,
     pub(super) account_id: String,
@@ -73,6 +74,7 @@ struct OperationalExternalAgentImportRow {
     failures: String,
 }
 
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
 pub(super) struct OperationalExternalAgentImportSnapshot {
     pub(super) import_id: String,
     pub(super) completed_at_ms: i64,

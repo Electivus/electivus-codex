@@ -27,6 +27,8 @@ mod snapshot_operational;
 mod source_lock;
 #[path = "migration/source_validation.rs"]
 mod source_validation;
+#[path = "migration/thread_evidence.rs"]
+mod thread_evidence;
 #[path = "migration/thread_snapshot.rs"]
 mod thread_snapshot;
 

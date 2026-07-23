@@ -302,6 +302,18 @@ async fn postgres_contract_imports_complete_operational_state_read_only() -> any
         .as_str()
         .context("migration evidence has no namespace digest")?
         .to_string();
+    let threads_content_hash = phase_evidence["threadsContentHash"]
+        .as_str()
+        .context("migration evidence has no thread content hash")?
+        .to_string();
+    let history_content_hash = phase_evidence["historyContentHash"]
+        .as_str()
+        .context("migration evidence has no history content hash")?
+        .to_string();
+    let coordination_content_hash = phase_evidence["threadCoordinationContentHash"]
+        .as_str()
+        .context("migration evidence has no thread coordination content hash")?
+        .to_string();
     assert_eq!(
         phase_evidence,
         serde_json::json!({
@@ -312,6 +324,9 @@ async fn postgres_contract_imports_complete_operational_state_read_only() -> any
             "fencingToken": 2,
             "threads": 1,
             "historyLines": 1,
+            "threadsContentHash": threads_content_hash,
+            "historyContentHash": history_content_hash,
+            "threadCoordinationContentHash": coordination_content_hash,
             "logs": 2,
             "goals": 1,
             "goalDeferrals": 1,

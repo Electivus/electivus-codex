@@ -10,6 +10,8 @@ use super::inspect_source;
 use super::progress::existing_progress;
 use super::progress::namespace_digest;
 use super::snapshot_runtime_state_migration_threads;
+use super::thread_evidence::snapshot_content_evidence;
+use super::thread_evidence::thread_content_evidence;
 use crate::PostgresNamespaceAction;
 use crate::PostgresNamespaceConfig;
 use crate::SqliteConfig;
@@ -132,6 +134,12 @@ async fn import_snapshot(
         .materialize(transaction.as_mut(), snapshot)
         .await
         .map_err(anyhow::Error::new)?;
+    let expected_content = snapshot_content_evidence(snapshot)?;
+    let content = thread_content_evidence(transaction.as_mut(), schema).await?;
+    anyhow::ensure!(
+        content == expected_content,
+        "imported thread identifiers, content, or Canonical Thread History ordering do not exactly match the SQLite source snapshot"
+    );
     let migration = qualified_table(schema, "runtime_state_migration");
     let mut evidence = json!({
         "sourceIdentity": source_identity,
@@ -141,6 +149,9 @@ async fn import_snapshot(
             .iter()
             .map(|thread| thread.canonical_history.lines().len())
             .sum::<usize>(),
+        "threadsContentHash": content.threads_hash,
+        "historyContentHash": content.history_hash,
+        "threadCoordinationContentHash": content.coordination_hash,
         "sourceFingerprint": source_fingerprint,
         "phase": "threads_imported",
         "ready": false,
@@ -270,7 +281,7 @@ async fn write_thread(
     Ok(())
 }
 
-fn thread_projection(
+pub(super) fn thread_projection(
     thread: &ThreadMigrationSnapshot,
     session_meta: &codex_protocol::protocol::SessionMetaLine,
 ) -> anyhow::Result<Value> {
