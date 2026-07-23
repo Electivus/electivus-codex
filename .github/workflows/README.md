@@ -9,8 +9,8 @@ remain the fallback.
 ## Linux Support Boundary
 
 - Native Linux x64 on `ubuntu-24.04` is the current Essential platform.
-- Linux ARM64 on `ubuntu-24.04-arm`, musl variants, release builds, remote
-  environments, and V8 canaries are Extended validation.
+- Linux ARM64 on `ubuntu-24.04-arm`, musl variants, release builds, and V8
+  canaries are Extended validation.
 - macOS and Windows remain Codex product platforms, but this fork does not
   select them in active validation matrices. They can return by restoring
   inherited jobs and widening matrices after their standard-runner paths are
@@ -38,8 +38,9 @@ remain the fallback.
   Both suites can also be dispatched against a non-default branch for Stability
   certification or a single diagnostic retry.
 - `rust-ci-full.yml` retains Linux x64 and ARM64 Cargo `clippy`, nextest,
-  GNU/musl, release-profile, argument-comment-lint, and remote-environment
-  coverage.
+  GNU/musl, release-profile, and argument-comment-lint coverage. Docker
+  remote-executor validation is deferred under #41 until the pinned baseline's
+  integration fixtures are consistently remote-safe.
 - Linux archive producers discard unused hosted-image toolchains and omit
   debuginfo from test artifacts so the inherited full suite fits standard
   runner disks. Linux ARM64 also caps Cargo parallelism to fit its memory
