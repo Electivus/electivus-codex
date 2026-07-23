@@ -123,6 +123,49 @@ async fn postgres_contract_preflight_rejects_incompatible_version_without_writes
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_preflight_rejects_unexpected_functions_and_triggers()
+-> anyhow::Result<()> {
+    let source = test_support::initialized_source("destination-trigger").await?;
+    let _cleanup = scopeguard::guard(source.clone(), |path| {
+        let _ = std::fs::remove_dir_all(path);
+    });
+    let database_url = test_database_url()?;
+    let mut destination = PostgresContractFixture::new(database_url, "preflight_trigger")?;
+    destination.manage(PostgresNamespaceAction::Migrate).await?;
+    let pool = destination.connect_pool().await?;
+    let schema = quote_identifier(destination.schema());
+    let logs = qualified_table(destination.schema(), "logs");
+    sqlx::query(AssertSqlSafe(format!(
+        "CREATE FUNCTION {schema}.unexpected_trigger() RETURNS trigger LANGUAGE plpgsql \
+         AS 'BEGIN RETURN NEW; END'"
+    )))
+    .execute(&pool)
+    .await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "CREATE TRIGGER unexpected_trigger BEFORE INSERT ON {logs} FOR EACH ROW \
+         EXECUTE FUNCTION {schema}.unexpected_trigger()"
+    )))
+    .execute(&pool)
+    .await?;
+    pool.close().await;
+
+    let error = preflight_runtime_state_migration(
+        SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(source.as_path())?),
+        destination.config_for_tests(),
+    )
+    .await
+    .expect_err("unexpected executable schema objects must be rejected");
+
+    assert!(
+        error.to_string().contains("incompatible table layout"),
+        "{error:#}"
+    );
+    destination.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
 async fn postgres_contract_preflight_does_not_create_an_absent_destination_schema()
 -> anyhow::Result<()> {
     let source = test_support::initialized_source("destination-absent").await?;

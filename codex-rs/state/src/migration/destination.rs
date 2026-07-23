@@ -1,3 +1,4 @@
+use super::progress::inspect_existing_progress;
 use crate::PostgresNamespaceAction;
 use crate::PostgresNamespaceConfig;
 use crate::postgres::MAXIMUM_COMPATIBLE_SCHEMA_VERSION;
@@ -9,7 +10,7 @@ use crate::postgres::qualified_table;
 use sqlx::AssertSqlSafe;
 use sqlx::Connection;
 
-const EXPECTED_SCHEMA_FINGERPRINT: &str = "331949118fa5285f1dc4b812b3cb46f7";
+const EXPECTED_SCHEMA_FINGERPRINT: &str = "6fd645fe2329527bbebbf24ffe848b59";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct DestinationState {
@@ -18,6 +19,21 @@ pub(super) struct DestinationState {
 }
 
 pub(super) async fn inspect(config: &PostgresNamespaceConfig) -> anyhow::Result<DestinationState> {
+    inspect_with_source(config, /*expected_source*/ None).await
+}
+
+pub(super) async fn inspect_resumable(
+    config: &PostgresNamespaceConfig,
+    source_identity: &str,
+    source_fingerprint: &str,
+) -> anyhow::Result<DestinationState> {
+    inspect_with_source(config, Some((source_identity, source_fingerprint))).await
+}
+
+async fn inspect_with_source(
+    config: &PostgresNamespaceConfig,
+    expected_source: Option<(&str, &str)>,
+) -> anyhow::Result<DestinationState> {
     let pool = connect_pool(config).await?;
     let result = async {
         let mut connection = pool
@@ -47,7 +63,23 @@ pub(super) async fn inspect(config: &PostgresNamespaceConfig) -> anyhow::Result<
             status.version(),
             MAXIMUM_COMPATIBLE_SCHEMA_VERSION
         );
-        ensure_empty(transaction.as_mut(), status.schema()).await?;
+        if let Err(empty_error) = ensure_empty(transaction.as_mut(), status.schema()).await {
+            let Some((source_identity, source_fingerprint)) = expected_source else {
+                return Err(empty_error);
+            };
+            match inspect_existing_progress(
+                transaction.as_mut(),
+                status.schema(),
+                source_identity,
+                source_fingerprint,
+            )
+            .await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => return Err(empty_error),
+                Err(error) => return Err(error),
+            }
+        }
         transaction.rollback().await.map_err(|error| {
             map_sql_error(config.schema(), "finish migration preflight", error)
         })?;
@@ -65,6 +97,7 @@ pub(super) async fn ensure_empty(
     connection: &mut sqlx::PgConnection,
     schema: &str,
 ) -> anyhow::Result<()> {
+    validate_layout(connection, schema).await?;
     let backfill_state = qualified_table(schema, "backfill_state");
     let backfill_is_baseline: bool = sqlx::query_scalar(AssertSqlSafe(format!(
         "SELECT COUNT(*) = 1 AND BOOL_AND(\
@@ -98,17 +131,6 @@ pub(super) async fn ensure_empty(
     .fetch_all(&mut *connection)
     .await
     .map_err(|error| map_sql_error(schema, "inventory destination tables", error))?;
-    let schema_fingerprint: String = sqlx::query_scalar(
-        "WITH definitions AS (SELECT concat_ws('|', 'column', table_name, ordinal_position, column_name, data_type, udt_name, is_nullable, COALESCE(column_default, ''), is_identity, COALESCE(identity_generation, '')) AS definition FROM information_schema.columns WHERE table_schema = $1 UNION ALL SELECT concat_ws('|', 'constraint', c.relname, x.conname, x.contype, replace(pg_get_constraintdef(x.oid), quote_ident($1) || '.', '')) FROM pg_constraint x JOIN pg_class c ON c.oid = x.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 UNION ALL SELECT concat_ws('|', 'relation', c.relkind, c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1) SELECT md5(string_agg(definition, E'\\n' ORDER BY definition)) FROM definitions",
-    )
-    .bind(schema)
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(|error| map_sql_error(schema, "validate destination schema layout", error))?;
-    anyhow::ensure!(
-        schema_fingerprint == EXPECTED_SCHEMA_FINGERPRINT,
-        "PostgreSQL Runtime State Namespace `{schema}` has an incompatible table layout; provision a freshly migrated namespace and retry"
-    );
     let mut populated = Vec::new();
     for table in tables {
         if matches!(
@@ -131,6 +153,24 @@ pub(super) async fn ensure_empty(
         populated.is_empty(),
         "PostgreSQL Runtime State Namespace `{schema}` is not empty: {}; provision an empty migrated namespace and retry",
         populated.join(", ")
+    );
+    Ok(())
+}
+
+pub(super) async fn validate_layout(
+    connection: &mut sqlx::PgConnection,
+    schema: &str,
+) -> anyhow::Result<()> {
+    let schema_fingerprint: String = sqlx::query_scalar(
+        "WITH definitions AS (SELECT concat_ws('|', 'column', table_name, ordinal_position, column_name, data_type, udt_name, is_nullable, COALESCE(column_default, ''), is_identity, COALESCE(identity_generation, '')) AS definition FROM information_schema.columns WHERE table_schema = $1 UNION ALL SELECT concat_ws('|', 'constraint', c.relname, x.conname, x.contype, replace(pg_get_constraintdef(x.oid), quote_ident($1) || '.', '')) FROM pg_constraint x JOIN pg_class c ON c.oid = x.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 UNION ALL SELECT concat_ws('|', 'relation', c.relkind, c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 UNION ALL SELECT concat_ws('|', 'function', p.proname, replace(pg_get_functiondef(p.oid), quote_ident($1) || '.', '')) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = $1 UNION ALL SELECT concat_ws('|', 'trigger', c.relname, t.tgname, replace(pg_get_triggerdef(t.oid), quote_ident($1) || '.', '')) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND NOT t.tgisinternal) SELECT md5(string_agg(definition, E'\\n' ORDER BY definition)) FROM definitions",
+    )
+    .bind(schema)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|error| map_sql_error(schema, "validate destination schema layout", error))?;
+    anyhow::ensure!(
+        schema_fingerprint == EXPECTED_SCHEMA_FINGERPRINT,
+        "PostgreSQL Runtime State Namespace `{schema}` has an incompatible table layout; provision a freshly migrated namespace and retry"
     );
     Ok(())
 }
