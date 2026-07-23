@@ -395,6 +395,12 @@ async fn damage_history_projections(
         .execute(transaction.as_mut())
         .await?;
     }
+    sqlx::query(AssertSqlSafe(format!(
+        "UPDATE \"{schema}\".threads SET history_projection_version = NULL WHERE thread_id = $1"
+    )))
+    .bind(thread_id.to_string())
+    .execute(transaction.as_mut())
+    .await?;
     transaction.commit().await?;
     pool.close().await;
     Ok(())

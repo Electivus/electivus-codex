@@ -350,6 +350,13 @@ async fn damage_projections(store: &PostgresThreadStore, thread_id: ThreadId) ->
         .execute(transaction.as_mut())
         .await?;
     }
+    sqlx::query(AssertSqlSafe(format!(
+        "UPDATE {} SET history_projection_version = NULL WHERE thread_id = $1",
+        store.tables.threads
+    )))
+    .bind(thread_id.to_string())
+    .execute(transaction.as_mut())
+    .await?;
     transaction.commit().await?;
     Ok(())
 }

@@ -693,3 +693,7 @@ mod memory_generation_contract_tests;
 #[cfg(test)]
 #[path = "postgres_memory_reset_contract_tests.rs"]
 mod memory_reset_contract_tests;
+
+#[cfg(test)]
+#[path = "postgres_no_extensions_contract_tests.rs"]
+mod no_extensions_contract_tests;

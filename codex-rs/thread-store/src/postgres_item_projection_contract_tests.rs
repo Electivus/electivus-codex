@@ -466,10 +466,19 @@ async fn execute_item_projection_sql(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pool = sqlx::PgPool::connect(&fixture.database_url).await?;
     let items = format!("\"{}\".thread_items", fixture.schema);
+    let threads = format!("\"{}\".threads", fixture.schema);
+    let mut transaction = pool.begin().await?;
     sqlx::query(AssertSqlSafe(sql.replace("{items}", items.as_str())))
         .bind(thread_id.to_string())
-        .execute(&pool)
+        .execute(transaction.as_mut())
         .await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "UPDATE {threads} SET history_projection_version = NULL WHERE thread_id = $1"
+    )))
+    .bind(thread_id.to_string())
+    .execute(transaction.as_mut())
+    .await?;
+    transaction.commit().await?;
     pool.close().await;
     Ok(())
 }

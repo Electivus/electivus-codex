@@ -350,12 +350,23 @@ async fn delete_search_projection(
     store: &PostgresThreadStore,
     thread_id: ThreadId,
 ) -> TestResult<u64> {
+    let mut transaction = store.pool.begin().await?;
     let result = sqlx::query(AssertSqlSafe(format!(
         "DELETE FROM {} WHERE thread_id = $1",
         store.tables.search_content
     )))
     .bind(thread_id.to_string())
-    .execute(&store.pool)
+    .execute(transaction.as_mut())
     .await?;
+    if result.rows_affected() > 0 {
+        sqlx::query(AssertSqlSafe(format!(
+            "UPDATE {} SET history_projection_version = NULL WHERE thread_id = $1",
+            store.tables.threads
+        )))
+        .bind(thread_id.to_string())
+        .execute(transaction.as_mut())
+        .await?;
+    }
+    transaction.commit().await?;
     Ok(result.rows_affected())
 }

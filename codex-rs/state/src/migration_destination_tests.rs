@@ -136,14 +136,14 @@ async fn postgres_contract_preflight_rejects_unexpected_functions_and_triggers()
     let schema = quote_identifier(destination.schema());
     let logs = qualified_table(destination.schema(), "logs");
     sqlx::query(AssertSqlSafe(format!(
-        "CREATE FUNCTION {schema}.unexpected_trigger() RETURNS trigger LANGUAGE plpgsql \
-         AS 'BEGIN RETURN NEW; END'"
+        "CREATE FUNCTION {schema}.unexpected_function() RETURNS integer LANGUAGE SQL \
+         AS 'SELECT 1'"
     )))
     .execute(&pool)
     .await?;
     sqlx::query(AssertSqlSafe(format!(
-        "CREATE TRIGGER unexpected_trigger BEFORE INSERT ON {logs} FOR EACH ROW \
-         EXECUTE FUNCTION {schema}.unexpected_trigger()"
+        "CREATE TRIGGER unexpected_trigger BEFORE UPDATE ON {logs} FOR EACH ROW \
+         EXECUTE FUNCTION pg_catalog.suppress_redundant_updates_trigger()"
     )))
     .execute(&pool)
     .await?;

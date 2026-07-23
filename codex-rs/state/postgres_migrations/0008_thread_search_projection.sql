@@ -8,8 +8,4 @@ CREATE TABLE thread_search_content (
     PRIMARY KEY (thread_id, rollout_ordinal)
 );
 
-CREATE TRIGGER thread_search_content_invalidate_history_projection
-AFTER INSERT OR UPDATE OR DELETE ON thread_search_content
-FOR EACH ROW EXECUTE FUNCTION invalidate_thread_history_projection();
-
 UPDATE threads SET history_projection_version = NULL;
