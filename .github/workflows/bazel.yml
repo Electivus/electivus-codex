@@ -424,7 +424,7 @@ jobs:
   verify-release-build:
     # Release-only compilation belongs to Extended validation and must not add
     # latency to the pull-request Merge gate.
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'push'
     timeout-minutes: 45
     strategy:
       fail-fast: false
