@@ -319,7 +319,7 @@ goals = true
         }
     }
 
-    let state_db = codex_state::StateRuntime::init(
+    let state_db = codex_state::StateRuntime::init_sqlite(
         app.config.sqlite_home.clone(),
         app.config.model_provider_id.clone(),
     )

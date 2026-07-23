@@ -91,7 +91,7 @@ pub(crate) async fn read_session_model(
     path: Option<&Path>,
 ) -> Option<String> {
     if let Some(state_db_ctx) = state_db_ctx
-        && let Ok(Some(metadata)) = state_db_ctx.get_thread(thread_id).await
+        && let Ok(Some(metadata)) = state_db_ctx.get_thread_resume_metadata(thread_id).await
         && let Some(model) = metadata.model
     {
         return Some(model);
@@ -170,7 +170,7 @@ async fn read_session_cwd(
     path: Option<&Path>,
 ) -> Option<PathBuf> {
     if let Some(state_db_ctx) = state_db_ctx
-        && let Ok(Some(metadata)) = state_db_ctx.get_thread(thread_id).await
+        && let Ok(Some(metadata)) = state_db_ctx.get_thread_resume_metadata(thread_id).await
     {
         return Some(metadata.cwd);
     }
@@ -436,7 +436,7 @@ mod tests {
             ],
         )?;
         let state_runtime =
-            StateRuntime::init(temp_dir.path().to_path_buf(), "test-provider".to_string())
+            StateRuntime::init_sqlite(temp_dir.path().to_path_buf(), "test-provider".to_string())
                 .await
                 .map_err(std::io::Error::other)?;
         let created_at = chrono::DateTime::parse_from_rfc3339("2025-01-05T12:00:00Z")

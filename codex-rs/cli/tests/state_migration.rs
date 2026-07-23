@@ -16,9 +16,11 @@ async fn state_migrate_process_runs_the_complete_offline_migration() -> Result<(
     let database_url = std::env::var("CODEX_TEST_POSTGRES_URL")
         .context("CODEX_TEST_POSTGRES_URL must point to PostgreSQL 18")?;
     let source = tempfile::tempdir()?;
-    let runtime =
-        codex_state::StateRuntime::init(source.path().to_path_buf(), "test-provider".to_string())
-            .await?;
+    let runtime = codex_state::StateRuntime::init_sqlite(
+        source.path().to_path_buf(),
+        "test-provider".to_string(),
+    )
+    .await?;
     codex_state::open_thread_history_db(source.path())
         .await?
         .close()

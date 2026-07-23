@@ -548,7 +548,19 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         arg0_paths.codex_self_exe.clone(),
         arg0_paths.codex_linux_sandbox_exe.clone(),
     )?;
-    let state_db = codex_core::init_state_db(&config).await;
+    let state_db = if config.runtime_state_backend.is_postgresql() {
+        Some(
+            codex_core::try_init_state_db(&config)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed to initialize PostgreSQL Runtime State Backend: {error:#}"
+                    )
+                })?,
+        )
+    } else {
+        codex_core::init_state_db(&config).await
+    };
     let environment_manager = if run_loader_overrides.ignore_user_config {
         EnvironmentManager::from_env(Some(local_runtime_paths)).await?
     } else {
@@ -1509,7 +1521,9 @@ async fn resolve_resume_thread_id(
     if Uuid::parse_str(session_id).is_ok() {
         return Ok(Some(session_id.to_string()));
     }
-    if let Some(state_db) = state_db {
+    if let Some(state_db) = state_db
+        && !state_db.is_postgresql()
+    {
         let cwd = (!args.all).then_some(config.cwd.as_path());
         let resolved = state_db
             .find_thread_by_exact_title(

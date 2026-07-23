@@ -4207,7 +4207,8 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
         empty_extension_registry(),
         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
-        thread_store_from_config(&config, state_db.clone()),
+        thread_store_from_config(&config, state_db.clone())
+            .expect("thread store should initialize"),
         local_agent_graph_store_from_state_db(state_db.as_ref()),
         "11111111-1111-4111-8111-111111111111".to_string(),
         /*attestation_provider*/ None,

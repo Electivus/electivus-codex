@@ -4,9 +4,8 @@ use codex_state::PostgresNamespaceAction;
 use codex_state::PostgresNamespaceConfig;
 use codex_state::PostgresNamespaceStatus;
 use codex_state::PostgresPoolConfig;
-use codex_state::PostgresRuntimeStatePool;
 use codex_state::manage_postgres_namespace;
-use codex_thread_store::PostgresThreadStore;
+use codex_thread_store::PostgresThreadProjectionMaterializer;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -96,17 +95,14 @@ async fn run_migration(args: RuntimeStateMigrationArgs) -> anyhow::Result<()> {
     let source =
         codex_state::SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(args.sqlite_home)?);
     let destination = postgres_config(args.destination)?;
-    let runtime_pool = PostgresRuntimeStatePool::connect(destination.clone()).await?;
-    let thread_store = PostgresThreadStore::new(&runtime_pool);
-    let result = codex_state::migrate_runtime_state(
+    let projection_materializer = PostgresThreadProjectionMaterializer::new(&destination);
+    let report = codex_state::migrate_runtime_state(
         source,
         destination,
         &codex_rollout::CanonicalRolloutHistoryReader,
-        &thread_store,
+        &projection_materializer,
     )
-    .await;
-    runtime_pool.close().await;
-    let report = result?;
+    .await?;
     let output = format_migration_success(
         report.destination_schema(),
         report.fencing_token(),

@@ -133,7 +133,8 @@ async fn filesystem_authority_preserves_existing_workspace() -> Result<()> {
     tokio::fs::create_dir(&root).await?;
     tokio::fs::write(root.join("MEMORY.md"), "sqlite memory").await?;
 
-    let state = StateRuntime::init(home.path().to_path_buf(), "test-provider".to_string()).await?;
+    let state =
+        StateRuntime::init_sqlite(home.path().to_path_buf(), "test-provider".to_string()).await?;
     prepare_memory_workspace_from_store(state.memories(), &root).await?;
 
     assert_eq!(

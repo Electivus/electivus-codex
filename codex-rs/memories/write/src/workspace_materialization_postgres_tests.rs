@@ -21,7 +21,8 @@ const DATABASE_URL_ENV: &str = "CODEX_TEST_POSTGRES_URL";
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_replica_materializes_generation_and_reset_clears_workspaces() -> Result<()> {
+async fn postgres_contract_replica_materializes_generation_and_reset_clears_workspaces()
+-> Result<()> {
     let database_url = std::env::var(DATABASE_URL_ENV)?;
     let schema = format!("codex_memory_materialize_{}", Uuid::new_v4().simple());
     let config = PostgresNamespaceConfig::new(
@@ -31,6 +32,7 @@ async fn postgres_replica_materializes_generation_and_reset_clears_workspaces() 
     )?;
     codex_state::manage_postgres_namespace(config.clone(), PostgresNamespaceAction::Migrate)
         .await?;
+    mark_namespace_ready(&database_url, &schema).await?;
     let writer_pool = PostgresRuntimeStatePool::connect(config.clone()).await?;
     let reader_pool = PostgresRuntimeStatePool::connect(config).await?;
     let writer = writer_pool.memory_store();
@@ -152,5 +154,31 @@ async fn postgres_replica_materializes_generation_and_reset_clears_workspaces() 
         .execute(&cleanup_pool)
         .await?;
     cleanup_pool.close().await;
+    Ok(())
+}
+
+async fn mark_namespace_ready(database_url: &str, schema: &str) -> Result<()> {
+    let pool = sqlx::PgPool::connect(database_url).await?;
+    let migration = format!("\"{schema}\".runtime_state_migration");
+    let evidence = serde_json::json!({
+        "sourceIdentity": "memory-materialization-contract",
+        "sourceFingerprint": "memory-materialization-contract-fingerprint",
+        "phase": "ready",
+        "ready": true,
+        "fencingToken": 4,
+        "namespaceDigest": "memory-materialization-contract-digest",
+        "globalReferentialIntegrityValidated": true,
+        "canonicalThreadHistoryOrderingValidated": true,
+    });
+    sqlx::query(AssertSqlSafe(format!(
+        "INSERT INTO {migration} (source_identity, source_fingerprint, phase, ready, \
+         phase_evidence, fencing_token) VALUES ($1, $2, 'ready', TRUE, $3, 4)"
+    )))
+    .bind("memory-materialization-contract")
+    .bind("memory-materialization-contract-fingerprint")
+    .bind(evidence)
+    .execute(&pool)
+    .await?;
+    pool.close().await;
     Ok(())
 }

@@ -66,7 +66,7 @@ async fn upsert_thread_metadata(
     thread_id: ThreadId,
     rollout_path: PathBuf,
 ) -> StateDbHandle {
-    let runtime = StateRuntime::init(codex_home.to_path_buf(), "test-provider".to_string())
+    let runtime = StateRuntime::init_sqlite(codex_home.to_path_buf(), "test-provider".to_string())
         .await
         .unwrap();
     runtime

@@ -84,6 +84,7 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::read_codex_access_token_from_env;
 use codex_memories_write::clear_memory_roots_contents;
+use codex_memories_write::reset_memories;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::protocol::AskForApproval;
@@ -2047,6 +2048,19 @@ async fn run_debug_clear_memories_command(
         .cli_overrides(cli_kv_overrides)
         .build()
         .await?;
+
+    if config.runtime_state_backend.is_postgresql() {
+        let runtime = StateRuntime::init_with_backend(
+            config.runtime_state_backend.clone(),
+            config.model_provider_id.clone(),
+        )
+        .await?;
+        let reset_result = reset_memories(runtime.memories(), &config.codex_home).await;
+        runtime.close().await;
+        reset_result?;
+        println!("Cleared PostgreSQL memory state and local disposable memory workspaces.");
+        return Ok(());
+    }
 
     let memories_path = memories_db_path(config.sqlite_home.as_path());
     let cleared_memories_db =

@@ -27,7 +27,7 @@ async fn claim_global_job(store: &MemoryStore) -> Result<String> {
 async fn phase2_completion_preserves_sqlite_filesystem_authority() -> Result<()> {
     let home = TempDir::new()?;
     let runtime =
-        StateRuntime::init(home.path().to_path_buf(), "test-provider".to_string()).await?;
+        StateRuntime::init_sqlite(home.path().to_path_buf(), "test-provider".to_string()).await?;
     let memory_root = home.path().join("memories");
     tokio::fs::create_dir(&memory_root).await?;
     tokio::fs::write(memory_root.join("MEMORY.md"), "# Memory\n").await?;
@@ -55,7 +55,7 @@ async fn phase2_completion_preserves_sqlite_filesystem_authority() -> Result<()>
 async fn phase2_completion_path_collision_does_not_consume_job() -> Result<()> {
     let home = TempDir::new()?;
     let runtime =
-        StateRuntime::init(home.path().to_path_buf(), "test-provider".to_string()).await?;
+        StateRuntime::init_sqlite(home.path().to_path_buf(), "test-provider".to_string()).await?;
     let memory_root = home.path().join("memories");
     tokio::fs::create_dir(&memory_root).await?;
     tokio::fs::write(memory_root.join("MEMORY.md"), "first").await?;

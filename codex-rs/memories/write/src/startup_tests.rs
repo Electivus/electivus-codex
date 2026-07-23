@@ -597,7 +597,8 @@ async fn build_test_codex_with_memories_config(
 
 async fn init_state_db(home: &Arc<TempDir>) -> anyhow::Result<Arc<codex_state::StateRuntime>> {
     let db =
-        codex_state::StateRuntime::init(home.path().to_path_buf(), "test-provider".into()).await?;
+        codex_state::StateRuntime::init_sqlite(home.path().to_path_buf(), "test-provider".into())
+            .await?;
     db.mark_backfill_complete(/*last_watermark*/ None).await?;
     Ok(db)
 }

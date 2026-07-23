@@ -27,8 +27,10 @@ impl Drop for DropSignal {
 
 async fn sqlite_replicas() -> Result<(TempDir, Arc<StateRuntime>, Arc<StateRuntime>)> {
     let home = tempfile::tempdir()?;
-    let first = StateRuntime::init(home.path().to_path_buf(), "test-provider".to_string()).await?;
-    let second = StateRuntime::init(home.path().to_path_buf(), "test-provider".to_string()).await?;
+    let first =
+        StateRuntime::init_sqlite(home.path().to_path_buf(), "test-provider".to_string()).await?;
+    let second =
+        StateRuntime::init_sqlite(home.path().to_path_buf(), "test-provider".to_string()).await?;
     Ok((home, first, second))
 }
 
