@@ -11,12 +11,18 @@ use tokio::io::AsyncReadExt;
 
 #[path = "migration/destination.rs"]
 mod destination_validation;
+#[path = "migration/finalize.rs"]
+mod finalize;
 #[path = "migration/import_memory.rs"]
 mod import_memory;
 #[path = "migration/import_operational.rs"]
 mod import_operational;
 #[path = "migration/import_threads.rs"]
 mod import_threads;
+#[path = "migration/orchestrate.rs"]
+mod orchestrate;
+#[path = "migration/preflight.rs"]
+mod preflight;
 #[path = "migration/progress.rs"]
 mod progress;
 #[path = "migration/snapshot_memory.rs"]
@@ -32,9 +38,11 @@ mod thread_evidence;
 #[path = "migration/thread_snapshot.rs"]
 mod thread_snapshot;
 
+pub use finalize::RuntimeStateMigrationReport;
 pub use import_memory::import_runtime_state_memory;
 pub use import_operational::import_runtime_state_operational;
 pub use import_threads::import_runtime_state_threads;
+pub use orchestrate::migrate_runtime_state;
 pub use progress::RuntimeStateMigrationPhase;
 pub use progress::RuntimeStateMigrationProgress;
 pub use thread_snapshot::BackfillCoordinationSnapshot;

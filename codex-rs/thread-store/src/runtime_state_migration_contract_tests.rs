@@ -69,12 +69,11 @@ pub(super) struct MigrationSource {
     rollout_only_id: ThreadId,
     rollout_only_history: Vec<RolloutLine>,
     pub(super) rollout_path: std::path::PathBuf,
-    rollout_only_path: std::path::PathBuf,
     archived_at: chrono::DateTime<Utc>,
     public_view: ThreadPublicView,
     rollout_only_view: serde_json::Value,
     backfill: BackfillState,
-    source_artifacts: Vec<Vec<u8>>,
+    source_artifacts: Vec<(std::path::PathBuf, Vec<u8>, std::time::SystemTime)>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -421,6 +420,179 @@ async fn postgres_contract_runtime_state_thread_import_rolls_back_every_record_o
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_runtime_state_migration_reports_ready_only_after_every_phase()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source = migration_source(LineageFixture::Valid).await?;
+    let source_before = source_artifacts(&source)?;
+    let fixture = PostgresThreadStoreFixture::new("runtime_migration_ready_report")?;
+    fixture.migrate().await?;
+
+    let report = run_migration(&source, &fixture).await?;
+
+    assert_eq!(
+        (report.fencing_token(), report.destination_schema()),
+        (4, fixture.schema.as_str())
+    );
+    assert_eq!(report.evidence()["threads"], serde_json::Value::from(3));
+    assert_eq!(
+        report.evidence()["memoryArtifacts"],
+        serde_json::Value::from(1)
+    );
+    assert_eq!(
+        [
+            report.evidence()["threadsContentHash"]
+                .as_str()
+                .unwrap_or_default()
+                .len(),
+            report.evidence()["historyContentHash"]
+                .as_str()
+                .unwrap_or_default()
+                .len(),
+            report.evidence()["threadCoordinationContentHash"]
+                .as_str()
+                .unwrap_or_default()
+                .len(),
+        ],
+        [64, 64, 64]
+    );
+    assert_eq!(source_artifacts(&source)?, source_before);
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_runtime_state_migration_resumes_an_interrupted_phase_chain()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source = migration_source(LineageFixture::Valid).await?;
+    let source_before = source_artifacts(&source)?;
+    let fixture = PostgresThreadStoreFixture::new("runtime_migration_resume")?;
+    fixture.migrate().await?;
+    let inventory =
+        preflight_runtime_state_migration(source.config.clone(), fixture.config.clone()).await?;
+    let progress = import_threads(&source, &fixture, &inventory).await?;
+    assert_eq!(
+        progress.phase(),
+        RuntimeStateMigrationPhase::ThreadsImported
+    );
+
+    let report = run_migration(&source, &fixture).await?;
+
+    assert_eq!(report.fencing_token(), 4);
+    assert_eq!(source_artifacts(&source)?, source_before);
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_runtime_state_migration_validation_failure_stays_not_ready()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source = migration_source(LineageFixture::Valid).await?;
+    let source_before = source_artifacts(&source)?;
+    let fixture = PostgresThreadStoreFixture::new("runtime_migration_final_validation")?;
+    fixture.migrate().await?;
+    let inventory =
+        preflight_runtime_state_migration(source.config.clone(), fixture.config.clone()).await?;
+    import_threads(&source, &fixture, &inventory).await?;
+    codex_state::import_runtime_state_operational(&source.config, &fixture.config, &inventory)
+        .await?;
+    codex_state::import_runtime_state_memory(&source.config, &fixture.config, &inventory).await?;
+    let pool = sqlx::PgPool::connect(&fixture.database_url).await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "UPDATE \"{}\".thread_history SET recorded_at = recorded_at + INTERVAL '1 second'",
+        fixture.schema
+    )))
+    .execute(&pool)
+    .await?;
+
+    run_migration(&source, &fixture)
+        .await
+        .expect_err("changed content must prevent final readiness");
+
+    let state: (String, bool, i64) = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT phase, ready, fencing_token FROM \"{}\".runtime_state_migration",
+        fixture.schema
+    )))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(state, ("memory_imported".to_string(), false, 3));
+    assert_eq!(source_artifacts(&source)?, source_before);
+    pool.close().await;
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_runtime_state_migration_rejects_a_nonempty_destination()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source = migration_source(LineageFixture::Valid).await?;
+    let source_before = source_artifacts(&source)?;
+    let fixture = PostgresThreadStoreFixture::new("runtime_migration_nonempty_command")?;
+    fixture.migrate().await?;
+    let runtime_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    PostgresThreadStore::new(&runtime_pool)
+        .create_thread(crate::postgres_contract_tests::create_thread_params(
+            ThreadId::from_string("019c84d0-6666-7777-8666-666666666666")?,
+        ))
+        .await?;
+
+    run_migration(&source, &fixture)
+        .await
+        .expect_err("a non-empty destination must be rejected");
+
+    let (pool, schema) = runtime_pool.thread_store_connection();
+    let ready_count: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT COUNT(*) FROM \"{schema}\".runtime_state_migration WHERE ready"
+    )))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(ready_count, 0);
+    assert_eq!(source_artifacts(&source)?, source_before);
+    runtime_pool.close().await;
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+async fn import_threads(
+    source: &MigrationSource,
+    fixture: &PostgresThreadStoreFixture,
+    inventory: &codex_state::RuntimeStateMigrationInventory,
+) -> Result<codex_state::RuntimeStateMigrationProgress, Box<dyn std::error::Error>> {
+    let runtime_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let store = PostgresThreadStore::new(&runtime_pool);
+    let result = codex_state::import_runtime_state_threads(
+        &source.config,
+        &fixture.config,
+        inventory,
+        &codex_rollout::CanonicalRolloutHistoryReader,
+        &store,
+    )
+    .await;
+    runtime_pool.close().await;
+    Ok(result?)
+}
+
+async fn run_migration(
+    source: &MigrationSource,
+    fixture: &PostgresThreadStoreFixture,
+) -> Result<codex_state::RuntimeStateMigrationReport, Box<dyn std::error::Error>> {
+    let runtime_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let store = PostgresThreadStore::new(&runtime_pool);
+    let result = codex_state::migrate_runtime_state(
+        source.config.clone(),
+        fixture.config.clone(),
+        &codex_rollout::CanonicalRolloutHistoryReader,
+        &store,
+    )
+    .await;
+    runtime_pool.close().await;
+    Ok(result?)
+}
+
 pub(super) async fn migration_source(
     lineage: LineageFixture,
 ) -> Result<MigrationSource, Box<dyn std::error::Error>> {
@@ -596,6 +768,11 @@ pub(super) async fn migration_source(
     )?;
     open_thread_history_db(source.path()).await?.close().await;
     std::fs::write(source.path().join("config.toml"), b"model = \"gpt-5\"\n")?;
+    std::fs::create_dir_all(source.path().join("memories"))?;
+    std::fs::write(
+        source.path().join("memories/MEMORY.md"),
+        b"# Preserved migration memory\n",
+    )?;
     let mut migration_source = MigrationSource {
         config,
         _temp: source,
@@ -606,7 +783,6 @@ pub(super) async fn migration_source(
         rollout_only_id,
         rollout_only_history,
         rollout_path,
-        rollout_only_path,
         archived_at,
         public_view,
         rollout_only_view,
@@ -617,16 +793,32 @@ pub(super) async fn migration_source(
     Ok(migration_source)
 }
 
-fn source_artifacts(source: &MigrationSource) -> std::io::Result<Vec<Vec<u8>>> {
-    [
-        source.rollout_path.clone(),
-        source.rollout_only_path.clone(),
-        source.config.home().join("config.toml"),
-        source.config.home().join("session_index.jsonl"),
-    ]
-    .into_iter()
-    .map(std::fs::read)
-    .collect()
+fn source_artifacts(
+    source: &MigrationSource,
+) -> std::io::Result<Vec<(std::path::PathBuf, Vec<u8>, std::time::SystemTime)>> {
+    let mut directories = vec![source.config.home().to_path_buf()];
+    let mut artifacts = Vec::new();
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                directories.push(entry.path());
+            } else if metadata.is_file() {
+                artifacts.push((
+                    entry
+                        .path()
+                        .strip_prefix(source.config.home())
+                        .unwrap()
+                        .to_path_buf(),
+                    std::fs::read(entry.path())?,
+                    metadata.modified()?,
+                ));
+            }
+        }
+    }
+    artifacts.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(artifacts)
 }
 
 async fn thread_public_view(
