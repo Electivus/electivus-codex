@@ -53,6 +53,8 @@ pub use postgres::PostgresNamespaceConfig;
 pub use postgres::PostgresNamespaceStatus;
 pub use postgres::PostgresPoolConfig;
 pub use postgres::PostgresRuntimeStatePool;
+pub use postgres::RuntimeStateInitializationReport;
+pub use postgres::initialize_postgres_runtime_state;
 pub use postgres::manage_postgres_namespace;
 pub use runtime::BackfillClaimOutcome;
 pub use runtime::BackfillCoordinator;

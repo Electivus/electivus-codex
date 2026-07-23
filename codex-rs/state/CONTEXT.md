@@ -28,6 +28,10 @@ _Avoid_: Tenant, user
 An explicit, one-time transfer of a complete Runtime State Namespace from a quiescent source to an empty destination before authority switches.
 _Avoid_: Backfill, synchronization, replication
 
+**Runtime State Initialization**:
+Explicit provisioning of a new, empty Runtime State Namespace, including every baseline record and readiness invariant required before runtime use.
+_Avoid_: Empty migration, automatic startup migration
+
 **Canonical Thread History**:
 The complete, ordered record used to resume a thread and reconstruct its model-visible context.
 _Avoid_: Rollout file, history projection

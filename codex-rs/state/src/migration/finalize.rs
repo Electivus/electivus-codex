@@ -153,7 +153,7 @@ async fn finalize(
     })
 }
 
-async fn validate_global_integrity(
+pub(crate) async fn validate_global_integrity(
     connection: &mut sqlx::PgConnection,
     schema: &str,
 ) -> anyhow::Result<()> {
@@ -191,7 +191,7 @@ async fn validate_global_integrity(
     .map_err(|error| map_sql_error(schema, "validate Canonical Thread History ordering", error))?;
     anyhow::ensure!(
         invalid_history_streams == 0,
-        "migrated Canonical Thread History identifiers or ordering are invalid"
+        "Canonical Thread History identifiers or ordering are invalid"
     );
 
     let generation_state = qualified_table(schema, "memory_generation_state");
@@ -204,7 +204,7 @@ async fn validate_global_integrity(
     .map_err(|error| map_sql_error(schema, "validate active Memory Generation", error))?;
     anyhow::ensure!(
         generation_ready,
-        "migrated Memory Artifacts do not have one active Memory Generation"
+        "Runtime State Namespace does not have one active Memory Generation"
     );
     Ok(())
 }

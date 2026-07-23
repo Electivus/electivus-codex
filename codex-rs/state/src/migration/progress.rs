@@ -38,13 +38,13 @@ impl RuntimeStateMigrationPhase {
     }
 }
 
-pub(super) struct RuntimeStateMigrationEvidence<'a> {
-    pub(super) source_identity: &'a str,
-    pub(super) source_fingerprint: &'a str,
-    pub(super) phase: RuntimeStateMigrationPhase,
-    pub(super) ready: bool,
-    pub(super) fencing_token: i64,
-    pub(super) namespace_digest: &'a str,
+pub(crate) struct RuntimeStateMigrationEvidence<'a> {
+    pub(crate) source_identity: &'a str,
+    pub(crate) source_fingerprint: &'a str,
+    pub(crate) phase: RuntimeStateMigrationPhase,
+    pub(crate) ready: bool,
+    pub(crate) fencing_token: i64,
+    pub(crate) namespace_digest: &'a str,
 }
 
 /// Durable migration position after an idempotent phase attempt.
@@ -169,7 +169,7 @@ async fn read_progress(
     }))
 }
 
-pub(super) async fn phase_evidence(
+pub(crate) async fn phase_evidence(
     connection: &mut sqlx::PgConnection,
     schema: &str,
     metadata: RuntimeStateMigrationEvidence<'_>,
@@ -257,7 +257,7 @@ async fn add_memory_evidence(
 /// Client memory is bounded by one PostgreSQL row serialized as JSONB text. A single unusually
 /// large row still requires memory proportional to that row, and PostgreSQL may use `work_mem` or
 /// spill to disk while ordering rows; the digest never builds a whole-table JSON value.
-pub(super) async fn namespace_digest(
+pub(crate) async fn namespace_digest(
     connection: &mut sqlx::PgConnection,
     schema: &str,
 ) -> anyhow::Result<String> {

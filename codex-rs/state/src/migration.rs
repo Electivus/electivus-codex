@@ -39,12 +39,16 @@ mod thread_evidence;
 mod thread_snapshot;
 
 pub use finalize::RuntimeStateMigrationReport;
+pub(crate) use finalize::validate_global_integrity;
 pub use import_memory::import_runtime_state_memory;
 pub use import_operational::import_runtime_state_operational;
 pub use import_threads::import_runtime_state_threads;
 pub use orchestrate::migrate_runtime_state;
+pub(crate) use progress::RuntimeStateMigrationEvidence;
 pub use progress::RuntimeStateMigrationPhase;
 pub use progress::RuntimeStateMigrationProgress;
+pub(crate) use progress::namespace_digest;
+pub(crate) use progress::phase_evidence;
 pub use thread_snapshot::BackfillCoordinationSnapshot;
 pub use thread_snapshot::CanonicalThreadHistoryReader;
 pub use thread_snapshot::CanonicalThreadHistorySnapshot;

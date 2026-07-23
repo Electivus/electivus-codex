@@ -2581,6 +2581,41 @@ mod tests {
     }
 
     #[test]
+    fn state_initialize_parses_the_explicit_empty_interface() {
+        assert!(
+            MultitoolCli::try_parse_from([
+                "codex",
+                "state",
+                "initialize",
+                "--url-env",
+                "CODEX_TEST_POSTGRES_URL",
+                "--schema",
+                "empty_target",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn state_initialize_success_output_is_explicit_about_empty_start() {
+        insta::assert_snapshot!(
+            crate::state_cmd::format_initialization_success(
+                "empty_target",
+                /*fencing_token*/ 1,
+                &serde_json::Value::String("readiness-proof".to_string()),
+            )
+            .expect("initialization success output"),
+            @r###"
+        PostgreSQL Runtime State Namespace `empty_target` was initialized empty and is READY at readiness fence 1.
+        Validated the current schema layout, empty authoritative stores, referential integrity, and an active empty Memory Generation.
+        Readiness evidence: "readiness-proof"
+        No SQLite Runtime State Namespace was read or migrated.
+        config.toml was not changed; select the PostgreSQL backend separately after review.
+        "###
+        );
+    }
+
+    #[test]
     fn state_migrate_success_output_is_explicit_about_manual_cutover() {
         insta::assert_snapshot!(
             crate::state_cmd::format_migration_success(

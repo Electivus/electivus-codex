@@ -22,6 +22,8 @@ pub struct StateCommand {
 enum StateSubcommand {
     /// Explicitly manage a PostgreSQL Runtime State Namespace schema.
     Schema(PostgresSchemaCommand),
+    /// Initialize a new, empty PostgreSQL Runtime State Namespace.
+    Initialize(PostgresNamespaceArgs),
     /// Migrate one offline SQLite Runtime State Namespace into empty PostgreSQL.
     Migrate(RuntimeStateMigrationArgs),
 }
@@ -76,6 +78,7 @@ struct RuntimeStateMigrationArgs {
 pub async fn run(command: StateCommand) -> anyhow::Result<()> {
     match command.subcommand {
         StateSubcommand::Schema(command) => run_schema(command).await,
+        StateSubcommand::Initialize(args) => run_initialize(args).await,
         StateSubcommand::Migrate(args) => run_migration(args).await,
     }
 }
@@ -88,6 +91,14 @@ async fn run_schema(command: PostgresSchemaCommand) -> anyhow::Result<()> {
     let config = postgres_config(args)?;
     let status = manage_postgres_namespace(config, action).await?;
     print_status(action, status);
+    Ok(())
+}
+
+async fn run_initialize(args: PostgresNamespaceArgs) -> anyhow::Result<()> {
+    let report = codex_state::initialize_postgres_runtime_state(postgres_config(args)?).await?;
+    let output =
+        format_initialization_success(report.schema(), report.fencing_token(), report.evidence())?;
+    print!("{output}");
     Ok(())
 }
 
@@ -110,6 +121,21 @@ async fn run_migration(args: RuntimeStateMigrationArgs) -> anyhow::Result<()> {
     )?;
     print!("{output}");
     Ok(())
+}
+
+pub(super) fn format_initialization_success(
+    destination_schema: &str,
+    fencing_token: i64,
+    evidence: &serde_json::Value,
+) -> anyhow::Result<String> {
+    let evidence = serde_json::to_string(evidence)?;
+    Ok(format!(
+        "PostgreSQL Runtime State Namespace `{destination_schema}` was initialized empty and is READY at readiness fence {fencing_token}.\n\
+         Validated the current schema layout, empty authoritative stores, referential integrity, and an active empty Memory Generation.\n\
+         Readiness evidence: {evidence}\n\
+         No SQLite Runtime State Namespace was read or migrated.\n\
+         config.toml was not changed; select the PostgreSQL backend separately after review.\n"
+    ))
 }
 
 pub(super) fn format_migration_success(

@@ -34,6 +34,6 @@ omitted to use the values shown above.
 
 PostgreSQL runtime startup is read-only with respect to schema management. It requires PostgreSQL
 18 or later, the current migration layout, and the final ready fence written by the explicit
-`codex state migrate` workflow. An unavailable, incompatible, or unready namespace fails startup
-with a redacted actionable error; it never triggers SQLite recovery, fallback, or access to a
-configured `sqlite_home`.
+`codex state migrate` or `codex state initialize` workflow. An unavailable, incompatible, or
+unready namespace fails startup with a redacted actionable error; it never triggers SQLite
+recovery, fallback, initialization, or access to a configured `sqlite_home`.

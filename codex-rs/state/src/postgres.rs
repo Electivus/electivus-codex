@@ -9,11 +9,15 @@ use sqlx::Transaction;
 
 #[path = "postgres/config.rs"]
 pub(crate) mod config;
+#[path = "postgres/initialize.rs"]
+mod initialize;
 
 pub use config::PostgresNamespaceConfig;
 pub use config::PostgresPoolConfig;
 use config::connect_pool;
 use config::connection_failed;
+pub use initialize::RuntimeStateInitializationReport;
+pub use initialize::initialize_postgres_runtime_state;
 
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
@@ -281,8 +285,6 @@ async fn validate_final_runtime_fence(
     connection: &mut PgConnection,
     schema: &str,
 ) -> anyhow::Result<()> {
-    const FINAL_FENCING_TOKEN: i64 = 4;
-
     let migration = qualified_table(schema, "runtime_state_migration");
     let row = sqlx::query(AssertSqlSafe(format!(
         "SELECT source_identity, source_fingerprint, phase, ready, phase_evidence, fencing_token \
@@ -311,13 +313,13 @@ async fn validate_final_runtime_fence(
         map_sql_error(schema, "decode final Runtime State Migration fence", error)
     })?;
 
-    let evidence_is_final = evidence.get("sourceIdentity").and_then(Value::as_str)
+    let evidence_matches_record = evidence.get("sourceIdentity").and_then(Value::as_str)
         == Some(source_identity.as_str())
         && evidence.get("sourceFingerprint").and_then(Value::as_str)
             == Some(source_fingerprint.as_str())
         && evidence.get("phase").and_then(Value::as_str) == Some("ready")
         && evidence.get("ready").and_then(Value::as_bool) == Some(true)
-        && evidence.get("fencingToken").and_then(Value::as_i64) == Some(FINAL_FENCING_TOKEN)
+        && evidence.get("fencingToken").and_then(Value::as_i64) == Some(fencing_token)
         && evidence
             .get("namespaceDigest")
             .and_then(Value::as_str)
@@ -330,7 +332,17 @@ async fn validate_final_runtime_fence(
             .get("canonicalThreadHistoryOrderingValidated")
             .and_then(Value::as_bool)
             == Some(true);
-    if phase != "ready" || !ready || fencing_token != FINAL_FENCING_TOKEN || !evidence_is_final {
+    let evidence_has_valid_origin = match evidence.get("initializationMode").and_then(Value::as_str)
+    {
+        Some("empty") => {
+            source_identity == initialize::EMPTY_SOURCE_IDENTITY
+                && source_fingerprint == initialize::EMPTY_SOURCE_FINGERPRINT
+                && fencing_token == initialize::EMPTY_INITIALIZATION_FENCING_TOKEN
+        }
+        None => fencing_token == 4,
+        Some(_) => false,
+    };
+    if phase != "ready" || !ready || !evidence_matches_record || !evidence_has_valid_origin {
         return Err(runtime_not_ready(schema));
     }
     Ok(())
@@ -338,7 +350,7 @@ async fn validate_final_runtime_fence(
 
 fn runtime_not_ready(schema: &str) -> anyhow::Error {
     anyhow!(
-        "PostgreSQL Runtime State Namespace `{schema}` is not ready for runtime use; complete `codex state migrate` and verify its final readiness report before retrying"
+        "PostgreSQL Runtime State Namespace `{schema}` is not ready for runtime use; complete `codex state migrate` for existing SQLite state or `codex state initialize` for a new empty namespace, then verify its readiness report before retrying"
     )
 }
 
@@ -678,6 +690,11 @@ pub(crate) mod test_support;
 #[cfg(test)]
 #[path = "postgres_contract_tests.rs"]
 mod contract_tests;
+
+#[cfg(test)]
+#[path = "postgres_initialize_contract_tests.rs"]
+mod initialize_contract_tests;
+
 #[cfg(test)]
 #[path = "postgres_external_agent_memory_import_contract_tests.rs"]
 mod external_agent_memory_import_contract_tests;

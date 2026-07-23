@@ -51,7 +51,7 @@ jobs:
           just test -p codex-app-server --run-ignored ignored-only -E 'test(/postgres_contract_/)'
           just test -p codex-app-server-transport --run-ignored ignored-only -E 'test(/postgres_contract_/)'
           just test -p codex-memories-write --run-ignored ignored-only -E 'test(/postgres_contract_/)'
-          just test -p codex-cli --run-ignored ignored-only -E 'test(/state_migrate_process_runs_the_complete_offline_migration/)'
+          just test -p codex-cli --run-ignored ignored-only -E 'test(/state_(migrate|initialize)_process_/)'
 
       - name: Verify contracts installed no extensions
         if: always() && !cancelled()

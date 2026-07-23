@@ -93,7 +93,7 @@ async fn inspect_with_source(
     result
 }
 
-pub(super) async fn ensure_empty(
+pub(crate) async fn ensure_empty(
     connection: &mut sqlx::PgConnection,
     schema: &str,
 ) -> anyhow::Result<()> {

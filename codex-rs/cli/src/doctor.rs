@@ -2191,7 +2191,7 @@ async fn state_check(config: &Config) -> DoctorCheck {
             .detail(format!("PostgreSQL runtime readiness: {error:#}"))
             .details(details)
             .remediation(
-                "Verify the configured PostgreSQL URL environment variable, PostgreSQL 18 availability, and the final Runtime State Migration readiness report.",
+                "Verify the configured PostgreSQL URL environment variable, PostgreSQL 18 availability, and the final Runtime State Migration or Initialization readiness report.",
             ),
         };
     }
