@@ -71,6 +71,32 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Free disk space for the Rust test archive (Linux)
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf \
+            /opt/ghc \
+            /opt/hostedtoolcache \
+            /usr/local/.ghcup \
+            /usr/local/lib/android \
+            /usr/local/share/boost \
+            /usr/share/swift \
+            /usr/share/dotnet
+          df -h /
+
+      - name: Reduce Rust archive disk use on standard Linux runners
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        shell: bash
+        run: echo "CARGO_PROFILE_CI_TEST_DEBUG=0" >> "$GITHUB_ENV"
+
+      - name: Limit Cargo parallelism on standard Linux ARM
+        if: runner.os == 'Linux' && runner.arch == 'ARM64' && runner.environment == 'github-hosted'
+        shell: bash
+        run: echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
+
       - uses: ./.github/actions/setup-ci
 
       - name: Install Linux build dependencies
