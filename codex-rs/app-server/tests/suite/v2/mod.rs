@@ -52,6 +52,8 @@ mod plugin_uninstall;
 #[cfg(debug_assertions)]
 mod postgres_goal_service;
 #[cfg(debug_assertions)]
+mod postgres_runtime_state;
+#[cfg(debug_assertions)]
 mod postgres_thread_store;
 mod process_exec;
 mod rate_limit_reset_credits;

@@ -20,7 +20,7 @@ use sqlx::Row;
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_cross_pool_memory_reset_satisfies_shared_contract() -> Result<()> {
+async fn postgres_contract_cross_pool_memory_reset_satisfies_shared_contract() -> Result<()> {
     let database_url = test_database_url()?;
     let mut fixture = PostgresContractFixture::new(database_url, "memory_reset")?;
     fixture.manage(PostgresNamespaceAction::Migrate).await?;

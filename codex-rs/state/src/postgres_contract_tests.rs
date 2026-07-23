@@ -1,5 +1,6 @@
 use super::MigrationHistory;
 use super::PostgresNamespaceAction;
+use super::PostgresRuntimeStatePool;
 use super::test_support::PostgresContractFixture;
 use super::test_support::test_database_url;
 use crate::runtime::LogStore;
@@ -28,9 +29,86 @@ use crate::runtime::remote_control_contract_tests::run_remote_control_enrollment
 use anyhow::Context;
 use anyhow::Result;
 use codex_protocol::ThreadId;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
 use std::time::Duration;
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_runtime_reads_resume_metadata_and_deletes_integrally() -> Result<()> {
+    let database_url = test_database_url()?;
+    let mut fixture = PostgresContractFixture::new(database_url, "runtime_lifecycle")?;
+    fixture.manage(PostgresNamespaceAction::Migrate).await?;
+    fixture.mark_runtime_ready_for_tests().await?;
+    let pool = fixture.connect_pool().await?;
+    let thread_id = ThreadId::new();
+    let cwd = crate::runtime::test_support::unique_temp_dir();
+    let threads = super::qualified_table(fixture.schema(), "threads");
+    let logs = super::qualified_table(fixture.schema(), "logs");
+    let projection = serde_json::json!({
+        "cwd": cwd.clone(),
+        "model": "gpt-runtime-state-contract",
+    });
+    sqlx::query(AssertSqlSafe(format!(
+        "INSERT INTO {threads} (thread_id, projection, stream_version, fencing_token, writer_id, \
+         writer_lease_expires_at, created_at, updated_at, recency_at) \
+         VALUES ($1, $2, 0, 1, 'runtime-contract', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, \
+         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )))
+    .bind(thread_id.to_string())
+    .bind(projection)
+    .execute(&pool)
+    .await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "INSERT INTO {logs} (ts, ts_nanos, level, target, thread_id, estimated_bytes) \
+         VALUES (1, 0, 'INFO', 'runtime-contract', $1, 1)"
+    )))
+    .bind(thread_id.to_string())
+    .execute(&pool)
+    .await?;
+
+    let runtime = crate::StateRuntime::init_with_backend(
+        crate::RuntimeStateBackendConfig::Postgresql {
+            codex_home: AbsolutePathBuf::try_from(cwd.clone())?,
+            namespace: fixture.config_for_tests(),
+        },
+        "test-provider".to_string(),
+    )
+    .await?;
+    assert_eq!(
+        runtime.get_thread_resume_metadata(thread_id).await?,
+        Some(crate::ThreadResumeMetadata {
+            cwd,
+            model: Some("gpt-runtime-state-contract".to_string()),
+        })
+    );
+    assert!(
+        runtime
+            .set_thread_preview_if_empty(thread_id, "shared goal preview")
+            .await?
+    );
+    let preview: String = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT projection ->> 'preview' FROM {threads} WHERE thread_id = $1"
+    )))
+    .bind(thread_id.to_string())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(preview, "shared goal preview");
+    assert_eq!(runtime.delete_thread(thread_id).await?, 1);
+    let remaining: (i64, i64) = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT (SELECT COUNT(*) FROM {threads} WHERE thread_id = $1), \
+         (SELECT COUNT(*) FROM {logs} WHERE thread_id = $1)"
+    )))
+    .bind(thread_id.to_string())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(remaining, (0, 0));
+
+    runtime.close().await;
+    pool.close().await;
+    fixture.cleanup().await
+}
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
@@ -273,7 +351,7 @@ async fn postgres_contract_goal_errors_match_sqlite() -> Result<()> {
     let _sqlite_cleanup = scopeguard::guard(sqlite_home.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
     });
-    let sqlite = crate::StateRuntime::init(sqlite_home, "test-provider".to_string()).await?;
+    let sqlite = crate::StateRuntime::init_sqlite(sqlite_home, "test-provider".to_string()).await?;
     let sqlite_error_thread_id = ThreadId::new();
     let sqlite_error =
         provoke_goal_accounting_conflict(sqlite.thread_goals(), sqlite_error_thread_id).await?;
@@ -313,8 +391,20 @@ async fn postgres_contract_goal_errors_match_sqlite() -> Result<()> {
 
 async fn postgres_log_replicas(fixture: &PostgresContractFixture) -> Result<(LogStore, LogStore)> {
     fixture.manage(PostgresNamespaceAction::Migrate).await?;
-    let writer =
-        LogStore::from_postgres(fixture.connect_pool().await?, fixture.schema().to_string());
+    let writer_pool = fixture.connect_pool().await?;
+    let threads = super::qualified_table(fixture.schema(), "threads");
+    for thread_id in ["thread-1", "thread-2", "oversized-thread"] {
+        sqlx::query(AssertSqlSafe(format!(
+            "INSERT INTO {threads} (thread_id, projection, stream_version, fencing_token, \
+             writer_id, writer_lease_expires_at, created_at, updated_at, recency_at) \
+             VALUES ($1, '{{}}', 0, 1, 'log-contract', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, \
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )))
+        .bind(thread_id)
+        .execute(&writer_pool)
+        .await?;
+    }
+    let writer = LogStore::from_postgres(writer_pool, fixture.schema().to_string());
     let reader =
         LogStore::from_postgres(fixture.connect_pool().await?, fixture.schema().to_string());
     Ok((writer, reader))
@@ -519,6 +609,180 @@ async fn postgres_contract_logs_preserve_partition_limits() -> Result<()> {
     fixture.cleanup().await
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_log_insert_cannot_escape_concurrent_thread_delete() -> Result<()> {
+    let database_url = test_database_url()?;
+    let mut fixture = PostgresContractFixture::new(database_url, "log_delete_race")?;
+    fixture.manage(PostgresNamespaceAction::Migrate).await?;
+    fixture.mark_runtime_ready_for_tests().await?;
+    let pool = fixture.connect_pool().await?;
+    let threads = super::qualified_table(fixture.schema(), "threads");
+    let logs = super::qualified_table(fixture.schema(), "logs");
+    let thread_id = ThreadId::new();
+    sqlx::query(AssertSqlSafe(format!(
+        "INSERT INTO {threads} (thread_id, projection, stream_version, fencing_token, writer_id, \
+         writer_lease_expires_at, created_at, updated_at, recency_at) \
+         VALUES ($1, '{{}}', 0, 1, 'log-delete-contract', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, \
+         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )))
+    .bind(thread_id.to_string())
+    .execute(&pool)
+    .await?;
+    let writer_runtime = crate::StateRuntime::init_with_backend(
+        crate::RuntimeStateBackendConfig::Postgresql {
+            codex_home: AbsolutePathBuf::try_from(crate::runtime::test_support::unique_temp_dir())?,
+            namespace: fixture.config_for_tests(),
+        },
+        "test-provider".to_string(),
+    )
+    .await?;
+    let delete_runtime = crate::StateRuntime::init_with_backend(
+        crate::RuntimeStateBackendConfig::Postgresql {
+            codex_home: AbsolutePathBuf::try_from(crate::runtime::test_support::unique_temp_dir())?,
+            namespace: fixture.config_for_tests(),
+        },
+        "test-provider".to_string(),
+    )
+    .await?;
+
+    let mut blocker = pool.begin().await?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended(\
+         'codex-runtime-state:logs:' || $1, 0))",
+    )
+    .bind(format!("{}:thread:{thread_id}", fixture.schema()))
+    .execute(&mut *blocker)
+    .await?;
+    let entry = crate::LogEntry {
+        ts: 1,
+        ts_nanos: 0,
+        level: "INFO".to_string(),
+        target: "log-delete-contract".to_string(),
+        message: Some("racing log".to_string()),
+        feedback_log_body: None,
+        thread_id: Some(thread_id.to_string()),
+        process_uuid: None,
+        module_path: None,
+        file: None,
+        line: None,
+    };
+    let insert_runtime = writer_runtime.clone();
+    let mut insert_task = tokio::spawn(async move { insert_runtime.insert_log(&entry).await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut insert_task)
+            .await
+            .is_err(),
+        "the test advisory lock must hold the racing insert"
+    );
+
+    assert_eq!(delete_runtime.delete_thread(thread_id).await?, 1);
+    blocker.commit().await?;
+    let insert_error = insert_task
+        .await?
+        .expect_err("a log cannot be inserted after its canonical thread is deleted");
+    assert!(!insert_error.to_string().contains(&thread_id.to_string()));
+    let remaining: (i64, i64) = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT (SELECT COUNT(*) FROM {threads} WHERE thread_id = $1), \
+         (SELECT COUNT(*) FROM {logs} WHERE thread_id = $1)"
+    )))
+    .bind(thread_id.to_string())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(remaining, (0, 0));
+
+    writer_runtime.close().await;
+    delete_runtime.close().await;
+    pool.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_stale_thread_log_does_not_poison_mixed_batch() -> Result<()> {
+    let database_url = test_database_url()?;
+    let mut fixture = PostgresContractFixture::new(database_url, "mixed_stale_log_batch")?;
+    fixture.manage(PostgresNamespaceAction::Migrate).await?;
+    fixture.mark_runtime_ready_for_tests().await?;
+    let pool = fixture.connect_pool().await?;
+    let threads = super::qualified_table(fixture.schema(), "threads");
+    let logs = super::qualified_table(fixture.schema(), "logs");
+    let active_thread_id = ThreadId::new();
+    let deleted_thread_id = ThreadId::new();
+    for thread_id in [active_thread_id, deleted_thread_id] {
+        sqlx::query(AssertSqlSafe(format!(
+            "INSERT INTO {threads} (thread_id, projection, stream_version, fencing_token, writer_id, \
+             writer_lease_expires_at, created_at, updated_at, recency_at) \
+             VALUES ($1, '{{}}', 0, 1, 'mixed-log-contract', CURRENT_TIMESTAMP, \
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )))
+        .bind(thread_id.to_string())
+        .execute(&pool)
+        .await?;
+    }
+    let writer_runtime = crate::StateRuntime::init_with_backend(
+        crate::RuntimeStateBackendConfig::Postgresql {
+            codex_home: AbsolutePathBuf::try_from(crate::runtime::test_support::unique_temp_dir())?,
+            namespace: fixture.config_for_tests(),
+        },
+        "test-provider".to_string(),
+    )
+    .await?;
+    let delete_runtime = crate::StateRuntime::init_with_backend(
+        crate::RuntimeStateBackendConfig::Postgresql {
+            codex_home: AbsolutePathBuf::try_from(crate::runtime::test_support::unique_temp_dir())?,
+            namespace: fixture.config_for_tests(),
+        },
+        "test-provider".to_string(),
+    )
+    .await?;
+    assert_eq!(delete_runtime.delete_thread(deleted_thread_id).await?, 1);
+
+    let base_entry = crate::LogEntry {
+        ts: 1,
+        ts_nanos: 0,
+        level: "INFO".to_string(),
+        target: "mixed-log-contract".to_string(),
+        message: Some("stale thread log".to_string()),
+        feedback_log_body: None,
+        thread_id: Some(deleted_thread_id.to_string()),
+        process_uuid: Some("mixed-log-process".to_string()),
+        module_path: None,
+        file: None,
+        line: None,
+    };
+    let mut active_entry = base_entry.clone();
+    active_entry.ts = 2;
+    active_entry.message = Some("active thread log".to_string());
+    active_entry.thread_id = Some(active_thread_id.to_string());
+    let mut process_entry = base_entry.clone();
+    process_entry.ts = 3;
+    process_entry.message = Some("process log".to_string());
+    process_entry.thread_id = None;
+
+    writer_runtime
+        .insert_logs(&[base_entry, active_entry, process_entry])
+        .await?;
+    let counts: (i64, i64, i64) = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT \
+         COUNT(*) FILTER (WHERE thread_id = $1), \
+         COUNT(*) FILTER (WHERE thread_id = $2), \
+         COUNT(*) FILTER (WHERE thread_id IS NULL AND process_uuid = $3) \
+         FROM {logs}"
+    )))
+    .bind(deleted_thread_id.to_string())
+    .bind(active_thread_id.to_string())
+    .bind("mixed-log-process")
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(counts, (0, 1, 1));
+
+    writer_runtime.close().await;
+    delete_runtime.close().await;
+    pool.close().await;
+    fixture.cleanup().await
+}
+
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
 async fn postgres_contract_log_failures_are_sanitized_without_sqlite_fallback() -> Result<()> {
@@ -615,6 +879,82 @@ async fn postgres_contract_validation_is_read_only() -> Result<()> {
 
     fixture.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_runtime_connection_rejects_unready_namespace_without_ddl() -> Result<()>
+{
+    let database_url = test_database_url()?;
+    let secret = database_url.clone();
+    let mut fixture = PostgresContractFixture::new(database_url, "runtime_unready")?;
+    fixture.manage(PostgresNamespaceAction::Migrate).await?;
+    let history_before = fixture.migration_history().await?;
+    let pool = fixture.connect_pool().await?;
+    let tables_before: Vec<String> = sqlx::query_scalar(
+        "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = $1 ORDER BY tablename",
+    )
+    .bind(fixture.schema())
+    .fetch_all(&pool)
+    .await?;
+    pool.close().await;
+
+    let error = PostgresRuntimeStatePool::connect(fixture.config_for_tests())
+        .await
+        .err()
+        .expect("a schema migration alone must not authorize runtime traffic");
+
+    let pool = fixture.connect_pool().await?;
+    let tables_after: Vec<String> = sqlx::query_scalar(
+        "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = $1 ORDER BY tablename",
+    )
+    .bind(fixture.schema())
+    .fetch_all(&pool)
+    .await?;
+    pool.close().await;
+    assert_eq!(tables_after, tables_before);
+    assert_eq!(fixture.migration_history().await?, history_before);
+    let rendered = format!("{error:?} {error}");
+    assert!(error.to_string().contains("not ready for runtime use"));
+    assert!(error.to_string().contains("codex state migrate"));
+    assert!(!rendered.contains(&secret));
+
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_runtime_connection_accepts_final_readiness_fence() -> Result<()> {
+    let database_url = test_database_url()?;
+    let mut fixture = PostgresContractFixture::new(database_url, "runtime_ready")?;
+    fixture.manage(PostgresNamespaceAction::Migrate).await?;
+    let pool = fixture.connect_pool().await?;
+    let migration = super::qualified_table(fixture.schema(), "runtime_state_migration");
+    let evidence = serde_json::json!({
+        "sourceIdentity": "test-source",
+        "sourceFingerprint": "test-fingerprint",
+        "phase": "ready",
+        "ready": true,
+        "fencingToken": 4,
+        "namespaceDigest": "test-final-digest",
+        "globalReferentialIntegrityValidated": true,
+        "canonicalThreadHistoryOrderingValidated": true,
+    });
+    sqlx::query(AssertSqlSafe(format!(
+        "INSERT INTO {migration} (source_identity, source_fingerprint, phase, ready, \
+         phase_evidence, fencing_token) VALUES ($1, $2, 'ready', TRUE, $3, 4)"
+    )))
+    .bind("test-source")
+    .bind("test-fingerprint")
+    .bind(evidence)
+    .execute(&pool)
+    .await?;
+    pool.close().await;
+
+    let runtime_pool = PostgresRuntimeStatePool::connect(fixture.config_for_tests()).await?;
+    runtime_pool.close().await;
+
+    fixture.cleanup().await
 }
 
 #[tokio::test]
