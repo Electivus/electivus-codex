@@ -31,12 +31,21 @@ runs:
       shell: bash
       run: |
         bazel_targets="$(./tools/argument-comment-lint/list-bazel-targets.sh)"
+        bazel_resource_args=()
+        if [[ "${RUNNER_OS}" == "macOS" ]]; then
+          # BuildBuddy's remote config defaults to 800 jobs, which can exhaust
+          # the standard macOS runner's 7 GB of memory while loading this
+          # workspace's complete lint target set.
+          bazel_resource_args+=(--jobs=3)
+        fi
+
         ./.github/scripts/run-bazel-ci.sh \
           -- \
           build \
           --config=argument-comment-lint \
           --keep_going \
           --build_metadata=COMMIT_SHA=${GITHUB_SHA} \
+          "${bazel_resource_args[@]}" \
           -- \
           ${bazel_targets}
 

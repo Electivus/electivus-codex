@@ -26,6 +26,8 @@ fallback.
   - `cargo shear`
   - `argument-comment-lint` on Linux, macOS, and Windows
   - `tools/argument-comment-lint` package tests when the lint or its workflow wiring changes
+- The macOS argument-comment-lint job caps Bazel at three concurrent jobs so
+  its complete target set fits the standard runner's memory.
 - `sdk.yml` runs Python and TypeScript SDK validation on `ubuntu-24.04`.
 
 ### Temporary Windows Capability Exclusion
