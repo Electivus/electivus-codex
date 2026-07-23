@@ -373,6 +373,7 @@ jobs:
       target: x86_64-unknown-linux-gnu
       profile: ci-test
       artifact_id: linux-x64
+      test_threads: 2
       use_sccache: true
     secrets: inherit
 
@@ -384,6 +385,7 @@ jobs:
       target: aarch64-unknown-linux-gnu
       profile: ci-test
       artifact_id: linux-arm64
+      test_threads: 2
       use_sccache: true
     secrets: inherit
 

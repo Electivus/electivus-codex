@@ -385,6 +385,10 @@ jobs:
           fi
 
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            if [[ "${{ runner.environment }}" == "github-hosted" && ( -e /tmp/.git || -L /tmp/.git ) ]]; then
+              echo "::warning::Moving inherited /tmp/.git so tests do not detect /tmp as a repository"
+              sudo mv -- /tmp/.git "${RUNNER_TEMP}/inherited-tmp-dot-git"
+            fi
             helper_dir="${RUNNER_TEMP}/${TEST_HELPERS_ARTIFACT}"
             helper_target_dir="${CARGO_TARGET_DIR}/${{ inputs.target }}/${{ inputs.profile }}"
             mkdir -p "${helper_target_dir}"
