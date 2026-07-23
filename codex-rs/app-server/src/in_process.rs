@@ -408,6 +408,11 @@ async fn start_uninitialized(
 ) -> IoResult<InProcessClientHandle> {
     let channel_capacity = args.channel_capacity.max(1);
     let installation_id = resolve_installation_id(&args.config.codex_home).await?;
+    let thread_store = match thread_store {
+        Some(thread_store) => thread_store,
+        None => codex_core::thread_store_from_config(&args.config, args.state_db.clone())
+            .map_err(|error| IoError::new(ErrorKind::InvalidInput, error))?,
+    };
     let (client_tx, mut client_rx) = mpsc::channel::<InProcessClientMessage>(channel_capacity);
     let (event_tx, event_rx) = mpsc::channel::<InProcessServerEvent>(channel_capacity);
 
@@ -475,12 +480,10 @@ async fn start_uninitialized(
                 remote_control_handle: None,
                 plugin_startup_tasks: crate::PluginStartupTasks::Start,
             };
-            let processor = Arc::new(match thread_store {
-                Some(thread_store) => {
-                    MessageProcessor::new_with_thread_store(processor_args, thread_store)
-                }
-                None => MessageProcessor::new(processor_args),
-            });
+            let processor = Arc::new(MessageProcessor::new_with_thread_store(
+                processor_args,
+                thread_store,
+            ));
             let mut thread_created_rx = processor.thread_created_receiver();
             let session = Arc::new(ConnectionSessionState::new());
             let mut listen_for_threads = true;

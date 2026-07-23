@@ -449,7 +449,7 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
     mcp.clear_message_buffer();
 
     let state_db =
-        StateRuntime::init(codex_home.path().to_path_buf(), "mock_provider".into()).await?;
+        StateRuntime::init_sqlite(codex_home.path().to_path_buf(), "mock_provider".into()).await?;
     let source_goal = state_db
         .thread_goals()
         .replace_thread_goal(

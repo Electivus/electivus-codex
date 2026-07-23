@@ -445,7 +445,7 @@ mod tests {
     use tokio::time::timeout;
 
     async fn remote_control_state_runtime(codex_home: &TempDir) -> Arc<StateRuntime> {
-        StateRuntime::init(codex_home.path().to_path_buf(), "test-provider".to_string())
+        StateRuntime::init_sqlite(codex_home.path().to_path_buf(), "test-provider".to_string())
             .await
             .expect("state runtime should initialize")
     }

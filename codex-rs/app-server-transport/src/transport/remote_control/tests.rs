@@ -131,7 +131,7 @@ fn remote_control_auth_dot_json(account_id: Option<&str>) -> AuthDotJson {
 }
 
 async fn remote_control_state_runtime(codex_home: &TempDir) -> Arc<StateRuntime> {
-    StateRuntime::init(codex_home.path().to_path_buf(), "test-provider".to_string())
+    StateRuntime::init_sqlite(codex_home.path().to_path_buf(), "test-provider".to_string())
         .await
         .expect("state runtime should initialize")
 }
@@ -212,7 +212,7 @@ async fn plain_start_resolves_persisted_remote_control_preference() {
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_replicas_share_enrollment_with_websocket_preference_resolution()
+async fn postgres_contract_replicas_share_enrollment_with_websocket_preference_resolution()
 -> anyhow::Result<()> {
     const TEST_DATABASE_URL_ENV: &str = "CODEX_TEST_POSTGRES_URL";
     let schema = format!("codex_transport_rc_{}", uuid::Uuid::now_v7().simple());
@@ -222,6 +222,8 @@ async fn postgres_replicas_share_enrollment_with_websocket_preference_resolution
         PostgresPoolConfig::default(),
     )?;
     manage_postgres_namespace(config.clone(), PostgresNamespaceAction::Migrate).await?;
+    let database_url = std::env::var(TEST_DATABASE_URL_ENV)?;
+    mark_postgres_namespace_ready(&database_url, &schema).await?;
     let writer = PostgresRuntimeStatePool::connect(config.clone()).await?;
     let reader = PostgresRuntimeStatePool::connect(config).await?;
     let writer_store = writer.remote_control_enrollment_store();
@@ -290,7 +292,6 @@ async fn postgres_replicas_share_enrollment_with_websocket_preference_resolution
 
     writer.close().await;
     reader.close().await;
-    let database_url = std::env::var(TEST_DATABASE_URL_ENV)?;
     let cleanup_pool = sqlx::PgPool::connect(&database_url).await?;
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "DROP SCHEMA \"{schema}\" CASCADE"
@@ -298,6 +299,32 @@ async fn postgres_replicas_share_enrollment_with_websocket_preference_resolution
     .execute(&cleanup_pool)
     .await?;
     cleanup_pool.close().await;
+    Ok(())
+}
+
+async fn mark_postgres_namespace_ready(database_url: &str, schema: &str) -> anyhow::Result<()> {
+    let pool = sqlx::PgPool::connect(database_url).await?;
+    let migration = format!("\"{schema}\".runtime_state_migration");
+    let evidence = json!({
+        "sourceIdentity": "remote-control-transport-contract",
+        "sourceFingerprint": "remote-control-transport-contract-fingerprint",
+        "phase": "ready",
+        "ready": true,
+        "fencingToken": 4,
+        "namespaceDigest": "remote-control-transport-contract-digest",
+        "globalReferentialIntegrityValidated": true,
+        "canonicalThreadHistoryOrderingValidated": true,
+    });
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO {migration} (source_identity, source_fingerprint, phase, ready, \
+         phase_evidence, fencing_token) VALUES ($1, $2, 'ready', TRUE, $3, 4)"
+    )))
+    .bind("remote-control-transport-contract")
+    .bind("remote-control-transport-contract-fingerprint")
+    .bind(evidence)
+    .execute(&pool)
+    .await?;
+    pool.close().await;
     Ok(())
 }
 

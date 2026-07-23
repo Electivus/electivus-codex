@@ -27,9 +27,11 @@ use codex_protocol::user_input::UserInput;
 use codex_state::PostgresNamespaceAction;
 use codex_state::PostgresNamespaceConfig;
 use codex_state::PostgresPoolConfig;
-use codex_state::PostgresRuntimeStatePool;
+use codex_state::RuntimeStateBackendConfig;
+use codex_state::StateRuntime;
 use codex_thread_store as store;
 use codex_thread_store::ThreadStore;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -46,18 +48,19 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_store_serves_database_native_v2_history_flows() -> Result<()> {
+async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Result<()> {
     let fixture = PostgresFixture::new()?;
     fixture.migrate().await?;
-    let writer_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let reader_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let writer = store::PostgresThreadStore::new(&writer_pool);
     let codex_home = TempDir::new()?;
+    let writer_runtime = fixture.runtime(codex_home.path()).await?;
+    let reader_runtime = fixture.runtime(codex_home.path()).await?;
+    let writer = store::PostgresThreadStore::from_runtime(Arc::clone(&writer_runtime))?;
     let thread_id = ThreadId::new();
     seed_thread(&writer, thread_id, codex_home.path(), "openai").await?;
 
-    let thread_store: Arc<dyn store::ThreadStore> =
-        Arc::new(store::PostgresThreadStore::new(&reader_pool));
+    let thread_store: Arc<dyn store::ThreadStore> = Arc::new(
+        store::PostgresThreadStore::from_runtime(Arc::clone(&reader_runtime))?,
+    );
     let client = start_in_process_server_with_thread_store(codex_home.path(), thread_store).await?;
     let thread_id = thread_id.to_string();
 
@@ -271,8 +274,8 @@ async fn postgres_store_serves_database_native_v2_history_flows() -> Result<()> 
         );
     }
 
-    let verifier_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let verifier = store::PostgresThreadStore::new(&verifier_pool);
+    let verifier_runtime = fixture.runtime(codex_home.path()).await?;
+    let verifier = store::PostgresThreadStore::from_runtime(Arc::clone(&verifier_runtime))?;
     let forked_thread_id = ThreadId::from_string(&forked.thread.id)?;
     let persisted_fork = verifier
         .read_thread(store::ReadThreadParams {
@@ -332,22 +335,22 @@ async fn postgres_store_serves_database_native_v2_history_flows() -> Result<()> 
     assert_eq!(started.thread.path, None);
 
     client.shutdown().await?;
-    writer_pool.close().await;
-    reader_pool.close().await;
-    verifier_pool.close().await;
+    writer_runtime.close().await;
+    reader_runtime.close().await;
+    verifier_runtime.close().await;
     fixture.cleanup().await
 }
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_paginated_rollback_is_visible_across_replicas() -> Result<()> {
+async fn postgres_contract_paginated_rollback_is_visible_across_replicas() -> Result<()> {
     let fixture = PostgresFixture::new()?;
     fixture.migrate().await?;
-    let origin_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let origin = store::PostgresThreadStore::new(&origin_pool);
     let model_server =
         create_mock_responses_server_repeating_assistant("after rollback answer").await;
     let codex_home = TempDir::new()?;
+    let origin_runtime = fixture.runtime(codex_home.path()).await?;
+    let origin = store::PostgresThreadStore::from_runtime(Arc::clone(&origin_runtime))?;
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(
@@ -379,11 +382,12 @@ plugins = false
             include_history: false,
         })
         .await?;
-    origin_pool.close().await;
+    origin_runtime.close().await;
 
-    let rollback_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let rollback_store: Arc<dyn store::ThreadStore> =
-        Arc::new(store::PostgresThreadStore::new(&rollback_pool));
+    let rollback_runtime = fixture.runtime(codex_home.path()).await?;
+    let rollback_store: Arc<dyn store::ThreadStore> = Arc::new(
+        store::PostgresThreadStore::from_runtime(Arc::clone(&rollback_runtime))?,
+    );
     let rollback_client =
         start_in_process_server_with_thread_store(codex_home.path(), rollback_store).await?;
     let resumed: api::ThreadResumeResponse = request(
@@ -422,8 +426,10 @@ plugins = false
     );
     fixture.damage_history_projections(thread_id).await?;
 
-    let reader_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let reader_store = Arc::new(store::PostgresThreadStore::new(&reader_pool));
+    let reader_runtime = fixture.runtime(codex_home.path()).await?;
+    let reader_store = Arc::new(store::PostgresThreadStore::from_runtime(Arc::clone(
+        &reader_runtime,
+    ))?);
     let mut reader_client = start_in_process_server_with_thread_store(
         codex_home.path(),
         Arc::clone(&reader_store) as Arc<dyn store::ThreadStore>,
@@ -562,7 +568,7 @@ plugins = false
     )));
 
     rollback_client.shutdown().await?;
-    rollback_pool.close().await;
+    rollback_runtime.close().await;
     let resumed: api::ThreadResumeResponse = request(
         &reader_client,
         api::ClientRequest::ThreadResume {
@@ -682,7 +688,7 @@ plugins = false
     assert!(!codex_home.path().join("sessions").exists());
 
     reader_client.shutdown().await?;
-    reader_pool.close().await;
+    reader_runtime.close().await;
     fixture.cleanup().await
 }
 
@@ -1013,7 +1019,40 @@ impl PostgresFixture {
             PostgresNamespaceAction::Migrate,
         )
         .await?;
+        let pool = sqlx::PgPool::connect(&self.database_url).await?;
+        let migration = format!("\"{}\".runtime_state_migration", self.schema);
+        let evidence = json!({
+            "sourceIdentity": "app-server-thread-store-contract",
+            "sourceFingerprint": "app-server-thread-store-contract-fingerprint",
+            "phase": "ready",
+            "ready": true,
+            "fencingToken": 4,
+            "namespaceDigest": "app-server-thread-store-contract-digest",
+            "globalReferentialIntegrityValidated": true,
+            "canonicalThreadHistoryOrderingValidated": true,
+        });
+        sqlx::query(AssertSqlSafe(format!(
+            "INSERT INTO {migration} (source_identity, source_fingerprint, phase, ready, \
+             phase_evidence, fencing_token) VALUES ($1, $2, 'ready', TRUE, $3, 4)"
+        )))
+        .bind("app-server-thread-store-contract")
+        .bind("app-server-thread-store-contract-fingerprint")
+        .bind(evidence)
+        .execute(&pool)
+        .await?;
+        pool.close().await;
         Ok(())
+    }
+
+    async fn runtime(&self, codex_home: &Path) -> Result<Arc<StateRuntime>> {
+        StateRuntime::init_with_backend(
+            RuntimeStateBackendConfig::Postgresql {
+                codex_home: AbsolutePathBuf::try_from(codex_home.to_path_buf())?,
+                namespace: self.config.clone(),
+            },
+            "openai".to_string(),
+        )
+        .await
     }
 
     async fn damage_history_projections(&self, thread_id: ThreadId) -> Result<()> {

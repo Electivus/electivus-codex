@@ -33,7 +33,7 @@ async fn thread_delete_deletes_spawned_descendants() -> Result<()> {
         create_delete_test_rollout(codex_home.path(), /*minute*/ 2, "grandchild")?;
 
     let state_db =
-        StateRuntime::init(codex_home.path().to_path_buf(), "mock_provider".into()).await?;
+        StateRuntime::init_sqlite(codex_home.path().to_path_buf(), "mock_provider".into()).await?;
     let parent_thread_id = ThreadId::from_string(&parent_id)?;
     let child_thread_id = ThreadId::from_string(&child_id)?;
     let grandchild_thread_id = ThreadId::from_string(&grandchild_id)?;

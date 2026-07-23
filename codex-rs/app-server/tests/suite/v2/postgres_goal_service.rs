@@ -22,7 +22,7 @@ const DATABASE_URL_ENV: &str = "CODEX_TEST_POSTGRES_URL";
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_goal_service_is_backend_neutral_across_replicas() -> Result<()> {
+async fn postgres_contract_goal_service_is_backend_neutral_across_replicas() -> Result<()> {
     let database_url = std::env::var(DATABASE_URL_ENV)?;
     let schema = format!("codex_app_server_goals_{}", Uuid::new_v4().simple());
     let config = PostgresNamespaceConfig::new(
@@ -32,12 +32,13 @@ async fn postgres_goal_service_is_backend_neutral_across_replicas() -> Result<()
     )?;
     codex_state::manage_postgres_namespace(config.clone(), PostgresNamespaceAction::Migrate)
         .await?;
+    mark_namespace_ready(&database_url, &schema).await?;
     let writer_pool = PostgresRuntimeStatePool::connect(config.clone()).await?;
     let reader_pool = PostgresRuntimeStatePool::connect(config).await?;
     let writer = writer_pool.goal_store();
     let reader = reader_pool.goal_store();
     let thread_id = ThreadId::new();
-    seed_thread(&writer_pool, thread_id).await?;
+    seed_thread(&database_url, &schema, thread_id).await?;
     let service = GoalService::new();
 
     let created = service
@@ -107,8 +108,34 @@ async fn postgres_goal_service_is_backend_neutral_across_replicas() -> Result<()
     cleanup_schema(&database_url, &schema).await
 }
 
-async fn seed_thread(pool: &PostgresRuntimeStatePool, thread_id: ThreadId) -> Result<()> {
-    let (pool, schema) = pool.thread_store_connection();
+async fn mark_namespace_ready(database_url: &str, schema: &str) -> Result<()> {
+    let pool = sqlx::PgPool::connect(database_url).await?;
+    let migration = format!("\"{schema}\".runtime_state_migration");
+    let evidence = serde_json::json!({
+        "sourceIdentity": "app-server-goal-contract",
+        "sourceFingerprint": "app-server-goal-contract-fingerprint",
+        "phase": "ready",
+        "ready": true,
+        "fencingToken": 4,
+        "namespaceDigest": "app-server-goal-contract-digest",
+        "globalReferentialIntegrityValidated": true,
+        "canonicalThreadHistoryOrderingValidated": true,
+    });
+    sqlx::query(AssertSqlSafe(format!(
+        "INSERT INTO {migration} (source_identity, source_fingerprint, phase, ready, \
+         phase_evidence, fencing_token) VALUES ($1, $2, 'ready', TRUE, $3, 4)"
+    )))
+    .bind("app-server-goal-contract")
+    .bind("app-server-goal-contract-fingerprint")
+    .bind(evidence)
+    .execute(&pool)
+    .await?;
+    pool.close().await;
+    Ok(())
+}
+
+async fn seed_thread(database_url: &str, schema: &str, thread_id: ThreadId) -> Result<()> {
+    let pool = sqlx::PgPool::connect(database_url).await?;
     let threads_table = format!("\"{schema}\".threads");
     sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO {threads_table} (thread_id, projection, stream_version, fencing_token, \
@@ -119,6 +146,7 @@ async fn seed_thread(pool: &PostgresRuntimeStatePool, thread_id: ThreadId) -> Re
     .bind(thread_id.to_string())
     .execute(&pool)
     .await?;
+    pool.close().await;
     Ok(())
 }
 
