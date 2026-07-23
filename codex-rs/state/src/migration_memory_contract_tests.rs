@@ -240,7 +240,7 @@ async fn postgres_contract_imports_complete_memory_generation_read_only() -> any
         progress
     );
 
-    let pool = PostgresRuntimeStatePool::connect(config).await?;
+    let pool = PostgresRuntimeStatePool::connect_for_migration(config).await?;
     let store = pool.memory_store();
     assert_eq!(
         store.list_stage1_outputs_for_global(/*n*/ 10).await?,

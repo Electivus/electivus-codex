@@ -236,7 +236,7 @@ async fn postgres_contract_imports_complete_operational_state_read_only() -> any
         progress
     );
 
-    let pool = PostgresRuntimeStatePool::connect(destination.clone()).await?;
+    let pool = PostgresRuntimeStatePool::connect_for_migration(destination.clone()).await?;
     let (raw_pool, schema) = pool.thread_store_connection();
     let log_store = LogStore::from_postgres(raw_pool.clone(), schema.clone());
     assert_eq!(

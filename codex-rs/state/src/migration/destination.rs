@@ -157,7 +157,7 @@ pub(super) async fn ensure_empty(
     Ok(())
 }
 
-pub(super) async fn validate_layout(
+pub(crate) async fn validate_layout(
     connection: &mut sqlx::PgConnection,
     schema: &str,
 ) -> anyhow::Result<()> {

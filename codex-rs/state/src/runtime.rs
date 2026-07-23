@@ -1,6 +1,7 @@
 use crate::GOALS_DB_FILENAME;
 use crate::LOGS_DB_FILENAME;
 use crate::MEMORIES_DB_FILENAME;
+use crate::PostgresRuntimeStatePool;
 use crate::STATE_DB_FILENAME;
 use crate::SortKey;
 use crate::SqliteConfig;
@@ -127,6 +128,7 @@ pub use recovery::sqlite_error_detail_is_lock;
 pub use remote_control::RemoteControlEnrollmentRecord;
 pub use remote_control::RemoteControlEnrollmentStore;
 pub use threads::ThreadFilterOptions;
+pub use threads::ThreadResumeMetadata;
 
 // "Partition" is the retained-log-content bucket we cap at 10 MiB:
 // - one bucket per non-null thread_id
@@ -206,7 +208,8 @@ pub struct StateRuntime {
     codex_home: PathBuf,
     default_provider: String,
     external_agent_config_imports: ExternalAgentConfigImportStore,
-    pool: Arc<sqlx::SqlitePool>,
+    backend: StateRuntimeBackend,
+    backfill: BackfillCoordinator,
     logs: LogStore,
     remote_control_enrollments: RemoteControlEnrollmentStore,
     thread_goals: GoalStore,
@@ -215,14 +218,23 @@ pub struct StateRuntime {
     thread_recency_at_millis: Arc<AtomicI64>,
 }
 
+#[derive(Clone)]
+enum StateRuntimeBackend {
+    Postgresql(PostgresRuntimeStatePool),
+    Sqlite(Arc<sqlx::SqlitePool>),
+}
+
 impl StateRuntime {
-    /// Initialize the state runtime using the provided Codex home and default provider.
+    /// Initialize an explicitly selected SQLite state runtime.
     ///
-    /// This opens (and migrates) the SQLite databases under `codex_home`.
+    /// This opens (and migrates) the SQLite databases under `sqlite_home`.
     /// Logs and paginated thread history live in dedicated files to reduce
     /// lock contention with the rest of the state store.
-    pub async fn init(codex_home: PathBuf, default_provider: String) -> anyhow::Result<Arc<Self>> {
-        let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(codex_home)?);
+    pub async fn init_sqlite(
+        sqlite_home: PathBuf,
+        default_provider: String,
+    ) -> anyhow::Result<Arc<Self>> {
+        let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(sqlite_home)?);
         Self::init_with_backend(RuntimeStateBackendConfig::Sqlite(sqlite), default_provider).await
     }
 
@@ -256,12 +268,50 @@ impl StateRuntime {
     ) -> anyhow::Result<Arc<Self>> {
         match backend {
             RuntimeStateBackendConfig::Sqlite(sqlite) => {
-                Self::init_sqlite(sqlite, default_provider, telemetry_override).await
+                Self::init_sqlite_backend(sqlite, default_provider, telemetry_override).await
+            }
+            RuntimeStateBackendConfig::Postgresql {
+                codex_home,
+                namespace,
+            } => {
+                anyhow::ensure!(
+                    telemetry_override.is_none(),
+                    "SQLite telemetry overrides cannot initialize PostgreSQL Runtime State"
+                );
+                Self::init_postgresql(codex_home, namespace, default_provider).await
             }
         }
     }
 
-    async fn init_sqlite(
+    async fn init_postgresql(
+        codex_home: AbsolutePathBuf,
+        namespace: crate::PostgresNamespaceConfig,
+        default_provider: String,
+    ) -> anyhow::Result<Arc<Self>> {
+        let pool = PostgresRuntimeStatePool::connect(namespace).await?;
+        let (raw_pool, schema) = pool.thread_store_connection();
+        let memories = pool.memory_store();
+        let runtime = Arc::new(Self {
+            codex_home: codex_home.into_path_buf(),
+            default_provider,
+            external_agent_config_imports: pool.external_agent_config_import_store(),
+            backfill: pool.backfill_coordinator(),
+            logs: LogStore::from_postgres(raw_pool, schema),
+            remote_control_enrollments: pool.remote_control_enrollment_store(),
+            thread_goals: pool.goal_store(),
+            memories,
+            backend: StateRuntimeBackend::Postgresql(pool),
+            thread_updated_at_millis: Arc::new(AtomicI64::new(0)),
+            thread_recency_at_millis: Arc::new(AtomicI64::new(0)),
+        });
+        if let Err(error) = runtime.run_logs_startup_maintenance().await {
+            runtime.close().await;
+            return Err(error);
+        }
+        Ok(runtime)
+    }
+
+    async fn init_sqlite_backend(
         sqlite: SqliteConfig,
         default_provider: String,
         telemetry_override: Option<&dyn DbTelemetry>,
@@ -393,7 +443,8 @@ impl StateRuntime {
             remote_control_enrollments: RemoteControlEnrollmentStore::from_sqlite(Arc::clone(
                 &pool,
             )),
-            pool,
+            backfill: BackfillCoordinator::from_sqlite(Arc::clone(&pool)),
+            backend: StateRuntimeBackend::Sqlite(pool),
             logs: LogStore::from_sqlite(logs_pool),
             codex_home,
             default_provider,
@@ -422,12 +473,54 @@ impl StateRuntime {
         &self.memories
     }
 
-    /// Close all SQLite pools and wait for outstanding pool workers to exit.
+    pub fn is_postgresql(&self) -> bool {
+        matches!(self.backend, StateRuntimeBackend::Postgresql(_))
+    }
+
+    /// Returns the ready PostgreSQL pool owner when this runtime selected PostgreSQL.
+    #[doc(hidden)]
+    pub fn postgres_runtime_pool(&self) -> Option<&PostgresRuntimeStatePool> {
+        match &self.backend {
+            StateRuntimeBackend::Postgresql(pool) => Some(pool),
+            StateRuntimeBackend::Sqlite(_) => None,
+        }
+    }
+
+    fn postgres_connection(&self) -> Option<(sqlx::PgPool, String)> {
+        self.postgres_runtime_pool()
+            .map(PostgresRuntimeStatePool::thread_store_connection)
+    }
+
+    fn sqlite_pool(&self) -> anyhow::Result<&SqlitePool> {
+        match &self.backend {
+            StateRuntimeBackend::Postgresql(_) => anyhow::bail!(
+                "SQLite-only Runtime State operation is unavailable with the PostgreSQL backend"
+            ),
+            StateRuntimeBackend::Sqlite(pool) => Ok(pool.as_ref()),
+        }
+    }
+
+    #[cfg(test)]
+    fn sqlite_pool_arc(&self) -> anyhow::Result<&Arc<SqlitePool>> {
+        match &self.backend {
+            StateRuntimeBackend::Postgresql(_) => anyhow::bail!(
+                "SQLite-only Runtime State operation is unavailable with the PostgreSQL backend"
+            ),
+            StateRuntimeBackend::Sqlite(pool) => Ok(pool),
+        }
+    }
+
+    /// Close every pool owned by this runtime and wait for outstanding workers to exit.
     pub async fn close(&self) {
-        self.memories.close().await;
-        self.thread_goals.close().await;
-        self.logs.close().await;
-        self.pool.close().await;
+        match &self.backend {
+            StateRuntimeBackend::Postgresql(pool) => pool.close().await,
+            StateRuntimeBackend::Sqlite(pool) => {
+                self.memories.close().await;
+                self.thread_goals.close().await;
+                self.logs.close().await;
+                pool.close().await;
+            }
+        }
     }
 
     pub async fn clear_memory_data_in_sqlite_home(sqlite_home: &Path) -> anyhow::Result<bool> {

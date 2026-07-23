@@ -1,8 +1,8 @@
-//! SQLite-backed state for rollout metadata.
+//! Durable runtime state backed by SQLite or PostgreSQL.
 //!
-//! This crate is intentionally small and focused: it extracts rollout metadata
-//! from JSONL rollouts and mirrors it into a local SQLite database. Backfill
-//! orchestration and rollout scanning live in `codex-core`.
+//! The selected backend owns thread metadata, logs, goals, memories, remote-control
+//! enrollment, and related runtime state. SQLite remains the local default; a ready
+//! PostgreSQL namespace can be selected as the integral shared backend.
 
 const _: () = assert!(
     libsqlite3_sys::SQLITE_VERSION_NUMBER >= 3_051_003,
@@ -114,6 +114,7 @@ pub use runtime::RemoteControlEnrollmentStore;
 pub use runtime::RuntimeDbBackup;
 pub use runtime::RuntimeDbPath;
 pub use runtime::ThreadFilterOptions;
+pub use runtime::ThreadResumeMetadata;
 pub use runtime::backup_runtime_db_for_fresh_start;
 pub use runtime::goals_db_filename;
 pub use runtime::goals_db_path;

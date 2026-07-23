@@ -180,6 +180,33 @@ impl PostgresContractFixture {
     pub(crate) async fn connect_pool(&self) -> anyhow::Result<PgPool> {
         connect_pool_with_url(&self.config, &self.resolved_url).await
     }
+
+    pub(crate) async fn mark_runtime_ready_for_tests(&self) -> anyhow::Result<()> {
+        let pool = self.connect_pool().await?;
+        let migration = super::qualified_table(self.schema(), "runtime_state_migration");
+        let evidence = serde_json::json!({
+            "sourceIdentity": "contract-source",
+            "sourceFingerprint": "contract-fingerprint",
+            "phase": "ready",
+            "ready": true,
+            "fencingToken": 4,
+            "namespaceDigest": "contract-final-digest",
+            "globalReferentialIntegrityValidated": true,
+            "canonicalThreadHistoryOrderingValidated": true,
+        });
+        sqlx::query(AssertSqlSafe(format!(
+            "INSERT INTO {migration} (source_identity, source_fingerprint, phase, ready, \
+             phase_evidence, fencing_token) VALUES ($1, $2, 'ready', TRUE, $3, 4)"
+        )))
+        .bind("contract-source")
+        .bind("contract-fingerprint")
+        .bind(evidence)
+        .execute(&pool)
+        .await
+        .map_err(|error| map_sql_error(self.schema(), "mark test namespace ready", error))?;
+        pool.close().await;
+        Ok(())
+    }
 }
 
 impl Drop for PostgresContractFixture {

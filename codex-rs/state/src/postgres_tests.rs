@@ -42,6 +42,20 @@ fn invalid_connection_url_error_does_not_include_secret_value() {
 }
 
 #[test]
+fn namespace_config_rejects_a_literal_url_in_place_of_an_environment_variable_name() {
+    let secret = "postgresql://codex:super-secret@example.invalid/codex";
+    let error = PostgresNamespaceConfig::new(
+        secret.to_string(),
+        "codex".to_string(),
+        PostgresPoolConfig::default(),
+    )
+    .expect_err("a connection URL must not be retained as configuration");
+
+    assert!(!error.to_string().contains(secret));
+    assert!(error.to_string().contains("environment-variable reference"));
+}
+
+#[test]
 fn migration_history_requires_a_contiguous_sequence_starting_at_one() {
     let schema = "isolated_namespace";
     let valid = MigrationHistory {

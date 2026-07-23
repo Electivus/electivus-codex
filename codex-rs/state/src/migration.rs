@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
 
 #[path = "migration/destination.rs"]
-mod destination_validation;
+pub(crate) mod destination_validation;
 #[path = "migration/finalize.rs"]
 mod finalize;
 #[path = "migration/import_memory.rs"]

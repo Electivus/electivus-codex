@@ -71,7 +71,8 @@ impl PostgresNamespaceConfig {
         })
     }
 
-    pub(crate) fn schema(&self) -> &str {
+    /// Returns the non-secret namespace schema name.
+    pub fn schema(&self) -> &str {
         &self.schema
     }
 
@@ -172,9 +173,13 @@ pub(super) fn parse_connection_options(
 }
 
 fn validate_url_environment_variable(name: &str) -> anyhow::Result<()> {
-    if name.is_empty() || name.contains('=') || name.contains('\0') {
+    let mut bytes = name.bytes();
+    let first_is_valid = bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+    if !first_is_valid || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
         anyhow::bail!(
-            "PostgreSQL URL environment-variable reference must be a non-empty variable name"
+            "PostgreSQL URL environment-variable reference must contain only letters, digits, and underscores and begin with a letter or underscore"
         );
     }
     Ok(())

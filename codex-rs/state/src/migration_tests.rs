@@ -47,7 +47,8 @@ async fn postgres_contract_preflight_inventories_all_source_authorities() -> any
     let _cleanup = scopeguard::guard(source.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
     });
-    let runtime = crate::StateRuntime::init(source.clone(), "test-provider".to_string()).await?;
+    let runtime =
+        crate::StateRuntime::init_sqlite(source.clone(), "test-provider".to_string()).await?;
     let history = open_thread_history_db(&source).await?;
     history.close().await;
     runtime.close().await;
@@ -166,7 +167,8 @@ async fn postgres_contract_preflight_reports_a_positive_active_writer_check() ->
     let _cleanup = scopeguard::guard(source.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
     });
-    let runtime = crate::StateRuntime::init(source.clone(), "test-provider".to_string()).await?;
+    let runtime =
+        crate::StateRuntime::init_sqlite(source.clone(), "test-provider".to_string()).await?;
     let history = open_thread_history_db(&source).await?;
     history.close().await;
     runtime.close().await;
