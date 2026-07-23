@@ -44,11 +44,11 @@ impl ThreadRequestProcessor {
             self.prepare_thread_for_delete(thread_id_to_delete).await;
         }
 
-        let postgres_state_db = self
+        let integral_state_db = self
             .state_db
             .as_ref()
-            .filter(|state_db| state_db.is_postgresql());
-        let deleted_subtree = if let Some(state_db) = postgres_state_db {
+            .filter(|state_db| !state_db.uses_local_rollout_history());
+        let deleted_subtree = if let Some(state_db) = integral_state_db {
             let deleted_subtree = state_db
                 .delete_thread_spawn_subtree_strict(thread_id)
                 .await
@@ -152,7 +152,7 @@ impl ThreadRequestProcessor {
                         ThreadStoreError::ThreadNotFound { thread_id },
                     ));
                 };
-                if state_db.is_postgresql() {
+                if !state_db.uses_local_rollout_history() {
                     return Err(thread_store_delete_error(
                         ThreadStoreError::ThreadNotFound { thread_id },
                     ));

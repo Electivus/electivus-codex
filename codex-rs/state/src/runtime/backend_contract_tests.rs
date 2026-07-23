@@ -49,7 +49,12 @@ impl RuntimeStateBackendFixture {
 }
 
 async fn run_runtime_state_smoke_contract(fixture: RuntimeStateBackendFixture) -> Result<()> {
+    let expected_local_rollout_history = matches!(&fixture, RuntimeStateBackendFixture::Sqlite(_));
     let runtime = fixture.construct().await?;
+    assert_eq!(
+        runtime.uses_local_rollout_history(),
+        expected_local_rollout_history
+    );
     runtime.backfill_coordinator().state().await?;
     assert_eq!(
         runtime

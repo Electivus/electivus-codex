@@ -473,8 +473,12 @@ impl StateRuntime {
         &self.memories
     }
 
-    pub fn is_postgresql(&self) -> bool {
-        matches!(self.backend, StateRuntimeBackend::Postgresql(_))
+    /// Whether local rollout JSONL is canonical thread history for this runtime.
+    ///
+    /// Consumers may use this to preserve SQLite compatibility lookups without
+    /// identifying or branching on the selected storage backend.
+    pub fn uses_local_rollout_history(&self) -> bool {
+        matches!(self.backend, StateRuntimeBackend::Sqlite(_))
     }
 
     /// Returns the ready PostgreSQL pool owner when this runtime selected PostgreSQL.

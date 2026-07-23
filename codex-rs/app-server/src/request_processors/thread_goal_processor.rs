@@ -277,7 +277,7 @@ impl ThreadGoalRequestProcessor {
     ) -> Result<StateDbHandle, JSONRPCErrorError> {
         if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
             if let Some(state_db) = thread.state_db() {
-                if thread.rollout_path().is_none() && !state_db.is_postgresql() {
+                if thread.rollout_path().is_none() && state_db.uses_local_rollout_history() {
                     return Err(invalid_request(format!(
                         "ephemeral thread does not support goals: {thread_id}"
                     )));
@@ -292,7 +292,7 @@ impl ThreadGoalRequestProcessor {
         } else if let Some(state_db) = self
             .state_db
             .clone()
-            .filter(|state_db| state_db.is_postgresql())
+            .filter(|state_db| !state_db.uses_local_rollout_history())
         {
             match self
                 .thread_manager
@@ -336,7 +336,7 @@ impl ThreadGoalRequestProcessor {
         thread_id: ThreadId,
         state_db: &StateDbHandle,
     ) -> Result<(), JSONRPCErrorError> {
-        if state_db.is_postgresql() {
+        if !state_db.uses_local_rollout_history() {
             return Ok(());
         }
         let running_thread = self.thread_manager.get_thread(thread_id).await.ok();

@@ -91,8 +91,6 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
@@ -1439,29 +1437,7 @@ fn all_thread_source_kinds() -> Vec<ThreadSourceKind> {
 }
 
 async fn latest_thread_cwd(thread: &AppServerThread) -> PathBuf {
-    if let Some(path) = thread.path.as_deref()
-        && let Some(cwd) = parse_latest_turn_context_cwd(path).await
-    {
-        return cwd;
-    }
     thread.cwd.to_path_buf()
-}
-
-async fn parse_latest_turn_context_cwd(path: &Path) -> Option<PathBuf> {
-    let text = tokio::fs::read_to_string(path).await.ok()?;
-    for line in text.lines().rev() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(trimmed) else {
-            continue;
-        };
-        if let RolloutItem::TurnContext(item) = rollout_line.item {
-            return Some(item.cwd.into_path_buf());
-        }
-    }
-    None
 }
 
 fn cwds_match(current_cwd: &Path, session_cwd: &Path) -> bool {
@@ -1522,7 +1498,7 @@ async fn resolve_resume_thread_id(
         return Ok(Some(session_id.to_string()));
     }
     if let Some(state_db) = state_db
-        && !state_db.is_postgresql()
+        && state_db.uses_local_rollout_history()
     {
         let cwd = (!args.all).then_some(config.cwd.as_path());
         let resolved = state_db
