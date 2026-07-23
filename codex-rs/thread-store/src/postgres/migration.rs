@@ -3,13 +3,13 @@ use futures::TryStreamExt;
 use serde_json::Value;
 use sqlx::AssertSqlSafe;
 
-use super::PostgresThreadStore;
+use super::PostgresThreadTables;
 use super::database_error;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
 pub(super) async fn validate_migrated_thread_projections(
-    store: &PostgresThreadStore,
+    tables: &PostgresThreadTables,
     connection: &mut sqlx::PgConnection,
     thread: &codex_state::ThreadMigrationSnapshot,
 ) -> ThreadStoreResult<()> {
@@ -37,7 +37,7 @@ pub(super) async fn validate_migrated_thread_projections(
             ),
         });
     }
-    let item_table = &store.tables.items;
+    let item_table = &tables.items;
     validate_projection(
         connection,
         thread_id,
@@ -54,7 +54,7 @@ pub(super) async fn validate_migrated_thread_projections(
               ORDER BY (items.item->>'phase' = 'final_answer') DESC NULLS LAST, \
               rollout_ordinal DESC LIMIT 1)) FROM {} AS turns WHERE turns.thread_id = $1 \
              ORDER BY turns.rollout_ordinal, turns.turn_id",
-            store.tables.turns
+            tables.turns
         ),
         thread.turns().iter().map(serde_json::to_value),
     )
@@ -66,7 +66,7 @@ pub(super) async fn validate_migrated_thread_projections(
             "SELECT (to_jsonb(items) - 'thread_id') || jsonb_build_object( \
              'item_type', item->>'type') FROM {} AS items WHERE thread_id = $1 \
              ORDER BY rollout_ordinal, turn_id, item_id",
-            store.tables.items
+            tables.items
         ),
         thread.items().iter().map(serde_json::to_value),
     )

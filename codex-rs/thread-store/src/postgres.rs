@@ -18,6 +18,7 @@ use crate::AppendBatchCommit;
 use crate::AppendThreadItemsBatch;
 use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
+use crate::ChildRegistrationGuard;
 use crate::CreateThreadParams;
 use crate::DeleteThreadParams;
 use crate::ItemPage;
@@ -67,7 +68,7 @@ pub(super) const WRITER_LEASE_DURATION: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 pub struct PostgresThreadStore {
     pub(super) pool: sqlx::PgPool,
-    schema: String,
+    state_db: Option<Arc<codex_state::StateRuntime>>,
     pub(super) tables: PostgresThreadTables,
     pub(super) writer_id: String,
     pub(super) live_writers: Arc<Mutex<HashMap<ThreadId, ActiveWriter>>>,
@@ -85,6 +86,38 @@ pub(super) struct PostgresThreadTables {
     pub(super) spawn_edges: String,
 }
 
+impl PostgresThreadTables {
+    fn new(schema: &str) -> Self {
+        let qualified_schema = format!("\"{schema}\"");
+        Self {
+            threads: format!("{qualified_schema}.threads"),
+            history: format!("{qualified_schema}.thread_history"),
+            append_batches: format!("{qualified_schema}.thread_append_batches"),
+            items: format!("{qualified_schema}.thread_items"),
+            turns: format!("{qualified_schema}.thread_turns"),
+            search_content: format!("{qualified_schema}.thread_search_content"),
+            spawn_edges: format!("{qualified_schema}.thread_spawn_edges"),
+        }
+    }
+}
+
+/// Materializes thread projections during an explicit offline Runtime State Migration.
+///
+/// This type cannot open a pool or serve runtime traffic. The migration coordinator supplies the
+/// transaction after it has validated and fenced the destination namespace.
+pub struct PostgresThreadProjectionMaterializer {
+    schema: String,
+    tables: PostgresThreadTables,
+}
+
+impl PostgresThreadProjectionMaterializer {
+    pub fn new(config: &codex_state::PostgresNamespaceConfig) -> Self {
+        let schema = config.schema().to_string();
+        let tables = PostgresThreadTables::new(&schema);
+        Self { schema, tables }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ActiveWriter {
     pub(super) fencing_token: i64,
@@ -95,25 +128,41 @@ pub(super) struct ActiveWriter {
 }
 
 impl PostgresThreadStore {
-    pub fn new(runtime_pool: &codex_state::PostgresRuntimeStatePool) -> Self {
+    /// Construct the PostgreSQL Thread Store owned by an integral runtime.
+    pub fn from_runtime(state_db: Arc<codex_state::StateRuntime>) -> ThreadStoreResult<Self> {
+        let runtime_pool =
+            state_db
+                .postgres_runtime_pool()
+                .ok_or_else(|| ThreadStoreError::Internal {
+                    message: "PostgreSQL Thread Store requires a PostgreSQL StateRuntime"
+                        .to_string(),
+                })?;
         let (pool, schema) = runtime_pool.thread_store_connection();
-        let qualified_schema = format!("\"{schema}\"");
+        Ok(Self::from_connection(pool, schema, Some(state_db)))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new(pool: sqlx::PgPool, schema: String) -> Self {
+        Self::from_connection(pool, schema, /*state_db*/ None)
+    }
+
+    fn from_connection(
+        pool: sqlx::PgPool,
+        schema: String,
+        state_db: Option<Arc<codex_state::StateRuntime>>,
+    ) -> Self {
         Self {
             pool,
-            schema,
-            tables: PostgresThreadTables {
-                threads: format!("{qualified_schema}.threads"),
-                history: format!("{qualified_schema}.thread_history"),
-                append_batches: format!("{qualified_schema}.thread_append_batches"),
-                items: format!("{qualified_schema}.thread_items"),
-                turns: format!("{qualified_schema}.thread_turns"),
-                search_content: format!("{qualified_schema}.thread_search_content"),
-                spawn_edges: format!("{qualified_schema}.thread_spawn_edges"),
-            },
+            tables: PostgresThreadTables::new(&schema),
+            state_db,
             writer_id: Uuid::now_v7().to_string(),
             live_writers: Arc::new(Mutex::new(HashMap::new())),
             operation_locks: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn state_db(&self) -> Option<Arc<codex_state::StateRuntime>> {
+        self.state_db.clone()
     }
 
     async fn lock_operation(&self, thread_id: ThreadId) -> OwnedMutexGuard<()> {
@@ -184,6 +233,21 @@ impl PostgresThreadStore {
             .begin()
             .await
             .map_err(|error| database_error("create", error))?;
+        if let Some(parent_thread_id) = params.parent_thread_id {
+            let parent = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+                "SELECT thread_id FROM {} WHERE thread_id = $1 FOR KEY SHARE",
+                self.tables.threads
+            )))
+            .bind(parent_thread_id.to_string())
+            .fetch_optional(transaction.as_mut())
+            .await
+            .map_err(|error| database_error("create", error))?;
+            if parent.is_none() {
+                return Err(ThreadStoreError::ThreadNotFound {
+                    thread_id: parent_thread_id,
+                });
+            }
+        }
         let insert_thread = sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO {} (thread_id, projection, stream_version, history_projection_version, fencing_token, writer_id, writer_lease_expires_at, created_at, updated_at, recency_at, history_projection_start_ordinal) \
              VALUES ($1, $2, 1, 1, 1, $3, CURRENT_TIMESTAMP + $4 * INTERVAL '1 millisecond', $5, $5, $5, $6)",
@@ -298,7 +362,9 @@ impl PostgresThreadStore {
     }
 }
 
-impl codex_state::RuntimeStateThreadProjectionMaterializer for PostgresThreadStore {
+impl codex_state::RuntimeStateThreadProjectionMaterializer
+    for PostgresThreadProjectionMaterializer
+{
     type Error = ThreadStoreError;
 
     fn destination_schema(&self) -> &str {
@@ -321,7 +387,7 @@ impl codex_state::RuntimeStateThreadProjectionMaterializer for PostgresThreadSto
             .await
             .map_err(|error| database_error("materialize migrated thread projections", error))?;
             projection::rebuild_history_projections_from_lines(
-                self,
+                &self.tables,
                 connection,
                 thread.metadata().id,
                 row.try_get("stream_version").map_err(|error| {
@@ -334,7 +400,8 @@ impl codex_state::RuntimeStateThreadProjectionMaterializer for PostgresThreadSto
                 thread.canonical_history().lines(),
             )
             .await?;
-            migration::validate_migrated_thread_projections(self, connection, thread).await?;
+            migration::validate_migrated_thread_projections(&self.tables, connection, thread)
+                .await?;
         }
         Ok(())
     }
@@ -428,6 +495,31 @@ impl ThreadStore for PostgresThreadStore {
 
     fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
         Box::pin(self.read(params))
+    }
+
+    fn validate_child_registration(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, ChildRegistrationGuard> {
+        Box::pin(async move {
+            let mut transaction = self
+                .pool
+                .begin()
+                .await
+                .map_err(|error| database_error("validate child registration", error))?;
+            let persisted_thread_id = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+                "SELECT thread_id FROM {} WHERE thread_id = $1 FOR KEY SHARE",
+                self.tables.threads
+            )))
+            .bind(thread_id.to_string())
+            .fetch_optional(transaction.as_mut())
+            .await
+            .map_err(|error| database_error("validate child registration", error))?;
+            if persisted_thread_id.is_none() {
+                return Err(ThreadStoreError::ThreadNotFound { thread_id });
+            }
+            Ok(ChildRegistrationGuard::holding(transaction))
+        })
     }
 
     fn read_thread_by_rollout_path(

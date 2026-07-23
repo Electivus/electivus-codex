@@ -16,7 +16,6 @@ use codex_protocol::protocol::UserMessageEvent;
 use codex_state::PostgresNamespaceAction;
 use codex_state::PostgresNamespaceConfig;
 use codex_state::PostgresPoolConfig;
-use codex_state::PostgresRuntimeStatePool;
 use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
 
@@ -41,10 +40,10 @@ async fn postgres_contract_metadata_updates_and_repairs_from_canonical_history()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_metadata")?;
     fixture.migrate().await?;
-    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let writer = PostgresThreadStore::new(&first_pool);
-    let replica = PostgresThreadStore::new(&second_pool);
+    let first_pool = fixture.connect_pool().await?;
+    let second_pool = fixture.connect_pool().await?;
+    let writer = PostgresThreadStore::new(first_pool.clone(), fixture.schema.clone());
+    let replica = PostgresThreadStore::new(second_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f010")?;
     writer
         .create_thread(create_thread_params(thread_id))
@@ -228,10 +227,10 @@ async fn postgres_contract_concurrent_metadata_updates_do_not_regress_timestamps
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_metadata_concurrent")?;
     fixture.migrate().await?;
-    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let first = PostgresThreadStore::new(&first_pool);
-    let second = PostgresThreadStore::new(&second_pool);
+    let first_pool = fixture.connect_pool().await?;
+    let second_pool = fixture.connect_pool().await?;
+    let first = PostgresThreadStore::new(first_pool.clone(), fixture.schema.clone());
+    let second = PostgresThreadStore::new(second_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f013")?;
     first.create_thread(create_thread_params(thread_id)).await?;
     first.shutdown_thread(thread_id).await?;
@@ -313,10 +312,10 @@ async fn postgres_contract_concurrent_resume_acquires_exactly_one_writer()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_resume_concurrent")?;
     fixture.migrate().await?;
-    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let first = PostgresThreadStore::new(&first_pool);
-    let second = PostgresThreadStore::new(&second_pool);
+    let first_pool = fixture.connect_pool().await?;
+    let second_pool = fixture.connect_pool().await?;
+    let first = PostgresThreadStore::new(first_pool.clone(), fixture.schema.clone());
+    let second = PostgresThreadStore::new(second_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f009")?;
     first.create_thread(create_thread_params(thread_id)).await?;
     first.shutdown_thread(thread_id).await?;
@@ -349,10 +348,10 @@ async fn postgres_contract_ambiguous_append_retry_requires_current_writer_fence(
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_resume_retry")?;
     fixture.migrate().await?;
-    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let superseded = PostgresThreadStore::new(&first_pool);
-    let current = PostgresThreadStore::new(&second_pool);
+    let first_pool = fixture.connect_pool().await?;
+    let second_pool = fixture.connect_pool().await?;
+    let superseded = PostgresThreadStore::new(first_pool.clone(), fixture.schema.clone());
+    let current = PostgresThreadStore::new(second_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f008")?;
     superseded
         .create_thread(create_thread_params(thread_id))
@@ -420,10 +419,10 @@ async fn postgres_contract_expired_writer_is_fenced_after_takeover()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_resume_expired")?;
     fixture.migrate().await?;
-    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let expired = PostgresThreadStore::new(&first_pool);
-    let takeover = PostgresThreadStore::new(&second_pool);
+    let first_pool = fixture.connect_pool().await?;
+    let second_pool = fixture.connect_pool().await?;
+    let expired = PostgresThreadStore::new(first_pool.clone(), fixture.schema.clone());
+    let takeover = PostgresThreadStore::new(second_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f007")?;
     expired
         .create_thread(create_thread_params(thread_id))
@@ -484,10 +483,10 @@ async fn postgres_contract_resume_after_shutdown_uses_durable_stream_version()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_resume_shutdown")?;
     fixture.migrate().await?;
-    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let first = PostgresThreadStore::new(&first_pool);
-    let resumed = PostgresThreadStore::new(&second_pool);
+    let first_pool = fixture.connect_pool().await?;
+    let second_pool = fixture.connect_pool().await?;
+    let first = PostgresThreadStore::new(first_pool.clone(), fixture.schema.clone());
+    let resumed = PostgresThreadStore::new(second_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f006")?;
     first.create_thread(create_thread_params(thread_id)).await?;
     first
@@ -540,10 +539,10 @@ async fn postgres_contract_resume_conflicts_while_another_writer_lease_is_active
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_resume_conflict")?;
     fixture.migrate().await?;
-    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let writer = PostgresThreadStore::new(&first_pool);
-    let contender = PostgresThreadStore::new(&second_pool);
+    let first_pool = fixture.connect_pool().await?;
+    let second_pool = fixture.connect_pool().await?;
+    let writer = PostgresThreadStore::new(first_pool.clone(), fixture.schema.clone());
+    let contender = PostgresThreadStore::new(second_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f005")?;
     writer
         .create_thread(create_thread_params(thread_id))
@@ -573,10 +572,10 @@ async fn postgres_contract_flush_and_shutdown_preserve_durable_history()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_lifecycle")?;
     fixture.migrate().await?;
-    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let writer = PostgresThreadStore::new(&first_pool);
-    let reader = PostgresThreadStore::new(&second_pool);
+    let first_pool = fixture.connect_pool().await?;
+    let second_pool = fixture.connect_pool().await?;
+    let writer = PostgresThreadStore::new(first_pool.clone(), fixture.schema.clone());
+    let reader = PostgresThreadStore::new(second_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f004")?;
     writer
         .create_thread(create_thread_params(thread_id))
@@ -633,8 +632,8 @@ async fn postgres_contract_append_batch_retries_are_idempotent()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_append_retry")?;
     fixture.migrate().await?;
-    let pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let store = PostgresThreadStore::new(&pool);
+    let pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f003")?;
     store.create_thread(create_thread_params(thread_id)).await?;
     let batch_id = AppendBatchId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331ba02")?;
@@ -678,10 +677,10 @@ async fn postgres_contract_append_batch_preserves_full_history_and_projection()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_append")?;
     fixture.migrate().await?;
-    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let writer = PostgresThreadStore::new(&first_pool);
-    let reader = PostgresThreadStore::new(&second_pool);
+    let first_pool = fixture.connect_pool().await?;
+    let second_pool = fixture.connect_pool().await?;
+    let writer = PostgresThreadStore::new(first_pool.clone(), fixture.schema.clone());
+    let reader = PostgresThreadStore::new(second_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f002")?;
     writer
         .create_thread(create_thread_params(thread_id))
@@ -735,10 +734,10 @@ async fn postgres_contract_create_is_readable_across_replicas_without_rollout()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_create")?;
     fixture.migrate().await?;
-    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let writer = PostgresThreadStore::new(&first_pool);
-    let reader = PostgresThreadStore::new(&second_pool);
+    let first_pool = fixture.connect_pool().await?;
+    let second_pool = fixture.connect_pool().await?;
+    let writer = PostgresThreadStore::new(first_pool.clone(), fixture.schema.clone());
+    let reader = PostgresThreadStore::new(second_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f001")?;
 
     writer
@@ -871,6 +870,10 @@ impl PostgresThreadStoreFixture {
         )
         .await?;
         Ok(())
+    }
+
+    pub(super) async fn connect_pool(&self) -> Result<sqlx::PgPool, Box<dyn std::error::Error>> {
+        Ok(sqlx::PgPool::connect(&self.database_url).await?)
     }
 
     async fn expire_writer_lease(

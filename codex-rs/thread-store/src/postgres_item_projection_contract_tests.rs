@@ -5,7 +5,6 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::ThreadHistoryMode;
-use codex_state::PostgresRuntimeStatePool;
 use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
 
@@ -24,10 +23,10 @@ async fn postgres_contract_canonical_appends_project_items_for_bidirectional_pag
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_item_projection")?;
     fixture.migrate().await?;
-    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let writer = PostgresThreadStore::new(&first_pool);
-    let reader = PostgresThreadStore::new(&second_pool);
+    let first_pool = fixture.connect_pool().await?;
+    let second_pool = fixture.connect_pool().await?;
+    let writer = PostgresThreadStore::new(first_pool.clone(), fixture.schema.clone());
+    let reader = PostgresThreadStore::new(second_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f011")?;
     let mut create_params = create_thread_params(thread_id);
     create_params.history_mode = ThreadHistoryMode::Paginated;
@@ -143,10 +142,10 @@ async fn postgres_contract_projection_failure_rolls_back_canonical_append()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_item_projection_atomicity")?;
     fixture.migrate().await?;
-    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let writer = PostgresThreadStore::new(&first_pool);
-    let reader = PostgresThreadStore::new(&second_pool);
+    let first_pool = fixture.connect_pool().await?;
+    let second_pool = fixture.connect_pool().await?;
+    let writer = PostgresThreadStore::new(first_pool.clone(), fixture.schema.clone());
+    let reader = PostgresThreadStore::new(second_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f012")?;
     let mut create_params = create_thread_params(thread_id);
     create_params.history_mode = ThreadHistoryMode::Paginated;
@@ -224,8 +223,8 @@ async fn postgres_contract_item_projection_excludes_inherited_subagent_prefix()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_item_projection_subagent")?;
     fixture.migrate().await?;
-    let pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let store = PostgresThreadStore::new(&pool);
+    let pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f013")?;
     let mut create_params = create_thread_params(thread_id);
     create_params.history_mode = ThreadHistoryMode::Paginated;
@@ -273,8 +272,8 @@ async fn postgres_contract_append_rebuilds_stale_prefix_before_projecting_suffix
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_projection_append_rebuild")?;
     fixture.migrate().await?;
-    let pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let store = PostgresThreadStore::new(&pool);
+    let pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f014")?;
     let mut create_params = create_thread_params(thread_id);
     create_params.history_mode = ThreadHistoryMode::Paginated;
@@ -311,8 +310,8 @@ async fn postgres_contract_failed_rebuild_preserves_projection_and_checkpoint()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_projection_rebuild_rollback")?;
     fixture.migrate().await?;
-    let pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let store = PostgresThreadStore::new(&pool);
+    let pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f015")?;
     let mut create_params = create_thread_params(thread_id);
     create_params.history_mode = ThreadHistoryMode::Paginated;
@@ -357,8 +356,8 @@ async fn postgres_contract_confirmed_retry_does_not_depend_on_projection_rebuild
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_projection_retry_rebuild")?;
     fixture.migrate().await?;
-    let pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let store = PostgresThreadStore::new(&pool);
+    let pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f016")?;
     let mut create_params = create_thread_params(thread_id);
     create_params.history_mode = ThreadHistoryMode::Paginated;

@@ -13,6 +13,7 @@ use sqlx::QueryBuilder;
 use sqlx::Row;
 
 use super::PostgresThreadStore;
+use super::PostgresThreadTables;
 use super::database_error;
 use super::list_threads::format_cursor;
 use super::list_threads::parse_cursor;
@@ -164,7 +165,7 @@ async fn rebuild_stale_search_projections(
                 message: format!("invalid stored thread id: {error}"),
             })?;
         super::projection::rebuild_history_projections(
-            store,
+            &store.tables,
             transaction.as_mut(),
             thread_id,
             row.try_get("stream_version")
@@ -199,7 +200,7 @@ fn search_result_from_row(
 }
 
 pub(super) async fn apply_projection(
-    store: &PostgresThreadStore,
+    tables: &PostgresThreadTables,
     connection: &mut sqlx::PgConnection,
     thread_id: ThreadId,
     rollout_ordinal: i64,
@@ -216,7 +217,7 @@ pub(super) async fn apply_projection(
          VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (thread_id, rollout_ordinal) DO UPDATE SET \
          content = EXCLUDED.content, folded_content = EXCLUDED.folded_content, \
          normalized_content = EXCLUDED.normalized_content, normalized_folded_content = EXCLUDED.normalized_folded_content",
-        store.tables.search_content
+        tables.search_content
     )))
     .bind(thread_id.to_string())
     .bind(rollout_ordinal)

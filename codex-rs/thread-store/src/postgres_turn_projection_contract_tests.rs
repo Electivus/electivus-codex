@@ -12,7 +12,6 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
-use codex_state::PostgresRuntimeStatePool;
 use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
 
@@ -34,15 +33,15 @@ use crate::postgres_contract_tests::create_thread_params;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn damaged_projections_rebuild_once_for_concurrent_public_readers()
+async fn postgres_contract_damaged_projections_rebuild_once_for_concurrent_public_readers()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_projection_rebuild")?;
     fixture.migrate().await?;
-    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let writer = PostgresThreadStore::new(&first_pool);
-    let first_reader = PostgresThreadStore::new(&first_pool);
-    let second_reader = PostgresThreadStore::new(&second_pool);
+    let first_pool = fixture.connect_pool().await?;
+    let second_pool = fixture.connect_pool().await?;
+    let writer = PostgresThreadStore::new(first_pool.clone(), fixture.schema.clone());
+    let first_reader = PostgresThreadStore::new(first_pool.clone(), fixture.schema.clone());
+    let second_reader = PostgresThreadStore::new(second_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f025")?;
     let mut create_params = create_thread_params(thread_id);
     create_params.history_mode = ThreadHistoryMode::Paginated;
@@ -84,14 +83,14 @@ async fn damaged_projections_rebuild_once_for_concurrent_public_readers()
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn turn_pages_match_local_summary_and_bidirectional_pagination()
+async fn postgres_contract_turn_pages_match_local_summary_and_bidirectional_pagination()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_turn_pages")?;
     fixture.migrate().await?;
-    let writer_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let reader_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let writer = PostgresThreadStore::new(&writer_pool);
-    let reader = PostgresThreadStore::new(&reader_pool);
+    let writer_pool = fixture.connect_pool().await?;
+    let reader_pool = fixture.connect_pool().await?;
+    let writer = PostgresThreadStore::new(writer_pool.clone(), fixture.schema.clone());
+    let reader = PostgresThreadStore::new(reader_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f022")?;
     let mut create_params = create_thread_params(thread_id);
     create_params.history_mode = ThreadHistoryMode::Paginated;
@@ -180,12 +179,12 @@ async fn turn_pages_match_local_summary_and_bidirectional_pagination()
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn inherited_prefix_is_excluded_and_turn_projection_failure_rolls_back()
+async fn postgres_contract_inherited_prefix_is_excluded_and_turn_projection_failure_rolls_back()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("thread_turn_atomicity")?;
     fixture.migrate().await?;
-    let runtime_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let store = PostgresThreadStore::new(&runtime_pool);
+    let runtime_pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(runtime_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f024")?;
     let mut create_params = create_thread_params(thread_id);
     create_params.history_mode = ThreadHistoryMode::Paginated;

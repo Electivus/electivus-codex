@@ -17,6 +17,7 @@ use sqlx::Transaction;
 use sqlx::types::Json;
 
 use super::PostgresThreadStore;
+use super::PostgresThreadTables;
 use super::database_error;
 use super::serialization_error;
 use crate::StoredThread;
@@ -64,7 +65,7 @@ pub(super) async fn begin_consistent_read(
         .map_err(|error| database_error(operation, error))?;
     if projection_version != Some(stream_version) {
         rebuild_history_projections(
-            store,
+            &store.tables,
             transaction.as_mut(),
             thread_id,
             stream_version,
@@ -77,19 +78,19 @@ pub(super) async fn begin_consistent_read(
 }
 
 pub(super) async fn rebuild_history_projections(
-    store: &PostgresThreadStore,
+    tables: &PostgresThreadTables,
     connection: &mut PgConnection,
     thread_id: codex_protocol::ThreadId,
     stream_version: i64,
     history_projection_start_ordinal: Option<i64>,
 ) -> ThreadStoreResult<()> {
-    clear_history_projections(store, connection, thread_id).await?;
+    clear_history_projections(tables, connection, thread_id).await?;
     let mut expected_ordinal = 0_i64;
     loop {
         let rows = sqlx::query_as::<_, (i64, Value, DateTime<Utc>)>(AssertSqlSafe(format!(
             "SELECT ordinal, item, recorded_at FROM {} \
              WHERE thread_id = $1 AND ordinal >= $2 ORDER BY ordinal ASC LIMIT 256",
-            store.tables.history
+            tables.history
         )))
         .bind(thread_id.to_string())
         .bind(expected_ordinal)
@@ -105,7 +106,7 @@ pub(super) async fn rebuild_history_projections(
             }
             let item = serde_json::from_value(item).map_err(serialization_error)?;
             apply_history_projections(
-                store,
+                tables,
                 connection,
                 thread_id,
                 ordinal,
@@ -122,11 +123,11 @@ pub(super) async fn rebuild_history_projections(
     if expected_ordinal != stream_version {
         return Err(invalid_canonical_history(thread_id));
     }
-    finish_history_projection(store, connection, thread_id, stream_version).await
+    finish_history_projection(tables, connection, thread_id, stream_version).await
 }
 
 pub(super) async fn rebuild_history_projections_from_lines(
-    store: &PostgresThreadStore,
+    tables: &PostgresThreadTables,
     connection: &mut PgConnection,
     thread_id: codex_protocol::ThreadId,
     stream_version: i64,
@@ -136,7 +137,7 @@ pub(super) async fn rebuild_history_projections_from_lines(
     if i64::try_from(lines.len()).map_err(projection_too_large)? != stream_version {
         return Err(invalid_canonical_history(thread_id));
     }
-    clear_history_projections(store, connection, thread_id).await?;
+    clear_history_projections(tables, connection, thread_id).await?;
     for (ordinal, line) in lines.iter().enumerate() {
         let ordinal = i64::try_from(ordinal).map_err(projection_too_large)?;
         let recorded_at = DateTime::parse_from_rfc3339(&line.timestamp)
@@ -145,7 +146,7 @@ pub(super) async fn rebuild_history_projections_from_lines(
             })?
             .to_utc();
         apply_history_projections(
-            store,
+            tables,
             connection,
             thread_id,
             ordinal,
@@ -155,19 +156,15 @@ pub(super) async fn rebuild_history_projections_from_lines(
         )
         .await?;
     }
-    finish_history_projection(store, connection, thread_id, stream_version).await
+    finish_history_projection(tables, connection, thread_id, stream_version).await
 }
 
 async fn clear_history_projections(
-    store: &PostgresThreadStore,
+    tables: &PostgresThreadTables,
     connection: &mut PgConnection,
     thread_id: codex_protocol::ThreadId,
 ) -> ThreadStoreResult<()> {
-    for table in [
-        &store.tables.items,
-        &store.tables.turns,
-        &store.tables.search_content,
-    ] {
+    for table in [&tables.items, &tables.turns, &tables.search_content] {
         sqlx::query(AssertSqlSafe(format!(
             "DELETE FROM {table} WHERE thread_id = $1"
         )))
@@ -180,14 +177,14 @@ async fn clear_history_projections(
 }
 
 async fn finish_history_projection(
-    store: &PostgresThreadStore,
+    tables: &PostgresThreadTables,
     connection: &mut PgConnection,
     thread_id: codex_protocol::ThreadId,
     stream_version: i64,
 ) -> ThreadStoreResult<()> {
     sqlx::query(AssertSqlSafe(format!(
         "UPDATE {} SET history_projection_version = $1 WHERE thread_id = $2",
-        store.tables.threads
+        tables.threads
     )))
     .bind(stream_version)
     .bind(thread_id.to_string())
@@ -198,7 +195,7 @@ async fn finish_history_projection(
 }
 
 pub(super) async fn apply_history_projections(
-    store: &PostgresThreadStore,
+    tables: &PostgresThreadTables,
     connection: &mut PgConnection,
     thread_id: codex_protocol::ThreadId,
     first_ordinal: i64,
@@ -213,11 +210,11 @@ pub(super) async fn apply_history_projections(
             .checked_add(offset)
             .ok_or_else(|| projection_too_large(()))?;
         if let RolloutItem::EventMsg(EventMsg::ThreadRolledBack(event)) = item {
-            apply_rollback_projection(store, connection, thread_id, event.num_turns).await?;
+            apply_rollback_projection(tables, connection, thread_id, event.num_turns).await?;
             continue;
         }
         super::search_threads::apply_projection(
-            store,
+            tables,
             connection,
             thread_id,
             rollout_ordinal,
@@ -236,7 +233,7 @@ pub(super) async fn apply_history_projections(
         };
         let changes = project_rollout_line(&line);
         for change in changes.changed_turns {
-            apply_turn_projection(store, connection, thread_id, rollout_ordinal, change).await?;
+            apply_turn_projection(tables, connection, thread_id, rollout_ordinal, change).await?;
         }
         for change in changes.changed_items {
             let item_id = change.item.id().to_string();
@@ -245,7 +242,7 @@ pub(super) async fn apply_history_projections(
                 "INSERT INTO {} (thread_id, turn_id, item_id, rollout_ordinal, created_at_ms, item) \
                  VALUES ($1, $2, $3, $4, $5, $6) \
                  ON CONFLICT (thread_id, turn_id, item_id) DO UPDATE SET item = EXCLUDED.item",
-                store.tables.items
+                tables.items
             )))
             .bind(thread_id.to_string())
             .bind(change.turn_id)
@@ -262,7 +259,7 @@ pub(super) async fn apply_history_projections(
 }
 
 async fn apply_rollback_projection(
-    store: &PostgresThreadStore,
+    tables: &PostgresThreadTables,
     connection: &mut PgConnection,
     thread_id: codex_protocol::ThreadId,
     num_turns: u32,
@@ -275,7 +272,7 @@ async fn apply_rollback_projection(
             SELECT rollout_ordinal FROM {} WHERE thread_id = $1 \
             ORDER BY rollout_ordinal DESC LIMIT $2\
          ) AS rolled_back_turns",
-        store.tables.turns
+        tables.turns
     )))
     .bind(thread_id.to_string())
     .bind(i64::from(num_turns))
@@ -288,7 +285,7 @@ async fn apply_rollback_projection(
 
     sqlx::query(AssertSqlSafe(format!(
         "DELETE FROM {} WHERE thread_id = $1 AND rollout_ordinal >= $2",
-        store.tables.search_content
+        tables.search_content
     )))
     .bind(thread_id.to_string())
     .bind(rollback_start)
@@ -299,7 +296,7 @@ async fn apply_rollback_projection(
         "DELETE FROM {} WHERE thread_id = $1 AND turn_id IN (\
             SELECT turn_id FROM {} WHERE thread_id = $1 AND rollout_ordinal >= $2\
          )",
-        store.tables.items, store.tables.turns
+        tables.items, tables.turns
     )))
     .bind(thread_id.to_string())
     .bind(rollback_start)
@@ -308,7 +305,7 @@ async fn apply_rollback_projection(
     .map_err(|error| database_error("project thread rollback", error))?;
     sqlx::query(AssertSqlSafe(format!(
         "DELETE FROM {} WHERE thread_id = $1 AND rollout_ordinal >= $2",
-        store.tables.turns
+        tables.turns
     )))
     .bind(thread_id.to_string())
     .bind(rollback_start)
@@ -319,7 +316,7 @@ async fn apply_rollback_projection(
 }
 
 async fn apply_turn_projection(
-    store: &PostgresThreadStore,
+    tables: &PostgresThreadTables,
     connection: &mut PgConnection,
     thread_id: codex_protocol::ThreadId,
     rollout_ordinal: i64,
@@ -332,7 +329,7 @@ async fn apply_turn_projection(
          ON CONFLICT (thread_id, turn_id) DO UPDATE SET \
             status = EXCLUDED.status, error = EXCLUDED.error, started_at = EXCLUDED.started_at, \
             completed_at = EXCLUDED.completed_at, duration_ms = EXCLUDED.duration_ms",
-        store.tables.turns
+        tables.turns
     )))
     .bind(thread_id.to_string())
     .bind(change.turn_id)

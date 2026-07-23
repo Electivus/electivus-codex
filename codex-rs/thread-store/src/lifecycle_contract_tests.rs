@@ -13,9 +13,13 @@ use codex_protocol::protocol::UserMessageEvent;
 use codex_state::PostgresNamespaceAction;
 use codex_state::PostgresNamespaceConfig;
 use codex_state::PostgresPoolConfig;
-use codex_state::PostgresRuntimeStatePool;
+use codex_state::RuntimeStateBackendConfig;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
+use tokio::time::Duration;
+use tokio::time::Instant;
+use tokio::time::timeout;
 
 use crate::AppendBatchId;
 use crate::AppendThreadItemsBatch;
@@ -48,7 +52,7 @@ async fn local_lifecycle_contract_matches_public_thread_store_semantics()
         sqlite_home: home.path().to_path_buf(),
         default_model_provider_id: "lifecycle-contract-provider".to_string(),
     };
-    let runtime = codex_state::StateRuntime::init(
+    let runtime = codex_state::StateRuntime::init_sqlite(
         home.path().to_path_buf(),
         config.default_model_provider_id.clone(),
     )
@@ -64,12 +68,12 @@ async fn local_lifecycle_contract_matches_public_thread_store_semantics()
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_lifecycle_contract_matches_public_thread_store_semantics()
+async fn postgres_contract_lifecycle_matches_public_thread_store_semantics()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresLifecycleFixture::new("shared")?;
     fixture.migrate().await?;
-    let pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let store = PostgresThreadStore::new(&pool);
+    let pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f102")?;
 
     assert_lifecycle_contract(&store, thread_id, Path::new("/postgres-contract")).await?;
@@ -80,12 +84,12 @@ async fn postgres_lifecycle_contract_matches_public_thread_store_semantics()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_lifecycle_contract_archive_serializes_with_local_appends()
+async fn postgres_contract_lifecycle_archive_serializes_with_local_appends()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresLifecycleFixture::new("archive_append_race")?;
     fixture.migrate().await?;
-    let pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let store = PostgresThreadStore::new(&pool);
+    let pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
 
     for sequence in 0..64 {
         let thread_id = ThreadId::from_string(
@@ -126,14 +130,14 @@ async fn postgres_lifecycle_contract_archive_serializes_with_local_appends()
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_lifecycle_contract_fences_writers_and_delete_cascades_state()
+async fn postgres_contract_lifecycle_fences_writers_and_delete_cascades_state()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresLifecycleFixture::new("fence_delete")?;
     fixture.migrate().await?;
-    let writer_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let manager_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let writer = PostgresThreadStore::new(&writer_pool);
-    let manager = PostgresThreadStore::new(&manager_pool);
+    let writer_pool = fixture.connect_pool().await?;
+    let manager_pool = fixture.connect_pool().await?;
+    let writer = PostgresThreadStore::new(writer_pool.clone(), fixture.schema.clone());
+    let manager = PostgresThreadStore::new(manager_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f103")?;
     let batch_id = AppendBatchId::new();
     writer
@@ -227,14 +231,207 @@ async fn postgres_lifecycle_contract_fences_writers_and_delete_cascades_state()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_lifecycle_contract_concurrent_transitions_have_one_winner()
+async fn postgres_contract_subtree_delete_includes_a_concurrently_created_child()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = PostgresLifecycleFixture::new("subtree_create_delete")?;
+    fixture.migrate().await?;
+    fixture.mark_runtime_ready().await?;
+    let root_pool = fixture.connect_pool().await?;
+    let child_pool = fixture.connect_pool().await?;
+    let control_pool = fixture.connect_pool().await?;
+    let root_store = PostgresThreadStore::new(root_pool.clone(), fixture.schema.clone());
+    let child_store = PostgresThreadStore::new(child_pool.clone(), fixture.schema.clone());
+    let root_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+    root_store
+        .create_thread(create_thread_params(
+            root_thread_id,
+            Path::new("/postgres-contract"),
+        ))
+        .await?;
+    let home = TempDir::new()?;
+    let runtime = codex_state::StateRuntime::init_with_backend(
+        RuntimeStateBackendConfig::Postgresql {
+            codex_home: AbsolutePathBuf::try_from(home.path().to_path_buf())?,
+            namespace: fixture.config.clone(),
+        },
+        "lifecycle-contract-provider".to_string(),
+    )
+    .await?;
+
+    let threads = format!("\"{}\".threads", fixture.schema);
+    let edges = format!("\"{}\".thread_spawn_edges", fixture.schema);
+    let mut blocker = control_pool.begin().await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT thread_id FROM {threads} WHERE thread_id = $1 FOR UPDATE"
+    )))
+    .bind(root_thread_id.to_string())
+    .execute(&mut *blocker)
+    .await?;
+
+    let mut child_params = create_thread_params(child_thread_id, Path::new("/postgres-contract"));
+    child_params.parent_thread_id = Some(root_thread_id);
+    let create_task = tokio::spawn(async move { child_store.create_thread(child_params).await });
+    let wait_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let child_creation_is_waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+             WHERE datname = current_database() AND wait_event_type = 'Lock' \
+             AND query LIKE '%' || $1 || '%' AND query LIKE '%FOR KEY SHARE%')",
+        )
+        .bind(&fixture.schema)
+        .fetch_one(&control_pool)
+        .await?;
+        if child_creation_is_waiting {
+            break;
+        }
+        if Instant::now() >= wait_deadline {
+            panic!("child creation did not wait on the canonical parent row lock");
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(!create_task.is_finished());
+    let delete_runtime = runtime.clone();
+    let mut delete_task = tokio::spawn(async move {
+        delete_runtime
+            .delete_thread_spawn_subtree_strict(root_thread_id)
+            .await
+    });
+    assert!(
+        timeout(Duration::from_millis(100), &mut delete_task)
+            .await
+            .is_err(),
+        "the parent row lock must hold subtree deletion"
+    );
+
+    blocker.commit().await?;
+    create_task.await??;
+    let deleted_thread_ids = delete_task.await??;
+    assert_eq!(deleted_thread_ids, vec![root_thread_id, child_thread_id]);
+    let remaining: (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT (SELECT COUNT(*) FROM {threads} WHERE thread_id = ANY($1)), \
+         (SELECT COUNT(*) FROM {edges} WHERE parent_thread_id = $2 OR child_thread_id = $2)"
+    )))
+    .bind(vec![
+        root_thread_id.to_string(),
+        child_thread_id.to_string(),
+    ])
+    .bind(root_thread_id.to_string())
+    .fetch_one(&control_pool)
+    .await?;
+    assert_eq!(remaining, (0, 0));
+
+    runtime.close().await;
+    root_pool.close().await;
+    child_pool.close().await;
+    control_pool.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_child_registration_fences_cross_replica_subtree_delete_until_publication()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = PostgresLifecycleFixture::new("child_registration_delete")?;
+    fixture.migrate().await?;
+    fixture.mark_runtime_ready().await?;
+    let creator_pool = fixture.connect_pool().await?;
+    let registration_pool = fixture.connect_pool().await?;
+    let creator = PostgresThreadStore::new(creator_pool.clone(), fixture.schema.clone());
+    let registration_replica =
+        PostgresThreadStore::new(registration_pool.clone(), fixture.schema.clone());
+    let root_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+    creator
+        .create_thread(create_thread_params(
+            root_thread_id,
+            Path::new("/postgres-contract"),
+        ))
+        .await?;
+    let mut child_params = create_thread_params(child_thread_id, Path::new("/postgres-contract"));
+    child_params.parent_thread_id = Some(root_thread_id);
+    creator.create_thread(child_params).await?;
+    let home = TempDir::new()?;
+    let delete_runtime = codex_state::StateRuntime::init_with_backend(
+        RuntimeStateBackendConfig::Postgresql {
+            codex_home: AbsolutePathBuf::try_from(home.path().to_path_buf())?,
+            namespace: fixture.config.clone(),
+        },
+        "lifecycle-contract-provider".to_string(),
+    )
+    .await?;
+
+    let registration_guard = registration_replica
+        .validate_child_registration(child_thread_id)
+        .await?;
+    let delete_runtime_task = delete_runtime.clone();
+    let mut delete_task = tokio::spawn(async move {
+        delete_runtime_task
+            .delete_thread_spawn_subtree_strict(root_thread_id)
+            .await
+    });
+    assert!(
+        timeout(Duration::from_millis(100), &mut delete_task)
+            .await
+            .is_err(),
+        "subtree deletion must wait while another replica publishes a validated child"
+    );
+
+    drop(registration_guard);
+    assert_eq!(delete_task.await??, vec![root_thread_id, child_thread_id]);
+
+    delete_runtime.close().await;
+    creator_pool.close().await;
+    registration_pool.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_shutdown_forgets_writer_after_external_delete()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = PostgresLifecycleFixture::new("shutdown_deleted_writer")?;
+    fixture.migrate().await?;
+    fixture.mark_runtime_ready().await?;
+    let pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
+    let thread_id = ThreadId::new();
+    store
+        .create_thread(create_thread_params(
+            thread_id,
+            Path::new("/postgres-contract"),
+        ))
+        .await?;
+    assert!(store.live_writers.lock().await.contains_key(&thread_id));
+    let home = TempDir::new()?;
+    let runtime = codex_state::StateRuntime::init_with_backend(
+        RuntimeStateBackendConfig::Postgresql {
+            codex_home: AbsolutePathBuf::try_from(home.path().to_path_buf())?,
+            namespace: fixture.config.clone(),
+        },
+        "lifecycle-contract-provider".to_string(),
+    )
+    .await?;
+    assert_eq!(runtime.delete_thread(thread_id).await?, 1);
+
+    store.shutdown_thread(thread_id).await?;
+    assert!(!store.live_writers.lock().await.contains_key(&thread_id));
+
+    runtime.close().await;
+    pool.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_lifecycle_concurrent_transitions_have_one_winner()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresLifecycleFixture::new("concurrent")?;
     fixture.migrate().await?;
-    let first_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let first = PostgresThreadStore::new(&first_pool);
-    let second = PostgresThreadStore::new(&second_pool);
+    let first_pool = fixture.connect_pool().await?;
+    let second_pool = fixture.connect_pool().await?;
+    let first = PostgresThreadStore::new(first_pool.clone(), fixture.schema.clone());
+    let second = PostgresThreadStore::new(second_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f104")?;
     let initial =
         create_inactive_thread(&first, thread_id, Path::new("/postgres-contract")).await?;
@@ -491,6 +688,36 @@ impl PostgresLifecycleFixture {
         )
         .await?;
         Ok(())
+    }
+
+    async fn mark_runtime_ready(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let pool = self.connect_pool().await?;
+        let migration = format!("\"{}\".runtime_state_migration", self.schema);
+        let evidence = serde_json::json!({
+            "sourceIdentity": "lifecycle-contract",
+            "sourceFingerprint": "lifecycle-contract-fingerprint",
+            "phase": "ready",
+            "ready": true,
+            "fencingToken": 4,
+            "namespaceDigest": "lifecycle-contract-digest",
+            "globalReferentialIntegrityValidated": true,
+            "canonicalThreadHistoryOrderingValidated": true,
+        });
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO {migration} (source_identity, source_fingerprint, phase, ready, \
+             phase_evidence, fencing_token) VALUES ($1, $2, 'ready', TRUE, $3, 4)"
+        )))
+        .bind("lifecycle-contract")
+        .bind("lifecycle-contract-fingerprint")
+        .bind(evidence)
+        .execute(&pool)
+        .await?;
+        pool.close().await;
+        Ok(())
+    }
+
+    async fn connect_pool(&self) -> Result<sqlx::PgPool, Box<dyn std::error::Error>> {
+        Ok(sqlx::PgPool::connect(&self.database_url).await?)
     }
 
     async fn cleanup(&self) -> Result<(), Box<dyn std::error::Error>> {

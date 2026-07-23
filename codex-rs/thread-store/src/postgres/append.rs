@@ -153,7 +153,7 @@ pub(super) async fn append_batch(
         .map_err(|error| database_error("append thread history", error))?;
     if history_projection_version != Some(stream_version) {
         super::projection::rebuild_history_projections(
-            store,
+            &store.tables,
             transaction.as_mut(),
             batch.thread_id,
             stream_version,
@@ -204,7 +204,7 @@ pub(super) async fn append_batch(
         .await
         .map_err(|error| database_error("append thread history", error))?;
     super::projection::apply_history_projections(
-        store,
+        &store.tables,
         transaction.as_mut(),
         batch.thread_id,
         first_ordinal,

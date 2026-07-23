@@ -34,6 +34,32 @@ use crate::UpdateThreadMetadataParams;
 /// Future returned by [`ThreadStore`] operations.
 pub type ThreadStoreFuture<'a, T> = Pin<Box<dyn Future<Output = ThreadStoreResult<T>> + Send + 'a>>;
 
+/// Keeps a store-specific child registration fence alive through in-process publication.
+///
+/// Implementations with cross-process deletion should keep their durable read or lifecycle lock in
+/// this value. Callers must retain it until the child is visible in their local live-thread registry.
+#[must_use = "keep the guard alive until child registration is published"]
+pub struct ChildRegistrationGuard {
+    _hold: Box<dyn Any + Send>,
+}
+
+impl ChildRegistrationGuard {
+    pub(crate) fn unlocked() -> Self {
+        Self {
+            _hold: Box::new(()),
+        }
+    }
+
+    pub(crate) fn holding<T>(hold: T) -> Self
+    where
+        T: Any + Send,
+    {
+        Self {
+            _hold: Box::new(hold),
+        }
+    }
+}
+
 /// Storage-neutral thread persistence boundary.
 pub trait ThreadStore: Any + Send + Sync {
     /// Return this store as [`Any`] for implementation-owned escape hatches.
@@ -112,6 +138,19 @@ pub trait ThreadStore: Any + Send + Sync {
 
     /// Reads a thread summary and optionally its persisted history.
     fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread>;
+
+    /// Verifies that a newly initialized child can still be registered as live and returns a guard
+    /// that preserves that decision until publication.
+    ///
+    /// Stores with cross-process deletion should check their canonical record here. Local stores
+    /// can keep the default because their rollout metadata may become readable only after the
+    /// in-process registration step.
+    fn validate_child_registration(
+        &self,
+        _thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, ChildRegistrationGuard> {
+        Box::pin(async { Ok(ChildRegistrationGuard::unlocked()) })
+    }
 
     /// Reads a rollout-backed thread by path when the store supports path-addressed lookups.
     ///

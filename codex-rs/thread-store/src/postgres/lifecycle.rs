@@ -153,6 +153,23 @@ pub(super) async fn delete_thread(
     store: &PostgresThreadStore,
     params: DeleteThreadParams,
 ) -> ThreadStoreResult<()> {
+    if let Some(state_db) = store.state_db.as_ref() {
+        let deleted = state_db
+            .delete_thread(params.thread_id)
+            .await
+            .map_err(|_| ThreadStoreError::Internal {
+                message: "thread store could not complete `delete thread`; verify persistence health, then retry"
+                    .to_string(),
+            })?;
+        if deleted != 1 {
+            return Err(ThreadStoreError::ThreadNotFound {
+                thread_id: params.thread_id,
+            });
+        }
+        store.live_writers.lock().await.remove(&params.thread_id);
+        return Ok(());
+    }
+
     let mut transaction = store
         .pool
         .begin()
@@ -244,7 +261,17 @@ pub(super) async fn release_writer(
     .await
     .map_err(|error| database_error("shutdown thread history", error))?;
     if released.rows_affected() != 1 {
-        return Err(writer_conflict(thread_id));
+        let canonical_thread_exists: bool = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT EXISTS(SELECT 1 FROM {} WHERE thread_id = $1)",
+            store.tables.threads
+        )))
+        .bind(thread_id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .map_err(|error| database_error("shutdown thread history", error))?;
+        if canonical_thread_exists {
+            return Err(writer_conflict(thread_id));
+        }
     }
     store.live_writers.lock().await.remove(&thread_id);
     Ok(())
