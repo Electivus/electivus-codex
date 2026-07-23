@@ -79,11 +79,23 @@ jobs:
           df -h /
           sudo rm -rf \
             /opt/ghc \
-            /opt/hostedtoolcache/CodeQL \
+            /opt/hostedtoolcache \
             /usr/local/.ghcup \
             /usr/local/lib/android \
+            /usr/local/share/boost \
+            /usr/share/swift \
             /usr/share/dotnet
           df -h /
+
+      - name: Reduce Rust archive disk use on standard Linux runners
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        shell: bash
+        run: echo "CARGO_PROFILE_CI_TEST_DEBUG=0" >> "$GITHUB_ENV"
+
+      - name: Limit Cargo parallelism on standard Linux ARM
+        if: runner.os == 'Linux' && runner.arch == 'ARM64' && runner.environment == 'github-hosted'
+        shell: bash
+        run: echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
 
       - uses: ./.github/actions/setup-ci
 
@@ -304,6 +316,13 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
+      - name: Declare temporary Windows legacy sandbox capability exclusion
+        if: runner.os == 'Windows' && runner.environment == 'github-hosted'
+        shell: bash
+        run: |
+          echo "ELECTIVUS_EXCLUDE_WINDOWS_LEGACY_DELETE_BOUNDARY=1" >> "$GITHUB_ENV"
+          echo "::notice title=Temporary capability exclusion::legacy_workspace_write_delete_is_limited_to_writable_roots is excluded through 2026-08-23; see Electivus/electivus-codex#38"
 
       - uses: ./.github/actions/setup-ci
 

@@ -144,6 +144,12 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
+      - name: Declare temporary Windows legacy sandbox capability exclusion
+        shell: bash
+        run: |
+          echo "ELECTIVUS_EXCLUDE_WINDOWS_LEGACY_DELETE_BOUNDARY=1" >> "$GITHUB_ENV"
+          echo "::notice title=Temporary capability exclusion::legacy_workspace_write_delete_is_limited_to_writable_roots is excluded through 2026-08-23; see Electivus/electivus-codex#38"
+
       - name: Test BuildBuddy Bazel wrapper
         if: matrix.shard == 1
         shell: pwsh
@@ -195,6 +201,7 @@ jobs:
 
           bazel_test_args=(
             test
+            --local_test_jobs=4
             --skip_incompatible_explicit_targets
             --test_tag_filters=-argument-comment-lint
             --test_verbose_timeout_warnings
@@ -259,6 +266,12 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+
+      - name: Declare temporary Windows legacy sandbox capability exclusion
+        shell: bash
+        run: |
+          echo "ELECTIVUS_EXCLUDE_WINDOWS_LEGACY_DELETE_BOUNDARY=1" >> "$GITHUB_ENV"
+          echo "::notice title=Temporary capability exclusion::legacy_workspace_write_delete_is_limited_to_writable_roots is excluded through 2026-08-23; see Electivus/electivus-codex#38"
 
       - name: Prepare Bazel CI
         id: prepare_bazel

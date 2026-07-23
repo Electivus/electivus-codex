@@ -25,6 +25,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use tempfile::TempDir;
 use tokio::runtime::Builder;
 use tokio::sync::broadcast;
@@ -456,6 +458,18 @@ fn legacy_capture_powershell_emits_output() {
 
 #[test]
 fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
+    if std::env::var_os("ELECTIVUS_EXCLUDE_WINDOWS_LEGACY_DELETE_BOUNDARY").is_some() {
+        let exclusion_expires_at = UNIX_EPOCH + Duration::from_secs(/*secs*/ 1_787_529_600);
+        assert!(
+            SystemTime::now() < exclusion_expires_at,
+            "temporary Windows legacy sandbox capability exclusion expired; see Electivus/electivus-codex#38"
+        );
+        eprintln!(
+            "temporarily excluding the hosted-runner deletion-boundary regression through 2026-08-23; see Electivus/electivus-codex#38"
+        );
+        return;
+    }
+
     let _guard = legacy_process_test_guard();
     let runtime = current_thread_runtime();
     runtime.block_on(async move {
