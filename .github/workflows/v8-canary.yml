@@ -1,12 +1,11 @@
 name: v8-canary
 
-# Do not use trigger-level path filters here. This workflow is also called by
-# postmerge-ci, and GitHub cannot share a path filter between pull_request and
-# workflow_call. v8_canary_changes.py is the single source of truth instead;
-# unrelated events run only the cheap metadata job below.
+# Keep the canary in extended validation: postmerge-ci calls it after pushes to
+# main, and workflow_dispatch remains available for certification and retries.
+# v8_canary_changes.py is the single source of truth for called workflows;
+# manual dispatches force the complete matrix.
 on:
   workflow_call:
-  pull_request: {}
   workflow_dispatch:
 
 concurrency:
@@ -16,6 +15,7 @@ concurrency:
 jobs:
   metadata:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       # A stale PR head can contain the old detector, which does not emit this
       # output. Missing must mean "run" so older branches cannot silently skip
@@ -76,6 +76,7 @@ jobs:
     # Metadata always runs; only relevant changes pay for the large matrix.
     if: ${{ needs.metadata.outputs.canary_required == 'true' }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     permissions:
       contents: read
       actions: read
@@ -114,28 +115,28 @@ jobs:
             target: aarch64-unknown-linux-gnu
             v8_cpu: arm64
             variant: ptrcomp-sandbox
-          - runner: macos-15-xlarge
+          - runner: macos-15-intel
             bazel_config: ci-macos
             platform: macos_amd64
             sandbox: false
             target: x86_64-apple-darwin
             v8_cpu: x64
             variant: release
-          - runner: macos-15-xlarge
+          - runner: macos-15-intel
             bazel_config: ci-macos
             platform: macos_amd64
             sandbox: true
             target: x86_64-apple-darwin
             v8_cpu: x64
             variant: ptrcomp-sandbox
-          - runner: macos-15-xlarge
+          - runner: macos-15
             bazel_config: ci-macos
             platform: macos_arm64
             sandbox: false
             target: aarch64-apple-darwin
             v8_cpu: arm64
             variant: release
-          - runner: macos-15-xlarge
+          - runner: macos-15
             bazel_config: ci-macos
             platform: macos_arm64
             sandbox: true
@@ -306,6 +307,7 @@ jobs:
     needs: metadata
     if: ${{ needs.metadata.outputs.windows_source_required == 'true' }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
@@ -314,7 +316,7 @@ jobs:
         include:
           - runner: windows-2025
             target: x86_64-pc-windows-msvc
-          - runner: windows-2025
+          - runner: windows-11-arm
             target: aarch64-pc-windows-msvc
 
     steps:
@@ -388,7 +390,7 @@ jobs:
           . $basename/sccache --start-server
           echo "$(pwd)/$basename" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Install Chromium clang for ARM64 MSVC cross build
+      - name: Install Chromium clang for ARM64 MSVC build
         if: matrix.target == 'aarch64-pc-windows-msvc'
         shell: bash
         working-directory: upstream-rusty-v8
