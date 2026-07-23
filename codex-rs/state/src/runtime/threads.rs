@@ -5,6 +5,7 @@ use crate::SortDirection;
 use codex_protocol::protocol::SessionSource;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
+mod postgres;
 
 /// Runtime metadata needed before a persisted thread is resumed or forked.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
@@ -15,20 +16,6 @@ pub struct ThreadResumeMetadata {
     pub model: Option<String>,
 }
 
-fn decode_postgres_thread_ids(
-    rows: Vec<sqlx::postgres::PgRow>,
-    schema: &str,
-    operation: &'static str,
-) -> anyhow::Result<Vec<ThreadId>> {
-    rows.into_iter()
-        .map(|row| {
-            let thread_id: String = row
-                .try_get("child_thread_id")
-                .map_err(|error| crate::postgres::map_sql_error(schema, operation, error))?;
-            ThreadId::try_from(thread_id).map_err(Into::into)
-        })
-        .collect()
-}
 
 impl StateRuntime {
     /// Read the canonical working directory and model for a persisted thread.
@@ -37,20 +24,7 @@ impl StateRuntime {
         id: ThreadId,
     ) -> anyhow::Result<Option<ThreadResumeMetadata>> {
         if let Some((pool, schema)) = self.postgres_connection() {
-            let threads = crate::postgres::qualified_table(&schema, "threads");
-            let projection: Option<Value> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                "SELECT projection FROM {threads} WHERE thread_id = $1"
-            )))
-            .bind(id.to_string())
-            .fetch_optional(&pool)
-            .await
-            .map_err(|error| {
-                crate::postgres::map_sql_error(&schema, "read thread resume metadata", error)
-            })?;
-            return projection
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(Into::into);
+            return postgres::get_thread_resume_metadata(&pool, &schema, id).await;
         }
 
         Ok(self
@@ -122,20 +96,7 @@ WHERE threads.id = ?
             return Ok(false);
         }
         if let Some((pool, schema)) = self.postgres_connection() {
-            let threads = crate::postgres::qualified_table(&schema, "threads");
-            let result = sqlx::query(sqlx::AssertSqlSafe(format!(
-                "UPDATE {threads} \
-                 SET projection = jsonb_set(projection, '{{preview}}', to_jsonb($1::text), TRUE) \
-                 WHERE thread_id = $2 AND COALESCE(projection ->> 'preview', '') = ''"
-            )))
-            .bind(preview)
-            .bind(thread_id.to_string())
-            .execute(&pool)
-            .await
-            .map_err(|error| {
-                crate::postgres::map_sql_error(&schema, "set empty thread preview", error)
-            })?;
-            return Ok(result.rows_affected() > 0);
+            return postgres::set_thread_preview_if_empty(&pool, &schema, thread_id, preview).await;
         }
 
         let result = sqlx::query(
@@ -160,49 +121,14 @@ WHERE id = ? AND preview = ''
         status: crate::DirectionalThreadSpawnEdgeStatus,
     ) -> anyhow::Result<()> {
         if let Some((pool, schema)) = self.postgres_connection() {
-            let table = crate::postgres::qualified_table(&schema, "thread_spawn_edges");
-            let threads = crate::postgres::qualified_table(&schema, "threads");
-            let mut thread_ids = vec![parent_thread_id.to_string(), child_thread_id.to_string()];
-            thread_ids.sort_unstable();
-            thread_ids.dedup();
-            let mut transaction = pool.begin().await.map_err(|error| {
-                crate::postgres::map_sql_error(&schema, "begin thread spawn edge upsert", error)
-            })?;
-            let locked_thread_ids = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
-                "SELECT thread_id FROM {threads} WHERE thread_id = ANY($1) \
-                 ORDER BY thread_id FOR KEY SHARE"
-            )))
-            .bind(&thread_ids)
-            .fetch_all(&mut *transaction)
-            .await
-            .map_err(|error| {
-                crate::postgres::map_sql_error(
-                    &schema,
-                    "lock canonical threads for spawn edge upsert",
-                    error,
-                )
-            })?;
-            anyhow::ensure!(
-                locked_thread_ids.len() == thread_ids.len(),
-                "Runtime State could not complete the `upsert thread spawn edge` operation; verify canonical thread state, then retry"
-            );
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "INSERT INTO {table} (parent_thread_id, child_thread_id, status) \
-                 VALUES ($1, $2, $3) ON CONFLICT(child_thread_id) DO UPDATE SET \
-                 parent_thread_id = excluded.parent_thread_id, status = excluded.status"
-            )))
-            .bind(parent_thread_id.to_string())
-            .bind(child_thread_id.to_string())
-            .bind(status.as_ref())
-            .execute(&mut *transaction)
-            .await
-            .map_err(|error| {
-                crate::postgres::map_sql_error(&schema, "upsert thread spawn edge", error)
-            })?;
-            transaction.commit().await.map_err(|error| {
-                crate::postgres::map_sql_error(&schema, "commit thread spawn edge upsert", error)
-            })?;
-            return Ok(());
+            return postgres::upsert_thread_spawn_edge(
+                &pool,
+                &schema,
+                parent_thread_id,
+                child_thread_id,
+                status,
+            )
+            .await;
         }
         sqlx::query(
             r#"
@@ -231,18 +157,8 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
         status: crate::DirectionalThreadSpawnEdgeStatus,
     ) -> anyhow::Result<()> {
         if let Some((pool, schema)) = self.postgres_connection() {
-            let table = crate::postgres::qualified_table(&schema, "thread_spawn_edges");
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "UPDATE {table} SET status = $1 WHERE child_thread_id = $2"
-            )))
-            .bind(status.as_ref())
-            .bind(child_thread_id.to_string())
-            .execute(&pool)
-            .await
-            .map_err(|error| {
-                crate::postgres::map_sql_error(&schema, "update thread spawn edge", error)
-            })?;
-            return Ok(());
+            return postgres::set_thread_spawn_edge_status(&pool, &schema, child_thread_id, status)
+                .await;
         }
         sqlx::query("UPDATE thread_spawn_edges SET status = ? WHERE child_thread_id = ?")
             .bind(status.as_ref())
@@ -356,32 +272,8 @@ LIMIT 2
         status: Option<crate::DirectionalThreadSpawnEdgeStatus>,
     ) -> anyhow::Result<Vec<ThreadId>> {
         if let Some((pool, schema)) = self.postgres_connection() {
-            let table = crate::postgres::qualified_table(&schema, "thread_spawn_edges");
-            let rows = match status {
-                Some(status) => {
-                    sqlx::query(sqlx::AssertSqlSafe(format!(
-                        "SELECT child_thread_id FROM {table} WHERE parent_thread_id = $1 \
-                         AND status = $2 ORDER BY child_thread_id"
-                    )))
-                    .bind(parent_thread_id.to_string())
-                    .bind(status.as_ref())
-                    .fetch_all(&pool)
-                    .await
-                }
-                None => {
-                    sqlx::query(sqlx::AssertSqlSafe(format!(
-                        "SELECT child_thread_id FROM {table} WHERE parent_thread_id = $1 \
-                         ORDER BY child_thread_id"
-                    )))
-                    .bind(parent_thread_id.to_string())
-                    .fetch_all(&pool)
-                    .await
-                }
-            }
-            .map_err(|error| {
-                crate::postgres::map_sql_error(&schema, "list thread spawn children", error)
-            })?;
-            return decode_postgres_thread_ids(rows, &schema, "list thread spawn children");
+            return postgres::list_thread_spawn_children(&pool, &schema, parent_thread_id, status)
+                .await;
         }
         let mut builder = QueryBuilder::<Sqlite>::new(
             "SELECT child_thread_id FROM thread_spawn_edges WHERE parent_thread_id = ",
@@ -406,39 +298,8 @@ LIMIT 2
         status: Option<crate::DirectionalThreadSpawnEdgeStatus>,
     ) -> anyhow::Result<Vec<ThreadId>> {
         if let Some((pool, schema)) = self.postgres_connection() {
-            let table = crate::postgres::qualified_table(&schema, "thread_spawn_edges");
-            let rows = match status {
-                Some(status) => {
-                    sqlx::query(sqlx::AssertSqlSafe(format!(
-                        "WITH RECURSIVE subtree(child_thread_id, depth) AS ( \
-                         SELECT child_thread_id, 1 FROM {table} WHERE parent_thread_id = $1 \
-                         AND status = $2 UNION ALL SELECT edge.child_thread_id, subtree.depth + 1 \
-                         FROM {table} AS edge JOIN subtree ON edge.parent_thread_id = \
-                         subtree.child_thread_id WHERE edge.status = $2) SELECT child_thread_id \
-                         FROM subtree ORDER BY depth ASC, child_thread_id ASC"
-                    )))
-                    .bind(root_thread_id.to_string())
-                    .bind(status.as_ref())
-                    .fetch_all(&pool)
-                    .await
-                }
-                None => {
-                    sqlx::query(sqlx::AssertSqlSafe(format!(
-                        "WITH RECURSIVE subtree(child_thread_id, depth) AS ( \
-                         SELECT child_thread_id, 1 FROM {table} WHERE parent_thread_id = $1 \
-                         UNION ALL SELECT edge.child_thread_id, subtree.depth + 1 FROM {table} \
-                         AS edge JOIN subtree ON edge.parent_thread_id = subtree.child_thread_id) \
-                         SELECT child_thread_id FROM subtree ORDER BY depth ASC, child_thread_id ASC"
-                    )))
-                    .bind(root_thread_id.to_string())
-                    .fetch_all(&pool)
-                    .await
-                }
-            }
-            .map_err(|error| {
-                crate::postgres::map_sql_error(&schema, "list thread spawn descendants", error)
-            })?;
-            return decode_postgres_thread_ids(rows, &schema, "list thread spawn descendants");
+            return postgres::list_thread_spawn_descendants(&pool, &schema, root_thread_id, status)
+                .await;
         }
         let mut builder = QueryBuilder::<Sqlite>::new(
             r#"
@@ -531,42 +392,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
         archived_only: Option<bool>,
     ) -> anyhow::Result<Option<PathBuf>> {
         if let Some((pool, schema)) = self.postgres_connection() {
-            let table = crate::postgres::qualified_table(&schema, "threads");
-            let mut builder = QueryBuilder::<sqlx::Postgres>::new(format!(
-                "SELECT projection ->> 'rollout_path' AS rollout_path FROM {table} \
-                 WHERE thread_id = "
-            ));
-            builder.push_bind(id.to_string());
-            match archived_only {
-                Some(true) => {
-                    builder.push(" AND projection ->> 'archived_at' IS NOT NULL");
-                }
-                Some(false) => {
-                    builder.push(" AND projection ->> 'archived_at' IS NULL");
-                }
-                None => {}
-            }
-            let row = builder
-                .build()
-                .fetch_optional(&pool)
-                .await
-                .map_err(|error| {
-                    crate::postgres::map_sql_error(&schema, "find thread rollout path", error)
-                })?;
-            return row
-                .map(|row| {
-                    row.try_get::<Option<String>, _>("rollout_path")
-                        .map(|path| path.map(PathBuf::from))
-                        .map_err(|error| {
-                            crate::postgres::map_sql_error(
-                                &schema,
-                                "decode thread rollout path",
-                                error,
-                            )
-                        })
-                })
-                .transpose()
-                .map(Option::flatten);
+            return postgres::find_rollout_path_by_id(&pool, &schema, id, archived_only).await;
         }
         let mut builder =
             QueryBuilder::<Sqlite>::new("SELECT rollout_path FROM threads WHERE id = ");
@@ -582,7 +408,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
         }
         let row = builder.build().fetch_optional(self.sqlite_pool()?).await?;
         Ok(row
-            .and_then(|r| r.try_get::<String, _>("rollout_path").ok())
+            .and_then(|row| row.try_get::<String, _>("rollout_path").ok())
             .map(PathBuf::from))
     }
 
@@ -1261,92 +1087,8 @@ ON CONFLICT(id) DO UPDATE SET
         root_thread_id: ThreadId,
     ) -> anyhow::Result<Vec<ThreadId>> {
         if let Some((pool, schema)) = self.postgres_connection() {
-            let logs = crate::postgres::qualified_table(&schema, "logs");
-            let threads = crate::postgres::qualified_table(&schema, "threads");
-            let spawn_edges = crate::postgres::qualified_table(&schema, "thread_spawn_edges");
-            let root_thread_id_string = root_thread_id.to_string();
-            let mut transaction = pool.begin().await.map_err(|error| {
-                crate::postgres::map_sql_error(&schema, "begin thread subtree deletion", error)
-            })?;
-            let thread_id_strings = loop {
-                let discovered = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
-                    "WITH RECURSIVE subtree(thread_id) AS (\
-                     SELECT $1::text UNION \
-                     SELECT edge.child_thread_id FROM {spawn_edges} AS edge \
-                     JOIN subtree ON edge.parent_thread_id = subtree.thread_id\
-                     ) SELECT thread_id FROM subtree \
-                     ORDER BY (thread_id <> $1), thread_id"
-                )))
-                .bind(&root_thread_id_string)
-                .fetch_all(&mut *transaction)
-                .await
-                .map_err(|error| {
-                    crate::postgres::map_sql_error(&schema, "discover thread spawn subtree", error)
-                })?;
-                let mut lock_order = discovered.clone();
-                lock_order.sort_unstable();
-                sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
-                    "SELECT thread_id FROM {threads} WHERE thread_id = ANY($1) \
-                     ORDER BY thread_id FOR UPDATE"
-                )))
-                .bind(&lock_order)
-                .fetch_all(&mut *transaction)
-                .await
-                .map_err(|error| {
-                    crate::postgres::map_sql_error(
-                        &schema,
-                        "lock thread spawn subtree for deletion",
-                        error,
-                    )
-                })?;
-                let stable = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
-                    "WITH RECURSIVE subtree(thread_id) AS (\
-                     SELECT $1::text UNION \
-                     SELECT edge.child_thread_id FROM {spawn_edges} AS edge \
-                     JOIN subtree ON edge.parent_thread_id = subtree.thread_id\
-                     ) SELECT thread_id FROM subtree \
-                     ORDER BY (thread_id <> $1), thread_id"
-                )))
-                .bind(&root_thread_id_string)
-                .fetch_all(&mut *transaction)
-                .await
-                .map_err(|error| {
-                    crate::postgres::map_sql_error(&schema, "verify thread spawn subtree", error)
-                })?;
-                if stable == discovered {
-                    break stable;
-                }
-            };
-            let deleted_thread_ids = thread_id_strings
-                .iter()
-                .map(|thread_id| ThreadId::try_from(thread_id.as_str()).map_err(Into::into))
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "DELETE FROM {logs} WHERE thread_id = ANY($1)"
-            )))
-            .bind(&thread_id_strings)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|error| {
-                crate::postgres::map_sql_error(&schema, "delete thread subtree logs", error)
-            })?;
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "DELETE FROM {threads} WHERE thread_id = ANY($1)"
-            )))
-            .bind(&thread_id_strings)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|error| {
-                crate::postgres::map_sql_error(
-                    &schema,
-                    "delete Runtime State thread subtree",
-                    error,
-                )
-            })?;
-            transaction.commit().await.map_err(|error| {
-                crate::postgres::map_sql_error(&schema, "commit thread subtree deletion", error)
-            })?;
-            return Ok(deleted_thread_ids);
+            return postgres::delete_thread_spawn_subtree_strict(&pool, &schema, root_thread_id)
+                .await;
         }
 
         let mut thread_ids = vec![root_thread_id];
@@ -1375,44 +1117,7 @@ ON CONFLICT(id) DO UPDATE SET
             .map(|(_, thread_id)| thread_id.clone())
             .collect::<Vec<_>>();
         if let Some((pool, schema)) = self.postgres_connection() {
-            let logs = crate::postgres::qualified_table(&schema, "logs");
-            let threads = crate::postgres::qualified_table(&schema, "threads");
-            let mut tx = pool.begin().await.map_err(|error| {
-                crate::postgres::map_sql_error(&schema, "begin thread deletion", error)
-            })?;
-            sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
-                "SELECT thread_id FROM {threads} WHERE thread_id = ANY($1) \
-                 ORDER BY thread_id FOR UPDATE"
-            )))
-            .bind(&thread_id_strings)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|error| {
-                crate::postgres::map_sql_error(&schema, "lock threads for deletion", error)
-            })?;
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "DELETE FROM {logs} WHERE thread_id = ANY($1)"
-            )))
-            .bind(&thread_id_strings)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| {
-                crate::postgres::map_sql_error(&schema, "delete thread logs", error)
-            })?;
-            let rows_affected = sqlx::query(sqlx::AssertSqlSafe(format!(
-                "DELETE FROM {threads} WHERE thread_id = ANY($1)"
-            )))
-            .bind(&thread_id_strings)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| {
-                crate::postgres::map_sql_error(&schema, "delete Runtime State threads", error)
-            })?
-            .rows_affected();
-            tx.commit().await.map_err(|error| {
-                crate::postgres::map_sql_error(&schema, "commit thread deletion", error)
-            })?;
-            return Ok(rows_affected);
+            return postgres::delete_threads_strict(&pool, &schema, &thread_id_strings).await;
         }
 
         for (thread_id, thread_id_string) in &thread_ids {
