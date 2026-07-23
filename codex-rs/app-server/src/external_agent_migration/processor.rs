@@ -364,7 +364,12 @@ impl ExternalAgentConfigRequestProcessor {
         let histories = state_db
             .external_agent_config_import_history_records()
             .await
-            .map_err(|err| internal_error(format!("failed to read import histories: {err}")))?;
+            .map_err(|err| {
+                tracing::warn!(error = %err, "failed to read external-agent import histories");
+                internal_error(
+                    "failed to read import histories; verify Runtime State health and retry",
+                )
+            })?;
         let data = histories
             .into_iter()
             .map(protocol_import_history)
@@ -506,14 +511,7 @@ async fn send_completed_import_notification(
         item_results,
         memory_import,
     } = completed_import;
-    let notification = completed_notification(import_id, &item_results);
-    log_completed_import_failures(&notification);
-    track_completed_import_notification(
-        analytics_events_client,
-        &analytics_source,
-        &provider_id,
-        &notification,
-    );
+    let mut notification = completed_notification(import_id, &item_results);
     if let Some(state_db) = state_db
         && let Err(err) =
             record_completed_import_notification(state_db, &notification, memory_import.as_ref())
@@ -524,12 +522,38 @@ async fn send_completed_import_notification(
             error = %err,
             "failed to record external agent config import completion"
         );
+        mark_import_persistence_failed(&mut notification);
     }
+    log_completed_import_failures(&notification);
+    track_completed_import_notification(
+        analytics_events_client,
+        &analytics_source,
+        &provider_id,
+        &notification,
+    );
     outgoing
         .send_server_notification(ServerNotification::ExternalAgentConfigImportCompleted(
             notification,
         ))
         .await;
+}
+
+fn mark_import_persistence_failed(
+    notification: &mut ExternalAgentConfigImportCompletedNotification,
+) {
+    for type_result in &mut notification.item_type_results {
+        type_result.successes.clear();
+        type_result.failures.push(ProtocolImportFailure {
+            item_type: type_result.item_type,
+            error_type: Some("runtime_state_unavailable".to_string()),
+            sub_error_type: None,
+            failure_stage: "persist_import_completion".to_string(),
+            message: "failed to persist import completion; verify Runtime State health and retry"
+                .to_string(),
+            cwd: None,
+            source: None,
+        });
+    }
 }
 
 fn log_completed_import_failures(notification: &ExternalAgentConfigImportCompletedNotification) {

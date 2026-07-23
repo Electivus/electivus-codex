@@ -7,6 +7,10 @@ use anyhow::Result;
 use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::to_response;
+use codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification;
+use codex_app_server_protocol::ExternalAgentConfigImportProgressNotification;
+use codex_app_server_protocol::ExternalAgentConfigImportResponse;
+use codex_app_server_protocol::ExternalAgentConfigMigrationItemType;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::MemoryResetResponse;
 use codex_app_server_protocol::RequestId;
@@ -228,6 +232,103 @@ async fn postgres_contract_app_server_rejects_missing_feature_gate_without_sqlit
         );
     }
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_external_agent_import_reports_persistence_failure() -> Result<()> {
+    let database_url = std::env::var(DATABASE_URL_ENV)?;
+    let schema = format!("codex_app_import_failure_{}", Uuid::new_v4().simple());
+    prepare_namespace(&schema, RuntimeReadiness::Ready).await?;
+    let model_server = create_mock_responses_server_repeating_assistant("unused").await;
+    let home = RuntimeHome::new(&schema, &model_server.uri())?;
+    let external_agent_home = home.path().join(concat!(".", "cla", "ude"));
+    std::fs::create_dir_all(&external_agent_home)?;
+    std::fs::write(
+        external_agent_home.join("settings.json"),
+        r#"{"env":{"IMPORTED":"true"}}"#,
+    )?;
+    let home_dir = home.path().display().to_string();
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .without_managed_config()
+        .with_env_overrides(&[
+            (DATABASE_URL_ENV, Some(database_url.as_str())),
+            ("HOME", Some(home_dir.as_str())),
+        ])
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, app_server.initialize()).await??;
+
+    let pool = sqlx::PgPool::connect(&database_url).await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "DROP TABLE \"{schema}\".external_agent_config_imports"
+    )))
+    .execute(&pool)
+    .await?;
+    pool.close().await;
+
+    let request_id = app_server
+        .send_raw_request(
+            "externalAgentConfig/import",
+            Some(json!({
+                "migrationItems": [{
+                    "itemType": "CONFIG",
+                    "description": "Import config",
+                    "cwd": null
+                }]
+            })),
+        )
+        .await?;
+    let response: ExternalAgentConfigImportResponse =
+        read_response(&mut app_server, request_id).await?;
+    let progress = timeout(
+        DEFAULT_READ_TIMEOUT,
+        app_server.read_stream_until_notification_message("externalAgentConfig/import/progress"),
+    )
+    .await??;
+    let progress: ExternalAgentConfigImportProgressNotification =
+        serde_json::from_value(progress.params.expect("progress params"))?;
+    assert_eq!(progress.import_id, response.import_id);
+    assert_eq!(progress.item_type_results.len(), 1);
+    assert_eq!(progress.item_type_results[0].successes.len(), 1);
+    assert_eq!(progress.item_type_results[0].failures, Vec::new());
+
+    let completed = timeout(
+        DEFAULT_READ_TIMEOUT,
+        app_server.read_stream_until_notification_message("externalAgentConfig/import/completed"),
+    )
+    .await??;
+    let completed: ExternalAgentConfigImportCompletedNotification =
+        serde_json::from_value(completed.params.expect("completed params"))?;
+    assert_eq!(completed.import_id, response.import_id);
+    assert_eq!(completed.item_type_results.len(), 1);
+    let result = &completed.item_type_results[0];
+    assert_eq!(
+        result.item_type,
+        ExternalAgentConfigMigrationItemType::Config
+    );
+    assert_eq!(result.successes, Vec::new());
+    assert_eq!(result.failures.len(), 1);
+    assert_eq!(
+        result.failures[0].error_type.as_deref(),
+        Some("runtime_state_unavailable")
+    );
+    assert_eq!(
+        result.failures[0].failure_stage,
+        "persist_import_completion"
+    );
+    assert_eq!(
+        result.failures[0].message,
+        "failed to persist import completion; verify Runtime State health and retry"
+    );
+    assert!(!result.failures[0].message.contains("postgres"));
+    assert!(!result.failures[0].message.contains(&schema));
+    assert!(!result.failures[0].message.contains(&database_url));
+
+    assert!(app_server.shutdown_gracefully().await?.success());
+    home.assert_sqlite_untouched()?;
+    cleanup_schema(&database_url, &schema).await
 }
 
 async fn start_app_server(home: &RuntimeHome, database_url: &str) -> Result<TestAppServer> {

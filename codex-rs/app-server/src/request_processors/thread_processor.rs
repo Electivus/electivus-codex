@@ -1639,10 +1639,10 @@ impl ThreadRequestProcessor {
         reset_memories(state_db.memories(), &self.config.codex_home)
             .await
             .map_err(|err| {
-                internal_error(format!(
-                    "failed to reset memory state under {}: {err}",
-                    self.config.codex_home.display()
-                ))
+                warn!(error = %err, "failed to reset Runtime State memory");
+                internal_error(
+                    "failed to reset memory state; verify Runtime State health and retry",
+                )
             })?;
 
         Ok(MemoryResetResponse {})
