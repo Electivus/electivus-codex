@@ -6,7 +6,62 @@ use codex_protocol::protocol::SessionSource;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 
+/// Runtime metadata needed before a persisted thread is resumed or forked.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+pub struct ThreadResumeMetadata {
+    /// Working directory captured for the thread.
+    pub cwd: PathBuf,
+    /// Latest observed model, if one has been persisted.
+    pub model: Option<String>,
+}
+
+fn decode_postgres_thread_ids(
+    rows: Vec<sqlx::postgres::PgRow>,
+    schema: &str,
+    operation: &'static str,
+) -> anyhow::Result<Vec<ThreadId>> {
+    rows.into_iter()
+        .map(|row| {
+            let thread_id: String = row
+                .try_get("child_thread_id")
+                .map_err(|error| crate::postgres::map_sql_error(schema, operation, error))?;
+            ThreadId::try_from(thread_id).map_err(Into::into)
+        })
+        .collect()
+}
+
 impl StateRuntime {
+    /// Read the canonical working directory and model for a persisted thread.
+    pub async fn get_thread_resume_metadata(
+        &self,
+        id: ThreadId,
+    ) -> anyhow::Result<Option<ThreadResumeMetadata>> {
+        if let Some((pool, schema)) = self.postgres_connection() {
+            let threads = crate::postgres::qualified_table(&schema, "threads");
+            let projection: Option<Value> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT projection FROM {threads} WHERE thread_id = $1"
+            )))
+            .bind(id.to_string())
+            .fetch_optional(&pool)
+            .await
+            .map_err(|error| {
+                crate::postgres::map_sql_error(&schema, "read thread resume metadata", error)
+            })?;
+            return projection
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(Into::into);
+        }
+
+        Ok(self
+            .get_thread(id)
+            .await?
+            .map(|metadata| ThreadResumeMetadata {
+                cwd: metadata.cwd,
+                model: metadata.model,
+            }))
+    }
+
     pub async fn get_thread(&self, id: ThreadId) -> anyhow::Result<Option<crate::ThreadMetadata>> {
         let row = sqlx::query(
             r#"
@@ -43,7 +98,7 @@ WHERE threads.id = ?
             "#,
         )
         .bind(id.to_string())
-        .fetch_optional(self.pool.as_ref())
+        .fetch_optional(self.sqlite_pool()?)
         .await?;
         row.map(|row| ThreadRow::try_from_row(&row).and_then(ThreadMetadata::try_from))
             .transpose()
@@ -52,7 +107,7 @@ WHERE threads.id = ?
     pub async fn get_thread_memory_mode(&self, id: ThreadId) -> anyhow::Result<Option<String>> {
         let row = sqlx::query("SELECT memory_mode FROM threads WHERE id = ?")
             .bind(id.to_string())
-            .fetch_optional(self.pool.as_ref())
+            .fetch_optional(self.sqlite_pool()?)
             .await?;
         Ok(row.and_then(|row| row.try_get("memory_mode").ok()))
     }
@@ -66,6 +121,23 @@ WHERE threads.id = ?
         if preview.is_empty() {
             return Ok(false);
         }
+        if let Some((pool, schema)) = self.postgres_connection() {
+            let threads = crate::postgres::qualified_table(&schema, "threads");
+            let result = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE {threads} \
+                 SET projection = jsonb_set(projection, '{{preview}}', to_jsonb($1::text), TRUE) \
+                 WHERE thread_id = $2 AND COALESCE(projection ->> 'preview', '') = ''"
+            )))
+            .bind(preview)
+            .bind(thread_id.to_string())
+            .execute(&pool)
+            .await
+            .map_err(|error| {
+                crate::postgres::map_sql_error(&schema, "set empty thread preview", error)
+            })?;
+            return Ok(result.rows_affected() > 0);
+        }
+
         let result = sqlx::query(
             r#"
 UPDATE threads
@@ -75,7 +147,7 @@ WHERE id = ? AND preview = ''
         )
         .bind(preview)
         .bind(thread_id.to_string())
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -87,6 +159,51 @@ WHERE id = ? AND preview = ''
         child_thread_id: ThreadId,
         status: crate::DirectionalThreadSpawnEdgeStatus,
     ) -> anyhow::Result<()> {
+        if let Some((pool, schema)) = self.postgres_connection() {
+            let table = crate::postgres::qualified_table(&schema, "thread_spawn_edges");
+            let threads = crate::postgres::qualified_table(&schema, "threads");
+            let mut thread_ids = vec![parent_thread_id.to_string(), child_thread_id.to_string()];
+            thread_ids.sort_unstable();
+            thread_ids.dedup();
+            let mut transaction = pool.begin().await.map_err(|error| {
+                crate::postgres::map_sql_error(&schema, "begin thread spawn edge upsert", error)
+            })?;
+            let locked_thread_ids = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
+                "SELECT thread_id FROM {threads} WHERE thread_id = ANY($1) \
+                 ORDER BY thread_id FOR KEY SHARE"
+            )))
+            .bind(&thread_ids)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(|error| {
+                crate::postgres::map_sql_error(
+                    &schema,
+                    "lock canonical threads for spawn edge upsert",
+                    error,
+                )
+            })?;
+            anyhow::ensure!(
+                locked_thread_ids.len() == thread_ids.len(),
+                "Runtime State could not complete the `upsert thread spawn edge` operation; verify canonical thread state, then retry"
+            );
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "INSERT INTO {table} (parent_thread_id, child_thread_id, status) \
+                 VALUES ($1, $2, $3) ON CONFLICT(child_thread_id) DO UPDATE SET \
+                 parent_thread_id = excluded.parent_thread_id, status = excluded.status"
+            )))
+            .bind(parent_thread_id.to_string())
+            .bind(child_thread_id.to_string())
+            .bind(status.as_ref())
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| {
+                crate::postgres::map_sql_error(&schema, "upsert thread spawn edge", error)
+            })?;
+            transaction.commit().await.map_err(|error| {
+                crate::postgres::map_sql_error(&schema, "commit thread spawn edge upsert", error)
+            })?;
+            return Ok(());
+        }
         sqlx::query(
             r#"
 INSERT INTO thread_spawn_edges (
@@ -102,7 +219,7 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
         .bind(parent_thread_id.to_string())
         .bind(child_thread_id.to_string())
         .bind(status.as_ref())
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         Ok(())
     }
@@ -113,10 +230,24 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
         child_thread_id: ThreadId,
         status: crate::DirectionalThreadSpawnEdgeStatus,
     ) -> anyhow::Result<()> {
+        if let Some((pool, schema)) = self.postgres_connection() {
+            let table = crate::postgres::qualified_table(&schema, "thread_spawn_edges");
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE {table} SET status = $1 WHERE child_thread_id = $2"
+            )))
+            .bind(status.as_ref())
+            .bind(child_thread_id.to_string())
+            .execute(&pool)
+            .await
+            .map_err(|error| {
+                crate::postgres::map_sql_error(&schema, "update thread spawn edge", error)
+            })?;
+            return Ok(());
+        }
         sqlx::query("UPDATE thread_spawn_edges SET status = ? WHERE child_thread_id = ?")
             .bind(status.as_ref())
             .bind(child_thread_id.to_string())
-            .execute(self.pool.as_ref())
+            .execute(self.sqlite_pool()?)
             .await?;
         Ok(())
     }
@@ -182,7 +313,7 @@ LIMIT 2
         )
         .bind(parent_thread_id.to_string())
         .bind(agent_path)
-        .fetch_all(self.pool.as_ref())
+        .fetch_all(self.sqlite_pool()?)
         .await?;
         one_thread_id_from_rows(rows, agent_path)
     }
@@ -214,7 +345,7 @@ LIMIT 2
         )
         .bind(root_thread_id.to_string())
         .bind(agent_path)
-        .fetch_all(self.pool.as_ref())
+        .fetch_all(self.sqlite_pool()?)
         .await?;
         one_thread_id_from_rows(rows, agent_path)
     }
@@ -224,6 +355,34 @@ LIMIT 2
         parent_thread_id: ThreadId,
         status: Option<crate::DirectionalThreadSpawnEdgeStatus>,
     ) -> anyhow::Result<Vec<ThreadId>> {
+        if let Some((pool, schema)) = self.postgres_connection() {
+            let table = crate::postgres::qualified_table(&schema, "thread_spawn_edges");
+            let rows = match status {
+                Some(status) => {
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "SELECT child_thread_id FROM {table} WHERE parent_thread_id = $1 \
+                         AND status = $2 ORDER BY child_thread_id"
+                    )))
+                    .bind(parent_thread_id.to_string())
+                    .bind(status.as_ref())
+                    .fetch_all(&pool)
+                    .await
+                }
+                None => {
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "SELECT child_thread_id FROM {table} WHERE parent_thread_id = $1 \
+                         ORDER BY child_thread_id"
+                    )))
+                    .bind(parent_thread_id.to_string())
+                    .fetch_all(&pool)
+                    .await
+                }
+            }
+            .map_err(|error| {
+                crate::postgres::map_sql_error(&schema, "list thread spawn children", error)
+            })?;
+            return decode_postgres_thread_ids(rows, &schema, "list thread spawn children");
+        }
         let mut builder = QueryBuilder::<Sqlite>::new(
             "SELECT child_thread_id FROM thread_spawn_edges WHERE parent_thread_id = ",
         );
@@ -233,7 +392,7 @@ LIMIT 2
         }
         builder.push(" ORDER BY child_thread_id");
 
-        let rows = builder.build().fetch_all(self.pool.as_ref()).await?;
+        let rows = builder.build().fetch_all(self.sqlite_pool()?).await?;
         rows.into_iter()
             .map(|row| {
                 ThreadId::try_from(row.try_get::<String, _>("child_thread_id")?).map_err(Into::into)
@@ -246,6 +405,41 @@ LIMIT 2
         root_thread_id: ThreadId,
         status: Option<crate::DirectionalThreadSpawnEdgeStatus>,
     ) -> anyhow::Result<Vec<ThreadId>> {
+        if let Some((pool, schema)) = self.postgres_connection() {
+            let table = crate::postgres::qualified_table(&schema, "thread_spawn_edges");
+            let rows = match status {
+                Some(status) => {
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "WITH RECURSIVE subtree(child_thread_id, depth) AS ( \
+                         SELECT child_thread_id, 1 FROM {table} WHERE parent_thread_id = $1 \
+                         AND status = $2 UNION ALL SELECT edge.child_thread_id, subtree.depth + 1 \
+                         FROM {table} AS edge JOIN subtree ON edge.parent_thread_id = \
+                         subtree.child_thread_id WHERE edge.status = $2) SELECT child_thread_id \
+                         FROM subtree ORDER BY depth ASC, child_thread_id ASC"
+                    )))
+                    .bind(root_thread_id.to_string())
+                    .bind(status.as_ref())
+                    .fetch_all(&pool)
+                    .await
+                }
+                None => {
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "WITH RECURSIVE subtree(child_thread_id, depth) AS ( \
+                         SELECT child_thread_id, 1 FROM {table} WHERE parent_thread_id = $1 \
+                         UNION ALL SELECT edge.child_thread_id, subtree.depth + 1 FROM {table} \
+                         AS edge JOIN subtree ON edge.parent_thread_id = subtree.child_thread_id) \
+                         SELECT child_thread_id FROM subtree ORDER BY depth ASC, child_thread_id ASC"
+                    )))
+                    .bind(root_thread_id.to_string())
+                    .fetch_all(&pool)
+                    .await
+                }
+            }
+            .map_err(|error| {
+                crate::postgres::map_sql_error(&schema, "list thread spawn descendants", error)
+            })?;
+            return decode_postgres_thread_ids(rows, &schema, "list thread spawn descendants");
+        }
         let mut builder = QueryBuilder::<Sqlite>::new(
             r#"
 WITH RECURSIVE subtree(child_thread_id, depth) AS (
@@ -287,7 +481,7 @@ ORDER BY depth ASC, child_thread_id ASC
             "#,
         );
 
-        let rows = builder.build().fetch_all(self.pool.as_ref()).await?;
+        let rows = builder.build().fetch_all(self.sqlite_pool()?).await?;
         rows.into_iter()
             .map(|row| {
                 ThreadId::try_from(row.try_get::<String, _>("child_thread_id")?).map_err(Into::into)
@@ -313,7 +507,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
         .bind(parent_thread_id.to_string())
         .bind(child_thread_id.to_string())
         .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         Ok(())
     }
@@ -336,6 +530,44 @@ ON CONFLICT(child_thread_id) DO NOTHING
         id: ThreadId,
         archived_only: Option<bool>,
     ) -> anyhow::Result<Option<PathBuf>> {
+        if let Some((pool, schema)) = self.postgres_connection() {
+            let table = crate::postgres::qualified_table(&schema, "threads");
+            let mut builder = QueryBuilder::<sqlx::Postgres>::new(format!(
+                "SELECT projection ->> 'rollout_path' AS rollout_path FROM {table} \
+                 WHERE thread_id = "
+            ));
+            builder.push_bind(id.to_string());
+            match archived_only {
+                Some(true) => {
+                    builder.push(" AND projection ->> 'archived_at' IS NOT NULL");
+                }
+                Some(false) => {
+                    builder.push(" AND projection ->> 'archived_at' IS NULL");
+                }
+                None => {}
+            }
+            let row = builder
+                .build()
+                .fetch_optional(&pool)
+                .await
+                .map_err(|error| {
+                    crate::postgres::map_sql_error(&schema, "find thread rollout path", error)
+                })?;
+            return row
+                .map(|row| {
+                    row.try_get::<Option<String>, _>("rollout_path")
+                        .map(|path| path.map(PathBuf::from))
+                        .map_err(|error| {
+                            crate::postgres::map_sql_error(
+                                &schema,
+                                "decode thread rollout path",
+                                error,
+                            )
+                        })
+                })
+                .transpose()
+                .map(Option::flatten);
+        }
         let mut builder =
             QueryBuilder::<Sqlite>::new("SELECT rollout_path FROM threads WHERE id = ");
         builder.push_bind(id.to_string());
@@ -348,7 +580,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
             }
             None => {}
         }
-        let row = builder.build().fetch_optional(self.pool.as_ref()).await?;
+        let row = builder.build().fetch_optional(self.sqlite_pool()?).await?;
         Ok(row
             .and_then(|r| r.try_get::<String, _>("rollout_path").ok())
             .map(PathBuf::from))
@@ -396,7 +628,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
             /*limit*/ 1,
         );
 
-        let row = builder.build().fetch_optional(self.pool.as_ref()).await?;
+        let row = builder.build().fetch_optional(self.sqlite_pool()?).await?;
         row.map(|row| ThreadRow::try_from_row(&row).and_then(crate::ThreadMetadata::try_from))
             .transpose()
     }
@@ -448,7 +680,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
         let mut builder = QueryBuilder::<Sqlite>::new("");
         push_list_threads_query(&mut builder, filters, relation_filter, limit);
 
-        let rows = builder.build().fetch_all(self.pool.as_ref()).await?;
+        let rows = builder.build().fetch_all(self.sqlite_pool()?).await?;
         let mut items = Vec::with_capacity(rows.len());
         let mut parent_thread_ids = std::collections::HashMap::new();
         for row in rows {
@@ -514,7 +746,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
             limit,
         );
 
-        let rows = builder.build().fetch_all(self.pool.as_ref()).await?;
+        let rows = builder.build().fetch_all(self.sqlite_pool()?).await?;
         rows.into_iter()
             .map(|row| {
                 let id: String = row.try_get("id")?;
@@ -617,7 +849,7 @@ ON CONFLICT(id) DO NOTHING
         .bind(metadata.git_branch.as_deref())
         .bind(metadata.git_origin_url.as_deref())
         .bind("enabled")
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         self.insert_thread_spawn_edge_from_source_if_absent(metadata.id, metadata.source.as_str())
             .await?;
@@ -632,7 +864,7 @@ ON CONFLICT(id) DO NOTHING
         let result = sqlx::query("UPDATE threads SET memory_mode = ? WHERE id = ?")
             .bind(memory_mode)
             .bind(thread_id.to_string())
-            .execute(self.pool.as_ref())
+            .execute(self.sqlite_pool()?)
             .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -645,7 +877,7 @@ ON CONFLICT(id) DO NOTHING
         let result = sqlx::query("UPDATE threads SET title = ? WHERE id = ?")
             .bind(title)
             .bind(thread_id.to_string())
-            .execute(self.pool.as_ref())
+            .execute(self.sqlite_pool()?)
             .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -658,7 +890,7 @@ ON CONFLICT(id) DO NOTHING
         let result = sqlx::query("UPDATE threads SET name = ? WHERE id = ?")
             .bind(name)
             .bind(thread_id.to_string())
-            .execute(self.pool.as_ref())
+            .execute(self.sqlite_pool()?)
             .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -674,7 +906,7 @@ ON CONFLICT(id) DO NOTHING
                 .bind(datetime_to_epoch_seconds(updated_at))
                 .bind(datetime_to_epoch_millis(updated_at))
                 .bind(thread_id.to_string())
-                .execute(self.pool.as_ref())
+                .execute(self.sqlite_pool()?)
                 .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -700,7 +932,7 @@ WHERE id = ?
         .bind(recency_at_millis)
         .bind(recency_at_millis)
         .bind(thread_id.to_string())
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -789,7 +1021,7 @@ WHERE id = ?
         .bind(git_origin_url.is_some())
         .bind(git_origin_url.flatten())
         .bind(thread_id.to_string())
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -915,7 +1147,7 @@ ON CONFLICT(id) DO UPDATE SET
         .bind(metadata.git_branch.as_deref())
         .bind(metadata.git_origin_url.as_deref())
         .bind(creation_memory_mode.unwrap_or("enabled"))
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         self.insert_thread_spawn_edge_from_source_if_absent(metadata.id, metadata.source.as_str())
             .await?;
@@ -1020,6 +1252,109 @@ ON CONFLICT(id) DO UPDATE SET
         self.delete_threads_strict(&[thread_id]).await
     }
 
+    /// Atomically discover and delete a thread plus its complete spawned subtree.
+    ///
+    /// PostgreSQL child creation shares canonical row locks with this operation, so a child that
+    /// commits while deletion is waiting is included before the transaction can commit.
+    pub async fn delete_thread_spawn_subtree_strict(
+        &self,
+        root_thread_id: ThreadId,
+    ) -> anyhow::Result<Vec<ThreadId>> {
+        if let Some((pool, schema)) = self.postgres_connection() {
+            let logs = crate::postgres::qualified_table(&schema, "logs");
+            let threads = crate::postgres::qualified_table(&schema, "threads");
+            let spawn_edges = crate::postgres::qualified_table(&schema, "thread_spawn_edges");
+            let root_thread_id_string = root_thread_id.to_string();
+            let mut transaction = pool.begin().await.map_err(|error| {
+                crate::postgres::map_sql_error(&schema, "begin thread subtree deletion", error)
+            })?;
+            let thread_id_strings = loop {
+                let discovered = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
+                    "WITH RECURSIVE subtree(thread_id) AS (\
+                     SELECT $1::text UNION \
+                     SELECT edge.child_thread_id FROM {spawn_edges} AS edge \
+                     JOIN subtree ON edge.parent_thread_id = subtree.thread_id\
+                     ) SELECT thread_id FROM subtree \
+                     ORDER BY (thread_id <> $1), thread_id"
+                )))
+                .bind(&root_thread_id_string)
+                .fetch_all(&mut *transaction)
+                .await
+                .map_err(|error| {
+                    crate::postgres::map_sql_error(&schema, "discover thread spawn subtree", error)
+                })?;
+                let mut lock_order = discovered.clone();
+                lock_order.sort_unstable();
+                sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
+                    "SELECT thread_id FROM {threads} WHERE thread_id = ANY($1) \
+                     ORDER BY thread_id FOR UPDATE"
+                )))
+                .bind(&lock_order)
+                .fetch_all(&mut *transaction)
+                .await
+                .map_err(|error| {
+                    crate::postgres::map_sql_error(
+                        &schema,
+                        "lock thread spawn subtree for deletion",
+                        error,
+                    )
+                })?;
+                let stable = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
+                    "WITH RECURSIVE subtree(thread_id) AS (\
+                     SELECT $1::text UNION \
+                     SELECT edge.child_thread_id FROM {spawn_edges} AS edge \
+                     JOIN subtree ON edge.parent_thread_id = subtree.thread_id\
+                     ) SELECT thread_id FROM subtree \
+                     ORDER BY (thread_id <> $1), thread_id"
+                )))
+                .bind(&root_thread_id_string)
+                .fetch_all(&mut *transaction)
+                .await
+                .map_err(|error| {
+                    crate::postgres::map_sql_error(&schema, "verify thread spawn subtree", error)
+                })?;
+                if stable == discovered {
+                    break stable;
+                }
+            };
+            let deleted_thread_ids = thread_id_strings
+                .iter()
+                .map(|thread_id| ThreadId::try_from(thread_id.as_str()).map_err(Into::into))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {logs} WHERE thread_id = ANY($1)"
+            )))
+            .bind(&thread_id_strings)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| {
+                crate::postgres::map_sql_error(&schema, "delete thread subtree logs", error)
+            })?;
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {threads} WHERE thread_id = ANY($1)"
+            )))
+            .bind(&thread_id_strings)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| {
+                crate::postgres::map_sql_error(
+                    &schema,
+                    "delete Runtime State thread subtree",
+                    error,
+                )
+            })?;
+            transaction.commit().await.map_err(|error| {
+                crate::postgres::map_sql_error(&schema, "commit thread subtree deletion", error)
+            })?;
+            return Ok(deleted_thread_ids);
+        }
+
+        let mut thread_ids = vec![root_thread_id];
+        thread_ids.extend(self.list_thread_spawn_descendants(root_thread_id).await?);
+        self.delete_threads_strict(&thread_ids).await?;
+        Ok(thread_ids)
+    }
+
     /// Delete a set of threads and all associated state.
     ///
     /// Spawn edges and thread rows are deleted last so a failed delete can be retried with enough
@@ -1029,17 +1364,64 @@ ON CONFLICT(id) DO UPDATE SET
             return Ok(0);
         }
 
+        let mut thread_ids = thread_ids
+            .iter()
+            .map(|thread_id| (*thread_id, thread_id.to_string()))
+            .collect::<Vec<_>>();
+        thread_ids.sort_unstable_by(|(_, left), (_, right)| left.cmp(right));
+        thread_ids.dedup_by(|(_, left), (_, right)| left == right);
         let thread_id_strings = thread_ids
             .iter()
-            .map(ThreadId::to_string)
+            .map(|(_, thread_id)| thread_id.clone())
             .collect::<Vec<_>>();
-        for (thread_id, thread_id_string) in thread_ids.iter().zip(&thread_id_strings) {
+        if let Some((pool, schema)) = self.postgres_connection() {
+            let logs = crate::postgres::qualified_table(&schema, "logs");
+            let threads = crate::postgres::qualified_table(&schema, "threads");
+            let mut tx = pool.begin().await.map_err(|error| {
+                crate::postgres::map_sql_error(&schema, "begin thread deletion", error)
+            })?;
+            sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
+                "SELECT thread_id FROM {threads} WHERE thread_id = ANY($1) \
+                 ORDER BY thread_id FOR UPDATE"
+            )))
+            .bind(&thread_id_strings)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|error| {
+                crate::postgres::map_sql_error(&schema, "lock threads for deletion", error)
+            })?;
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {logs} WHERE thread_id = ANY($1)"
+            )))
+            .bind(&thread_id_strings)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                crate::postgres::map_sql_error(&schema, "delete thread logs", error)
+            })?;
+            let rows_affected = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {threads} WHERE thread_id = ANY($1)"
+            )))
+            .bind(&thread_id_strings)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                crate::postgres::map_sql_error(&schema, "delete Runtime State threads", error)
+            })?
+            .rows_affected();
+            tx.commit().await.map_err(|error| {
+                crate::postgres::map_sql_error(&schema, "commit thread deletion", error)
+            })?;
+            return Ok(rows_affected);
+        }
+
+        for (thread_id, thread_id_string) in &thread_ids {
             self.logs.delete_logs_for_thread(thread_id_string).await?;
             self.memories.delete_thread_memory(*thread_id).await?;
             self.thread_goals.delete_thread_goal(*thread_id).await?;
         }
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.sqlite_pool()?.begin().await?;
         for thread_id_string in &thread_id_strings {
             sqlx::query("DELETE FROM thread_dynamic_tools WHERE thread_id = ?")
                 .bind(thread_id_string)
@@ -1395,7 +1777,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_thread_keeps_creation_memory_mode_for_existing_rows() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -1410,7 +1792,7 @@ mod tests {
         let memory_mode: String =
             sqlx::query_scalar("SELECT memory_mode FROM threads WHERE id = ?")
                 .bind(thread_id.to_string())
-                .fetch_one(runtime.pool.as_ref())
+                .fetch_one(runtime.sqlite_pool().expect("SQLite runtime"))
                 .await
                 .expect("memory mode should be readable");
         assert_eq!(memory_mode, "disabled");
@@ -1424,7 +1806,7 @@ mod tests {
         let memory_mode: String =
             sqlx::query_scalar("SELECT memory_mode FROM threads WHERE id = ?")
                 .bind(thread_id.to_string())
-                .fetch_one(runtime.pool.as_ref())
+                .fetch_one(runtime.sqlite_pool().expect("SQLite runtime"))
                 .await
                 .expect("memory mode should remain readable");
         assert_eq!(memory_mode, "disabled");
@@ -1433,7 +1815,7 @@ mod tests {
     #[tokio::test]
     async fn thread_metadata_round_trips_history_mode() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -1457,7 +1839,8 @@ mod tests {
     #[tokio::test]
     async fn delete_thread_cleans_associated_state() -> Result<()> {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string()).await?;
+        let runtime =
+            StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string()).await?;
         let thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000401")?;
         let child_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000402")?;
         runtime
@@ -1474,7 +1857,7 @@ mod tests {
         .bind("test_tool")
         .bind("test dynamic tool")
         .bind("{}")
-        .execute(runtime.pool.as_ref())
+        .execute(runtime.sqlite_pool().expect("SQLite runtime"))
         .await?;
         let rows = runtime
             .delete_threads_strict(&[thread_id, child_thread_id])
@@ -1485,7 +1868,7 @@ mod tests {
         let dynamic_tool_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM thread_dynamic_tools WHERE thread_id = ?")
                 .bind(thread_id.to_string())
-                .fetch_one(runtime.pool.as_ref())
+                .fetch_one(runtime.sqlite_pool().expect("SQLite runtime"))
                 .await?;
         assert_eq!(dynamic_tool_count, 0);
         assert_thread_cleanup_state(&runtime, thread_id).await?;
@@ -1501,9 +1884,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_threads_strict_deduplicates_cleanup_ids() -> Result<()> {
+        let codex_home = unique_temp_dir();
+        let runtime =
+            StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string()).await?;
+        let first_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000411")?;
+        let second_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000412")?;
+        for thread_id in [first_thread_id, second_thread_id] {
+            runtime
+                .upsert_thread(&test_thread_metadata(
+                    &codex_home,
+                    thread_id,
+                    codex_home.clone(),
+                ))
+                .await?;
+            seed_thread_cleanup_state(&runtime, thread_id, ThreadId::new()).await?;
+        }
+
+        assert_eq!(
+            runtime
+                .delete_threads_strict(&[first_thread_id, first_thread_id, second_thread_id])
+                .await?,
+            2
+        );
+        assert_thread_cleanup_state(&runtime, first_thread_id).await?;
+        assert_thread_cleanup_state(&runtime, second_thread_id).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn delete_thread_keeps_retry_graph_on_cleanup_failure() -> Result<()> {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string()).await?;
+        let runtime =
+            StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string()).await?;
         let thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000405")?;
         let child_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000406")?;
         runtime
@@ -1577,7 +1990,7 @@ mod tests {
         )
         .bind(thread_id.to_string())
         .bind(thread_id.to_string())
-        .fetch_one(runtime.pool.as_ref())
+        .fetch_one(runtime.sqlite_pool().expect("SQLite runtime"))
         .await?;
         assert_eq!(spawn_edge_count, 0);
         assert_eq!(
@@ -1597,7 +2010,7 @@ mod tests {
     #[tokio::test]
     async fn list_threads_updated_after_returns_oldest_changes_first() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let older_id =
@@ -1683,7 +2096,7 @@ mod tests {
     #[tokio::test]
     async fn list_threads_filters_by_cwd() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let first_id =
@@ -1791,7 +2204,7 @@ mod tests {
     #[tokio::test]
     async fn list_threads_uses_indexes_matching_cwd_filters() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home, "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home, "test-provider".to_string())
             .await
             .expect("state db should initialize");
 
@@ -1850,7 +2263,7 @@ mod tests {
                 );
                 let plan_details = builder
                     .build()
-                    .fetch_all(runtime.pool.as_ref())
+                    .fetch_all(runtime.sqlite_pool().expect("SQLite runtime"))
                     .await
                     .expect("query plan should load")
                     .into_iter()
@@ -1877,7 +2290,7 @@ mod tests {
     #[tokio::test]
     async fn list_threads_by_relation_filters_spawn_graph_with_keyset_pagination() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let parent_id = ThreadId::new();
@@ -1943,7 +2356,7 @@ mod tests {
         );
         let plan_details = builder
             .build()
-            .fetch_all(runtime.pool.as_ref())
+            .fetch_all(runtime.sqlite_pool().expect("SQLite runtime"))
             .await
             .expect("relationship query plan should load")
             .into_iter()
@@ -2071,7 +2484,7 @@ mod tests {
     #[tokio::test]
     async fn apply_rollout_items_restores_memory_mode_from_session_meta() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -2136,7 +2549,7 @@ mod tests {
     #[tokio::test]
     async fn apply_rollout_items_preserves_existing_git_branch_and_fills_missing_git_fields() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -2213,7 +2626,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_thread_preserves_existing_git_fields_atomically() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -2254,7 +2667,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_thread_preserves_existing_preview_when_incoming_preview_is_empty() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -2287,7 +2700,7 @@ mod tests {
     #[tokio::test]
     async fn set_thread_preview_if_empty_only_fills_blank_preview() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -2328,7 +2741,7 @@ mod tests {
     #[tokio::test]
     async fn update_thread_git_info_preserves_newer_non_git_metadata() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -2352,7 +2765,7 @@ mod tests {
         .bind("newer preview")
         .bind("newer preview")
         .bind(thread_id.to_string())
-        .execute(runtime.pool.as_ref())
+        .execute(runtime.sqlite_pool().expect("SQLite runtime"))
         .await
         .expect("concurrent metadata write should succeed");
 
@@ -2390,7 +2803,7 @@ mod tests {
     #[tokio::test]
     async fn insert_thread_if_absent_preserves_existing_metadata() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -2438,7 +2851,7 @@ mod tests {
     #[tokio::test]
     async fn update_thread_git_info_can_clear_fields() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -2472,7 +2885,7 @@ mod tests {
     #[tokio::test]
     async fn touch_thread_updated_at_updates_only_updated_at() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -2511,7 +2924,7 @@ mod tests {
     #[tokio::test]
     async fn touch_thread_recency_at_is_monotonic_and_survives_stale_upsert() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -2570,7 +2983,7 @@ mod tests {
     #[tokio::test]
     async fn list_threads_orders_and_pages_by_recency_at() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let first_id =
@@ -2593,7 +3006,7 @@ mod tests {
         sqlx::query("UPDATE threads SET recency_at = ?, recency_at_ms = ?")
             .bind(datetime_to_epoch_seconds(recency_at))
             .bind(datetime_to_epoch_millis(recency_at))
-            .execute(runtime.pool.as_ref())
+            .execute(runtime.sqlite_pool().expect("SQLite runtime"))
             .await
             .expect("recency timestamps should match");
 
@@ -2691,7 +3104,7 @@ mod tests {
     #[tokio::test]
     async fn thread_updated_at_uses_unique_epoch_millis_and_reads_legacy_seconds() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let first_id =
@@ -2748,7 +3161,7 @@ mod tests {
             "SELECT created_at, updated_at, created_at_ms, updated_at_ms FROM threads WHERE id = ?",
         )
         .bind(second_id.to_string())
-        .fetch_one(runtime.pool.as_ref())
+        .fetch_one(runtime.sqlite_pool().expect("SQLite runtime"))
         .await
         .expect("thread timestamp row should load");
         assert_eq!(
@@ -2782,7 +3195,7 @@ mod tests {
         sqlx::query("UPDATE threads SET updated_at = ? WHERE id = ?")
             .bind(1_700_001_112_i64)
             .bind(first_id.to_string())
-            .execute(runtime.pool.as_ref())
+            .execute(runtime.sqlite_pool().expect("SQLite runtime"))
             .await
             .expect("legacy timestamp write should succeed");
         let legacy = runtime
@@ -2799,7 +3212,7 @@ mod tests {
     #[tokio::test]
     async fn apply_rollout_items_uses_override_updated_at_when_provided() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -2859,7 +3272,7 @@ mod tests {
     #[tokio::test]
     async fn thread_spawn_edges_track_directional_status() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home, "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home, "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let parent_thread_id =
@@ -2955,7 +3368,7 @@ mod tests {
     #[tokio::test]
     async fn thread_spawn_children_without_status_filter_lists_all_statuses() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home, "test-provider".to_string())
+        let runtime = StateRuntime::init_sqlite(codex_home, "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let parent_thread_id =
@@ -2995,7 +3408,7 @@ INSERT INTO thread_spawn_edges (
         .bind(parent_thread_id.to_string())
         .bind(future_child_thread_id.to_string())
         .bind("future")
-        .execute(runtime.pool.as_ref())
+        .execute(runtime.sqlite_pool().expect("SQLite runtime"))
         .await
         .expect("future-status child edge insert should succeed");
 

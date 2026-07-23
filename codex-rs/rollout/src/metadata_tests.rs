@@ -265,9 +265,10 @@ async fn backfill_sessions_resumes_from_watermark_and_marks_complete() {
         /*git*/ None,
     );
 
-    let runtime = codex_state::StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-        .await
-        .expect("initialize runtime");
+    let runtime =
+        codex_state::StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize runtime");
     let first_watermark = backfill_watermark_for_path(codex_home.as_path(), first_path.as_path());
     let coordinator = runtime.backfill_coordinator();
     let lease = match coordinator
@@ -341,12 +342,14 @@ async fn backfill_runner_skips_busy_owner_then_takes_over_expired_lease() {
         thread_uuid,
         /*git*/ None,
     );
-    let first = codex_state::StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-        .await
-        .expect("initialize first runtime");
-    let second = codex_state::StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-        .await
-        .expect("initialize second runtime");
+    let first =
+        codex_state::StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize first runtime");
+    let second =
+        codex_state::StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize second runtime");
     let coordinator = first.backfill_coordinator();
     let active_lease = match coordinator
         .try_claim("active-worker", Duration::from_secs(60))
@@ -450,12 +453,14 @@ async fn backfill_runner_heartbeats_while_processing_a_long_batch() {
         );
         last_thread_id = Some(ThreadId::from_string(&thread_uuid.to_string()).expect("thread id"));
     }
-    let runtime = codex_state::StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-        .await
-        .expect("initialize runtime");
-    let second = codex_state::StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-        .await
-        .expect("initialize second runtime");
+    let runtime =
+        codex_state::StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize runtime");
+    let second =
+        codex_state::StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize second runtime");
 
     let (first_outcome, second_outcome) = tokio::join!(
         backfill_sessions_with_lease(
@@ -516,12 +521,14 @@ async fn cancelled_backfill_runner_releases_lease_for_retry() {
         );
         last_thread_id = Some(ThreadId::from_string(&thread_uuid.to_string()).expect("thread id"));
     }
-    let first = codex_state::StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-        .await
-        .expect("initialize first runtime");
-    let second = codex_state::StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-        .await
-        .expect("initialize second runtime");
+    let first =
+        codex_state::StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize first runtime");
+    let second =
+        codex_state::StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize second runtime");
     let first_runtime = first.clone();
     let first_home = codex_home.clone();
     let runner = tokio::spawn(async move {
@@ -615,9 +622,10 @@ async fn backfill_sessions_preserves_existing_git_branch_and_fills_missing_git_f
         }),
     );
 
-    let runtime = codex_state::StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-        .await
-        .expect("initialize runtime");
+    let runtime =
+        codex_state::StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize runtime");
     let thread_id = ThreadId::from_string(&thread_uuid.to_string()).expect("thread id");
     let mut existing = extract_metadata_from_rollout(&rollout_path, "test-provider")
         .await
@@ -661,9 +669,10 @@ async fn backfill_sessions_preserves_existing_paginated_memory_mode() {
         ThreadHistoryMode::Paginated,
     );
 
-    let runtime = codex_state::StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-        .await
-        .expect("initialize runtime");
+    let runtime =
+        codex_state::StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize runtime");
     let thread_id = ThreadId::from_string(&thread_uuid.to_string()).expect("thread id");
     let existing = extract_metadata_from_rollout(&rollout_path, "test-provider")
         .await
@@ -708,9 +717,10 @@ async fn backfill_sessions_normalizes_cwd_before_upsert() {
         ThreadHistoryMode::Legacy,
     );
 
-    let runtime = codex_state::StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-        .await
-        .expect("initialize runtime");
+    let runtime =
+        codex_state::StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize runtime");
 
     backfill_sessions(runtime.as_ref(), codex_home.as_path(), "test-provider").await;
 

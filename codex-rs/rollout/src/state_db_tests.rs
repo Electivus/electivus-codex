@@ -50,9 +50,11 @@ fn cursor_to_anchor_preserves_recency_tie_breaker() {
 #[tokio::test]
 async fn try_init_waits_for_concurrent_startup_backfill() -> anyhow::Result<()> {
     let home = TempDir::new().expect("temp dir");
-    let runtime =
-        codex_state::StateRuntime::init(home.path().to_path_buf(), "test-provider".to_string())
-            .await?;
+    let runtime = codex_state::StateRuntime::init_sqlite(
+        home.path().to_path_buf(),
+        "test-provider".to_string(),
+    )
+    .await?;
     let coordinator = runtime.backfill_coordinator();
     let lease = match coordinator
         .try_claim("concurrent-worker", Duration::from_secs(60))
@@ -88,9 +90,11 @@ async fn try_init_waits_for_concurrent_startup_backfill() -> anyhow::Result<()> 
 #[tokio::test]
 async fn try_init_times_out_waiting_for_stuck_startup_backfill() -> anyhow::Result<()> {
     let home = TempDir::new().expect("temp dir");
-    let runtime =
-        codex_state::StateRuntime::init(home.path().to_path_buf(), "test-provider".to_string())
-            .await?;
+    let runtime = codex_state::StateRuntime::init_sqlite(
+        home.path().to_path_buf(),
+        "test-provider".to_string(),
+    )
+    .await?;
     let _lease = match runtime
         .backfill_coordinator()
         .try_claim("stuck-worker", Duration::from_secs(60))
@@ -126,9 +130,11 @@ async fn reconcile_rollout_preserves_existing_explicit_title() -> anyhow::Result
     let thread_id = ThreadId::new();
     let rollout_path =
         write_rollout_with_user_message(home.path(), thread_id, "Hey", ThreadHistoryMode::Legacy)?;
-    let runtime =
-        codex_state::StateRuntime::init(home.path().to_path_buf(), "test-provider".to_string())
-            .await?;
+    let runtime = codex_state::StateRuntime::init_sqlite(
+        home.path().to_path_buf(),
+        "test-provider".to_string(),
+    )
+    .await?;
 
     let mut metadata =
         metadata::extract_metadata_from_rollout(rollout_path.as_path(), "test-provider")
@@ -169,9 +175,11 @@ async fn reconcile_rollout_preserves_existing_paginated_memory_mode() -> anyhow:
         "Hey",
         ThreadHistoryMode::Paginated,
     )?;
-    let runtime =
-        codex_state::StateRuntime::init(home.path().to_path_buf(), "test-provider".to_string())
-            .await?;
+    let runtime = codex_state::StateRuntime::init_sqlite(
+        home.path().to_path_buf(),
+        "test-provider".to_string(),
+    )
+    .await?;
 
     reconcile_rollout(
         Some(runtime.as_ref()),

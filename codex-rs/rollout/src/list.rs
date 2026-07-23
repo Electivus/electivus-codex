@@ -1337,6 +1337,11 @@ async fn find_thread_path_by_id_str_in_subdir(
         return Ok(None);
     }
 
+    // PostgreSQL owns Canonical Thread History and never consults replica-local rollout files.
+    if state_db_ctx.is_some_and(codex_state::StateRuntime::is_postgresql) {
+        return Ok(None);
+    }
+
     // Prefer DB lookup, then fall back to rollout file search.
     // TODO(jif): sqlite migration phase 1
     let archived_only = match subdir {
