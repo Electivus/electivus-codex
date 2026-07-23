@@ -9,7 +9,6 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
-use codex_state::PostgresRuntimeStatePool;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
@@ -36,7 +35,7 @@ async fn local_metadata_contract_matches_public_thread_store_semantics()
         sqlite_home: home.path().to_path_buf(),
         default_model_provider_id: "metadata-contract-provider".to_string(),
     };
-    let runtime = codex_state::StateRuntime::init(
+    let runtime = codex_state::StateRuntime::init_sqlite(
         home.path().to_path_buf(),
         config.default_model_provider_id.clone(),
     )
@@ -52,12 +51,12 @@ async fn local_metadata_contract_matches_public_thread_store_semantics()
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_metadata_contract_matches_public_thread_store_semantics()
+async fn postgres_contract_metadata_matches_public_thread_store_semantics()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("shared_metadata")?;
     fixture.migrate().await?;
-    let pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let store = PostgresThreadStore::new(&pool);
+    let pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f111")?;
 
     assert_metadata_contract(&store, thread_id, Path::new("/metadata-contract")).await?;

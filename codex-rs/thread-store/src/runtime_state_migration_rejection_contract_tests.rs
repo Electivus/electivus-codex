@@ -1,3 +1,4 @@
+use crate::PostgresThreadProjectionMaterializer;
 use crate::PostgresThreadStore;
 use crate::ThreadStore;
 use crate::postgres_contract_tests::PostgresThreadStoreFixture;
@@ -6,7 +7,6 @@ use crate::runtime_state_migration_contract_tests::LineageFixture;
 use crate::runtime_state_migration_contract_tests::MigrationSource;
 use crate::runtime_state_migration_contract_tests::migration_source;
 use codex_protocol::ThreadId;
-use codex_state::PostgresRuntimeStatePool;
 use codex_state::RuntimeStateMigrationInventory;
 use codex_state::RuntimeStateMigrationProgress;
 use codex_state::preflight_runtime_state_migration;
@@ -202,8 +202,8 @@ async fn postgres_contract_runtime_state_thread_import_rejects_other_sources_non
     let inventory =
         preflight_runtime_state_migration(first_source.config.clone(), nonempty.config.clone())
             .await?;
-    let runtime_pool = PostgresRuntimeStatePool::connect(nonempty.config.clone()).await?;
-    PostgresThreadStore::new(&runtime_pool)
+    let runtime_pool = nonempty.connect_pool().await?;
+    PostgresThreadStore::new(runtime_pool.clone(), nonempty.schema.clone())
         .create_thread(create_thread_params(ThreadId::from_string(
             "019c84d0-5555-7777-8555-555555555555",
         )?))
@@ -240,16 +240,13 @@ async fn import_threads(
     fixture: &PostgresThreadStoreFixture,
     inventory: &RuntimeStateMigrationInventory,
 ) -> Result<RuntimeStateMigrationProgress, Box<dyn std::error::Error>> {
-    let runtime_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let store = PostgresThreadStore::new(&runtime_pool);
-    let result = codex_state::import_runtime_state_threads(
+    let projection_materializer = PostgresThreadProjectionMaterializer::new(&fixture.config);
+    Ok(codex_state::import_runtime_state_threads(
         &source.config,
         &fixture.config,
         inventory,
         &codex_rollout::CanonicalRolloutHistoryReader,
-        &store,
+        &projection_materializer,
     )
-    .await;
-    runtime_pool.close().await;
-    Ok(result?)
+    .await?)
 }

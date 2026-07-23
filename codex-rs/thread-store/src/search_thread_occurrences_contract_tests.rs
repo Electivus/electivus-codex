@@ -10,7 +10,6 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::user_input::UserInput;
-use codex_state::PostgresRuntimeStatePool;
 use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
 use tempfile::TempDir;
@@ -45,7 +44,7 @@ async fn local_occurrence_search_matches_public_store_contract() -> TestResult {
         sqlite_home: home.path().to_path_buf(),
         default_model_provider_id: "occurrence-search-contract".to_string(),
     };
-    let runtime = codex_state::StateRuntime::init(
+    let runtime = codex_state::StateRuntime::init_sqlite(
         home.path().to_path_buf(),
         config.default_model_provider_id.clone(),
     )
@@ -75,13 +74,13 @@ async fn local_occurrence_search_matches_public_store_contract() -> TestResult {
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_occurrence_search_matches_contract_across_replicas_and_repairs() -> TestResult {
+async fn postgres_contract_occurrence_search_matches_across_replicas_and_repairs() -> TestResult {
     let fixture = PostgresThreadStoreFixture::new("occurrence_search")?;
     fixture.migrate().await?;
-    let writer_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let reader_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let writer = PostgresThreadStore::new(&writer_pool);
-    let reader = PostgresThreadStore::new(&reader_pool);
+    let writer_pool = fixture.connect_pool().await?;
+    let reader_pool = fixture.connect_pool().await?;
+    let writer = PostgresThreadStore::new(writer_pool.clone(), fixture.schema.clone());
+    let reader = PostgresThreadStore::new(reader_pool.clone(), fixture.schema.clone());
     let cwd = Path::new("/occurrence-search");
     assert_contract(&writer, cwd).await?;
 

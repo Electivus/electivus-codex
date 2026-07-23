@@ -9,7 +9,6 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
-use codex_state::PostgresRuntimeStatePool;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
@@ -39,7 +38,7 @@ async fn local_list_threads_matches_public_store_contract() -> Result<(), Box<dy
         sqlite_home: home.path().to_path_buf(),
         default_model_provider_id: "list-contract-provider".to_string(),
     };
-    let runtime = codex_state::StateRuntime::init(
+    let runtime = codex_state::StateRuntime::init_sqlite(
         home.path().to_path_buf(),
         config.default_model_provider_id.clone(),
     )
@@ -55,14 +54,14 @@ async fn local_list_threads_matches_public_store_contract() -> Result<(), Box<dy
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_list_threads_matches_public_store_contract()
+async fn postgres_contract_list_threads_matches_public_store_contract()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("list_threads_order")?;
     fixture.migrate().await?;
-    let pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let reader_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let store = PostgresThreadStore::new(&pool);
-    let reader = PostgresThreadStore::new(&reader_pool);
+    let pool = fixture.connect_pool().await?;
+    let reader_pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
+    let reader = PostgresThreadStore::new(reader_pool.clone(), fixture.schema.clone());
 
     assert_list_threads_contract(&store, Path::new("/list-contract")).await?;
     let parent_thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f301")?;
@@ -103,14 +102,14 @@ async fn postgres_list_threads_matches_public_store_contract()
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_list_threads_keeps_tied_cursor_stable_across_replicas()
+async fn postgres_contract_list_threads_keeps_tied_cursor_stable_across_replicas()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("list_threads_replicas")?;
     fixture.migrate().await?;
-    let writer_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let reader_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let writer = PostgresThreadStore::new(&writer_pool);
-    let reader = PostgresThreadStore::new(&reader_pool);
+    let writer_pool = fixture.connect_pool().await?;
+    let reader_pool = fixture.connect_pool().await?;
+    let writer = PostgresThreadStore::new(writer_pool.clone(), fixture.schema.clone());
+    let reader = PostgresThreadStore::new(reader_pool.clone(), fixture.schema.clone());
     let lower_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f311")?;
     let higher_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f312")?;
     for thread_id in [lower_id, higher_id] {

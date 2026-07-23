@@ -153,7 +153,7 @@ mod tests {
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
         let archived_path = write_archived_session_file(home.path(), "2025-01-03T13-00-00", uuid)
             .expect("archived session file");
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             home.path().to_path_buf(),
             config.default_model_provider_id.clone(),
         )

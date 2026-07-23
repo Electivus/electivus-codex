@@ -26,7 +26,6 @@ use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::user_input::UserInput;
-use codex_state::PostgresRuntimeStatePool;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
@@ -67,12 +66,12 @@ async fn local_latest_model_context_matches_public_store_contract()
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_latest_model_context_matches_public_store_contract()
+async fn postgres_contract_latest_model_context_matches_public_store_contract()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("model_context_shared")?;
     fixture.migrate().await?;
-    let pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let store = PostgresThreadStore::new(&pool);
+    let pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
     let thread_ids = [
         ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f032")?,
         ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f035")?,
@@ -88,14 +87,14 @@ async fn postgres_latest_model_context_matches_public_store_contract()
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_resume_and_context_are_database_native_across_replicas()
+async fn postgres_contract_resume_and_context_are_database_native_across_replicas()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("model_context_replica")?;
     fixture.migrate().await?;
-    let writer_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let replica_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let writer = PostgresThreadStore::new(&writer_pool);
-    let replica = PostgresThreadStore::new(&replica_pool);
+    let writer_pool = fixture.connect_pool().await?;
+    let replica_pool = fixture.connect_pool().await?;
+    let writer = PostgresThreadStore::new(writer_pool.clone(), fixture.schema.clone());
+    let replica = PostgresThreadStore::new(replica_pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f037")?;
     let cwd = Path::new("/database-native-context");
     writer

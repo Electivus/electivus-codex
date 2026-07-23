@@ -493,7 +493,7 @@ mod tests {
         // metadata updates must use LiveThread or call update_thread_metadata explicitly.
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -528,7 +528,7 @@ mod tests {
     async fn live_thread_observes_appended_items_into_sqlite_metadata() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -563,7 +563,7 @@ mod tests {
     async fn live_thread_does_not_derive_metadata_from_inherited_items() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -631,7 +631,7 @@ mod tests {
     async fn live_thread_output_advances_updated_at_but_not_recency_at() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -720,7 +720,7 @@ mod tests {
     async fn live_thread_shutdown_does_not_materialize_empty_thread_metadata() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -756,7 +756,7 @@ mod tests {
     async fn live_thread_memory_mode_update_before_rollout_materializes_keeps_history_mode() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -796,7 +796,7 @@ mod tests {
     async fn live_thread_shutdown_with_buffered_items_materializes_before_metadata_read() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -840,7 +840,7 @@ mod tests {
     async fn live_thread_resume_loads_history_before_observing_metadata() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -895,7 +895,7 @@ mod tests {
         let home = TempDir::new().expect("temp dir");
         let external_home = TempDir::new().expect("external temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )

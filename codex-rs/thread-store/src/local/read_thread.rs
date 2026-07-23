@@ -613,7 +613,7 @@ mod tests {
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
         let active_path =
             write_session_file(home.path(), "2025-01-03T12-00-00", uuid).expect("session file");
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -772,7 +772,7 @@ mod tests {
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
         let rollout_path =
             write_session_file(home.path(), "2025-01-03T12-00-00", uuid).expect("session file");
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -817,7 +817,7 @@ mod tests {
             ThreadHistoryMode::Paginated,
         )
         .expect("session file");
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -860,7 +860,7 @@ mod tests {
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
         let rollout_path =
             write_session_file(home.path(), "2025-01-03T12-00-00", uuid).expect("session file");
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -901,7 +901,7 @@ mod tests {
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
         let rollout_path =
             write_session_file(home.path(), "2025-01-03T12-00-00", uuid).expect("session file");
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -935,7 +935,7 @@ mod tests {
     async fn read_thread_preserves_rollout_cwd_when_sqlite_metadata_exists() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -1071,7 +1071,7 @@ mod tests {
         });
         writeln!(file, "{meta}").expect("write session meta");
 
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -1125,7 +1125,7 @@ mod tests {
         let rollout_path =
             write_session_file(home.path(), "2025-01-03T12-00-00", uuid).expect("session file");
         let stale_path = external.path().join("missing-rollout.jsonl");
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -1176,7 +1176,7 @@ mod tests {
         let other_uuid = Uuid::from_u128(222);
         let stale_path = write_session_file(external.path(), "2025-01-04T12-00-00", other_uuid)
             .expect("other session file");
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -1275,7 +1275,7 @@ mod tests {
         let rollout_path = external
             .path()
             .join(format!("rollout-2025-01-03T12-00-00-{uuid}.jsonl"));
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -1337,7 +1337,7 @@ mod tests {
         let rollout_path = external
             .path()
             .join(format!("rollout-2025-01-03T12-00-00-{uuid}.jsonl"));
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -1392,7 +1392,7 @@ mod tests {
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
         let archived_path = write_archived_session_file(home.path(), "2025-01-03T12-00-00", uuid)
             .expect("archived session file");
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )

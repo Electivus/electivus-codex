@@ -259,7 +259,7 @@ mod tests {
         let rollout_path = home.path().join("rollout-title-search.jsonl");
         fs::write(&rollout_path, "").expect("placeholder rollout file");
 
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             home.path().to_path_buf(),
             config.default_model_provider_id.clone(),
         )
@@ -327,7 +327,7 @@ mod tests {
         let rollout_path = home.path().join("rollout-paginated-name-search.jsonl");
         fs::write(&rollout_path, "").expect("placeholder rollout file");
 
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             home.path().to_path_buf(),
             config.default_model_provider_id.clone(),
         )

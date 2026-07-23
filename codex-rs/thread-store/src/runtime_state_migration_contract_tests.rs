@@ -4,6 +4,7 @@ use crate::ListTurnsParams;
 use crate::LoadThreadHistoryParams;
 use crate::LocalThreadStore;
 use crate::LocalThreadStoreConfig;
+use crate::PostgresThreadProjectionMaterializer;
 use crate::PostgresThreadStore;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
@@ -41,9 +42,7 @@ use codex_protocol::user_input::UserInput;
 use codex_state::BackfillClaimOutcome;
 use codex_state::BackfillLeaseUpdate;
 use codex_state::BackfillState;
-use codex_state::BackfillStatus;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
-use codex_state::PostgresRuntimeStatePool;
 use codex_state::RuntimeStateMigrationPhase;
 use codex_state::SqliteConfig;
 use codex_state::ThreadMetadataBuilder;
@@ -96,16 +95,17 @@ async fn postgres_contract_runtime_state_thread_import_is_visible_to_another_poo
     let source = migration_source(LineageFixture::Valid).await?;
     let fixture = PostgresThreadStoreFixture::new("runtime_migration")?;
     fixture.migrate().await?;
-    let replica_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let replica = PostgresThreadStore::new(&replica_pool);
+    let replica_pool = fixture.connect_pool().await?;
+    let replica = PostgresThreadStore::new(replica_pool.clone(), fixture.schema.clone());
     let inventory =
         preflight_runtime_state_migration(source.config.clone(), fixture.config.clone()).await?;
+    let projection_materializer = PostgresThreadProjectionMaterializer::new(&fixture.config);
     let progress = import_runtime_state_threads(
         &source.config,
         &fixture.config,
         &inventory,
         &codex_rollout::CanonicalRolloutHistoryReader,
-        &replica,
+        &projection_materializer,
     )
     .await?;
     assert_eq!(
@@ -118,14 +118,14 @@ async fn postgres_contract_runtime_state_thread_import_is_visible_to_another_poo
             &fixture.config,
             &inventory,
             &codex_rollout::CanonicalRolloutHistoryReader,
-            &replica,
+            &projection_materializer,
         )
         .await?,
         progress
     );
 
-    let second_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let second = PostgresThreadStore::new(&second_pool);
+    let second_pool = fixture.connect_pool().await?;
+    let second = PostgresThreadStore::new(second_pool.clone(), fixture.schema.clone());
     let imported = replica
         .read_thread(ReadThreadParams {
             thread_id: source.thread_id,
@@ -284,15 +284,27 @@ async fn postgres_contract_runtime_state_thread_import_is_visible_to_another_poo
         serde_json::to_value(second.list_items(item_params).await?)?
     );
     assert_eq!(items.items.len(), 1);
-    let backfill = replica_pool.backfill_coordinator().state().await?;
-    assert_eq!(backfill, second_pool.backfill_coordinator().state().await?);
-    assert_eq!(backfill.status, BackfillStatus::Running);
-    assert_eq!(
-        backfill.last_watermark.as_deref(),
-        Some("archived_sessions/rollout.jsonl")
+    let backfill_query = format!(
+        "SELECT status, last_watermark, last_success_at FROM \"{}\".backfill_state WHERE id = 1",
+        fixture.schema
     );
-    assert!(backfill.last_success_at.is_none());
-    assert_eq!(backfill, source.backfill);
+    let backfill: (String, Option<String>, Option<chrono::DateTime<Utc>>) =
+        sqlx::query_as(AssertSqlSafe(backfill_query.clone()))
+            .fetch_one(&replica_pool)
+            .await?;
+    let backfill_from_second: (String, Option<String>, Option<chrono::DateTime<Utc>>) =
+        sqlx::query_as(AssertSqlSafe(backfill_query))
+            .fetch_one(&second_pool)
+            .await?;
+    let expected_backfill = (
+        source.backfill.status.as_str().to_string(),
+        source.backfill.last_watermark.clone(),
+        source.backfill.last_success_at,
+    );
+    assert_eq!(
+        (backfill, backfill_from_second),
+        (expected_backfill.clone(), expected_backfill)
+    );
     let legacy = second
         .read_thread(ReadThreadParams {
             thread_id: source.legacy_id,
@@ -311,18 +323,19 @@ async fn postgres_contract_runtime_state_thread_import_is_visible_to_another_poo
                 .collect::<Vec<_>>()
         )?
     );
-    let (pool, schema) = replica_pool.thread_store_connection();
+    let pool = &replica_pool;
+    let schema = &fixture.schema;
     let source_ordinals: Vec<i64> = sqlx::query_scalar(AssertSqlSafe(format!(
         "SELECT source_ordinal FROM \"{schema}\".thread_history WHERE thread_id = $1 ORDER BY ordinal"
     )))
     .bind(source.thread_id.to_string())
-    .fetch_all(&pool)
+    .fetch_all(pool)
     .await?;
     assert_eq!(source_ordinals, vec![0, 1, 2, 3, 4, 5]);
     let pollution_overrides: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
         "SELECT COUNT(*) FROM \"{schema}\".memory_thread_mode_overrides"
     )))
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await?;
     assert_eq!(pollution_overrides, 2);
     assert_eq!(
@@ -355,7 +368,7 @@ async fn postgres_contract_runtime_state_thread_import_is_visible_to_another_poo
             &fixture.config,
             &inventory,
             &codex_rollout::CanonicalRolloutHistoryReader,
-            &replica,
+            &projection_materializer,
         )
         .await?,
         progress
@@ -377,16 +390,17 @@ async fn postgres_contract_runtime_state_thread_import_rolls_back_every_record_o
     );
     let fixture = PostgresThreadStoreFixture::new("runtime_migration_rollback")?;
     fixture.migrate().await?;
-    let replica_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let replica = PostgresThreadStore::new(&replica_pool);
+    let replica_pool = fixture.connect_pool().await?;
+    let replica = PostgresThreadStore::new(replica_pool.clone(), fixture.schema.clone());
     let inventory =
         preflight_runtime_state_migration(source.config.clone(), fixture.config.clone()).await?;
+    let projection_materializer = PostgresThreadProjectionMaterializer::new(&fixture.config);
     import_runtime_state_threads(
         &source.config,
         &fixture.config,
         &inventory,
         &codex_rollout::CanonicalRolloutHistoryReader,
-        &replica,
+        &projection_materializer,
     )
     .await
     .expect_err("orphan lineage must fail the import transaction");
@@ -401,11 +415,12 @@ async fn postgres_contract_runtime_state_thread_import_rolls_back_every_record_o
             .await,
         Err(crate::ThreadStoreError::ThreadNotFound { .. })
     );
-    let (pool, schema) = replica_pool.thread_store_connection();
+    let pool = &replica_pool;
+    let schema = &fixture.schema;
     let migration_count: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
         "SELECT COUNT(*) FROM \"{schema}\".runtime_state_migration"
     )))
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await?;
     assert_eq!((thread_absent, migration_count), (true, 0));
     assert_eq!(
@@ -533,8 +548,8 @@ async fn postgres_contract_runtime_state_migration_rejects_a_nonempty_destinatio
     let source_before = source_artifacts(&source)?;
     let fixture = PostgresThreadStoreFixture::new("runtime_migration_nonempty_command")?;
     fixture.migrate().await?;
-    let runtime_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    PostgresThreadStore::new(&runtime_pool)
+    let runtime_pool = fixture.connect_pool().await?;
+    PostgresThreadStore::new(runtime_pool.clone(), fixture.schema.clone())
         .create_thread(crate::postgres_contract_tests::create_thread_params(
             ThreadId::from_string("019c84d0-6666-7777-8666-666666666666")?,
         ))
@@ -544,11 +559,12 @@ async fn postgres_contract_runtime_state_migration_rejects_a_nonempty_destinatio
         .await
         .expect_err("a non-empty destination must be rejected");
 
-    let (pool, schema) = runtime_pool.thread_store_connection();
+    let pool = &runtime_pool;
+    let schema = &fixture.schema;
     let ready_count: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
         "SELECT COUNT(*) FROM \"{schema}\".runtime_state_migration WHERE ready"
     )))
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await?;
     assert_eq!(ready_count, 0);
     assert_eq!(source_artifacts(&source)?, source_before);
@@ -562,35 +578,29 @@ async fn import_threads(
     fixture: &PostgresThreadStoreFixture,
     inventory: &codex_state::RuntimeStateMigrationInventory,
 ) -> Result<codex_state::RuntimeStateMigrationProgress, Box<dyn std::error::Error>> {
-    let runtime_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let store = PostgresThreadStore::new(&runtime_pool);
-    let result = codex_state::import_runtime_state_threads(
+    let projection_materializer = PostgresThreadProjectionMaterializer::new(&fixture.config);
+    Ok(codex_state::import_runtime_state_threads(
         &source.config,
         &fixture.config,
         inventory,
         &codex_rollout::CanonicalRolloutHistoryReader,
-        &store,
+        &projection_materializer,
     )
-    .await;
-    runtime_pool.close().await;
-    Ok(result?)
+    .await?)
 }
 
 async fn run_migration(
     source: &MigrationSource,
     fixture: &PostgresThreadStoreFixture,
 ) -> Result<codex_state::RuntimeStateMigrationReport, Box<dyn std::error::Error>> {
-    let runtime_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let store = PostgresThreadStore::new(&runtime_pool);
-    let result = codex_state::migrate_runtime_state(
+    let projection_materializer = PostgresThreadProjectionMaterializer::new(&fixture.config);
+    Ok(codex_state::migrate_runtime_state(
         source.config.clone(),
         fixture.config.clone(),
         &codex_rollout::CanonicalRolloutHistoryReader,
-        &store,
+        &projection_materializer,
     )
-    .await;
-    runtime_pool.close().await;
-    Ok(result?)
+    .await?)
 }
 
 pub(super) async fn migration_source(
@@ -638,9 +648,11 @@ pub(super) async fn migration_source(
     )?;
     codex_rollout::append_thread_name(source.path(), rollout_only_id, "Index-only thread name")
         .await?;
-    let runtime =
-        codex_state::StateRuntime::init(source.path().to_path_buf(), "test-provider".to_string())
-            .await?;
+    let runtime = codex_state::StateRuntime::init_sqlite(
+        source.path().to_path_buf(),
+        "test-provider".to_string(),
+    )
+    .await?;
     open_thread_history_db(source.path()).await?.close().await;
     let created_at = Utc
         .with_ymd_and_hms(2026, 7, 22, 10, 0, 0)

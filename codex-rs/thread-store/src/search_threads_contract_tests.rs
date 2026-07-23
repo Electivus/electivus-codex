@@ -12,7 +12,6 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::user_input::UserInput;
-use codex_state::PostgresRuntimeStatePool;
 use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
 use tempfile::TempDir;
@@ -41,7 +40,7 @@ async fn local_search_threads_matches_public_store_contract() -> TestResult {
         sqlite_home: home.path().to_path_buf(),
         default_model_provider_id: "search-contract-provider".to_string(),
     };
-    let runtime = codex_state::StateRuntime::init(
+    let runtime = codex_state::StateRuntime::init_sqlite(
         home.path().to_path_buf(),
         config.default_model_provider_id.clone(),
     )
@@ -56,13 +55,13 @@ async fn local_search_threads_matches_public_store_contract() -> TestResult {
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_search_matches_contract_across_replicas_and_is_atomic() -> TestResult {
+async fn postgres_contract_search_matches_across_replicas_and_is_atomic() -> TestResult {
     let fixture = PostgresThreadStoreFixture::new("search_projection")?;
     fixture.migrate().await?;
-    let writer_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let reader_pool = PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
-    let writer = PostgresThreadStore::new(&writer_pool);
-    let reader = PostgresThreadStore::new(&reader_pool);
+    let writer_pool = fixture.connect_pool().await?;
+    let reader_pool = fixture.connect_pool().await?;
+    let writer = PostgresThreadStore::new(writer_pool.clone(), fixture.schema.clone());
+    let reader = PostgresThreadStore::new(reader_pool.clone(), fixture.schema.clone());
     assert_basic_search_contract(&writer, Path::new("/search-contract")).await?;
     let low = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f410")?;
     let high = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f411")?;
