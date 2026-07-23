@@ -4,8 +4,12 @@ use codex_state::PostgresNamespaceAction;
 use codex_state::PostgresNamespaceConfig;
 use codex_state::PostgresNamespaceStatus;
 use codex_state::PostgresPoolConfig;
+use codex_state::PostgresRuntimeStatePool;
 use codex_state::manage_postgres_namespace;
+use codex_thread_store::PostgresThreadStore;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Manage the Runtime State Store.
@@ -19,6 +23,8 @@ pub struct StateCommand {
 enum StateSubcommand {
     /// Explicitly manage a PostgreSQL Runtime State Namespace schema.
     Schema(PostgresSchemaCommand),
+    /// Migrate one offline SQLite Runtime State Namespace into empty PostgreSQL.
+    Migrate(RuntimeStateMigrationArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -58,22 +64,81 @@ struct PostgresNamespaceArgs {
     statement_timeout_ms: u64,
 }
 
+#[derive(Debug, Args)]
+struct RuntimeStateMigrationArgs {
+    /// Complete, offline SQLite home to preserve and migrate.
+    #[arg(long, value_name = "PATH")]
+    sqlite_home: PathBuf,
+
+    #[command(flatten)]
+    destination: PostgresNamespaceArgs,
+}
+
 pub async fn run(command: StateCommand) -> anyhow::Result<()> {
-    let (action, args) = match command.subcommand {
-        StateSubcommand::Schema(command) => match command.action {
-            PostgresSchemaAction::Migrate(args) => (PostgresNamespaceAction::Migrate, args),
-            PostgresSchemaAction::Validate(args) => (PostgresNamespaceAction::Validate, args),
-        },
+    match command.subcommand {
+        StateSubcommand::Schema(command) => run_schema(command).await,
+        StateSubcommand::Migrate(args) => run_migration(args).await,
+    }
+}
+
+async fn run_schema(command: PostgresSchemaCommand) -> anyhow::Result<()> {
+    let (action, args) = match command.action {
+        PostgresSchemaAction::Migrate(args) => (PostgresNamespaceAction::Migrate, args),
+        PostgresSchemaAction::Validate(args) => (PostgresNamespaceAction::Validate, args),
     };
+    let config = postgres_config(args)?;
+    let status = manage_postgres_namespace(config, action).await?;
+    print_status(action, status);
+    Ok(())
+}
+
+async fn run_migration(args: RuntimeStateMigrationArgs) -> anyhow::Result<()> {
+    let source =
+        codex_state::SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(args.sqlite_home)?);
+    let destination = postgres_config(args.destination)?;
+    let runtime_pool = PostgresRuntimeStatePool::connect(destination.clone()).await?;
+    let thread_store = PostgresThreadStore::new(&runtime_pool);
+    let result = codex_state::migrate_runtime_state(
+        source,
+        destination,
+        &codex_rollout::CanonicalRolloutHistoryReader,
+        &thread_store,
+    )
+    .await;
+    runtime_pool.close().await;
+    let report = result?;
+    let output = format_migration_success(
+        report.destination_schema(),
+        report.fencing_token(),
+        report.evidence(),
+    )?;
+    print!("{output}");
+    Ok(())
+}
+
+pub(super) fn format_migration_success(
+    destination_schema: &str,
+    fencing_token: i64,
+    evidence: &serde_json::Value,
+) -> anyhow::Result<String> {
+    let evidence = serde_json::to_string(evidence)?;
+    Ok(format!(
+        "PostgreSQL Runtime State Namespace `{destination_schema}` is READY at migration fence {fencing_token}.\n\
+         Validated counts, identifiers, ordering, content hashes, referential integrity, and every Runtime State Store responsibility.\n\
+         Integrity evidence: {evidence}\n\
+         The SQLite source, rollouts, Memory Artifacts, and config.toml were preserved.\n\
+         config.toml was not changed; select the PostgreSQL backend separately after review.\n\
+         WARNING: This migration is forward-only. After PostgreSQL accepts new writes, the preserved SQLite source becomes stale and cannot provide a lossless rollback.\n"
+    ))
+}
+
+fn postgres_config(args: PostgresNamespaceArgs) -> anyhow::Result<PostgresNamespaceConfig> {
     let pool = PostgresPoolConfig::new(
         args.max_connections,
         Duration::from_millis(args.acquire_timeout_ms),
         Duration::from_millis(args.statement_timeout_ms),
     )?;
-    let config = PostgresNamespaceConfig::new(args.url_env, args.schema, pool)?;
-    let status = manage_postgres_namespace(config, action).await?;
-    print_status(action, status);
-    Ok(())
+    PostgresNamespaceConfig::new(args.url_env, args.schema, pool)
 }
 
 fn print_status(action: PostgresNamespaceAction, status: PostgresNamespaceStatus) {

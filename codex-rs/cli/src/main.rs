@@ -2538,6 +2538,54 @@ mod tests {
     use codex_tui::TokenUsage;
     use pretty_assertions::assert_eq;
 
+    #[test]
+    fn state_migrate_parses_the_explicit_offline_interface() {
+        assert!(
+            MultitoolCli::try_parse_from([
+                "codex",
+                "state",
+                "migrate",
+                "--sqlite-home",
+                "/tmp/codex-sqlite",
+                "--url-env",
+                "CODEX_TEST_POSTGRES_URL",
+                "--schema",
+                "migration_target",
+            ])
+            .is_ok()
+        );
+        assert!(
+            MultitoolCli::try_parse_from([
+                "codex",
+                "state",
+                "migrate",
+                "--url-env",
+                "CODEX_TEST_POSTGRES_URL",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn state_migrate_success_output_is_explicit_about_manual_cutover() {
+        insta::assert_snapshot!(
+            crate::state_cmd::format_migration_success(
+                "migration_target",
+                /*fencing_token*/ 4,
+                &serde_json::Value::String("integrity-proof".to_string()),
+            )
+            .expect("migration success output"),
+            @r###"
+        PostgreSQL Runtime State Namespace `migration_target` is READY at migration fence 4.
+        Validated counts, identifiers, ordering, content hashes, referential integrity, and every Runtime State Store responsibility.
+        Integrity evidence: "integrity-proof"
+        The SQLite source, rollouts, Memory Artifacts, and config.toml were preserved.
+        config.toml was not changed; select the PostgreSQL backend separately after review.
+        WARNING: This migration is forward-only. After PostgreSQL accepts new writes, the preserved SQLite source becomes stale and cannot provide a lossless rollback.
+        "###
+        );
+    }
+
     #[tokio::test]
     async fn updater_http_client_factory_honors_respect_system_proxy() {
         let codex_home = tempfile::tempdir().expect("temporary Codex home");
