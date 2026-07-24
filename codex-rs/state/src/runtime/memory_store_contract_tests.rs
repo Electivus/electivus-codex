@@ -88,7 +88,7 @@ pub(crate) async fn run_stage1_claim_and_output_contract(
                 source_updated_at,
                 "must not replace memory",
                 "must not replace summary",
-                None,
+                /*rollout_slug*/ None,
             )
             .await?
     );

@@ -107,17 +107,19 @@ async fn snapshot_preserves_complete_legacy_and_current_thread_domain_read_only(
     seed_thread_history_projections(&source, current_id).await?;
     let source_before = test_support::snapshot_source(&source)?;
 
-    let mut inherited_meta = session_meta(legacy_id, &legacy, None);
+    let mut inherited_meta = session_meta(legacy_id, &legacy, /*parent_thread_id*/ None);
     inherited_meta.meta.dynamic_tools = Some(dynamic_tools_fixture());
     let legacy_history = vec![
         rollout_line(
             "2026-07-21T10:00:00Z",
-            None,
-            RolloutItem::SessionMeta(session_meta(legacy_id, &legacy, None)),
+            /*ordinal*/ None,
+            RolloutItem::SessionMeta(session_meta(
+                legacy_id, &legacy, /*parent_thread_id*/ None,
+            )),
         ),
         rollout_line(
             "2026-07-21T10:01:00Z",
-            None,
+            /*ordinal*/ None,
             RolloutItem::SessionMeta(inherited_meta),
         ),
     ];
@@ -163,7 +165,10 @@ async fn snapshot_preserves_complete_legacy_and_current_thread_domain_read_only(
                 metadata: legacy,
                 memory_mode: ThreadMemoryMode::Enabled,
                 polluted_at_stream_version: Some(2),
-                canonical_history: super::CanonicalThreadHistorySnapshot::new(legacy_history, 0),
+                canonical_history: super::CanonicalThreadHistorySnapshot::new(
+                    legacy_history,
+                    /*rejected_line_count*/ 0,
+                ),
                 dynamic_tools: Vec::new(),
                 projection_state: None,
                 turns: Vec::new(),
@@ -173,7 +178,10 @@ async fn snapshot_preserves_complete_legacy_and_current_thread_domain_read_only(
                 metadata: current,
                 memory_mode: ThreadMemoryMode::Enabled,
                 polluted_at_stream_version: None,
-                canonical_history: super::CanonicalThreadHistorySnapshot::new(current_history, 0),
+                canonical_history: super::CanonicalThreadHistorySnapshot::new(
+                    current_history,
+                    /*rejected_line_count*/ 0,
+                ),
                 dynamic_tools: dynamic_tools_fixture(),
                 projection_state: Some(ThreadHistoryProjectionStateSnapshot {
                     next_rollout_byte_offset: 321,

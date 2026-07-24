@@ -50,9 +50,9 @@ async fn local_occurrence_search_matches_public_store_contract() -> TestResult {
     )
     .await?;
     for (thread_id, history_mode) in [
-        (thread_id(41)?, ThreadHistoryMode::Paginated),
-        (thread_id(42)?, ThreadHistoryMode::Paginated),
-        (thread_id(43)?, ThreadHistoryMode::Legacy),
+        (thread_id(/*suffix*/ 41)?, ThreadHistoryMode::Paginated),
+        (thread_id(/*suffix*/ 42)?, ThreadHistoryMode::Paginated),
+        (thread_id(/*suffix*/ 43)?, ThreadHistoryMode::Legacy),
     ] {
         let mut builder = codex_state::ThreadMetadataBuilder::new(
             thread_id,
@@ -84,7 +84,7 @@ async fn postgres_contract_occurrence_search_matches_across_replicas_and_repairs
     let cwd = Path::new("/occurrence-search");
     assert_contract(&writer, cwd).await?;
 
-    let thread_id = thread_id(44)?;
+    let thread_id = thread_id(/*suffix*/ 44)?;
     create_thread(
         &writer,
         thread_id,
@@ -94,12 +94,22 @@ async fn postgres_contract_occurrence_search_matches_across_replicas_and_repairs
     )
     .await?;
     assert_eq!(
-        item_ids(&search(&reader, thread_id, "needle", None, 10).await?),
+        item_ids(
+            &search(
+                &reader, thread_id, "needle", /*cursor*/ None, /*page_size*/ 10
+            )
+            .await?
+        ),
         vec!["user-1", "user-1", "user-1", "user-1", "steer-1", "final-1"]
     );
     damage_projections(&writer, thread_id).await?;
     assert_eq!(
-        item_ids(&search(&reader, thread_id, "école", None, 10).await?),
+        item_ids(
+            &search(
+                &reader, thread_id, "école", /*cursor*/ None, /*page_size*/ 10
+            )
+            .await?
+        ),
         vec!["steer-1"]
     );
 
@@ -110,7 +120,11 @@ async fn postgres_contract_occurrence_search_matches_across_replicas_and_repairs
 
 async fn assert_contract(store: &dyn ThreadStore, cwd: &Path) -> TestResult {
     assert!(store.supports_paginated_history_lists());
-    let (primary, other, legacy) = (thread_id(41)?, thread_id(42)?, thread_id(43)?);
+    let (primary, other, legacy) = (
+        thread_id(/*suffix*/ 41)?,
+        thread_id(/*suffix*/ 42)?,
+        thread_id(/*suffix*/ 43)?,
+    );
     create_thread(
         store,
         primary,
@@ -122,7 +136,10 @@ async fn assert_contract(store: &dyn ThreadStore, cwd: &Path) -> TestResult {
     create_thread(store, other, cwd, ThreadHistoryMode::Paginated, Vec::new()).await?;
     create_thread(store, legacy, cwd, ThreadHistoryMode::Legacy, Vec::new()).await?;
 
-    let first = search(store, primary, "needle", None, 3).await?;
+    let first = search(
+        store, primary, "needle", /*cursor*/ None, /*page_size*/ 3,
+    )
+    .await?;
     let turn_cursor = first.items[0].turn_cursor.clone();
     assert_eq!(
         occurrences(&first),
@@ -133,7 +150,14 @@ async fn assert_contract(store: &dyn ThreadStore, cwd: &Path) -> TestResult {
         ]
     );
     let next = first.next_cursor.ok_or("first page must continue")?;
-    let second = search(store, primary, "needle", Some(next.clone()), 3).await?;
+    let second = search(
+        store,
+        primary,
+        "needle",
+        Some(next.clone()),
+        /*page_size*/ 3,
+    )
+    .await?;
     assert_eq!(
         occurrences(&second),
         vec![
@@ -151,7 +175,12 @@ async fn assert_contract(store: &dyn ThreadStore, cwd: &Path) -> TestResult {
             .all(|item| { item.turn_id == "turn-1" && item.turn_cursor == turn_cursor })
     );
     assert_eq!(
-        item_ids(&search(store, primary, "école", None, 10).await?),
+        item_ids(
+            &search(
+                store, primary, "école", /*cursor*/ None, /*page_size*/ 10
+            )
+            .await?
+        ),
         vec!["steer-1"]
     );
 
@@ -176,11 +205,18 @@ async fn assert_contract(store: &dyn ThreadStore, cwd: &Path) -> TestResult {
     );
 
     for params in [
-        search_params(primary, "needle", Some(format!("{next}!")), 3),
-        search_params(other, "needle", Some(next.clone()), 3),
-        search_params(primary, "Needle", Some(next), 3),
-        search_params(primary, " ", None, 3),
-        search_params(primary, "needle", None, 0),
+        search_params(
+            primary,
+            "needle",
+            Some(format!("{next}!")),
+            /*page_size*/ 3,
+        ),
+        search_params(other, "needle", Some(next.clone()), /*page_size*/ 3),
+        search_params(primary, "Needle", Some(next), /*page_size*/ 3),
+        search_params(primary, " ", /*cursor*/ None, /*page_size*/ 3),
+        search_params(
+            primary, "needle", /*cursor*/ None, /*page_size*/ 0,
+        ),
     ] {
         assert!(matches!(
             store.search_thread_occurrences(params).await,
@@ -188,7 +224,10 @@ async fn assert_contract(store: &dyn ThreadStore, cwd: &Path) -> TestResult {
         ));
     }
     assert!(matches!(
-        search(store, legacy, "needle", None, 3).await,
+        search(
+            store, legacy, "needle", /*cursor*/ None, /*page_size*/ 3
+        )
+        .await,
         Err(ThreadStoreError::Unsupported {
             operation: "thread/searchOccurrences"
         })
@@ -197,7 +236,12 @@ async fn assert_contract(store: &dyn ThreadStore, cwd: &Path) -> TestResult {
         .archive_thread(ArchiveThreadParams { thread_id: primary })
         .await?;
     assert_eq!(
-        item_ids(&search(store, primary, "école", None, 10).await?),
+        item_ids(
+            &search(
+                store, primary, "école", /*cursor*/ None, /*page_size*/ 10
+            )
+            .await?
+        ),
         vec!["steer-1"]
     );
     Ok(())
@@ -226,7 +270,7 @@ async fn create_thread(
 
 fn history(thread_id: ThreadId) -> Vec<RolloutItem> {
     vec![
-        turn_started("turn-1", 1),
+        turn_started("turn-1", /*started_at*/ 1),
         completed_item(
             thread_id,
             "turn-1",
@@ -258,7 +302,7 @@ fn history(thread_id: ThreadId) -> Vec<RolloutItem> {
         completed_item(
             thread_id,
             "turn-1",
-            agent_item("draft-1", "draft needle", None),
+            agent_item("draft-1", "draft needle", /*phase*/ None),
         ),
         completed_item(
             thread_id,
@@ -269,7 +313,9 @@ fn history(thread_id: ThreadId) -> Vec<RolloutItem> {
                 Some(MessagePhase::FinalAnswer),
             ),
         ),
-        turn_complete("turn-1", 1, 2, None),
+        turn_complete(
+            "turn-1", /*started_at*/ 1, /*completed_at*/ 2, /*error*/ None,
+        ),
     ]
 }
 

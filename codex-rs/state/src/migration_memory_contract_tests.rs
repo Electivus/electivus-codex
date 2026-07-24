@@ -162,7 +162,10 @@ async fn postgres_contract_imports_complete_memory_generation_read_only() -> any
     for output in &mut expected_imported_outputs {
         output.rollout_path = std::path::PathBuf::new();
     }
-    runtime.memories().enqueue_global_consolidation(42).await?;
+    runtime
+        .memories()
+        .enqueue_global_consolidation(/*input_watermark*/ 42)
+        .await?;
     let Phase2JobClaimOutcome::Claimed {
         ownership_token,
         input_watermark,

@@ -52,9 +52,9 @@ pub(crate) async fn run_replica_visibility_contract(
     writer: &LogStore,
     reader: &LogStore,
 ) -> anyhow::Result<()> {
-    writer.insert_log(&entry(10, "single")).await?;
+    writer.insert_log(&entry(/*ts*/ 10, "single")).await?;
     writer
-        .insert_logs(&[entry(20, "batch-one"), entry(30, "batch-two")])
+        .insert_logs(&[entry(/*ts*/ 20, "batch-one"), entry(/*ts*/ 30, "batch-two")])
         .await?;
 
     assert_eq!(
@@ -105,11 +105,11 @@ pub(crate) async fn run_filter_order_and_max_id_contract(
     writer: &LogStore,
     reader: &LogStore,
 ) -> anyhow::Result<()> {
-    let mut first = entry(10, "ignored");
+    let mut first = entry(/*ts*/ 10, "ignored");
     first.module_path = Some("contract::ignored".to_string());
     first.file = Some("ignored.rs".to_string());
 
-    let mut second = entry(20, "beta second");
+    let mut second = entry(/*ts*/ 20, "beta second");
     second.level = "warn".to_string();
     second.thread_id = Some("thread-2".to_string());
     second.process_uuid = Some("process-2".to_string());
@@ -117,7 +117,7 @@ pub(crate) async fn run_filter_order_and_max_id_contract(
     second.file = Some("worker.rs".to_string());
     second.line = Some(20);
 
-    let mut third = entry(30, "beta third");
+    let mut third = entry(/*ts*/ 30, "beta third");
     third.level = "ERROR".to_string();
     third.thread_id = None;
     third.process_uuid = Some("process-2".to_string());
@@ -125,7 +125,7 @@ pub(crate) async fn run_filter_order_and_max_id_contract(
     third.file = Some("nested.rs".to_string());
     third.line = Some(30);
 
-    let mut fourth = entry(40, "too late");
+    let mut fourth = entry(/*ts*/ 40, "too late");
     fourth.level = "WARN".to_string();
     fourth.module_path = Some("contract::worker".to_string());
     fourth.file = Some("worker.rs".to_string());
@@ -182,17 +182,17 @@ pub(crate) async fn run_feedback_contract(
     writer: &LogStore,
     reader: &LogStore,
 ) -> anyhow::Result<()> {
-    let mut thread = entry(10, "message fallback is not selected");
+    let mut thread = entry(/*ts*/ 10, "message fallback is not selected");
     thread.feedback_log_body = Some("thread body".to_string());
     thread.process_uuid = Some("shared-process".to_string());
 
-    let mut threadless = entry(20, "ignored fallback");
+    let mut threadless = entry(/*ts*/ 20, "ignored fallback");
     threadless.level = "WARN".to_string();
     threadless.feedback_log_body = Some("process body\n".to_string());
     threadless.thread_id = None;
     threadless.process_uuid = Some("shared-process".to_string());
 
-    let mut unrelated = entry(30, "unrelated");
+    let mut unrelated = entry(/*ts*/ 30, "unrelated");
     unrelated.level = "ERROR".to_string();
     unrelated.thread_id = Some("thread-2".to_string());
     unrelated.process_uuid = Some("other-process".to_string());
@@ -214,7 +214,7 @@ pub(crate) async fn run_startup_retention_contract(
 ) -> anyhow::Result<()> {
     let retained_ts = chrono::Utc::now().timestamp();
     writer
-        .insert_logs(&[entry(1, "expired"), entry(retained_ts, "retained")])
+        .insert_logs(&[entry(/*ts*/ 1, "expired"), entry(retained_ts, "retained")])
         .await?;
 
     writer.run_startup_maintenance().await?;
@@ -261,7 +261,7 @@ pub(crate) async fn run_partition_limits_contract(
             entry
         })
         .collect::<Vec<_>>();
-    process_entries.push(entry(2_001, "newest-thread-row"));
+    process_entries.push(entry(/*ts*/ 2_001, "newest-thread-row"));
     writer.insert_logs(&process_entries).await?;
     let process_rows = reader
         .query_logs(&LogQuery {
@@ -283,7 +283,7 @@ pub(crate) async fn run_partition_limits_contract(
     assert_eq!(updated_thread_rows.last().map(|row| row.id), Some(2_003));
 
     let oversized_body = "x".repeat(10 * 1024 * 1024 + 1);
-    let mut oversized = entry(2_000, &oversized_body);
+    let mut oversized = entry(/*ts*/ 2_000, &oversized_body);
     oversized.thread_id = Some("oversized-thread".to_string());
     writer.insert_log(&oversized).await?;
     assert_eq!(

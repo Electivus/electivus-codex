@@ -106,7 +106,7 @@ async fn postgres_contract_turn_pages_match_local_summary_and_bidirectional_pagi
     let first_page = reader
         .list_turns(turn_params(
             thread_id,
-            None,
+            /*cursor*/ None,
             /*page_size*/ 2,
             SortDirection::Asc,
             StoredTurnItemsView::Summary,
@@ -191,8 +191,12 @@ async fn postgres_contract_inherited_prefix_is_excluded_and_turn_projection_fail
     create_params.subagent_history_start_ordinal = Some(3);
     store.create_thread(create_params).await?;
     let history = [
-        completed_turn_history("inherited", 10, 20),
-        completed_turn_history("owned", 30, 40),
+        completed_turn_history(
+            "inherited",
+            /*started_at*/ 10,
+            /*completed_at*/ 20,
+        ),
+        completed_turn_history("owned", /*started_at*/ 30, /*completed_at*/ 40),
     ]
     .concat();
     store
@@ -217,7 +221,7 @@ async fn postgres_contract_inherited_prefix_is_excluded_and_turn_projection_fail
     let retry_batch = AppendThreadItemsBatch::new(
         thread_id,
         AppendBatchId::new(),
-        completed_turn_history("retry", 50, 60),
+        completed_turn_history("retry", /*started_at*/ 50, /*completed_at*/ 60),
     );
     assert!(matches!(
         store.append_batch(retry_batch.clone()).await,
@@ -253,32 +257,38 @@ async fn postgres_contract_inherited_prefix_is_excluded_and_turn_projection_fail
 fn completed_turn_history(turn_id: &str, started_at: i64, completed_at: i64) -> Vec<RolloutItem> {
     vec![
         turn_started(turn_id, started_at),
-        turn_complete(turn_id, started_at, completed_at, None),
+        turn_complete(turn_id, started_at, completed_at, /*error*/ None),
     ]
 }
 
 fn paginated_turn_history(thread_id: ThreadId) -> Vec<RolloutItem> {
     let mut history = vec![
         completed_item(thread_id, "turn-1", user_item("user-1")),
-        completed_item(thread_id, "turn-1", agent_item("agent-1", "draft", None)),
+        completed_item(
+            thread_id,
+            "turn-1",
+            agent_item("agent-1", "draft", /*phase*/ None),
+        ),
         completed_item(
             thread_id,
             "turn-1",
             agent_item("agent-1", "final", Some(MessagePhase::FinalAnswer)),
         ),
     ];
-    history.extend(completed_turn_history("turn-1", 10, 20));
-    history.push(turn_started("turn-2", 30));
+    history.extend(completed_turn_history(
+        "turn-1", /*started_at*/ 10, /*completed_at*/ 20,
+    ));
+    history.push(turn_started("turn-2", /*started_at*/ 30));
     history.push(turn_complete(
         "turn-2",
-        30,
-        40,
+        /*started_at*/ 30,
+        /*completed_at*/ 40,
         Some(ErrorEvent {
             message: "request failed".to_string(),
             codex_error_info: Some(CodexErrorInfo::ServerOverloaded),
         }),
     ));
-    history.push(turn_started("turn-3", 50));
+    history.push(turn_started("turn-3", /*started_at*/ 50));
     history
 }
 
@@ -357,8 +367,8 @@ fn turn_params(
 fn default_turn_params(thread_id: ThreadId) -> ListTurnsParams {
     turn_params(
         thread_id,
-        None,
-        10,
+        /*cursor*/ None,
+        /*page_size*/ 10,
         SortDirection::Asc,
         StoredTurnItemsView::NotLoaded,
     )

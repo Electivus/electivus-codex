@@ -1049,7 +1049,7 @@ fn history(thread_id: ThreadId, source: &std::path::Path) -> Vec<RolloutLine> {
         RolloutLine {
             timestamp: "2026-07-22T10:03:00.000Z".to_string(),
             ordinal: Some(3),
-            item: turn_started("turn-migration", 10),
+            item: turn_started("turn-migration", /*started_at*/ 10),
         },
         RolloutLine {
             timestamp: "2026-07-22T10:04:00.000Z".to_string(),
@@ -1059,7 +1059,12 @@ fn history(thread_id: ThreadId, source: &std::path::Path) -> Vec<RolloutLine> {
         RolloutLine {
             timestamp: "2026-07-22T10:05:00.000Z".to_string(),
             ordinal: Some(5),
-            item: turn_complete("turn-migration", 10, 20, None),
+            item: turn_complete(
+                "turn-migration",
+                /*started_at*/ 10,
+                /*completed_at*/ 20,
+                /*error*/ None,
+            ),
         },
     ]
 }

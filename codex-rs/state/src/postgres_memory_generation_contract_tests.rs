@@ -60,7 +60,7 @@ async fn postgres_contract_publishes_complete_fenced_memory_generations() -> Res
     );
     assert_eq!(reader.load_active_memory_generation().await?, None);
 
-    let (first_token, first_watermark) = claim(&writer, 10).await?;
+    let (first_token, first_watermark) = claim(&writer, /*input_watermark*/ 10).await?;
     let first_artifacts = artifacts("first");
     assert!(
         writer
@@ -83,7 +83,7 @@ async fn postgres_contract_publishes_complete_fenced_memory_generations() -> Res
     )))
     .execute(&setup_pool)
     .await?;
-    let (second_token, second_watermark) = claim(&writer, 20).await?;
+    let (second_token, second_watermark) = claim(&writer, /*input_watermark*/ 20).await?;
     let second_artifacts = artifacts("second");
     let writer_for_publish = writer.clone();
     let second_artifacts_for_publish = second_artifacts.clone();
@@ -129,7 +129,7 @@ async fn postgres_contract_publishes_complete_fenced_memory_generations() -> Res
     )))
     .execute(&setup_pool)
     .await?;
-    let (stale_token, _) = claim(&writer, 30).await?;
+    let (stale_token, _) = claim(&writer, /*input_watermark*/ 30).await?;
     assert!(
         writer
             .heartbeat_global_phase2_job(&stale_token, /*lease_seconds*/ 0)
@@ -142,7 +142,12 @@ async fn postgres_contract_publishes_complete_fenced_memory_generations() -> Res
 
     assert_eq!(
         writer
-            .complete_global_consolidation(&stale_token, 30, &[], &artifacts("stale"))
+            .complete_global_consolidation(
+                &stale_token,
+                /*completed_watermark*/ 30,
+                &[],
+                &artifacts("stale")
+            )
             .await?,
         false
     );

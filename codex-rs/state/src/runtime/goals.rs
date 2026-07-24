@@ -695,7 +695,14 @@ mod tests {
             .expect("goal replacement should succeed");
         let outcome = runtime
             .thread_goals()
-            .account_thread_goal_usage(thread_id, active_accounting("objective-accounting", 12, 30))
+            .account_thread_goal_usage(
+                thread_id,
+                active_accounting(
+                    "objective-accounting",
+                    /*time_delta_seconds*/ 12,
+                    /*token_delta*/ 30,
+                ),
+            )
             .await
             .expect("usage accounting should succeed");
         let GoalAccountingOutcome::Updated(accounted) = outcome else {
@@ -911,7 +918,14 @@ mod tests {
 
         let outcome = runtime
             .thread_goals()
-            .account_thread_goal_usage(thread_id, active_accounting("active-accounting", 7, 5))
+            .account_thread_goal_usage(
+                thread_id,
+                active_accounting(
+                    "active-accounting",
+                    /*time_delta_seconds*/ 7,
+                    /*token_delta*/ 5,
+                ),
+            )
             .await
             .expect("usage accounting should succeed");
         let GoalAccountingOutcome::Updated(goal) = outcome else {
@@ -925,7 +939,11 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                active_accounting("budget-crossing-accounting", 3, 15),
+                active_accounting(
+                    "budget-crossing-accounting",
+                    /*time_delta_seconds*/ 3,
+                    /*token_delta*/ 15,
+                ),
             )
             .await
             .expect("usage accounting should succeed");
@@ -940,7 +958,11 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                active_accounting("budget-limited-accounting", 5, 5),
+                active_accounting(
+                    "budget-limited-accounting",
+                    /*time_delta_seconds*/ 5,
+                    /*token_delta*/ 5,
+                ),
             )
             .await
             .expect("usage accounting should succeed");
@@ -974,8 +996,8 @@ mod tests {
                 thread_id,
                 accounting(
                     "active-status-accounting",
-                    5,
-                    5,
+                    /*time_delta_seconds*/ 5,
+                    /*token_delta*/ 5,
                     GoalAccountingMode::ActiveStatusOnly,
                 ),
             )
@@ -1024,8 +1046,8 @@ mod tests {
                 thread_id,
                 accounting(
                     "stopped-accounting",
-                    3,
-                    25,
+                    /*time_delta_seconds*/ 3,
+                    /*token_delta*/ 25,
                     GoalAccountingMode::ActiveOrStopped,
                 ),
             )
@@ -1056,7 +1078,14 @@ mod tests {
             .expect("goal replacement should succeed");
         runtime
             .thread_goals()
-            .account_thread_goal_usage(thread_id, active_accounting("budget-accounting", 1, 50))
+            .account_thread_goal_usage(
+                thread_id,
+                active_accounting(
+                    "budget-accounting",
+                    /*time_delta_seconds*/ 1,
+                    /*token_delta*/ 50,
+                ),
+            )
             .await
             .expect("usage accounting should succeed");
 
@@ -1097,7 +1126,14 @@ mod tests {
             .expect("goal replacement should succeed");
         runtime
             .thread_goals()
-            .account_thread_goal_usage(thread_id, active_accounting("budget-accounting", 1, 50))
+            .account_thread_goal_usage(
+                thread_id,
+                active_accounting(
+                    "budget-accounting",
+                    /*time_delta_seconds*/ 1,
+                    /*token_delta*/ 50,
+                ),
+            )
             .await
             .expect("usage accounting should succeed");
 
@@ -1142,7 +1178,14 @@ mod tests {
             .expect("goal replacement should succeed");
         runtime
             .thread_goals()
-            .account_thread_goal_usage(thread_id, active_accounting("budget-accounting", 1, 50))
+            .account_thread_goal_usage(
+                thread_id,
+                active_accounting(
+                    "budget-accounting",
+                    /*time_delta_seconds*/ 1,
+                    /*token_delta*/ 50,
+                ),
+            )
             .await
             .expect("usage accounting should succeed");
 
@@ -1183,7 +1226,14 @@ mod tests {
             .expect("goal replacement should succeed");
         let outcome = runtime
             .thread_goals()
-            .account_thread_goal_usage(thread_id, active_accounting("budget-accounting", 1, 50))
+            .account_thread_goal_usage(
+                thread_id,
+                active_accounting(
+                    "budget-accounting",
+                    /*time_delta_seconds*/ 1,
+                    /*token_delta*/ 50,
+                ),
+            )
             .await
             .expect("usage accounting should succeed");
         let GoalAccountingOutcome::Updated(budget_limited) = outcome else {
@@ -1232,7 +1282,11 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                active_accounting("completed-active-only", 30, 200),
+                active_accounting(
+                    "completed-active-only",
+                    /*time_delta_seconds*/ 30,
+                    /*token_delta*/ 200,
+                ),
             )
             .await
             .expect("usage accounting should succeed");
@@ -1249,8 +1303,8 @@ mod tests {
                 thread_id,
                 accounting(
                     "completed-final-accounting",
-                    30,
-                    200,
+                    /*time_delta_seconds*/ 30,
+                    /*token_delta*/ 200,
                     GoalAccountingMode::ActiveOrComplete,
                 ),
             )
@@ -1296,7 +1350,14 @@ mod tests {
 
         let active_only = runtime
             .thread_goals()
-            .account_thread_goal_usage(thread_id, active_accounting("stopped-active-only", 30, 200))
+            .account_thread_goal_usage(
+                thread_id,
+                active_accounting(
+                    "stopped-active-only",
+                    /*time_delta_seconds*/ 30,
+                    /*token_delta*/ 200,
+                ),
+            )
             .await
             .expect("usage accounting should succeed");
         let GoalAccountingOutcome::Unchanged(Some(goal)) = active_only else {
@@ -1312,8 +1373,8 @@ mod tests {
                 thread_id,
                 accounting(
                     "stopped-final-accounting",
-                    30,
-                    200,
+                    /*time_delta_seconds*/ 30,
+                    /*token_delta*/ 200,
                     GoalAccountingMode::ActiveOrStopped,
                 ),
             )
@@ -1345,11 +1406,19 @@ mod tests {
 
         let first = runtime.thread_goals().account_thread_goal_usage(
             thread_id,
-            active_accounting("concurrent-accounting-1", 4, 40),
+            active_accounting(
+                "concurrent-accounting-1",
+                /*time_delta_seconds*/ 4,
+                /*token_delta*/ 40,
+            ),
         );
         let second = runtime.thread_goals().account_thread_goal_usage(
             thread_id,
-            active_accounting("concurrent-accounting-2", 6, 60),
+            active_accounting(
+                "concurrent-accounting-2",
+                /*time_delta_seconds*/ 6,
+                /*token_delta*/ 60,
+            ),
         );
         let (first, second) = tokio::join!(first, second);
         first.expect("first usage accounting should succeed");

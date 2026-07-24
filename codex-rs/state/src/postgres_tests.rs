@@ -87,13 +87,13 @@ fn schema_versions_outside_the_compatibility_range_are_actionable() {
     let schema = "isolated_namespace";
 
     assert_eq!(
-        ensure_compatible_schema_version(schema, 0)
+        ensure_compatible_schema_version(schema, /*version*/ 0)
             .expect_err("older schema should be rejected")
             .to_string(),
         "PostgreSQL schema `isolated_namespace` is at version 0, older than the minimum supported version 1; run a compatible Codex schema migration command"
     );
     assert_eq!(
-        ensure_compatible_schema_version(schema, 18)
+        ensure_compatible_schema_version(schema, /*version*/ 18)
             .expect_err("newer schema should be rejected")
             .to_string(),
         "PostgreSQL schema `isolated_namespace` is at version 18, newer than the maximum supported version 17; upgrade Codex before using this namespace"
@@ -103,10 +103,11 @@ fn schema_versions_outside_the_compatibility_range_are_actionable() {
 #[test]
 fn postgresql_versions_before_18_are_rejected() {
     assert_eq!(
-        ensure_supported_postgres_version(17)
+        ensure_supported_postgres_version(/*detected_major*/ 17)
             .expect_err("PostgreSQL 17 should be rejected")
             .to_string(),
         "PostgreSQL 17 is unsupported; PostgreSQL 18 or later is required"
     );
-    ensure_supported_postgres_version(18).expect("PostgreSQL 18 should be supported");
+    ensure_supported_postgres_version(/*detected_major*/ 18)
+        .expect("PostgreSQL 18 should be supported");
 }

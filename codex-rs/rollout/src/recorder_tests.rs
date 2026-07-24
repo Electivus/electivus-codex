@@ -319,7 +319,7 @@ async fn bounded_rollout_load_rejects_oversized_and_blank_decoded_lines() -> std
         )?;
         for path in [plain, compressed] {
             assert!(
-                RolloutRecorder::load_rollout_lines_bounded(&path, 1)
+                RolloutRecorder::load_rollout_lines_bounded(&path, /*maximum_source_bytes*/ 1)
                     .await
                     .is_err()
             );

@@ -28,9 +28,13 @@ async fn rollout_validation_bounds_plain_and_compressed_decoded_lines() -> anyho
         ),
     ] {
         std::fs::write(source.join(name), contents)?;
-        super::source_validation::validate_json_lines(&source, std::path::Path::new(name), 1)
-            .await
-            .expect_err("decoded line must respect the validation budget");
+        super::source_validation::validate_json_lines(
+            &source,
+            std::path::Path::new(name),
+            /*maximum_bytes*/ 1,
+        )
+        .await
+        .expect_err("decoded line must respect the validation budget");
     }
     Ok(())
 }

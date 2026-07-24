@@ -67,7 +67,7 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
     let list: api::ThreadListResponse = request(
         &client,
         api::ClientRequest::ThreadList {
-            request_id: request_id(1),
+            request_id: request_id(/*id*/ 1),
             params: api::ThreadListParams {
                 cursor: None,
                 limit: Some(1),
@@ -98,7 +98,7 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
     let read: api::ThreadReadResponse = request(
         &client,
         api::ClientRequest::ThreadRead {
-            request_id: request_id(2),
+            request_id: request_id(/*id*/ 2),
             params: api::ThreadReadParams {
                 thread_id: thread_id.clone(),
                 include_turns: false,
@@ -112,7 +112,7 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
     let first_turn: api::ThreadTurnsListResponse = request(
         &client,
         api::ClientRequest::ThreadTurnsList {
-            request_id: request_id(3),
+            request_id: request_id(/*id*/ 3),
             params: api::ThreadTurnsListParams {
                 thread_id: thread_id.clone(),
                 cursor: None,
@@ -127,7 +127,7 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
     let second_turn: api::ThreadTurnsListResponse = request(
         &client,
         api::ClientRequest::ThreadTurnsList {
-            request_id: request_id(4),
+            request_id: request_id(/*id*/ 4),
             params: api::ThreadTurnsListParams {
                 thread_id: thread_id.clone(),
                 cursor: first_turn.next_cursor,
@@ -140,7 +140,7 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
     .await?;
     assert_eq!(turn_ids(&second_turn), vec!["turn-2"]);
 
-    let first_items = items_page(&client, &thread_id, None).await?;
+    let first_items = items_page(&client, &thread_id, /*cursor*/ None).await?;
     assert_eq!(item_ids(&first_items), vec!["user-1", "agent-1"]);
     let second_items = items_page(&client, &thread_id, first_items.next_cursor).await?;
     assert_eq!(item_ids(&second_items), vec!["user-2", "agent-2"]);
@@ -148,7 +148,7 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
     let search: api::ThreadSearchResponse = request(
         &client,
         api::ClientRequest::ThreadSearch {
-            request_id: request_id(7),
+            request_id: request_id(/*id*/ 7),
             params: api::ThreadSearchParams {
                 cursor: None,
                 limit: Some(1),
@@ -164,7 +164,7 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
     assert_eq!(search.data[0].thread.id, thread_id);
     assert!(search.data[0].snippet.contains("database native needle"));
 
-    let first_occurrences = occurrence_page(&client, &thread_id, None).await?;
+    let first_occurrences = occurrence_page(&client, &thread_id, /*cursor*/ None).await?;
     assert_eq!(
         occurrence_ids(&first_occurrences),
         vec!["user-1", "agent-1"]
@@ -179,7 +179,7 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
     let resumed: api::ThreadResumeResponse = request(
         &client,
         api::ClientRequest::ThreadResume {
-            request_id: request_id(10),
+            request_id: request_id(/*id*/ 10),
             params: api::ThreadResumeParams {
                 thread_id: thread_id.clone(),
                 exclude_turns: true,
@@ -225,7 +225,7 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
     let forked: api::ThreadForkResponse = request(
         &client,
         api::ClientRequest::ThreadFork {
-            request_id: request_id(13),
+            request_id: request_id(/*id*/ 13),
             params: api::ThreadForkParams {
                 thread_id: thread_id.clone(),
                 ..Default::default()
@@ -320,7 +320,7 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
     let started: api::ThreadStartResponse = request(
         &client,
         api::ClientRequest::ThreadStart {
-            request_id: request_id(16),
+            request_id: request_id(/*id*/ 16),
             params: api::ThreadStartParams {
                 history_mode: Some(api::ThreadHistoryMode::Paginated),
                 ..Default::default()
@@ -393,7 +393,7 @@ plugins = false
     let resumed: api::ThreadResumeResponse = request(
         &rollback_client,
         api::ClientRequest::ThreadResume {
-            request_id: request_id(1),
+            request_id: request_id(/*id*/ 1),
             params: api::ThreadResumeParams {
                 thread_id: thread_id.to_string(),
                 ..Default::default()
@@ -409,7 +409,7 @@ plugins = false
     let rolled_back: api::ThreadRollbackResponse = request(
         &rollback_client,
         api::ClientRequest::ThreadRollback {
-            request_id: request_id(2),
+            request_id: request_id(/*id*/ 2),
             params: api::ThreadRollbackParams {
                 thread_id: thread_id.to_string(),
                 num_turns: 1,
@@ -438,7 +438,7 @@ plugins = false
     let read: api::ThreadReadResponse = request(
         &reader_client,
         api::ClientRequest::ThreadRead {
-            request_id: request_id(3),
+            request_id: request_id(/*id*/ 3),
             params: api::ThreadReadParams {
                 thread_id: thread_id.to_string(),
                 include_turns: false,
@@ -452,7 +452,7 @@ plugins = false
     let list: api::ThreadListResponse = request(
         &reader_client,
         api::ClientRequest::ThreadList {
-            request_id: request_id(4),
+            request_id: request_id(/*id*/ 4),
             params: api::ThreadListParams {
                 cursor: None,
                 limit: Some(10),
@@ -477,7 +477,7 @@ plugins = false
     let turns: api::ThreadTurnsListResponse = request(
         &reader_client,
         api::ClientRequest::ThreadTurnsList {
-            request_id: request_id(5),
+            request_id: request_id(/*id*/ 5),
             params: api::ThreadTurnsListParams {
                 thread_id: thread_id.to_string(),
                 cursor: None,
@@ -494,7 +494,7 @@ plugins = false
     let items: api::ThreadItemsListResponse = request(
         &reader_client,
         api::ClientRequest::ThreadItemsList {
-            request_id: request_id(6),
+            request_id: request_id(/*id*/ 6),
             params: api::ThreadItemsListParams {
                 thread_id: thread_id.to_string(),
                 turn_id: None,
@@ -510,7 +510,7 @@ plugins = false
     let search: api::ThreadSearchResponse = request(
         &reader_client,
         api::ClientRequest::ThreadSearch {
-            request_id: request_id(7),
+            request_id: request_id(/*id*/ 7),
             params: api::ThreadSearchParams {
                 cursor: None,
                 limit: Some(10),
@@ -527,7 +527,7 @@ plugins = false
     let occurrences: api::ThreadSearchOccurrencesResponse = request(
         &reader_client,
         api::ClientRequest::ThreadSearchOccurrences {
-            request_id: request_id(8),
+            request_id: request_id(/*id*/ 8),
             params: api::ThreadSearchOccurrencesParams {
                 thread_id: thread_id.to_string(),
                 search_term: "second needle".to_string(),
@@ -572,7 +572,7 @@ plugins = false
     let resumed: api::ThreadResumeResponse = request(
         &reader_client,
         api::ClientRequest::ThreadResume {
-            request_id: request_id(9),
+            request_id: request_id(/*id*/ 9),
             params: api::ThreadResumeParams {
                 thread_id: thread_id.to_string(),
                 ..Default::default()
@@ -584,7 +584,7 @@ plugins = false
     let started: api::TurnStartResponse = request(
         &reader_client,
         api::ClientRequest::TurnStart {
-            request_id: request_id(10),
+            request_id: request_id(/*id*/ 10),
             params: api::TurnStartParams {
                 thread_id: thread_id.to_string(),
                 input: vec![api::UserInput::Text {
@@ -670,7 +670,7 @@ plugins = false
     let after_append: api::ThreadTurnsListResponse = request(
         &reader_client,
         api::ClientRequest::ThreadTurnsList {
-            request_id: request_id(11),
+            request_id: request_id(/*id*/ 11),
             params: api::ThreadTurnsListParams {
                 thread_id: thread_id.to_string(),
                 cursor: None,
@@ -856,7 +856,7 @@ fn history(thread_id: ThreadId) -> Vec<RolloutItem> {
             "user-1",
             "database native needle",
             "agent-1",
-            10,
+            /*started_at*/ 10,
         ),
         turn(
             thread_id,
@@ -864,7 +864,7 @@ fn history(thread_id: ThreadId) -> Vec<RolloutItem> {
             "user-2",
             "second needle",
             "agent-2",
-            30,
+            /*started_at*/ 30,
         ),
     ]
     .concat()
