@@ -639,7 +639,13 @@ async fn backfill_sessions_preserves_existing_git_branch_and_fills_missing_git_f
         .await
         .expect("existing metadata upsert");
 
-    backfill_sessions(runtime.as_ref(), codex_home.as_path(), "test-provider").await;
+    backfill_sessions_with_owner(
+        runtime.as_ref(),
+        codex_home.as_path(),
+        "test-provider",
+        "test-owner",
+    )
+    .await;
 
     let persisted = runtime
         .get_thread(thread_id)
@@ -689,7 +695,13 @@ async fn backfill_sessions_preserves_existing_paginated_memory_mode() {
             .expect("disable memory mode")
     );
 
-    backfill_sessions(runtime.as_ref(), codex_home.as_path(), "test-provider").await;
+    backfill_sessions_with_owner(
+        runtime.as_ref(),
+        codex_home.as_path(),
+        "test-provider",
+        "test-owner",
+    )
+    .await;
 
     assert_eq!(
         runtime
@@ -722,7 +734,13 @@ async fn backfill_sessions_normalizes_cwd_before_upsert() {
             .await
             .expect("initialize runtime");
 
-    backfill_sessions(runtime.as_ref(), codex_home.as_path(), "test-provider").await;
+    backfill_sessions_with_owner(
+        runtime.as_ref(),
+        codex_home.as_path(),
+        "test-provider",
+        "test-owner",
+    )
+    .await;
 
     let thread_id = ThreadId::from_string(&thread_uuid.to_string()).expect("thread id");
     let stored = runtime

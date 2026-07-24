@@ -162,15 +162,6 @@ pub(crate) async fn extract_metadata_from_items<'a>(
     })
 }
 
-pub(crate) async fn backfill_sessions(
-    runtime: &codex_state::StateRuntime,
-    codex_home: &Path,
-    default_provider: &str,
-) -> BackfillRunOutcome {
-    let owner_id = format!("rollout-backfill-{}", uuid::Uuid::new_v4());
-    backfill_sessions_with_owner(runtime, codex_home, default_provider, &owner_id).await
-}
-
 pub(crate) async fn backfill_sessions_with_owner(
     runtime: &codex_state::StateRuntime,
     codex_home: &Path,
