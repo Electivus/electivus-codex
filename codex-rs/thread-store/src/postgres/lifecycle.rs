@@ -216,10 +216,11 @@ pub(super) async fn renew_writer(
         .cloned()
         .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
     let lease_millis = lease_millis()?;
+    // Identity, fencing, and stream checks make an expired lease renewable only until another
+    // writer takes over. The takeover path changes the identity and fencing token atomically.
     let renewed = sqlx::query(AssertSqlSafe(format!(
         "UPDATE {} SET writer_lease_expires_at = CURRENT_TIMESTAMP + $1 * INTERVAL '1 millisecond' \
-         WHERE thread_id = $2 AND writer_id = $3 AND fencing_token = $4 AND stream_version = $5 \
-         AND writer_lease_expires_at > CURRENT_TIMESTAMP",
+         WHERE thread_id = $2 AND writer_id = $3 AND fencing_token = $4 AND stream_version = $5",
         store.tables.threads
     )))
     .bind(lease_millis)
@@ -247,10 +248,10 @@ pub(super) async fn release_writer(
         .get(&thread_id)
         .cloned()
         .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+    // Releasing an already-expired lease is a safe no-op while this writer's fence still matches.
     let released = sqlx::query(AssertSqlSafe(format!(
         "UPDATE {} SET writer_lease_expires_at = CURRENT_TIMESTAMP \
-         WHERE thread_id = $1 AND writer_id = $2 AND fencing_token = $3 AND stream_version = $4 \
-         AND writer_lease_expires_at > CURRENT_TIMESTAMP",
+         WHERE thread_id = $1 AND writer_id = $2 AND fencing_token = $3 AND stream_version = $4",
         store.tables.threads
     )))
     .bind(thread_id.to_string())

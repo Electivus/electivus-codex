@@ -76,8 +76,7 @@ pub(super) async fn append_batch(
         .await
         .map_err(|error| database_error("append thread history", error))?;
     let row = sqlx::query(AssertSqlSafe(format!(
-        "SELECT projection, stream_version, history_projection_version, fencing_token, writer_id, \
-         writer_lease_expires_at > CURRENT_TIMESTAMP AS lease_active \
+        "SELECT projection, stream_version, history_projection_version, fencing_token, writer_id \
          FROM {} WHERE thread_id = $1 FOR UPDATE",
         store.tables.threads
     )))
@@ -97,10 +96,9 @@ pub(super) async fn append_batch(
     let writer_id: String = row
         .try_get("writer_id")
         .map_err(|error| database_error("append thread history", error))?;
-    let lease_active: bool = row
-        .try_get("lease_active")
-        .map_err(|error| database_error("append thread history", error))?;
-    if fencing_token != writer.fencing_token || writer_id != store.writer_id || !lease_active {
+    // The current writer may continue after an idle lease expiry if no takeover occurred.
+    // A takeover changes both the writer id and fencing token, so the former writer remains fenced.
+    if fencing_token != writer.fencing_token || writer_id != store.writer_id {
         return Err(writer_conflict(batch.thread_id));
     }
     let committed_batch = sqlx::query(AssertSqlSafe(format!(
@@ -220,8 +218,7 @@ pub(super) async fn append_batch(
         "UPDATE {} SET projection = $1, stream_version = $2, history_projection_version = $2, \
          updated_at = $3, recency_at = $4, \
          writer_lease_expires_at = CURRENT_TIMESTAMP + $5 * INTERVAL '1 millisecond' \
-         WHERE thread_id = $6 AND writer_id = $7 AND fencing_token = $8 AND stream_version = $9 \
-         AND writer_lease_expires_at > CURRENT_TIMESTAMP",
+         WHERE thread_id = $6 AND writer_id = $7 AND fencing_token = $8 AND stream_version = $9",
         store.tables.threads
     )))
     .bind(projection_json)

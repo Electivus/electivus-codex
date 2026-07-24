@@ -29,6 +29,9 @@ mod postgres_contract_tests;
 #[path = "postgres_item_projection_contract_tests.rs"]
 mod postgres_item_projection_contract_tests;
 #[cfg(test)]
+#[path = "postgres_lease_recovery_contract_tests.rs"]
+mod postgres_lease_recovery_contract_tests;
+#[cfg(test)]
 #[path = "postgres_turn_projection_contract_tests.rs"]
 mod postgres_turn_projection_contract_tests;
 #[cfg(test)]

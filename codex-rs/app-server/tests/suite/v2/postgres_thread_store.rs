@@ -692,7 +692,7 @@ plugins = false
     fixture.cleanup().await
 }
 
-async fn request<T: DeserializeOwned>(
+pub(super) async fn request<T: DeserializeOwned>(
     client: &InProcessClientHandle,
     request: api::ClientRequest,
 ) -> Result<T> {
@@ -991,14 +991,14 @@ fn completed_item(thread_id: ThreadId, turn_id: &str, item: TurnItem) -> Rollout
     }))
 }
 
-struct PostgresFixture {
+pub(super) struct PostgresFixture {
     config: PostgresNamespaceConfig,
-    database_url: String,
-    schema: String,
+    pub(super) database_url: String,
+    pub(super) schema: String,
 }
 
 impl PostgresFixture {
-    fn new() -> Result<Self> {
+    pub(super) fn new() -> Result<Self> {
         let database_url = std::env::var(DATABASE_URL_ENV)?;
         let schema = format!("codex_app_server_{}", Uuid::new_v4().simple());
         let config = PostgresNamespaceConfig::new(
@@ -1013,7 +1013,7 @@ impl PostgresFixture {
         })
     }
 
-    async fn migrate(&self) -> Result<()> {
+    pub(super) async fn migrate(&self) -> Result<()> {
         codex_state::manage_postgres_namespace(
             self.config.clone(),
             PostgresNamespaceAction::Migrate,
@@ -1044,7 +1044,7 @@ impl PostgresFixture {
         Ok(())
     }
 
-    async fn runtime(&self, codex_home: &Path) -> Result<Arc<StateRuntime>> {
+    pub(super) async fn runtime(&self, codex_home: &Path) -> Result<Arc<StateRuntime>> {
         StateRuntime::init_with_backend(
             RuntimeStateBackendConfig::Postgresql {
                 codex_home: AbsolutePathBuf::try_from(codex_home.to_path_buf())?,
@@ -1086,7 +1086,7 @@ impl PostgresFixture {
         Ok(())
     }
 
-    async fn cleanup(&self) -> Result<()> {
+    pub(super) async fn cleanup(&self) -> Result<()> {
         let pool = sqlx::PgPool::connect(&self.database_url).await?;
         sqlx::query(AssertSqlSafe(format!(
             "DROP SCHEMA \"{}\" CASCADE",
