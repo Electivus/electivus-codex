@@ -60,4 +60,18 @@ impl SqliteConfig {
             .connect_with(options)
             .await
     }
+
+    /// Open an existing database as an immutable snapshot without creating SQLite sidecars.
+    pub(crate) async fn open_immutable_pool(&self, path: &Path) -> Result<SqlitePool, Error> {
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(false)
+            .read_only(true)
+            .immutable(true)
+            .log_statements(LevelFilter::Off);
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+    }
 }

@@ -1957,7 +1957,7 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
     .await??;
 
     let state_db =
-        StateRuntime::init(codex_home.path().to_path_buf(), "mock_provider".into()).await?;
+        StateRuntime::init_sqlite(codex_home.path().to_path_buf(), "mock_provider".into()).await?;
     let thread_id = ThreadId::from_string(&thread_id)?;
     let thread_metadata = state_db
         .get_thread(thread_id)
@@ -1973,10 +1973,13 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
         .thread_goals()
         .account_thread_goal_usage(
             thread_id,
-            /*time_delta_seconds*/ 12,
-            /*token_delta*/ 50,
-            codex_state::GoalAccountingMode::ActiveOnly,
-            Some(persisted_goal.goal_id.as_str()),
+            codex_state::GoalAccountingRequest {
+                event_id: "thread-resume-persisted-usage",
+                time_delta_seconds: 12,
+                token_delta: 50,
+                mode: codex_state::GoalAccountingMode::ActiveOnly,
+                target: codex_state::GoalAccountingTarget::GoalId(persisted_goal.goal_id.as_str()),
+            },
         )
         .await?;
 
@@ -2722,7 +2725,7 @@ stream_max_retries = 0
             + "\n",
     )?;
     let state_db =
-        StateRuntime::init(codex_home.path().to_path_buf(), "mock_provider".into()).await?;
+        StateRuntime::init_sqlite(codex_home.path().to_path_buf(), "mock_provider".into()).await?;
     state_db
         .mark_backfill_complete(/*last_watermark*/ None)
         .await?;

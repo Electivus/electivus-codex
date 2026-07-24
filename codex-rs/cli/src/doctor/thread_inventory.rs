@@ -91,6 +91,19 @@ impl RolloutScan {
 }
 
 pub(super) async fn thread_inventory_check(config: &Config) -> DoctorCheck {
+    if let codex_state::RuntimeStateBackendConfig::Postgresql { namespace, .. } =
+        &config.runtime_state_backend
+    {
+        return DoctorCheck::new(
+            CHECK_ID,
+            CHECK_CATEGORY,
+            CheckStatus::Ok,
+            "Canonical Thread History is PostgreSQL-backed",
+        )
+        .detail(format!("PostgreSQL schema: {}", namespace.schema()))
+        .detail("replica-local rollout and SQLite inventory: inactive");
+    }
+
     thread_inventory_check_for_roots(
         config.codex_home.as_path(),
         config.sqlite_home.as_path(),
@@ -1303,7 +1316,7 @@ mod tests {
         async fn new() -> Self {
             let codex_home = TempDir::new().expect("codex home");
             let sqlite_home = TempDir::new().expect("sqlite home");
-            let _runtime = codex_state::StateRuntime::init(
+            let _runtime = codex_state::StateRuntime::init_sqlite(
                 sqlite_home.path().to_path_buf(),
                 "test-provider".to_string(),
             )

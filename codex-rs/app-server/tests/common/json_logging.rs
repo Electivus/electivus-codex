@@ -73,6 +73,28 @@ impl JsonLogCapture {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         json_log_events(lines.iter().map(String::as_str))
     }
+
+    pub(crate) fn joined_lines(&self) -> String {
+        self.lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .join("\n")
+    }
+
+    pub(crate) async fn wait_for_text(&self, needle: &str) -> Result<String> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let updated = self.updated.notified();
+                let lines = self.joined_lines();
+                if lines.contains(needle) {
+                    return lines;
+                }
+                updated.await;
+            }
+        })
+        .await
+        .with_context(|| format!("timed out waiting for stderr containing `{needle}`"))
+    }
 }
 
 pub fn app_server_json_shutdown_event(

@@ -2264,7 +2264,7 @@ fn update_memory_settings_updates_current_thread_memory_mode() -> Result<()> {
         ))
         .await;
 
-        let state_db = codex_state::StateRuntime::init(
+        let state_db = codex_state::StateRuntime::init_sqlite(
             codex_home.path().to_path_buf(),
             app.config.model_provider_id.clone(),
         )

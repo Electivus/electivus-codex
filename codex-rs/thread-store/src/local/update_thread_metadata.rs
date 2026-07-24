@@ -859,7 +859,7 @@ mod tests {
         )
         .expect("session file");
         let original_rollout = std::fs::read_to_string(&path).expect("read rollout");
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             home.path().to_path_buf(),
             config.default_model_provider_id.clone(),
         )
@@ -951,7 +951,7 @@ mod tests {
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
         let path =
             write_session_file(home.path(), "2025-01-03T14-30-00", uuid).expect("session file");
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             home.path().to_path_buf(),
             config.default_model_provider_id.clone(),
         )
@@ -997,7 +997,7 @@ mod tests {
         )
         .expect("session file");
         let original_rollout = std::fs::read_to_string(&path).expect("read rollout");
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             home.path().to_path_buf(),
             config.default_model_provider_id.clone(),
         )
@@ -1094,7 +1094,7 @@ mod tests {
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
         let path =
             write_session_file(home.path(), "2025-01-03T18-30-00", uuid).expect("session file");
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -1199,7 +1199,7 @@ mod tests {
     async fn update_thread_metadata_sets_git_info() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -1242,7 +1242,7 @@ mod tests {
     async fn update_thread_metadata_updates_permission_profile_and_reasoning_effort() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -1297,7 +1297,7 @@ mod tests {
     async fn update_thread_metadata_partially_updates_git_info() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -1355,7 +1355,7 @@ mod tests {
     async fn update_thread_metadata_clears_git_info_fields() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             config.sqlite_home.clone(),
             config.default_model_provider_id.clone(),
         )
@@ -1558,7 +1558,7 @@ mod tests {
     async fn update_thread_metadata_applies_combined_explicit_patch() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             home.path().to_path_buf(),
             config.default_model_provider_id.clone(),
         )
@@ -1651,7 +1651,7 @@ mod tests {
     async fn metadata_patch_applies_title_over_existing_name() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             home.path().to_path_buf(),
             config.default_model_provider_id.clone(),
         )
@@ -1694,7 +1694,7 @@ mod tests {
     async fn metadata_patch_applies_latest_preview_and_first_user_message() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             home.path().to_path_buf(),
             config.default_model_provider_id.clone(),
         )
@@ -1752,7 +1752,7 @@ mod tests {
     async fn observed_metadata_rejects_unknown_thread_without_rollout() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             home.path().to_path_buf(),
             config.default_model_provider_id.clone(),
         )
@@ -1799,7 +1799,7 @@ mod tests {
             ThreadHistoryMode::Paginated,
         )
         .expect("session file");
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             home.path().to_path_buf(),
             config.default_model_provider_id.clone(),
         )
@@ -1839,7 +1839,7 @@ mod tests {
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
         write_archived_session_file(home.path(), "2025-01-03T19-30-00", uuid)
             .expect("archived session file");
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             home.path().to_path_buf(),
             config.default_model_provider_id.clone(),
         )
@@ -1875,7 +1875,7 @@ mod tests {
     async fn observed_metadata_normalizes_cwd_for_list_filters() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             home.path().to_path_buf(),
             config.default_model_provider_id.clone(),
         )
@@ -1944,7 +1944,7 @@ mod tests {
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
         let archived_path = write_archived_session_file(home.path(), "2025-01-03T16-00-00", uuid)
             .expect("archived session file");
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             home.path().to_path_buf(),
             config.default_model_provider_id.clone(),
         )
@@ -2007,7 +2007,7 @@ mod tests {
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
         let archived_path = write_archived_session_file(home.path(), "2025-01-03T16-30-00", uuid)
             .expect("archived session file");
-        let runtime = codex_state::StateRuntime::init(
+        let runtime = codex_state::StateRuntime::init_sqlite(
             home.path().to_path_buf(),
             config.default_model_provider_id.clone(),
         )

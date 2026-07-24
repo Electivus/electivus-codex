@@ -1634,23 +1634,15 @@ impl ThreadRequestProcessor {
         let state_db = self
             .state_db
             .clone()
-            .ok_or_else(|| internal_error("sqlite state db unavailable for memory reset"))?;
+            .ok_or_else(|| internal_error("runtime state unavailable for memory reset"))?;
 
-        state_db
-            .memories()
-            .clear_memory_data()
+        reset_memories(state_db.memories(), &self.config.codex_home)
             .await
             .map_err(|err| {
-                internal_error(format!("failed to clear memory rows in memories db: {err}"))
-            })?;
-
-        clear_memory_roots_contents(&self.config.codex_home)
-            .await
-            .map_err(|err| {
-                internal_error(format!(
-                    "failed to clear memory directories under {}: {err}",
-                    self.config.codex_home.display()
-                ))
+                warn!(error = %err, "failed to reset Runtime State memory");
+                internal_error(
+                    "failed to reset memory state; verify Runtime State health and retry",
+                )
             })?;
 
         Ok(MemoryResetResponse {})
@@ -1797,15 +1789,19 @@ impl ThreadRequestProcessor {
         }
 
         let (thread_id, thread) = self.load_thread(&thread_id).await?;
-        if matches!(
-            thread.config_snapshot().await.history_mode,
-            ThreadHistoryMode::Paginated
-        ) {
+        let config_snapshot = thread.config_snapshot().await;
+        if config_snapshot.ephemeral {
+            return Err(invalid_request(
+                "thread rollback requires persisted thread history",
+            ));
+        }
+        if matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated)
+            && !self.thread_store.supports_paginated_rollback()
+        {
             return Err(invalid_request(
                 "paginated threads do not support thread/rollback",
             ));
         }
-
         let request = request_id.clone();
 
         let rollback_already_in_progress = {
@@ -3211,12 +3207,6 @@ impl ThreadRequestProcessor {
                 }
                 let instruction_sources = codex_thread.legacy_instruction_sources().await;
                 let SessionConfiguredEvent { rollout_path, .. } = session_configured;
-                let Some(rollout_path) = rollout_path else {
-                    let error =
-                        internal_error(format!("rollout path missing for thread {thread_id}"));
-                    self.outgoing.send_error(request_id, error).await;
-                    return Ok(());
-                };
                 // Paginated JSONL is canonical, but its SQLite projection can lag after a
                 // previous write failure. Persist after reopening the live writer so legacy
                 // response hydration reads the latest durable turns and items.
@@ -3259,7 +3249,7 @@ impl ThreadRequestProcessor {
                         thread_id,
                         codex_thread.as_ref(),
                         &response_history,
-                        rollout_path.as_path(),
+                        rollout_path.as_deref(),
                         resume_source_thread,
                         include_turns && !paginated_resume,
                     )
@@ -3744,7 +3734,9 @@ impl ThreadRequestProcessor {
         path: Option<&PathBuf>,
         include_history: bool,
     ) -> Result<StoredThread, JSONRPCErrorError> {
-        let result = if let Some(path) = path {
+        let result = if let Some(path) = path
+            && self.thread_store.supports_rollout_path_lookup()
+        {
             self.thread_store
                 .read_thread_by_rollout_path(StoreReadThreadByRolloutPathParams {
                     rollout_path: path.clone(),
@@ -3838,7 +3830,7 @@ impl ThreadRequestProcessor {
         thread_id: ThreadId,
         thread: &CodexThread,
         thread_history: &InitialHistory,
-        rollout_path: &Path,
+        rollout_path: Option<&Path>,
         resume_source_thread: Option<StoredThread>,
         include_turns: bool,
     ) -> std::result::Result<Thread, String> {
@@ -3912,7 +3904,7 @@ impl ThreadRequestProcessor {
                     session_id.clone(),
                     thread.multi_agent_version(),
                     &config_snapshot,
-                    Some(rollout_path.into()),
+                    rollout_path.map(Path::to_path_buf),
                 );
                 thread.preview = preview_from_rollout_items(items);
                 Ok(thread)
@@ -3925,7 +3917,9 @@ impl ThreadRequestProcessor {
         thread.can_accept_direct_input = Some(can_accept_direct_input);
         thread.id = thread_id.to_string();
         thread.session_id = session_id;
-        thread.path = Some(rollout_path.to_path_buf());
+        if let Some(rollout_path) = rollout_path {
+            thread.path = Some(rollout_path.to_path_buf());
+        }
         if include_turns {
             let history_items = thread_history.get_rollout_items();
             populate_thread_turns_from_history(
@@ -3994,14 +3988,16 @@ impl ThreadRequestProcessor {
                 "`permissions` cannot be combined with `sandbox`",
             ));
         }
-        let source_thread = self
+        let mut source_thread = self
             .read_stored_thread_for_resume(
                 &thread_id,
                 path.as_ref(),
                 /*include_history*/ false,
             )
             .await?;
-        if matches!(source_thread.history_mode, ThreadHistoryMode::Paginated) {
+        let source_thread_id = source_thread.thread_id;
+        let paginated_fork = matches!(source_thread.history_mode, ThreadHistoryMode::Paginated);
+        if paginated_fork && ephemeral {
             return Err(method_not_found("paginated_threads is not supported yet"));
         }
         if last_turn_id.is_some() && before_turn_id.is_some() {
@@ -4014,23 +4010,37 @@ impl ThreadRequestProcessor {
                 "`deferGoalContinuation` cannot be combined with `ephemeral`",
             ));
         }
-        let mut source_thread = self
-            .read_stored_thread_for_resume(&thread_id, path.as_ref(), /*include_history*/ true)
-            .await?;
-        let source_thread_id = source_thread.thread_id;
         let source_thread_name = source_thread
             .name
             .as_deref()
             .and_then(codex_core::util::normalize_thread_name);
-        let history_items = source_thread
-            .history
-            .take()
-            .map(|history| history.items)
-            .ok_or_else(|| {
-                internal_error(format!(
-                    "thread {source_thread_id} did not include persisted history"
-                ))
-            })?;
+        let history_items = if paginated_fork {
+            self.thread_store
+                .load_latest_model_context(StoreLoadThreadHistoryParams {
+                    thread_id: source_thread_id,
+                    include_archived: true,
+                })
+                .await
+                .map_err(thread_store_resume_read_error)?
+                .items
+        } else {
+            source_thread = self
+                .read_stored_thread_for_resume(
+                    &thread_id,
+                    path.as_ref(),
+                    /*include_history*/ true,
+                )
+                .await?;
+            source_thread
+                .history
+                .take()
+                .map(|history| history.items)
+                .ok_or_else(|| {
+                    internal_error(format!(
+                        "thread {source_thread_id} did not include persisted history"
+                    ))
+                })?
+        };
         let history_items = match (last_turn_id.as_deref(), before_turn_id.as_deref()) {
             (Some(last_turn_id), None) => Arc::new(
                 truncate_rollout_after_turn_id(&history_items, last_turn_id)
@@ -4127,9 +4137,7 @@ impl ThreadRequestProcessor {
             app_server_client_version,
         )
         .await?;
-        if session_configured.rollout_path.is_some()
-            && let Some(name) = source_thread_name.clone()
-        {
+        if !ephemeral && let Some(name) = source_thread_name.clone() {
             self.thread_manager
                 .update_thread_metadata(
                     thread_id,
@@ -4142,10 +4150,7 @@ impl ThreadRequestProcessor {
                 .await
                 .map_err(|err| core_thread_write_error("inherit source thread name", err))?;
         }
-        let inherited_goal = if defer_goal_continuation
-            && session_configured.rollout_path.is_some()
-            && goals_enabled
-        {
+        let inherited_goal = if defer_goal_continuation && !ephemeral && goals_enabled {
             if let Some(state_db) = forked_thread.state_db().or_else(|| self.state_db.clone()) {
                 self.thread_goal_processor
                     .flush_goal_progress_for_fork(source_thread_id)
@@ -4187,8 +4192,9 @@ impl ThreadRequestProcessor {
 
         let config_snapshot = forked_thread.config_snapshot().await;
 
-        // Persistent forks materialize their own rollout immediately. Ephemeral forks stay
-        // pathless, so they rebuild their visible history from the copied source history instead.
+        // Rollout-backed forks can read their stored summary immediately. Pathless forks build
+        // their visible metadata from the copied source history; durable paginated forks hydrate
+        // their turns from the thread store below.
         let mut thread = if session_configured.rollout_path.is_some() {
             let stored_thread = self
                 .read_stored_thread_for_new_fork(thread_id, include_turns)
@@ -4208,7 +4214,7 @@ impl ThreadRequestProcessor {
             );
             thread.preview = preview_from_rollout_items(&history_items);
             thread.forked_from_id = Some(source_thread_id.to_string());
-            if include_turns {
+            if include_turns && !paginated_fork {
                 populate_thread_turns_from_history(
                     &mut thread,
                     &history_items,
@@ -4217,6 +4223,9 @@ impl ThreadRequestProcessor {
             }
             thread
         };
+        if include_turns && paginated_fork {
+            thread.turns = self.paginated_thread_full_turns(thread_id).await?;
+        }
         if let Some(name) = source_thread_name {
             set_thread_name_from_title(&mut thread, name);
         }

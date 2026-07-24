@@ -38,7 +38,7 @@ pub(crate) fn unique_temp_dir() -> PathBuf {
 }
 
 #[cfg(test)]
-pub(super) fn test_thread_metadata(
+pub(crate) fn test_thread_metadata(
     codex_home: &Path,
     thread_id: ThreadId,
     cwd: PathBuf,

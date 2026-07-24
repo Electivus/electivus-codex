@@ -44,43 +44,67 @@ impl ThreadRequestProcessor {
             self.prepare_thread_for_delete(thread_id_to_delete).await;
         }
 
-        let mut delete_order: Vec<_> = thread_ids.iter().skip(1).rev().copied().collect();
-        delete_order.push(thread_id);
-
-        for thread_id_to_delete in delete_order.iter().copied() {
-            match self
-                .thread_store
-                .delete_thread(StoreDeleteThreadParams {
-                    thread_id: thread_id_to_delete,
-                })
-                .await
-            {
-                Ok(()) => {}
-                Err(ThreadStoreError::ThreadNotFound { .. }) => {
-                    warn!(
-                        "thread {thread_id_to_delete} was already missing while deleting {thread_id}"
-                    );
-                }
-                Err(err) => {
-                    return Err(thread_store_delete_error(err));
-                }
-            }
-        }
-
-        if let Some(state_db) = self.state_db.as_ref() {
-            state_db
-                .delete_threads_strict(thread_ids.as_slice())
+        let integral_state_db = self
+            .state_db
+            .as_ref()
+            .filter(|state_db| !state_db.uses_local_rollout_history());
+        let deleted_subtree = if let Some(state_db) = integral_state_db {
+            let deleted_subtree = state_db
+                .delete_thread_spawn_subtree_strict(thread_id)
                 .await
                 .map_err(|err| {
                     internal_error(format!(
                         "failed to delete app-server state for {thread_id}: {err}"
                     ))
                 })?;
-        }
+            for deleted_thread_id in deleted_subtree.iter().copied() {
+                self.prepare_thread_for_delete(deleted_thread_id).await;
+            }
+            deleted_subtree
+        } else {
+            let mut delete_order: Vec<_> = thread_ids.iter().skip(1).rev().copied().collect();
+            delete_order.push(thread_id);
+
+            for thread_id_to_delete in delete_order.iter().copied() {
+                match self
+                    .thread_store
+                    .delete_thread(StoreDeleteThreadParams {
+                        thread_id: thread_id_to_delete,
+                    })
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(ThreadStoreError::ThreadNotFound { .. }) => {
+                        warn!(
+                            "thread {thread_id_to_delete} was already missing while deleting {thread_id}"
+                        );
+                    }
+                    Err(err) => {
+                        return Err(thread_store_delete_error(err));
+                    }
+                }
+            }
+
+            if let Some(state_db) = self.state_db.as_ref() {
+                state_db
+                    .delete_threads_strict(thread_ids.as_slice())
+                    .await
+                    .map_err(|err| {
+                        internal_error(format!(
+                            "failed to delete app-server state for {thread_id}: {err}"
+                        ))
+                    })?;
+            }
+            thread_ids
+        };
 
         deleted_thread_ids.extend(
-            delete_order
-                .into_iter()
+            deleted_subtree
+                .iter()
+                .skip(1)
+                .rev()
+                .copied()
+                .chain(std::iter::once(thread_id))
                 .map(|thread_id| thread_id.to_string()),
         );
         Ok(ThreadDeleteResponse {})
@@ -128,6 +152,11 @@ impl ThreadRequestProcessor {
                         ThreadStoreError::ThreadNotFound { thread_id },
                     ));
                 };
+                if !state_db.uses_local_rollout_history() {
+                    return Err(thread_store_delete_error(
+                        ThreadStoreError::ThreadNotFound { thread_id },
+                    ));
+                }
                 if state_db
                     .get_thread(thread_id)
                     .await

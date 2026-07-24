@@ -509,7 +509,7 @@ fn test_model_client_session() -> crate::client::ModelClientSession {
         /*auth_manager*/ None,
         AgentIdentityAuthPolicy::JwtOnly,
         thread_id,
-        ModelProviderInfo::create_openai_provider(/* base_url */ /*base_url*/ None),
+        ModelProviderInfo::create_openai_provider(/*base_url*/ None),
         codex_protocol::protocol::SessionSource::Exec,
         "test_originator".to_string(),
         /*model_verbosity*/ None,
@@ -5669,7 +5669,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         Arc::new(codex_thread_store::LocalThreadStore::new(
             codex_thread_store::LocalThreadStoreConfig::from_config(config.as_ref()),
             Some(
-                codex_state::StateRuntime::init(
+                codex_state::StateRuntime::init_sqlite(
                     config.sqlite_home.clone(),
                     config.model_provider_id.clone(),
                 )

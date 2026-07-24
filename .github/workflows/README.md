@@ -30,6 +30,8 @@ remain the fallback.
   - `cargo shear`
   - `argument-comment-lint` on Linux
   - `tools/argument-comment-lint` package tests when the lint or its workflow wiring changes
+- `postgres-runtime-state-contracts.yml` provisions PostgreSQL 18 on Linux and
+  runs the real-database Runtime State Namespace contract suite.
 - `sdk.yml` runs Python and TypeScript SDK validation on `ubuntu-24.04`.
 
 ## Extended Validation

@@ -13,6 +13,8 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 pub use codex_state::LogEntry;
+use codex_state::RuntimeStateBackendConfig;
+use codex_state::SqliteConfig;
 use codex_state::ThreadMetadataBuilder;
 use codex_utils_path::normalize_for_path_comparison;
 use serde_json::Value;
@@ -24,7 +26,7 @@ use std::time::Instant;
 use tracing::info;
 use tracing::warn;
 
-/// Core-facing handle to the SQLite-backed state runtime.
+/// Core-facing handle to the selected state runtime.
 pub type StateDbHandle = Arc<codex_state::StateRuntime>;
 
 #[cfg(not(test))]
@@ -38,15 +40,16 @@ const STARTUP_BACKFILL_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Initialize the state runtime for thread state persistence.
 ///
-/// This is the process entry point for local state: it opens the SQLite-backed
-/// runtime, applies rollout metadata backfills as needed, and returns the
-/// initialized handle.
+/// This is the process entry point for runtime state. SQLite startup applies rollout
+/// metadata backfills; PostgreSQL startup validates and opens the selected ready namespace.
 pub async fn init(config: &impl RolloutConfigView) -> Option<StateDbHandle> {
+    let selected_backend = config.runtime_state_backend().cloned();
     let config = RolloutConfig::from_view(config);
-    match try_init_with_roots(
+    match try_init_with_roots_and_backend(
         config.codex_home,
         config.sqlite_home,
         config.model_provider_id,
+        selected_backend,
     )
     .await
     {
@@ -63,25 +66,39 @@ pub async fn init(config: &impl RolloutConfigView) -> Option<StateDbHandle> {
 /// Prefer [`init`] unless the caller needs to surface the exact failure after
 /// tracing or UI setup has completed.
 pub async fn try_init(config: &impl RolloutConfigView) -> anyhow::Result<StateDbHandle> {
+    let selected_backend = config.runtime_state_backend().cloned();
     let config = RolloutConfig::from_view(config);
-    try_init_with_roots(
+    try_init_with_roots_and_backend(
         config.codex_home,
         config.sqlite_home,
         config.model_provider_id,
+        selected_backend,
     )
     .await
 }
 
-async fn try_init_with_roots(
+async fn try_init_with_roots_and_backend(
     codex_home: PathBuf,
     sqlite_home: PathBuf,
     default_model_provider_id: String,
+    selected_backend: Option<RuntimeStateBackendConfig>,
 ) -> anyhow::Result<StateDbHandle> {
+    if let Some(backend @ RuntimeStateBackendConfig::Postgresql { .. }) = selected_backend {
+        return codex_state::StateRuntime::init_with_backend(backend, default_model_provider_id)
+            .await;
+    }
+    // `sqlite_home` remains the compatibility authority for SQLite callers.
+    // Rebuild the SQLite backend from the live config view so callers that
+    // override that field do not retain a stale path captured during loading.
+    let backend = RuntimeStateBackendConfig::Sqlite(SqliteConfig::from_sqlite_home(
+        sqlite_home.clone().try_into()?,
+    ));
     try_init_with_roots_inner(
         codex_home,
         sqlite_home,
         default_model_provider_id,
-        /*backfill_lease_seconds*/ None,
+        /*backfill_lease_duration*/ None,
+        backend,
     )
     .await
 }
@@ -91,13 +108,17 @@ async fn try_init_with_roots_and_backfill_lease(
     codex_home: PathBuf,
     sqlite_home: PathBuf,
     default_model_provider_id: String,
-    backfill_lease_seconds: i64,
+    backfill_lease_duration: Duration,
 ) -> anyhow::Result<StateDbHandle> {
+    let backend = RuntimeStateBackendConfig::Sqlite(SqliteConfig::from_sqlite_home(
+        sqlite_home.clone().try_into()?,
+    ));
     try_init_with_roots_inner(
         codex_home,
         sqlite_home,
         default_model_provider_id,
-        Some(backfill_lease_seconds),
+        Some(backfill_lease_duration),
+        backend,
     )
     .await
 }
@@ -106,10 +127,11 @@ async fn try_init_with_roots_inner(
     codex_home: PathBuf,
     sqlite_home: PathBuf,
     default_model_provider_id: String,
-    backfill_lease_seconds: Option<i64>,
+    backfill_lease_duration: Option<Duration>,
+    backend: RuntimeStateBackendConfig,
 ) -> anyhow::Result<StateDbHandle> {
     let runtime =
-        codex_state::StateRuntime::init(sqlite_home.clone(), default_model_provider_id.clone())
+        codex_state::StateRuntime::init_with_backend(backend, default_model_provider_id.clone())
             .await
             .with_context(|| {
                 format!(
@@ -118,11 +140,13 @@ async fn try_init_with_roots_inner(
                 )
             })?;
     let backfill_gate_started = Instant::now();
+    let backfill_owner_id = format!("startup-backfill-{}", uuid::Uuid::new_v4());
     let backfill_gate_result = wait_for_backfill_gate(
         runtime.as_ref(),
         codex_home.as_path(),
         default_model_provider_id.as_str(),
-        backfill_lease_seconds,
+        backfill_lease_duration,
+        &backfill_owner_id,
     )
     .await;
     codex_state::record_backfill_gate(
@@ -141,12 +165,14 @@ async fn wait_for_backfill_gate(
     runtime: &codex_state::StateRuntime,
     codex_home: &Path,
     default_model_provider_id: &str,
-    backfill_lease_seconds: Option<i64>,
+    backfill_lease_duration: Option<Duration>,
+    backfill_owner_id: &str,
 ) -> anyhow::Result<()> {
     let wait_started = Instant::now();
     let mut reported_wait = false;
+    let backfill_coordinator = runtime.backfill_coordinator();
     loop {
-        let backfill_state = runtime.get_backfill_state().await.map_err(|err| {
+        let backfill_state = backfill_coordinator.state().await.map_err(|err| {
             anyhow::anyhow!(
                 "failed to read backfill state at {}: {err}",
                 codex_home.display()
@@ -156,18 +182,25 @@ async fn wait_for_backfill_gate(
             return Ok(());
         }
 
-        if let Some(backfill_lease_seconds) = backfill_lease_seconds {
+        if let Some(backfill_lease_duration) = backfill_lease_duration {
             metadata::backfill_sessions_with_lease(
                 runtime,
                 codex_home,
                 default_model_provider_id,
-                backfill_lease_seconds,
+                backfill_lease_duration,
+                backfill_owner_id,
             )
             .await;
         } else {
-            metadata::backfill_sessions(runtime, codex_home, default_model_provider_id).await;
+            metadata::backfill_sessions_with_owner(
+                runtime,
+                codex_home,
+                default_model_provider_id,
+                backfill_owner_id,
+            )
+            .await;
         }
-        let backfill_state = runtime.get_backfill_state().await.map_err(|err| {
+        let backfill_state = backfill_coordinator.state().await.map_err(|err| {
             anyhow::anyhow!(
                 "failed to read backfill state at {} after startup backfill: {err}",
                 codex_home.display()
@@ -216,6 +249,22 @@ fn emit_startup_warning(message: &str) {
 /// Unlike [`init`], this helper does not run rollout backfill. It is for
 /// optional local reads from non-owning contexts such as remote app-server mode.
 pub async fn get_state_db(config: &impl RolloutConfigView) -> Option<StateDbHandle> {
+    if let Some(backend @ RuntimeStateBackendConfig::Postgresql { .. }) =
+        config.runtime_state_backend().cloned()
+    {
+        return match codex_state::StateRuntime::init_with_backend(
+            backend,
+            config.model_provider_id().to_string(),
+        )
+        .await
+        {
+            Ok(runtime) => Some(runtime),
+            Err(error) => {
+                warn!("failed to initialize PostgreSQL Runtime State Backend: {error:#}");
+                None
+            }
+        };
+    }
     let state_path = codex_state::state_db_path(config.sqlite_home());
     if !tokio::fs::try_exists(&state_path).await.unwrap_or(false) {
         codex_state::record_fallback(
@@ -225,7 +274,7 @@ pub async fn get_state_db(config: &impl RolloutConfigView) -> Option<StateDbHand
         );
         return None;
     }
-    let runtime = match codex_state::StateRuntime::init(
+    let runtime = match codex_state::StateRuntime::init_sqlite(
         config.sqlite_home().to_path_buf(),
         config.model_provider_id().to_string(),
     )
@@ -256,7 +305,7 @@ async fn require_backfill_complete(
     runtime: StateDbHandle,
     codex_home: &Path,
 ) -> Option<StateDbHandle> {
-    match runtime.get_backfill_state().await {
+    match runtime.backfill_coordinator().state().await {
         Ok(state) if state.status == codex_state::BackfillStatus::Complete => Some(runtime),
         Ok(state) => {
             warn!(

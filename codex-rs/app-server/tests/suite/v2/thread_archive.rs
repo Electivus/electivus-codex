@@ -205,7 +205,7 @@ async fn thread_archive_archives_spawned_descendants() -> Result<()> {
     let child_thread_id = ThreadId::from_string(&child_id)?;
     let grandchild_thread_id = ThreadId::from_string(&grandchild_id)?;
     let state_db =
-        StateRuntime::init(codex_home.path().to_path_buf(), "mock_provider".into()).await?;
+        StateRuntime::init_sqlite(codex_home.path().to_path_buf(), "mock_provider".into()).await?;
     state_db
         .mark_backfill_complete(/*last_watermark*/ None)
         .await?;
@@ -320,7 +320,7 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
     let child_thread_id = ThreadId::from_string(&child_id)?;
     let grandchild_thread_id = ThreadId::from_string(&grandchild_id)?;
     let state_db =
-        StateRuntime::init(codex_home.path().to_path_buf(), "mock_provider".into()).await?;
+        StateRuntime::init_sqlite(codex_home.path().to_path_buf(), "mock_provider".into()).await?;
     state_db
         .mark_backfill_complete(/*last_watermark*/ None)
         .await?;
@@ -445,7 +445,7 @@ async fn thread_archive_succeeds_when_spawned_descendant_is_missing() -> Result<
     let missing_child_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000901")?;
 
     let state_db =
-        StateRuntime::init(codex_home.path().to_path_buf(), "mock_provider".into()).await?;
+        StateRuntime::init_sqlite(codex_home.path().to_path_buf(), "mock_provider".into()).await?;
     state_db
         .mark_backfill_complete(/*last_watermark*/ None)
         .await?;

@@ -307,6 +307,121 @@ async fn load_rollout_items_defaults_legacy_session_id() -> std::io::Result<()> 
 }
 
 #[tokio::test]
+async fn bounded_rollout_load_rejects_oversized_and_blank_decoded_lines() -> std::io::Result<()> {
+    let home = TempDir::new()?;
+    for (name, contents) in [("record", b"{}\n".as_slice()), ("blank", b" \n")] {
+        let plain = home.path().join(format!("{name}.jsonl"));
+        let compressed = plain.with_extension("jsonl.zst");
+        fs::write(&plain, contents)?;
+        fs::write(
+            &compressed,
+            zstd::stream::encode_all(contents, /*level*/ 0)?,
+        )?;
+        for path in [plain, compressed] {
+            assert!(
+                RolloutRecorder::load_rollout_lines_bounded(&path, /*maximum_source_bytes*/ 1)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_rollout_lines_preserves_complete_legacy_and_current_domain_items()
+-> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let rollout_path = home.path().join("rollout.jsonl");
+    let mut file = File::create(&rollout_path)?;
+    let thread_id = ThreadId::new();
+    let legacy_timestamp = "2025-01-03T12:00:00Z";
+    let current_timestamp = "2026-07-22T15:12:34.567Z";
+
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "timestamp": legacy_timestamp,
+            "type": "session_meta",
+            "payload": {
+                "id": thread_id,
+                "timestamp": legacy_timestamp,
+                "cwd": ".",
+                "originator": "legacy",
+                "cli_version": "0.1.0",
+                "source": "cli",
+                "model_provider": "legacy-provider",
+            },
+        })
+    )?;
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "timestamp": legacy_timestamp,
+            "type": "response_item",
+            "payload": {
+                "type": "ghost_snapshot",
+                "ghost_commit": {
+                    "id": "deadbeef",
+                    "preexisting_untracked_dirs": [],
+                    "preexisting_untracked_files": [],
+                },
+            },
+        })
+    )?;
+    let current_item = agent_message_item("current message");
+    writeln!(
+        file,
+        "{}",
+        serde_json::to_string(&RolloutLine {
+            timestamp: current_timestamp.to_string(),
+            ordinal: Some(7),
+            item: current_item.clone(),
+        })?
+    )?;
+    write!(file, "{{\"timestamp\":\"incomplete")?;
+    drop(file);
+
+    let (lines, loaded_thread_id, parse_errors) =
+        RolloutRecorder::load_rollout_lines(&rollout_path).await?;
+    let expected = vec![
+        RolloutLine {
+            timestamp: legacy_timestamp.to_string(),
+            ordinal: None,
+            item: RolloutItem::SessionMeta(SessionMetaLine {
+                meta: SessionMeta {
+                    session_id: SessionId::from(thread_id),
+                    id: thread_id,
+                    timestamp: legacy_timestamp.to_string(),
+                    cwd: PathBuf::from("."),
+                    originator: "legacy".to_string(),
+                    cli_version: "0.1.0".to_string(),
+                    source: SessionSource::Cli,
+                    model_provider: Some("legacy-provider".to_string()),
+                    ..SessionMeta::default()
+                },
+                git: None,
+            }),
+        },
+        RolloutLine {
+            timestamp: current_timestamp.to_string(),
+            ordinal: Some(7),
+            item: current_item,
+        },
+    ];
+
+    assert_eq!(loaded_thread_id, Some(thread_id));
+    assert_eq!(parse_errors, 1);
+    assert_eq!(
+        serde_json::to_value(lines).map_err(std::io::Error::other)?,
+        serde_json::to_value(expected).map_err(std::io::Error::other)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_rollout_items_ignores_unknown_fork_source_history_mode() -> std::io::Result<()> {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::new_v4();
@@ -942,7 +1057,7 @@ async fn list_threads_db_enabled_drops_missing_rollout_paths() -> std::io::Resul
         "sessions/2099/01/01/rollout-2099-01-01T00-00-00-{uuid}.jsonl"
     ));
 
-    let runtime = codex_state::StateRuntime::init(
+    let runtime = codex_state::StateRuntime::init_sqlite(
         home.path().to_path_buf(),
         config.model_provider_id.clone(),
     )
@@ -1008,7 +1123,7 @@ async fn list_threads_db_enabled_repairs_stale_rollout_paths() -> std::io::Resul
         "sessions/2099/01/01/rollout-2099-01-01T00-00-00-{uuid}.jsonl"
     ));
 
-    let runtime = codex_state::StateRuntime::init(
+    let runtime = codex_state::StateRuntime::init_sqlite(
         home.path().to_path_buf(),
         config.model_provider_id.clone(),
     )
@@ -1069,7 +1184,7 @@ async fn list_threads_state_db_only_skips_jsonl_repair_scan() -> std::io::Result
     let home = TempDir::new().expect("temp dir");
     let config = test_config(home.path());
 
-    let runtime = codex_state::StateRuntime::init(
+    let runtime = codex_state::StateRuntime::init_sqlite(
         home.path().to_path_buf(),
         config.model_provider_id.clone(),
     )
@@ -1173,7 +1288,7 @@ async fn list_threads_default_filter_returns_filesystem_scan_results() -> std::i
     let real_path = write_session_file(home.path(), "2025-01-03T13-00-00", uuid)?;
     let stale_cwd = home.path().join("stale-cwd");
 
-    let runtime = codex_state::StateRuntime::init(
+    let runtime = codex_state::StateRuntime::init_sqlite(
         home.path().to_path_buf(),
         config.model_provider_id.clone(),
     )
@@ -1263,7 +1378,7 @@ async fn list_threads_metadata_filter_overlays_state_db_list_metadata() -> std::
     let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
     let rollout_path = write_session_file(home.path(), "2025-01-03T16-00-00", uuid)?;
 
-    let runtime = codex_state::StateRuntime::init(
+    let runtime = codex_state::StateRuntime::init_sqlite(
         home.path().to_path_buf(),
         config.model_provider_id.clone(),
     )
@@ -1403,7 +1518,7 @@ async fn list_threads_search_repairs_stale_state_db_hits_before_returning() -> s
     let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
     let real_path = write_session_file(home.path(), "2025-01-03T15-00-00", uuid)?;
 
-    let runtime = codex_state::StateRuntime::init(
+    let runtime = codex_state::StateRuntime::init_sqlite(
         home.path().to_path_buf(),
         config.model_provider_id.clone(),
     )

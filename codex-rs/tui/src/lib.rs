@@ -289,6 +289,14 @@ async fn init_state_db_for_app_server_target(
 ) -> std::io::Result<Option<StateDbHandle>> {
     match app_server_target {
         AppServerTarget::Embedded => state_db::try_init(config).await.map(Some).map_err(|err| {
+            if matches!(
+                &config.runtime_state_backend,
+                codex_state::RuntimeStateBackendConfig::Postgresql { .. }
+            ) {
+                return std::io::Error::other(format!(
+                    "failed to initialize PostgreSQL Runtime State Backend: {err:#}"
+                ));
+            }
             let database_path = codex_state::runtime_db_path_for_corruption_error(&err)
                 .unwrap_or_else(|| codex_state::state_db_path(config.sqlite_home.as_path()));
             std::io::Error::other(LocalStateDbStartupError::new(
@@ -711,7 +719,7 @@ async fn lookup_latest_session_target_with_app_server(
             .into_iter()
             .find_map(session_target_from_app_server_thread);
         if target.as_ref().is_some_and(|target| {
-            uses_remote_workspace || target.path.as_deref().is_some_and(std::path::Path::exists)
+            uses_remote_workspace || target.path.as_deref().is_none_or(std::path::Path::exists)
         }) {
             return Ok(target);
         }
@@ -3007,7 +3015,7 @@ mod tests {
             std::fs::create_dir_all(rollout_dir)?;
             std::fs::write(&rollout_path, "")?;
 
-            let state_runtime = codex_state::StateRuntime::init(
+            let state_runtime = codex_state::StateRuntime::init_sqlite(
                 config.codex_home.to_path_buf(),
                 config.model_provider_id.clone(),
             )

@@ -449,7 +449,7 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
     mcp.clear_message_buffer();
 
     let state_db =
-        StateRuntime::init(codex_home.path().to_path_buf(), "mock_provider".into()).await?;
+        StateRuntime::init_sqlite(codex_home.path().to_path_buf(), "mock_provider".into()).await?;
     let source_goal = state_db
         .thread_goals()
         .replace_thread_goal(
@@ -463,10 +463,13 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
         .thread_goals()
         .account_thread_goal_usage(
             source_thread_id,
-            /*time_delta_seconds*/ 11,
-            /*token_delta*/ 37,
-            codex_state::GoalAccountingMode::ActiveOnly,
-            Some(source_goal.goal_id.as_str()),
+            codex_state::GoalAccountingRequest {
+                event_id: "thread-fork-source-usage",
+                time_delta_seconds: 11,
+                token_delta: 37,
+                mode: codex_state::GoalAccountingMode::ActiveOnly,
+                target: codex_state::GoalAccountingTarget::GoalId(source_goal.goal_id.as_str()),
+            },
         )
         .await?;
     let source_goal = state_db

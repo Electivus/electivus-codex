@@ -500,7 +500,7 @@ async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
     let thread_id = codex_protocol::ThreadId::default();
-    let state_db = codex_state::StateRuntime::init(
+    let state_db = codex_state::StateRuntime::init_sqlite(
         codex_home.path().to_path_buf(),
         "mock_provider".to_string(),
     )
@@ -1517,7 +1517,7 @@ async fn paginated_history_lists_use_projected_turns_and_items() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
     let thread_id = codex_protocol::ThreadId::default();
-    let state_db = codex_state::StateRuntime::init(
+    let state_db = codex_state::StateRuntime::init_sqlite(
         codex_home.path().to_path_buf(),
         "mock_provider".to_string(),
     )

@@ -50,16 +50,24 @@ fn cursor_to_anchor_preserves_recency_tie_breaker() {
 #[tokio::test]
 async fn try_init_waits_for_concurrent_startup_backfill() -> anyhow::Result<()> {
     let home = TempDir::new().expect("temp dir");
-    let runtime =
-        codex_state::StateRuntime::init(home.path().to_path_buf(), "test-provider".to_string())
-            .await?;
-    let claimed = runtime.try_claim_backfill(/*lease_seconds*/ 60).await?;
-    assert!(claimed);
-    let runtime_for_completion = runtime.clone();
+    let runtime = codex_state::StateRuntime::init_sqlite(
+        home.path().to_path_buf(),
+        "test-provider".to_string(),
+    )
+    .await?;
+    let coordinator = runtime.backfill_coordinator();
+    let lease = match coordinator
+        .try_claim("concurrent-worker", Duration::from_secs(60))
+        .await?
+    {
+        codex_state::BackfillClaimOutcome::Claimed { lease, .. } => lease,
+        outcome => anyhow::bail!("expected claimed lease, got {outcome:?}"),
+    };
+    let coordinator_for_completion = coordinator.clone();
     let complete_backfill = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        runtime_for_completion
-            .mark_backfill_complete(/*last_watermark*/ None)
+        coordinator_for_completion
+            .complete(&lease, /*last_watermark*/ None)
             .await
     });
 
@@ -67,12 +75,12 @@ async fn try_init_waits_for_concurrent_startup_backfill() -> anyhow::Result<()> 
         home.path().to_path_buf(),
         home.path().to_path_buf(),
         "test-provider".to_string(),
-        /*backfill_lease_seconds*/ 60,
+        /*backfill_lease_duration*/ Duration::from_secs(60),
     )
     .await?;
     complete_backfill.await??;
     assert_eq!(
-        initialized.get_backfill_state().await?.status,
+        initialized.backfill_coordinator().state().await?.status,
         codex_state::BackfillStatus::Complete
     );
 
@@ -82,17 +90,25 @@ async fn try_init_waits_for_concurrent_startup_backfill() -> anyhow::Result<()> 
 #[tokio::test]
 async fn try_init_times_out_waiting_for_stuck_startup_backfill() -> anyhow::Result<()> {
     let home = TempDir::new().expect("temp dir");
-    let runtime =
-        codex_state::StateRuntime::init(home.path().to_path_buf(), "test-provider".to_string())
-            .await?;
-    let claimed = runtime.try_claim_backfill(/*lease_seconds*/ 60).await?;
-    assert!(claimed);
+    let runtime = codex_state::StateRuntime::init_sqlite(
+        home.path().to_path_buf(),
+        "test-provider".to_string(),
+    )
+    .await?;
+    let _lease = match runtime
+        .backfill_coordinator()
+        .try_claim("stuck-worker", Duration::from_secs(60))
+        .await?
+    {
+        codex_state::BackfillClaimOutcome::Claimed { lease, .. } => lease,
+        outcome => anyhow::bail!("expected claimed lease, got {outcome:?}"),
+    };
 
     let result = try_init_with_roots_and_backfill_lease(
         home.path().to_path_buf(),
         home.path().to_path_buf(),
         "test-provider".to_string(),
-        /*backfill_lease_seconds*/ 60,
+        /*backfill_lease_duration*/ Duration::from_secs(60),
     )
     .await;
     let err = match result {
@@ -114,9 +130,11 @@ async fn reconcile_rollout_preserves_existing_explicit_title() -> anyhow::Result
     let thread_id = ThreadId::new();
     let rollout_path =
         write_rollout_with_user_message(home.path(), thread_id, "Hey", ThreadHistoryMode::Legacy)?;
-    let runtime =
-        codex_state::StateRuntime::init(home.path().to_path_buf(), "test-provider".to_string())
-            .await?;
+    let runtime = codex_state::StateRuntime::init_sqlite(
+        home.path().to_path_buf(),
+        "test-provider".to_string(),
+    )
+    .await?;
 
     let mut metadata =
         metadata::extract_metadata_from_rollout(rollout_path.as_path(), "test-provider")
@@ -157,9 +175,11 @@ async fn reconcile_rollout_preserves_existing_paginated_memory_mode() -> anyhow:
         "Hey",
         ThreadHistoryMode::Paginated,
     )?;
-    let runtime =
-        codex_state::StateRuntime::init(home.path().to_path_buf(), "test-provider".to_string())
-            .await?;
+    let runtime = codex_state::StateRuntime::init_sqlite(
+        home.path().to_path_buf(),
+        "test-provider".to_string(),
+    )
+    .await?;
 
     reconcile_rollout(
         Some(runtime.as_ref()),

@@ -593,9 +593,11 @@ async fn external_agent_config_import_sends_completion_notification_for_sync_onl
     let completed: ExternalAgentConfigImportCompletedNotification =
         serde_json::from_value(notification.params.expect("completed params"))?;
     assert_eq!(completed.import_id, import_id);
-    let state_db =
-        codex_state::StateRuntime::init(sqlite_home.path().to_path_buf(), "mock_provider".into())
-            .await?;
+    let state_db = codex_state::StateRuntime::init_sqlite(
+        sqlite_home.path().to_path_buf(),
+        "mock_provider".into(),
+    )
+    .await?;
     let details_record = state_db
         .external_agent_config_import_details_record(&import_id)
         .await?
@@ -1024,6 +1026,24 @@ async fn external_agent_config_detects_and_imports_project_memory_files() -> Res
             ),
         ]
     );
+
+    let state_db = codex_state::StateRuntime::init_sqlite(
+        codex_home.path().to_path_buf(),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    let claim = state_db
+        .memories()
+        .try_claim_global_phase2_job(codex_protocol::ThreadId::new(), /*lease_seconds*/ 60)
+        .await?;
+    let codex_state::Phase2JobClaimOutcome::Claimed {
+        input_watermark, ..
+    } = claim
+    else {
+        anyhow::bail!("expected imported-memory consolidation claim, got {claim:?}");
+    };
+    assert!(input_watermark > 0);
+    state_db.close().await;
 
     Ok(())
 }
