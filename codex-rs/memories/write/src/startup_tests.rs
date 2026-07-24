@@ -484,7 +484,7 @@ async fn memories_startup_phase2_explicit_model_override_drives_request_model() 
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_memories_startup_phase1_loads_pathless_canonical_thread_history()
+async fn postgres_contract_memories_startup_phase1_loads_pathless_canonical_thread_history()
 -> anyhow::Result<()> {
     const DATABASE_URL_ENV: &str = "CODEX_TEST_POSTGRES_URL";
     let database_url = std::env::var(DATABASE_URL_ENV)?;

@@ -22,6 +22,7 @@ use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
+use codex_protocol::protocol::TruncationPolicy;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
@@ -80,6 +81,68 @@ async fn postgres_contract_latest_model_context_matches_public_store_contract()
 
     assert_latest_model_context_contract(&store, thread_ids, Path::new("/model-context-contract"))
         .await?;
+
+    pool.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_model_context_rejects_decoded_item_over_token_cap()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = PostgresThreadStoreFixture::new("model_context_item_cap")?;
+    fixture.migrate().await?;
+    let pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
+    let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f038")?;
+    let item_byte_limit = TruncationPolicy::Tokens(/*tokens*/ 10_000).byte_budget();
+    store
+        .create_thread(create_thread_params(
+            thread_id,
+            Path::new("/model-context-item-cap"),
+            ThreadHistoryMode::Legacy,
+        ))
+        .await?;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![RolloutItem::ResponseItem(ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "x".repeat(item_byte_limit + 1),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            })],
+        })
+        .await?;
+    store.shutdown_thread(thread_id).await?;
+
+    let stored_bytes: i32 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT pg_column_size(item) FROM {} WHERE thread_id = $1 AND ordinal = 1",
+        store.tables.history
+    )))
+    .bind(thread_id.to_string())
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        usize::try_from(stored_bytes)? < item_byte_limit,
+        "fixture must exercise a compressed JSONB value"
+    );
+    let error = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect_err("decoded item above the token cap must be rejected");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "invalid thread-store request: model context for thread {thread_id} cannot be loaded safely: an individual history item exceeds 10000 estimated tokens (limit: 10000 items or 16777216 bytes)"
+        )
+    );
 
     pool.close().await;
     fixture.cleanup().await
