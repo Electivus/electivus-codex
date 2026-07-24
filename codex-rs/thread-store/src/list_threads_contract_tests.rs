@@ -130,16 +130,26 @@ async fn postgres_contract_list_threads_keeps_tied_cursor_stable_across_replicas
         )
         .await?;
     }
-    let first = reader
-        .list_threads(list_params(
-            /*page_size*/ 1,
-            /*cursor*/ None,
-            ThreadSortKey::RecencyAt,
-            SortDirection::Desc,
-        ))
-        .await?;
-    assert_eq!(thread_ids_from_page(&first), vec![higher_id]);
-    let cursor = first.next_cursor.expect("first page should have a cursor");
+    let mut cursors = Vec::new();
+    for sort_key in [
+        ThreadSortKey::CreatedAt,
+        ThreadSortKey::UpdatedAt,
+        ThreadSortKey::RecencyAt,
+    ] {
+        let first = reader
+            .list_threads(list_params(
+                /*page_size*/ 1,
+                /*cursor*/ None,
+                sort_key,
+                SortDirection::Desc,
+            ))
+            .await?;
+        assert_eq!(thread_ids_from_page(&first), vec![higher_id]);
+        cursors.push((
+            sort_key,
+            first.next_cursor.expect("first page should have a cursor"),
+        ));
+    }
     let newer_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f313")?;
     create_listed_thread(
         &writer,
@@ -157,16 +167,18 @@ async fn postgres_contract_list_threads_keeps_tied_cursor_stable_across_replicas
         },
     )
     .await?;
-    let second = reader
-        .list_threads(list_params(
-            /*page_size*/ 1,
-            Some(cursor),
-            ThreadSortKey::RecencyAt,
-            SortDirection::Desc,
-        ))
-        .await?;
-    assert_eq!(thread_ids_from_page(&second), vec![lower_id]);
-    assert_eq!(second.next_cursor, None);
+    for (sort_key, cursor) in cursors {
+        let second = reader
+            .list_threads(list_params(
+                /*page_size*/ 1,
+                Some(cursor),
+                sort_key,
+                SortDirection::Desc,
+            ))
+            .await?;
+        assert_eq!(thread_ids_from_page(&second), vec![lower_id]);
+        assert_eq!(second.next_cursor, None);
+    }
     writer_pool.close().await;
     reader_pool.close().await;
     fixture.cleanup().await

@@ -44,8 +44,6 @@ pub(super) async fn list_threads(
         SortDirection::Asc => (">", "ASC"),
         SortDirection::Desc => ("<", "DESC"),
     };
-    let include_thread_id_tiebreaker =
-        params.sort_key == ThreadSortKey::RecencyAt || params.relation_filter.is_some();
     let include_relation_parent = params.relation_filter.is_some();
     let mut query = QueryBuilder::<Postgres>::new("");
     if let Some(ThreadRelationFilter::DescendantsOf(ancestor_thread_id)) = params.relation_filter {
@@ -143,7 +141,7 @@ pub(super) async fn list_threads(
         query.push(sort_column);
         query.push(format!(" {operator} "));
         query.push_bind(cursor.timestamp);
-        if include_thread_id_tiebreaker && let Some(thread_id) = cursor.thread_id {
+        if let Some(thread_id) = cursor.thread_id {
             query.push(" OR (");
             query.push("threads.");
             query.push(sort_column);
@@ -159,9 +157,7 @@ pub(super) async fn list_threads(
     query.push("threads.");
     query.push(sort_column);
     query.push(format!(" {direction}"));
-    if include_thread_id_tiebreaker {
-        query.push(format!(", threads.thread_id {direction}"));
-    }
+    query.push(format!(", threads.thread_id {direction}"));
     query.push(" LIMIT ");
     query.push_bind(limit);
 
@@ -203,12 +199,7 @@ pub(super) async fn list_threads(
     let next_cursor = has_more
         .then(|| items.last())
         .flatten()
-        .map(|(thread, timestamp)| {
-            format_cursor(
-                *timestamp,
-                include_thread_id_tiebreaker.then_some(thread.thread_id),
-            )
-        });
+        .map(|(thread, timestamp)| format_cursor(*timestamp, Some(thread.thread_id)));
     Ok(ThreadPage {
         items: items.into_iter().map(|(thread, _)| thread).collect(),
         next_cursor,

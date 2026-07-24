@@ -50,7 +50,6 @@ pub(super) async fn search_threads(
         SortDirection::Asc => (">", "ASC"),
         SortDirection::Desc => ("<", "DESC"),
     };
-    let include_thread_id_tiebreaker = params.sort_key == ThreadSortKey::RecencyAt;
     let folded_search_term = params.search_term.to_lowercase();
     let mut transaction = store
         .pool
@@ -91,7 +90,7 @@ pub(super) async fn search_threads(
         query.push(sort_column);
         query.push(format!(" {operator} "));
         query.push_bind(cursor.timestamp);
-        if include_thread_id_tiebreaker && let Some(thread_id) = cursor.thread_id {
+        if let Some(thread_id) = cursor.thread_id {
             query.push(" OR (threads.");
             query.push(sort_column);
             query.push(" = ");
@@ -105,9 +104,7 @@ pub(super) async fn search_threads(
     query.push(" ORDER BY threads.");
     query.push(sort_column);
     query.push(format!(" {direction}"));
-    if include_thread_id_tiebreaker {
-        query.push(format!(", threads.thread_id {direction}"));
-    }
+    query.push(format!(", threads.thread_id {direction}"));
     query.push(" LIMIT ");
     query.push_bind(limit);
 
@@ -127,12 +124,7 @@ pub(super) async fn search_threads(
     let next_cursor = has_more
         .then(|| items.last())
         .flatten()
-        .map(|(item, timestamp)| {
-            format_cursor(
-                *timestamp,
-                include_thread_id_tiebreaker.then_some(item.thread.thread_id),
-            )
-        });
+        .map(|(item, timestamp)| format_cursor(*timestamp, Some(item.thread.thread_id)));
     transaction
         .commit()
         .await

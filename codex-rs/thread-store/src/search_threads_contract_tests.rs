@@ -77,10 +77,21 @@ async fn postgres_contract_search_matches_across_replicas_and_is_atomic() -> Tes
         )
         .await?;
     }
-    let mut first_query = search_params(ThreadSortKey::RecencyAt, SortDirection::Desc);
-    first_query.page_size = 1;
-    let first = reader.search_threads(first_query).await?;
-    assert_eq!(ids(&first), vec![high]);
+    let mut cursors = Vec::new();
+    for sort_key in [
+        ThreadSortKey::CreatedAt,
+        ThreadSortKey::UpdatedAt,
+        ThreadSortKey::RecencyAt,
+    ] {
+        let mut first_query = search_params(sort_key, SortDirection::Desc);
+        first_query.page_size = 1;
+        let first = reader.search_threads(first_query).await?;
+        assert_eq!(ids(&first), vec![high]);
+        cursors.push((
+            sort_key,
+            first.next_cursor.expect("first page should have a cursor"),
+        ));
+    }
     let newer = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f412")?;
     create_searchable_thread(
         &writer,
@@ -92,10 +103,12 @@ async fn postgres_contract_search_matches_across_replicas_and_is_atomic() -> Tes
         vec![visible_user("needle[1]")],
     )
     .await?;
-    let mut query = search_params(ThreadSortKey::RecencyAt, SortDirection::Desc);
-    query.page_size = 1;
-    query.cursor = first.next_cursor;
-    assert_search_ids(&reader, query, &[low]).await?;
+    for (sort_key, cursor) in cursors {
+        let mut query = search_params(sort_key, SortDirection::Desc);
+        query.page_size = 1;
+        query.cursor = Some(cursor);
+        assert_search_ids(&reader, query, &[low]).await?;
+    }
 
     let paginated = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f420")?;
     let item = RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
