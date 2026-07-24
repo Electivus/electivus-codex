@@ -1,6 +1,8 @@
 use anyhow::Result;
 use codex_features::Feature;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::AgentStatus;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_thread_store::AppendThreadItemsParams;
 use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::ChildRegistrationGuard;
@@ -374,6 +376,184 @@ async fn v2_nested_spawn_checks_shared_active_execution_capacity() -> Result<()>
         "collab spawn failed: agent thread limit reached"
     );
     assert_eq!(test.thread_manager.list_thread_ids().await.len(), 2);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_v2_agent_restore_replays_persisted_model_context() -> Result<()> {
+    const SPAWN_PROMPT: &str = "spawn a V2 agent that will be unloaded";
+    const RESTORE_PROMPT: &str = "reload the persisted V2 agent";
+    const FIRST_CHILD_REPLY: &str = "first child persisted reply";
+    const FOLLOWUP: &str = "continue after the cold restore";
+
+    let server = start_mock_server().await;
+    let first_args = serde_json::to_string(&json!({
+        "message": FIRST_TASK,
+        "task_name": "first",
+    }))?;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, SPAWN_PROMPT),
+        sse(vec![
+            ev_response_created("cold-parent-spawn-first"),
+            ev_function_call_with_namespace(
+                "cold-spawn-first-call",
+                MULTI_AGENT_V2_NAMESPACE,
+                "spawn_agent",
+                &first_args,
+            ),
+            ev_completed("cold-parent-spawn-first"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, FIRST_TASK)
+                && !has_function_call_output(request, "cold-spawn-first-call")
+        },
+        sse(vec![
+            ev_response_created("cold-first-child"),
+            ev_assistant_message("cold-first-child-message", FIRST_CHILD_REPLY),
+            ev_completed("cold-first-child"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| has_function_call_output(request, "cold-spawn-first-call"),
+        sse(vec![
+            ev_response_created("cold-parent-spawn-complete"),
+            ev_assistant_message("cold-parent-spawn-complete-message", "spawned"),
+            ev_completed("cold-parent-spawn-complete"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_model("koffing")
+        .with_history_mode(ThreadHistoryMode::Paginated)
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should allow feature update");
+            config.multi_agent_v2.max_concurrent_threads_per_session = 3;
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+    test.submit_turn(SPAWN_PROMPT).await?;
+
+    let child_thread_id = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(thread_id) = test
+                .thread_manager
+                .list_thread_ids()
+                .await
+                .into_iter()
+                .find(|thread_id| *thread_id != test.session_configured.thread_id)
+            {
+                return thread_id;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    let child = test.thread_manager.get_thread(child_thread_id).await?;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if matches!(
+                child.agent_status().await,
+                AgentStatus::Completed(Some(ref message)) if message == FIRST_CHILD_REPLY
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    child.shutdown_and_wait().await?;
+    assert!(
+        test.thread_manager
+            .remove_thread(&child_thread_id)
+            .await
+            .is_some()
+    );
+
+    let followup_args = serde_json::to_string(&json!({
+        "target": "first",
+        "message": FOLLOWUP,
+    }))?;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, RESTORE_PROMPT),
+        sse(vec![
+            ev_response_created("cold-parent-followup-first"),
+            ev_function_call_with_namespace(
+                "cold-followup-first-call",
+                MULTI_AGENT_V2_NAMESPACE,
+                "followup_task",
+                &followup_args,
+            ),
+            ev_completed("cold-parent-followup-first"),
+        ]),
+    )
+    .await;
+    let restored_child = mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, FIRST_TASK)
+                && body_contains(request, FIRST_CHILD_REPLY)
+                && body_contains(request, FOLLOWUP)
+                && !has_function_call_output(request, "cold-followup-first-call")
+        },
+        sse(vec![
+            ev_response_created("cold-restored-first-child"),
+            ev_assistant_message("cold-restored-first-child-message", "restored"),
+            ev_completed("cold-restored-first-child"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| has_function_call_output(request, "cold-followup-first-call"),
+        sse(vec![
+            ev_response_created("cold-parent-done"),
+            ev_assistant_message("cold-parent-done-message", "done"),
+            ev_completed("cold-parent-done"),
+        ]),
+    )
+    .await;
+    test.submit_turn(RESTORE_PROMPT).await?;
+
+    let restored_request = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(request) = restored_child.requests().into_iter().find(|request| {
+                let body = request.body_json().to_string();
+                [FIRST_TASK, FIRST_CHILD_REPLY, FOLLOWUP]
+                    .iter()
+                    .all(|expected| body.contains(expected))
+                    && request
+                        .function_call_output_text("cold-followup-first-call")
+                        .is_none()
+            }) {
+                return request;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    let restored_body = restored_request.body_json().to_string();
+    for expected in [FIRST_TASK, FIRST_CHILD_REPLY, FOLLOWUP] {
+        assert!(
+            restored_body.contains(expected),
+            "restored child request should contain {expected:?}"
+        );
+    }
 
     Ok(())
 }

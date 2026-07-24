@@ -17,6 +17,8 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadDeleteParams;
 use codex_app_server_protocol::ThreadDeleteResponse;
+use codex_app_server_protocol::ThreadForkParams;
+use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadGoalGetResponse;
 use codex_app_server_protocol::ThreadGoalSetResponse;
 use codex_app_server_protocol::ThreadListParams;
@@ -83,6 +85,33 @@ async fn postgres_contract_app_server_shares_runtime_state_without_sqlite_access
         .await?;
     let set_goal: ThreadGoalSetResponse = read_response(&mut first, goal_id).await?;
 
+    let fork_id = first
+        .send_thread_fork_request(ThreadForkParams {
+            thread_id: first_thread.clone(),
+            defer_goal_continuation: true,
+            ..Default::default()
+        })
+        .await?;
+    let forked: ThreadForkResponse = read_response(&mut first, fork_id).await?;
+    assert_eq!(forked.thread.path, None);
+    let forked_thread_id = forked.thread.id.clone();
+    let inherited_goal_id = second
+        .send_raw_request(
+            "thread/goal/get",
+            Some(json!({ "threadId": forked_thread_id })),
+        )
+        .await?;
+    let inherited_goal: ThreadGoalGetResponse =
+        read_response(&mut second, inherited_goal_id).await?;
+    let mut expected_goal = set_goal.goal.clone();
+    expected_goal.thread_id = forked_thread_id.clone();
+    assert_eq!(inherited_goal.goal, Some(expected_goal));
+    let expected_ids_after_fork = BTreeSet::from([
+        first_thread.clone(),
+        second_thread.clone(),
+        forked_thread_id.clone(),
+    ]);
+
     assert!(first.shutdown_gracefully().await?.success());
     let get_goal_id = second
         .send_raw_request(
@@ -140,7 +169,7 @@ async fn postgres_contract_app_server_shares_runtime_state_without_sqlite_access
             .into_iter()
             .map(|thread| thread.id)
             .collect::<BTreeSet<_>>(),
-        expected_ids
+        expected_ids_after_fork
     );
 
     let delete_id = second
@@ -156,7 +185,7 @@ async fn postgres_contract_app_server_shares_runtime_state_without_sqlite_access
             .into_iter()
             .map(|thread| thread.id)
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from([first_thread])
+        BTreeSet::from([first_thread, forked_thread_id])
     );
 
     assert!(second.shutdown_gracefully().await?.success());

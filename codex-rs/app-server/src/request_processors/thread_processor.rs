@@ -3988,13 +3988,14 @@ impl ThreadRequestProcessor {
                 "`permissions` cannot be combined with `sandbox`",
             ));
         }
-        let source_thread = self
+        let mut source_thread = self
             .read_stored_thread_for_resume(
                 &thread_id,
                 path.as_ref(),
                 /*include_history*/ false,
             )
             .await?;
+        let source_thread_id = source_thread.thread_id;
         let paginated_fork = matches!(source_thread.history_mode, ThreadHistoryMode::Paginated);
         if paginated_fork && ephemeral {
             return Err(method_not_found("paginated_threads is not supported yet"));
@@ -4009,23 +4010,37 @@ impl ThreadRequestProcessor {
                 "`deferGoalContinuation` cannot be combined with `ephemeral`",
             ));
         }
-        let mut source_thread = self
-            .read_stored_thread_for_resume(&thread_id, path.as_ref(), /*include_history*/ true)
-            .await?;
-        let source_thread_id = source_thread.thread_id;
         let source_thread_name = source_thread
             .name
             .as_deref()
             .and_then(codex_core::util::normalize_thread_name);
-        let history_items = source_thread
-            .history
-            .take()
-            .map(|history| history.items)
-            .ok_or_else(|| {
-                internal_error(format!(
-                    "thread {source_thread_id} did not include persisted history"
-                ))
-            })?;
+        let history_items = if paginated_fork {
+            self.thread_store
+                .load_latest_model_context(StoreLoadThreadHistoryParams {
+                    thread_id: source_thread_id,
+                    include_archived: true,
+                })
+                .await
+                .map_err(thread_store_resume_read_error)?
+                .items
+        } else {
+            source_thread = self
+                .read_stored_thread_for_resume(
+                    &thread_id,
+                    path.as_ref(),
+                    /*include_history*/ true,
+                )
+                .await?;
+            source_thread
+                .history
+                .take()
+                .map(|history| history.items)
+                .ok_or_else(|| {
+                    internal_error(format!(
+                        "thread {source_thread_id} did not include persisted history"
+                    ))
+                })?
+        };
         let history_items = match (last_turn_id.as_deref(), before_turn_id.as_deref()) {
             (Some(last_turn_id), None) => Arc::new(
                 truncate_rollout_after_turn_id(&history_items, last_turn_id)
@@ -4135,10 +4150,7 @@ impl ThreadRequestProcessor {
                 .await
                 .map_err(|err| core_thread_write_error("inherit source thread name", err))?;
         }
-        let inherited_goal = if defer_goal_continuation
-            && session_configured.rollout_path.is_some()
-            && goals_enabled
-        {
+        let inherited_goal = if defer_goal_continuation && !ephemeral && goals_enabled {
             if let Some(state_db) = forked_thread.state_db().or_else(|| self.state_db.clone()) {
                 self.thread_goal_processor
                     .flush_goal_progress_for_fork(source_thread_id)
