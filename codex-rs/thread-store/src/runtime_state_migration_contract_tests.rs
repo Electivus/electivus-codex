@@ -610,7 +610,9 @@ pub(super) async fn migration_source(
     let thread_id = ThreadId::from_string("019c84d0-3333-7777-8333-333333333333")?;
     let legacy_id = ThreadId::from_string("019c84d0-2222-7777-8222-222222222222")?;
     let rollout_only_id = ThreadId::from_string("019c84d0-1111-7777-8111-111111111111")?;
-    let rollout_path = source.path().join("archived_sessions/rollout.jsonl");
+    let rollout_path = source.path().join(format!(
+        "archived_sessions/rollout-2026-07-22T10-00-00-{thread_id}.jsonl"
+    ));
     let legacy_path = source.path().join("sessions/2026/07/21/legacy.jsonl");
     let rollout_only_path = source.path().join(format!(
         "archived_sessions/rollout-2026-07-21T10-00-00-{rollout_only_id}.jsonl.zst"
