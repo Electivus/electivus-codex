@@ -392,6 +392,24 @@ jobs:
               echo "::warning::Moving inherited /tmp/.git so tests do not detect /tmp as a repository"
               sudo mv -- /tmp/.git "${RUNNER_TEMP}/inherited-tmp-dot-git"
             fi
+            # Run each Linux test through a guard that removes the empty
+            # repository marker leaked by earlier sandbox tests.
+            test_runner="${RUNNER_TEMP}/nextest-test-runner"
+            printf '%s\n' \
+              '#!/usr/bin/env bash' \
+              'set -euo pipefail' \
+              '' \
+              'if [[ -d /tmp/.git ]]; then' \
+              '  rmdir /tmp/.git 2>/dev/null || true' \
+              'fi' \
+              '' \
+              'exec "$@"' \
+              > "${test_runner}"
+            chmod +x "${test_runner}"
+            target_runner_env="CARGO_TARGET_${{ inputs.target }}_RUNNER"
+            target_runner_env="${target_runner_env^^}"
+            target_runner_env="${target_runner_env//-/_}"
+            export "${target_runner_env}=${test_runner}"
             helper_dir="${RUNNER_TEMP}/${TEST_HELPERS_ARTIFACT}"
             helper_target_dir="${CARGO_TARGET_DIR}/${{ inputs.target }}/${{ inputs.profile }}"
             mkdir -p "${helper_target_dir}"
