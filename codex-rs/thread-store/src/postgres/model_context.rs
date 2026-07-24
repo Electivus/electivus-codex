@@ -6,6 +6,7 @@ use futures::TryStreamExt;
 use serde_json::Value;
 use sqlx::AssertSqlSafe;
 use sqlx::Row;
+use sqlx::postgres::PgRow;
 
 use super::PostgresThreadStore;
 use super::database_error;
@@ -15,6 +16,72 @@ use crate::StoredModelContext;
 use crate::StoredThread;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
+
+const MAX_MODEL_CONTEXT_ITEMS: usize = 10_000;
+const MAX_MODEL_CONTEXT_BYTES: u64 = 16 * 1024 * 1024;
+
+struct ModelContextBudget {
+    thread_id: codex_protocol::ThreadId,
+    items: usize,
+    bytes: u64,
+    max_items: usize,
+    max_bytes: u64,
+}
+
+impl ModelContextBudget {
+    fn new(thread_id: codex_protocol::ThreadId) -> Self {
+        Self::with_limits(thread_id, MAX_MODEL_CONTEXT_ITEMS, MAX_MODEL_CONTEXT_BYTES)
+    }
+
+    fn with_limits(thread_id: codex_protocol::ThreadId, max_items: usize, max_bytes: u64) -> Self {
+        Self {
+            thread_id,
+            items: 0,
+            bytes: 0,
+            max_items,
+            max_bytes,
+        }
+    }
+
+    fn account_item(&mut self, item_bytes: i64) -> ThreadStoreResult<()> {
+        let item_bytes =
+            u64::try_from(item_bytes).map_err(|_| self.limit_error("invalid item size"))?;
+        let next_items = self
+            .items
+            .checked_add(1)
+            .ok_or_else(|| self.limit_error("item count overflow"))?;
+        let next_bytes = self
+            .bytes
+            .checked_add(item_bytes)
+            .ok_or_else(|| self.limit_error("byte count overflow"))?;
+        if next_items > self.max_items || next_bytes > self.max_bytes {
+            return Err(self.limit_error("history exceeds the bounded read budget"));
+        }
+        self.items = next_items;
+        self.bytes = next_bytes;
+        Ok(())
+    }
+
+    fn limit_error(&self, reason: &str) -> ThreadStoreError {
+        ThreadStoreError::InvalidRequest {
+            message: format!(
+                "model context for thread {} cannot be loaded safely: {reason} (limit: {} items or {} bytes)",
+                self.thread_id, self.max_items, self.max_bytes
+            ),
+        }
+    }
+}
+
+fn bounded_item_from_row(
+    row: &PgRow,
+    budget: &ModelContextBudget,
+) -> ThreadStoreResult<RolloutItem> {
+    let item: Option<Value> = row
+        .try_get("item")
+        .map_err(|error| database_error("load latest model context", error))?;
+    let item = item.ok_or_else(|| budget.limit_error("an individual history item is too large"))?;
+    serde_json::from_value(item).map_err(serialization_error)
+}
 
 pub(super) async fn load_latest_model_context(
     store: &PostgresThreadStore,
@@ -47,20 +114,25 @@ pub(super) async fn load_latest_model_context(
     }
 
     let head = sqlx::query(AssertSqlSafe(format!(
-        "SELECT item FROM {} WHERE thread_id = $1 AND ordinal = 0",
+        "SELECT CASE WHEN pg_column_size(item) <= $2 THEN item END AS item, \
+         pg_column_size(item)::bigint AS item_bytes \
+         FROM {} WHERE thread_id = $1 AND ordinal = 0",
         store.tables.history
     )))
     .bind(params.thread_id.to_string())
+    .bind(i64::try_from(MAX_MODEL_CONTEXT_BYTES).unwrap_or(i64::MAX))
     .fetch_optional(transaction.as_mut())
     .await
     .map_err(|error| database_error("load latest model context", error))?
     .ok_or_else(|| ThreadStoreError::Internal {
         message: format!("thread {} has no session metadata", params.thread_id),
     })?;
-    let head: Value = head
-        .try_get("item")
+    let head_bytes: i64 = head
+        .try_get("item_bytes")
         .map_err(|error| database_error("load latest model context", error))?;
-    let head: RolloutItem = serde_json::from_value(head).map_err(serialization_error)?;
+    let mut budget = ModelContextBudget::new(params.thread_id);
+    budget.account_item(head_bytes)?;
+    let head = bounded_item_from_row(&head, &budget)?;
     let RolloutItem::SessionMeta(session_meta) = head else {
         return Err(ThreadStoreError::Internal {
             message: format!("thread {} has invalid session metadata", params.thread_id),
@@ -78,20 +150,30 @@ pub(super) async fn load_latest_model_context(
     let items = if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Paginated) {
         let mut scan = ModelContextScan::default();
         let mut rows = sqlx::query(AssertSqlSafe(format!(
-            "SELECT item FROM {} WHERE thread_id = $1 ORDER BY ordinal DESC",
+            "SELECT ordinal, CASE WHEN pg_column_size(item) <= $3 THEN item END AS item, \
+             pg_column_size(item)::bigint AS item_bytes \
+             FROM {} WHERE thread_id = $1 ORDER BY ordinal DESC LIMIT $2",
             store.tables.history
         )))
         .bind(params.thread_id.to_string())
+        .bind(i64::try_from(MAX_MODEL_CONTEXT_ITEMS + 1).unwrap_or(i64::MAX))
+        .bind(i64::try_from(MAX_MODEL_CONTEXT_BYTES).unwrap_or(i64::MAX))
         .fetch(transaction.as_mut());
         while let Some(row) = rows
             .try_next()
             .await
             .map_err(|error| database_error("load latest model context", error))?
         {
-            let item: Value = row
-                .try_get("item")
+            let ordinal: i64 = row
+                .try_get("ordinal")
                 .map_err(|error| database_error("load latest model context", error))?;
-            let item = serde_json::from_value(item).map_err(serialization_error)?;
+            if ordinal != 0 {
+                let item_bytes: i64 = row
+                    .try_get("item_bytes")
+                    .map_err(|error| database_error("load latest model context", error))?;
+                budget.account_item(item_bytes)?;
+            }
+            let item = bounded_item_from_row(&row, &budget)?;
             if matches!(scan.push(item), ModelContextScanProgress::Complete) {
                 break;
             }
@@ -99,22 +181,35 @@ pub(super) async fn load_latest_model_context(
         drop(rows);
         scan.finish(session_meta)
     } else {
-        let rows = sqlx::query(AssertSqlSafe(format!(
-            "SELECT item FROM {} WHERE thread_id = $1 ORDER BY ordinal ASC",
+        let mut rows = sqlx::query(AssertSqlSafe(format!(
+            "SELECT ordinal, CASE WHEN pg_column_size(item) <= $3 THEN item END AS item, \
+             pg_column_size(item)::bigint AS item_bytes \
+             FROM {} WHERE thread_id = $1 ORDER BY ordinal ASC LIMIT $2",
             store.tables.history
         )))
         .bind(params.thread_id.to_string())
-        .fetch_all(transaction.as_mut())
-        .await
-        .map_err(|error| database_error("load latest model context", error))?;
-        rows.into_iter()
-            .map(|row| {
-                let item: Value = row
-                    .try_get("item")
+        .bind(i64::try_from(MAX_MODEL_CONTEXT_ITEMS + 1).unwrap_or(i64::MAX))
+        .bind(i64::try_from(MAX_MODEL_CONTEXT_BYTES).unwrap_or(i64::MAX))
+        .fetch(transaction.as_mut());
+        let mut items = Vec::new();
+        while let Some(row) = rows
+            .try_next()
+            .await
+            .map_err(|error| database_error("load latest model context", error))?
+        {
+            let ordinal: i64 = row
+                .try_get("ordinal")
+                .map_err(|error| database_error("load latest model context", error))?;
+            if ordinal != 0 {
+                let item_bytes: i64 = row
+                    .try_get("item_bytes")
                     .map_err(|error| database_error("load latest model context", error))?;
-                serde_json::from_value(item).map_err(serialization_error)
-            })
-            .collect::<ThreadStoreResult<Vec<_>>>()?
+                budget.account_item(item_bytes)?;
+            }
+            items.push(bounded_item_from_row(&row, &budget)?);
+        }
+        drop(rows);
+        items
     };
 
     transaction
@@ -126,3 +221,7 @@ pub(super) async fn load_latest_model_context(
         items,
     })
 }
+
+#[cfg(test)]
+#[path = "model_context_tests.rs"]
+mod tests;

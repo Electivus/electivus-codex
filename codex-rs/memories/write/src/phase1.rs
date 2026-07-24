@@ -7,7 +7,6 @@ use crate::runtime::MemoryStartupContext;
 use crate::runtime::StageOneRequestContext;
 use codex_config::types::MemoriesConfig;
 use codex_core::Prompt;
-use codex_core::RolloutRecorder;
 use codex_core::config::Config;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::BaseInstructions;
@@ -254,6 +253,7 @@ mod job {
             sample(
                 context,
                 config,
+                thread_id,
                 &claimed_thread.rollout_path,
                 &claimed_thread.cwd,
                 stage_one_context,
@@ -330,11 +330,12 @@ mod job {
     async fn sample(
         context: &MemoryStartupContext,
         config: &Config,
+        thread_id: codex_protocol::ThreadId,
         rollout_path: &Path,
         rollout_cwd: &Path,
         stage_one_context: &StageOneRequestContext,
     ) -> anyhow::Result<(StageOneOutput, Option<TokenUsage>)> {
-        let (rollout_items, _, _) = RolloutRecorder::load_rollout_items(rollout_path).await?;
+        let rollout_items = context.load_thread_history(thread_id).await?;
         let rollout_contents = serialize_filtered_rollout_response_items(&rollout_items)?;
 
         let mut prompt = Prompt::default();

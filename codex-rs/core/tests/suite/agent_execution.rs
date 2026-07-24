@@ -1,5 +1,23 @@
 use anyhow::Result;
 use codex_features::Feature;
+use codex_protocol::ThreadId;
+use codex_thread_store::AppendThreadItemsParams;
+use codex_thread_store::ArchiveThreadParams;
+use codex_thread_store::ChildRegistrationGuard;
+use codex_thread_store::CreateThreadParams;
+use codex_thread_store::DeleteThreadParams;
+use codex_thread_store::InMemoryThreadStore;
+use codex_thread_store::ListThreadsParams;
+use codex_thread_store::LoadThreadHistoryParams;
+use codex_thread_store::ReadThreadByRolloutPathParams;
+use codex_thread_store::ReadThreadParams;
+use codex_thread_store::ResumeThreadParams;
+use codex_thread_store::StoredThread;
+use codex_thread_store::StoredThreadHistory;
+use codex_thread_store::ThreadPage;
+use codex_thread_store::ThreadStore;
+use codex_thread_store::ThreadStoreFuture;
+use codex_thread_store::UpdateThreadMetadataParams;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call_with_namespace;
@@ -10,12 +28,141 @@ use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::test_codex;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio::sync::Notify;
 
 const FIRST_PROMPT: &str = "spawn the first worker";
 const FIRST_TASK: &str = "first worker task";
 const SECOND_TASK: &str = "second worker task";
 const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+
+struct DelayedChildCreateStore {
+    inner: Arc<InMemoryThreadStore>,
+    child_created: Notify,
+    created_child_id: Mutex<Option<ThreadId>>,
+    release_child_create: Notify,
+}
+
+impl DelayedChildCreateStore {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryThreadStore::for_id(format!(
+                "delayed-child-create-{}",
+                uuid::Uuid::new_v4()
+            )),
+            child_created: Notify::new(),
+            created_child_id: Mutex::new(None),
+            release_child_create: Notify::new(),
+        }
+    }
+}
+
+impl ThreadStore for DelayedChildCreateStore {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {
+        let inner = Arc::clone(&self.inner);
+        let child_created = &self.child_created;
+        let created_child_id = &self.created_child_id;
+        let release_child_create = &self.release_child_create;
+        Box::pin(async move {
+            let child_thread_id = params.parent_thread_id.map(|_| params.thread_id);
+            inner.create_thread(params).await?;
+            if let Some(child_thread_id) = child_thread_id {
+                *created_child_id.lock().await = Some(child_thread_id);
+                child_created.notify_one();
+                release_child_create.notified().await;
+            }
+            Ok(())
+        })
+    }
+
+    fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()> {
+        self.inner.resume_thread(params)
+    }
+
+    fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
+        self.inner.append_items(params)
+    }
+
+    fn persist_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        self.inner.persist_thread(thread_id)
+    }
+
+    fn flush_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        self.inner.flush_thread(thread_id)
+    }
+
+    fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        self.inner.shutdown_thread(thread_id)
+    }
+
+    fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        self.inner.discard_thread(thread_id)
+    }
+
+    fn load_history(
+        &self,
+        params: LoadThreadHistoryParams,
+    ) -> ThreadStoreFuture<'_, StoredThreadHistory> {
+        self.inner.load_history(params)
+    }
+
+    fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
+        self.inner.read_thread(params)
+    }
+
+    fn validate_child_registration(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, ChildRegistrationGuard> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            inner
+                .read_thread(ReadThreadParams {
+                    thread_id,
+                    include_archived: true,
+                    include_history: false,
+                })
+                .await?;
+            inner.validate_child_registration(thread_id).await
+        })
+    }
+
+    fn read_thread_by_rollout_path(
+        &self,
+        params: ReadThreadByRolloutPathParams,
+    ) -> ThreadStoreFuture<'_, StoredThread> {
+        self.inner.read_thread_by_rollout_path(params)
+    }
+
+    fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
+        self.inner.list_threads(params)
+    }
+
+    fn update_thread_metadata(
+        &self,
+        params: UpdateThreadMetadataParams,
+    ) -> ThreadStoreFuture<'_, StoredThread> {
+        self.inner.update_thread_metadata(params)
+    }
+
+    fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
+        self.inner.archive_thread(params)
+    }
+
+    fn unarchive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
+        self.inner.unarchive_thread(params)
+    }
+
+    fn delete_thread(&self, params: DeleteThreadParams) -> ThreadStoreFuture<'_, ()> {
+        self.inner.delete_thread(params)
+    }
+}
 
 fn body_contains(request: &wiremock::Request, text: &str) -> bool {
     serde_json::from_slice::<serde_json::Value>(&request.body)
@@ -34,6 +181,99 @@ fn has_function_call_output(request: &wiremock::Request, call_id: &str) -> bool 
                 })
             })
     })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleted_persisted_child_is_reported_and_never_published() -> Result<()> {
+    let server = start_mock_server().await;
+    let call_id = "deleted-child-call";
+    let args = serde_json::to_string(&json!({
+        "message": "child that will be deleted",
+        "task_name": "deleted",
+    }))?;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, FIRST_PROMPT),
+        sse(vec![
+            ev_response_created("deleted-child-response"),
+            ev_function_call_with_namespace(
+                call_id,
+                MULTI_AGENT_V2_NAMESPACE,
+                "spawn_agent",
+                &args,
+            ),
+            ev_completed("deleted-child-response"),
+        ]),
+    )
+    .await;
+    let followup = mount_sse_once_match(
+        &server,
+        move |request: &wiremock::Request| has_function_call_output(request, call_id),
+        sse(vec![
+            ev_response_created("deleted-child-followup"),
+            ev_assistant_message("deleted-child-message", "spawn rejected"),
+            ev_completed("deleted-child-followup"),
+        ]),
+    )
+    .await;
+
+    let store = Arc::new(DelayedChildCreateStore::new());
+    let mut builder = test_codex()
+        .with_model("koffing")
+        .with_thread_store(codex_core::test_support::ThreadStoreOverride::new(
+            Arc::clone(&store),
+        ))
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should allow feature update");
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+    let delete_child = async {
+        store.child_created.notified().await;
+        let child_thread_id = store
+            .created_child_id
+            .lock()
+            .await
+            .expect("delayed store should expose the child id");
+        let deletion = store
+            .inner
+            .delete_thread(DeleteThreadParams {
+                thread_id: child_thread_id,
+            })
+            .await;
+        store.release_child_create.notify_one();
+        deletion?;
+        Ok::<_, codex_thread_store::ThreadStoreError>(child_thread_id)
+    };
+    let (submit_result, child_thread_id) =
+        tokio::join!(test.submit_turn(FIRST_PROMPT), delete_child);
+    submit_result?;
+    let child_thread_id = child_thread_id?;
+
+    assert_eq!(
+        followup.function_call_output_text(call_id),
+        Some(format!(
+            "collab spawn failed: no thread with id: {child_thread_id}"
+        ))
+    );
+    assert_eq!(
+        test.thread_manager.list_thread_ids().await,
+        vec![test.session_configured.thread_id]
+    );
+    assert!(
+        test.thread_manager
+            .get_thread(child_thread_id)
+            .await
+            .is_err()
+    );
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

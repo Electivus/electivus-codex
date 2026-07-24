@@ -3734,7 +3734,9 @@ impl ThreadRequestProcessor {
         path: Option<&PathBuf>,
         include_history: bool,
     ) -> Result<StoredThread, JSONRPCErrorError> {
-        let result = if let Some(path) = path {
+        let result = if let Some(path) = path
+            && self.thread_store.supports_rollout_path_lookup()
+        {
             self.thread_store
                 .read_thread_by_rollout_path(StoreReadThreadByRolloutPathParams {
                     rollout_path: path.clone(),

@@ -528,6 +528,9 @@ impl ThreadStore for PostgresThreadStore {
     ) -> ThreadStoreFuture<'_, StoredThread> {
         unsupported("read_thread_by_rollout_path")
     }
+    fn supports_rollout_path_lookup(&self) -> bool {
+        false
+    }
     fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
         Box::pin(list_threads::list_threads(self, params))
     }

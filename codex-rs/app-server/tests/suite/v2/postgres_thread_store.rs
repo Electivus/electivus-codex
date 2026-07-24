@@ -182,6 +182,9 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
             request_id: request_id(/*id*/ 10),
             params: api::ThreadResumeParams {
                 thread_id: thread_id.clone(),
+                path: Some(std::path::PathBuf::from(
+                    "/legacy/path/that-is-not-authoritative.jsonl",
+                )),
                 exclude_turns: true,
                 initial_turns_page: Some(api::ThreadResumeInitialTurnsPageParams {
                     limit: Some(1),
@@ -228,6 +231,9 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
             request_id: request_id(/*id*/ 13),
             params: api::ThreadForkParams {
                 thread_id: thread_id.clone(),
+                path: Some(std::path::PathBuf::from(
+                    "/legacy/path/that-is-not-authoritative.jsonl",
+                )),
                 ..Default::default()
             },
         },

@@ -160,6 +160,11 @@ pub trait ThreadStore: Any + Send + Sync {
         params: ReadThreadByRolloutPathParams,
     ) -> ThreadStoreFuture<'_, StoredThread>;
 
+    /// Whether this store can resolve legacy path-addressed thread requests.
+    fn supports_rollout_path_lookup(&self) -> bool {
+        true
+    }
+
     /// Lists stored threads matching the supplied filters.
     fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage>;
 

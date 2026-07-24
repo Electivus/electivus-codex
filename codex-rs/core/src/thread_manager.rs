@@ -608,6 +608,14 @@ impl ThreadManager {
         self.state.read_stored_thread(params).await
     }
 
+    /// Loads complete Canonical Thread History for a detached background job.
+    pub async fn load_thread_history_items(
+        &self,
+        thread_id: ThreadId,
+    ) -> CodexResult<Vec<RolloutItem>> {
+        self.state.load_thread_history_items(thread_id).await
+    }
+
     /// Updates metadata for loaded and cold threads through one entrypoint.
     ///
     /// Loaded threads route through `CodexThread`/`LiveThread`, so metadata changes stay ordered
@@ -1207,6 +1215,27 @@ impl ThreadManagerState {
                     }
                 }
                 err => CodexErr::Fatal(format!("failed to read stored thread {thread_id}: {err}")),
+            })
+    }
+
+    async fn load_thread_history_items(
+        &self,
+        thread_id: ThreadId,
+    ) -> CodexResult<Vec<RolloutItem>> {
+        self.thread_store
+            .load_history(LoadThreadHistoryParams {
+                thread_id,
+                include_archived: false,
+            })
+            .await
+            .map(|history| history.items)
+            .map_err(|err| match err {
+                ThreadStoreError::ThreadNotFound { thread_id } => {
+                    CodexErr::ThreadNotFound(thread_id)
+                }
+                err => CodexErr::Fatal(format!(
+                    "failed to load history for thread {thread_id}: {err}"
+                )),
             })
     }
 

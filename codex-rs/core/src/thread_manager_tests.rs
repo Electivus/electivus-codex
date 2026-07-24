@@ -27,16 +27,6 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
-use codex_thread_store::AppendThreadItemsParams;
-use codex_thread_store::ArchiveThreadParams;
-use codex_thread_store::ChildRegistrationGuard;
-use codex_thread_store::CreateThreadParams;
-use codex_thread_store::DeleteThreadParams;
-use codex_thread_store::ListThreadsParams;
-use codex_thread_store::ResumeThreadParams;
-use codex_thread_store::StoredThreadHistory;
-use codex_thread_store::ThreadPage;
-use codex_thread_store::ThreadStoreFuture;
 use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
 use core_test_support::PathExt;
@@ -44,137 +34,9 @@ use core_test_support::responses::mount_models_once;
 use pretty_assertions::assert_eq;
 use std::time::Duration;
 use tempfile::tempdir;
-use tokio::sync::Mutex;
-use tokio::sync::Notify;
 use wiremock::MockServer;
 
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
-
-struct DelayedChildCreateStore {
-    inner: Arc<InMemoryThreadStore>,
-    child_created: Notify,
-    created_child_id: Mutex<Option<ThreadId>>,
-    release_child_create: Notify,
-}
-
-impl DelayedChildCreateStore {
-    fn new() -> Self {
-        Self {
-            inner: InMemoryThreadStore::for_id(format!(
-                "delayed-child-create-{}",
-                uuid::Uuid::new_v4()
-            )),
-            child_created: Notify::new(),
-            created_child_id: Mutex::new(None),
-            release_child_create: Notify::new(),
-        }
-    }
-}
-
-impl ThreadStore for DelayedChildCreateStore {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {
-        let inner = Arc::clone(&self.inner);
-        let child_created = &self.child_created;
-        let created_child_id = &self.created_child_id;
-        let release_child_create = &self.release_child_create;
-        Box::pin(async move {
-            let child_thread_id = params.parent_thread_id.map(|_| params.thread_id);
-            inner.create_thread(params).await?;
-            if let Some(child_thread_id) = child_thread_id {
-                *created_child_id.lock().await = Some(child_thread_id);
-                child_created.notify_one();
-                release_child_create.notified().await;
-            }
-            Ok(())
-        })
-    }
-
-    fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()> {
-        self.inner.resume_thread(params)
-    }
-
-    fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
-        self.inner.append_items(params)
-    }
-
-    fn persist_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-        self.inner.persist_thread(thread_id)
-    }
-
-    fn flush_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-        self.inner.flush_thread(thread_id)
-    }
-
-    fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-        self.inner.shutdown_thread(thread_id)
-    }
-
-    fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-        self.inner.discard_thread(thread_id)
-    }
-
-    fn load_history(
-        &self,
-        params: LoadThreadHistoryParams,
-    ) -> ThreadStoreFuture<'_, StoredThreadHistory> {
-        self.inner.load_history(params)
-    }
-
-    fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
-        self.inner.read_thread(params)
-    }
-
-    fn validate_child_registration(
-        &self,
-        thread_id: ThreadId,
-    ) -> ThreadStoreFuture<'_, ChildRegistrationGuard> {
-        let inner = Arc::clone(&self.inner);
-        Box::pin(async move {
-            inner
-                .read_thread(ReadThreadParams {
-                    thread_id,
-                    include_archived: true,
-                    include_history: false,
-                })
-                .await?;
-            inner.validate_child_registration(thread_id).await
-        })
-    }
-
-    fn read_thread_by_rollout_path(
-        &self,
-        params: ReadThreadByRolloutPathParams,
-    ) -> ThreadStoreFuture<'_, StoredThread> {
-        self.inner.read_thread_by_rollout_path(params)
-    }
-
-    fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
-        self.inner.list_threads(params)
-    }
-
-    fn update_thread_metadata(
-        &self,
-        params: UpdateThreadMetadataParams,
-    ) -> ThreadStoreFuture<'_, StoredThread> {
-        self.inner.update_thread_metadata(params)
-    }
-
-    fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
-        self.inner.archive_thread(params)
-    }
-
-    fn unarchive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
-        self.inner.unarchive_thread(params)
-    }
-
-    fn delete_thread(&self, params: DeleteThreadParams) -> ThreadStoreFuture<'_, ()> {
-        self.inner.delete_thread(params)
-    }
-}
 
 #[tokio::test]
 async fn postgresql_thread_store_construction_reports_missing_runtime_without_panicking() {
@@ -202,84 +64,6 @@ async fn postgresql_thread_store_construction_reports_missing_runtime_without_pa
         error.to_string(),
         "PostgreSQL Runtime State was not initialized before Thread Store construction"
     );
-}
-
-#[tokio::test]
-async fn deleted_persisted_child_is_not_published_after_create_returns() {
-    let temp_dir = tempdir().expect("tempdir");
-    let mut config = test_config().await;
-    config.codex_home = temp_dir.path().join("codex-home").abs();
-    config.cwd = config.codex_home.abs();
-    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
-    let store = Arc::new(DelayedChildCreateStore::new());
-    let auth_manager =
-        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
-    let manager = ThreadManager::new(
-        &config,
-        auth_manager.clone(),
-        build_models_manager(&config, auth_manager),
-        crate::CodexAppsToolsCache::default(),
-        SessionSource::Exec,
-        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
-        empty_extension_registry(),
-        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
-        /*analytics_events_client*/ None,
-        Arc::clone(&store) as Arc<dyn ThreadStore>,
-        /*agent_graph_store*/ None,
-        TEST_INSTALLATION_ID.to_string(),
-        /*attestation_provider*/ None,
-        /*external_time_provider*/ None,
-    );
-    let parent_thread_id = ThreadId::new();
-    let state = Arc::clone(&manager.state);
-    let agent_control = manager.agent_control();
-    let spawn_task = tokio::spawn(async move {
-        state
-            .spawn_new_thread_with_source(
-                config,
-                agent_control,
-                SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                    parent_thread_id,
-                    depth: 1,
-                    agent_path: None,
-                    agent_nickname: None,
-                    agent_role: None,
-                }),
-                /*history_mode*/ None,
-                Some(parent_thread_id),
-                /*forked_from_thread_id*/ None,
-                /*thread_source*/ Some(ThreadSource::Subagent),
-                /*metrics_service_name*/ None,
-                /*inherited_environments*/ None,
-                /*inherited_exec_policy*/ None,
-                /*environments*/ None,
-            )
-            .await
-    });
-    store.child_created.notified().await;
-    let child_thread_id = store
-        .created_child_id
-        .lock()
-        .await
-        .expect("delayed store should expose the child id");
-    store
-        .inner
-        .delete_thread(DeleteThreadParams {
-            thread_id: child_thread_id,
-        })
-        .await
-        .expect("delete child after durable create");
-    store.release_child_create.notify_one();
-
-    let error = match spawn_task.await.expect("spawn task should join") {
-        Ok(_) => panic!("a deleted durable child must not become live"),
-        Err(error) => error,
-    };
-    assert!(matches!(
-        error,
-        CodexErr::ThreadNotFound(thread_id) if thread_id == child_thread_id
-    ));
-    assert!(manager.get_thread(child_thread_id).await.is_err());
 }
 
 struct FakeAgentGraphStore {

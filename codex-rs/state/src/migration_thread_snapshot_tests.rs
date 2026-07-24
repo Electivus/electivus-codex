@@ -37,6 +37,7 @@ use std::path::PathBuf;
 
 struct FixtureHistoryReader {
     histories: HashMap<PathBuf, Vec<RolloutLine>>,
+    minimum_read_budget: u64,
 }
 
 impl CanonicalThreadHistoryReader for FixtureHistoryReader {
@@ -45,6 +46,10 @@ impl CanonicalThreadHistoryReader for FixtureHistoryReader {
         path: &Path,
         maximum_source_bytes: u64,
     ) -> anyhow::Result<(Vec<RolloutLine>, usize, u64)> {
+        anyhow::ensure!(
+            maximum_source_bytes >= self.minimum_read_budget,
+            "fixture received a shared aggregate read budget"
+        );
         let lines = self
             .histories
             .get(path)
@@ -150,6 +155,7 @@ async fn snapshot_preserves_complete_legacy_and_current_thread_domain_read_only(
             (legacy_path.clone(), legacy_history.clone()),
             (current_path.clone(), current_history.clone()),
         ]),
+        minimum_read_budget: 256 * 1024 * 1024,
     };
     let inventory = inventory(&source, [&legacy_path, &current_path])?;
 

@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
 
-const MAX_CANONICAL_HISTORY_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_CANONICAL_HISTORY_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Reads Canonical Thread History without giving migration code write access to its representation.
 pub trait CanonicalThreadHistoryReader {
@@ -276,7 +276,6 @@ async fn snapshot(
     .fetch_all(state_pool)
     .await?;
     let mut threads = Vec::with_capacity(rows.len());
-    let mut remaining_history_bytes = MAX_CANONICAL_HISTORY_SOURCE_BYTES;
     let rollout_files = inventory
         .rollout_files
         .iter()
@@ -299,13 +298,10 @@ async fn snapshot(
         })?;
         referenced_rollouts.insert(relative_path);
         let rollout_path = source.home().join(physical_path);
-        let (lines, rejected_line_count, source_bytes) = history_reader
-            .read(&rollout_path, remaining_history_bytes)
+        let (lines, rejected_line_count, _source_bytes) = history_reader
+            .read(&rollout_path, MAX_CANONICAL_HISTORY_FILE_BYTES)
             .await
             .with_context(|| format!("read Canonical Thread History for {}", metadata.id))?;
-        remaining_history_bytes = remaining_history_bytes.checked_sub(source_bytes).context(
-            "Canonical Thread History reader exceeded its bounded migration source budget",
-        )?;
         anyhow::ensure!(
             rejected_line_count == 0,
             "Canonical Thread History for {} contains {rejected_line_count} unsupported or malformed record(s); upgrade Codex or repair the rollout before migrating",
@@ -336,12 +332,9 @@ async fn snapshot(
             continue;
         }
         let rollout_path = source.home().join(&physical_path);
-        let (lines, rejected_line_count, source_bytes) = history_reader
-            .read(&rollout_path, remaining_history_bytes)
+        let (lines, rejected_line_count, _source_bytes) = history_reader
+            .read(&rollout_path, MAX_CANONICAL_HISTORY_FILE_BYTES)
             .await?;
-        remaining_history_bytes = remaining_history_bytes.checked_sub(source_bytes).context(
-            "Canonical Thread History reader exceeded its bounded migration source budget",
-        )?;
         anyhow::ensure!(
             rejected_line_count == 0,
             "Canonical Thread History at {} contains {rejected_line_count} unsupported or malformed record(s); upgrade Codex or repair the rollout before migrating",
