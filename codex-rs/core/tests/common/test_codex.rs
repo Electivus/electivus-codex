@@ -51,6 +51,7 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::user_input::UserInput;
+use codex_thread_store::ThreadStore;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use futures::future::BoxFuture;
@@ -305,7 +306,7 @@ pub struct TestCodexBuilder {
     external_time_provider: Option<Arc<dyn TimeProvider>>,
     code_mode_host_program: Option<PathBuf>,
     history_mode: Option<ThreadHistoryMode>,
-    thread_store: Option<codex_core::test_support::ThreadStoreOverride>,
+    thread_store: Option<Arc<dyn ThreadStore>>,
 }
 
 impl TestCodexBuilder {
@@ -334,10 +335,10 @@ impl TestCodexBuilder {
         self
     }
 
-    pub fn with_thread_store(
-        mut self,
-        thread_store: codex_core::test_support::ThreadStoreOverride,
-    ) -> Self {
+    pub fn with_thread_store<T>(mut self, thread_store: Arc<T>) -> Self
+    where
+        T: ThreadStore + 'static,
+    {
         self.thread_store = Some(thread_store);
         self
     }
@@ -626,7 +627,7 @@ impl TestCodexBuilder {
         let auth = self.auth.clone();
         let state_db = codex_core::init_state_db(&config).await;
         let thread_store = match self.thread_store.take() {
-            Some(thread_store) => thread_store.into_inner(),
+            Some(thread_store) => thread_store,
             None => thread_store_from_config(&config, state_db.clone())?,
         };
         let installation_id = resolve_installation_id(&config.codex_home).await?;

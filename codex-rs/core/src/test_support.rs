@@ -27,7 +27,6 @@ use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::SessionSource;
-use codex_thread_store::ThreadStore;
 use once_cell::sync::Lazy;
 
 use crate::ThreadManager;
@@ -55,24 +54,6 @@ pub struct EmptyUserInstructionsProvider;
 impl UserInstructionsProvider for EmptyUserInstructionsProvider {
     fn load_user_instructions(&self) -> LoadUserInstructionsFuture<'_> {
         Box::pin(async { LoadedUserInstructions::default() })
-    }
-}
-
-/// Type-erased Thread Store override for cross-crate integration tests.
-pub struct ThreadStoreOverride {
-    inner: Arc<dyn ThreadStore>,
-}
-
-impl ThreadStoreOverride {
-    pub fn new<T>(store: Arc<T>) -> Self
-    where
-        T: ThreadStore + 'static,
-    {
-        Self { inner: store }
-    }
-
-    pub fn into_inner(self) -> Arc<dyn ThreadStore> {
-        self.inner
     }
 }
 

@@ -12,6 +12,7 @@ use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::ReadThreadByRolloutPathParams;
 use codex_thread_store::ReadThreadParams;
 use codex_thread_store::ResumeThreadParams;
+use codex_thread_store::StoredModelContext;
 use codex_thread_store::StoredThread;
 use codex_thread_store::StoredThreadHistory;
 use codex_thread_store::ThreadPage;
@@ -110,6 +111,13 @@ impl ThreadStore for DelayedChildCreateStore {
         params: LoadThreadHistoryParams,
     ) -> ThreadStoreFuture<'_, StoredThreadHistory> {
         self.inner.load_history(params)
+    }
+
+    fn load_latest_model_context(
+        &self,
+        params: LoadThreadHistoryParams,
+    ) -> ThreadStoreFuture<'_, StoredModelContext> {
+        self.inner.load_latest_model_context(params)
     }
 
     fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
@@ -220,9 +228,7 @@ async fn deleted_persisted_child_is_reported_and_never_published() -> Result<()>
     let store = Arc::new(DelayedChildCreateStore::new());
     let mut builder = test_codex()
         .with_model("koffing")
-        .with_thread_store(codex_core::test_support::ThreadStoreOverride::new(
-            Arc::clone(&store),
-        ))
+        .with_thread_store(Arc::clone(&store))
         .with_config(|config| {
             config
                 .features

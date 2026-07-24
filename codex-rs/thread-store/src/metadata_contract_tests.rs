@@ -4,14 +4,19 @@ use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
+use codex_protocol::protocol::TurnContextItem;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
+use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
 use crate::CreateThreadParams;
 use crate::GitInfoPatch;
@@ -60,6 +65,46 @@ async fn postgres_contract_metadata_matches_public_thread_store_semantics()
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f111")?;
 
     assert_metadata_contract(&store, thread_id, Path::new("/metadata-contract")).await?;
+    let cwd_thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f112")?;
+    store
+        .create_thread(create_thread_params(
+            cwd_thread_id,
+            Path::new("/metadata-contract"),
+            ThreadHistoryMode::Legacy,
+        ))
+        .await?;
+    let latest_cwd = Path::new("/metadata-contract/latest-turn").to_path_buf();
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id: cwd_thread_id,
+            items: vec![RolloutItem::TurnContext(TurnContextItem {
+                turn_id: Some("latest-turn".to_string()),
+                cwd: latest_cwd.clone().try_into()?,
+                workspace_roots: None,
+                current_date: None,
+                timezone: None,
+                approval_policy: AskForApproval::Never,
+                approvals_reviewer: None,
+                sandbox_policy: SandboxPolicy::DangerFullAccess,
+                permission_profile: None,
+                network: None,
+                file_system_sandbox_policy: None,
+                model: "metadata-contract-model".to_string(),
+                comp_hash: None,
+                personality: None,
+                collaboration_mode: None,
+                multi_agent_version: None,
+                multi_agent_mode: None,
+                realtime_active: None,
+                effort: None,
+                summary: ReasoningSummary::Auto,
+            })],
+        })
+        .await?;
+    store.persist_thread(cwd_thread_id).await?;
+    store.shutdown_thread(cwd_thread_id).await?;
+    let projected = read_thread(&store, cwd_thread_id, /*include_archived*/ false).await?;
+    assert_eq!(projected.cwd, latest_cwd);
 
     pool.close().await;
     fixture.cleanup().await
