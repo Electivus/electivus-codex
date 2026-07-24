@@ -91,6 +91,8 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
+use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
@@ -1436,7 +1438,30 @@ fn all_thread_source_kinds() -> Vec<ThreadSourceKind> {
     ]
 }
 
-async fn latest_thread_cwd(thread: &AppServerThread) -> PathBuf {
+#[derive(Clone, Copy)]
+enum ResumeCwdSource {
+    LocalRollout,
+    CanonicalProjection,
+}
+
+async fn latest_thread_cwd(thread: &AppServerThread, source: ResumeCwdSource) -> PathBuf {
+    if let ResumeCwdSource::LocalRollout = source
+        && let Some(path) = thread.path.as_deref()
+        && let Ok(text) = tokio::fs::read_to_string(path).await
+    {
+        for line in text.lines().rev() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(trimmed) else {
+                continue;
+            };
+            if let RolloutItem::TurnContext(item) = rollout_line.item {
+                return item.cwd.into_path_buf();
+            }
+        }
+    }
     thread.cwd.to_path_buf()
 }
 
@@ -1451,6 +1476,12 @@ async fn resolve_resume_thread_id(
     args: &crate::cli::ResumeArgs,
 ) -> anyhow::Result<Option<String>> {
     let model_providers = resume_lookup_model_providers(config, args);
+    let cwd_source = match state_db {
+        Some(runtime) if !runtime.uses_local_rollout_history() => {
+            ResumeCwdSource::CanonicalProjection
+        }
+        Some(_) | None => ResumeCwdSource::LocalRollout,
+    };
 
     if args.last {
         let mut cursor = None;
@@ -1479,7 +1510,7 @@ async fn resolve_resume_thread_id(
             .await
             .map_err(anyhow::Error::msg)?;
             for thread in response.data {
-                let latest_cwd = latest_thread_cwd(&thread).await;
+                let latest_cwd = latest_thread_cwd(&thread, cwd_source).await;
                 if args.all || cwds_match(config.cwd.as_path(), latest_cwd.as_path()) {
                     return Ok(Some(thread.id));
                 }
@@ -1551,7 +1582,7 @@ async fn resolve_resume_thread_id(
             if thread.name.as_deref() != Some(session_id) {
                 continue;
             }
-            let latest_cwd = latest_thread_cwd(&thread).await;
+            let latest_cwd = latest_thread_cwd(&thread, cwd_source).await;
             if args.all || cwds_match(config.cwd.as_path(), latest_cwd.as_path()) {
                 return Ok(Some(thread.id));
             }

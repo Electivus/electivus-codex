@@ -328,7 +328,7 @@ async fn resume_lookup_model_providers_filters_only_last_lookup() {
 }
 
 #[tokio::test]
-async fn latest_thread_cwd_uses_the_canonical_thread_projection() {
+async fn latest_thread_cwd_uses_the_selected_history_authority() {
     let rollout_dir = tempdir().expect("create rollout directory");
     let rollout_path = rollout_dir.path().join("rollout.jsonl");
     let canonical_cwd = rollout_dir.path().join("canonical");
@@ -371,7 +371,13 @@ async fn latest_thread_cwd_uses_the_canonical_thread_projection() {
     thread.cwd = canonical_cwd.clone().abs();
     thread.path = Some(rollout_path);
 
-    assert_eq!(latest_thread_cwd(&thread).await, canonical_cwd);
+    assert_eq!(
+        (
+            latest_thread_cwd(&thread, ResumeCwdSource::LocalRollout).await,
+            latest_thread_cwd(&thread, ResumeCwdSource::CanonicalProjection).await,
+        ),
+        (conflicting_cwd, canonical_cwd)
+    );
 }
 
 #[test]
