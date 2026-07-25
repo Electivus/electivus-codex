@@ -1,4 +1,5 @@
 import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -584,6 +585,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             fixture = GitFixture(Path(temp_dir))
             selected = fixture.release("rust-v9.0.0", "9.0.0", "release")
             fixture.git("config", "commit.gpgsign", "true")
+            fixture.git("config", "gpg.program", sys.executable)
             pull_requests = RecordingPullRequests()
 
             with self.assertRaisesRegex(SyncError, "without content conflicts"):
