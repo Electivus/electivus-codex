@@ -20,7 +20,6 @@ use crate::PostgresRuntimeStatePool;
 use crate::RemoteControlEnrollmentRecord;
 use crate::SqliteConfig;
 use crate::ThreadGoalStatus;
-use crate::logs_db_path;
 use crate::manage_postgres_namespace;
 use crate::postgres::qualified_table;
 use crate::postgres::quote_identifier;
@@ -174,6 +173,7 @@ async fn postgres_contract_imports_complete_operational_state_read_only() -> any
     runtime
         .record_external_agent_config_import_completed(
             "import-migration",
+            Some("migration-provider"),
             &[ExternalAgentConfigImportSuccessRecord {
                 item_type: "skills".to_string(),
                 cwd: Some(source.join("workspace")),
@@ -197,7 +197,7 @@ async fn postgres_contract_imports_complete_operational_state_read_only() -> any
     runtime.close().await;
 
     let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(source.as_path())?);
-    let logs_pool = sqlite.open_read_write_pool(&logs_db_path(&source)).await?;
+    let logs_pool = sqlite.open_read_write_pool(&sqlite.logs_db_path()).await?;
     sqlx::query("UPDATE logs SET estimated_bytes = ? WHERE id = 1")
         .bind(10_i64 * 1024 * 1024)
         .execute(&logs_pool)

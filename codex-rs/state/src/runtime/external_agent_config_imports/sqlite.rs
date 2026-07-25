@@ -21,6 +21,7 @@ impl SqliteExternalAgentConfigImportStore {
     pub(super) async fn record_completed(
         &self,
         import_id: &str,
+        provider_id: Option<&str>,
         successes: &[ExternalAgentConfigImportSuccessRecord],
         failures: &[ExternalAgentConfigImportFailureRecord],
     ) -> anyhow::Result<()> {
@@ -28,17 +29,20 @@ impl SqliteExternalAgentConfigImportStore {
             r#"
 INSERT INTO external_agent_config_imports (
     import_id,
+    provider_id,
     completed_at_ms,
     successes,
     failures
-) VALUES (?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(import_id) DO UPDATE SET
+    provider_id = excluded.provider_id,
     completed_at_ms = excluded.completed_at_ms,
     successes = excluded.successes,
     failures = excluded.failures
 "#,
         )
         .bind(import_id)
+        .bind(provider_id)
         .bind(datetime_to_epoch_millis(Utc::now()))
         .bind(serde_json::to_string(successes)?)
         .bind(serde_json::to_string(failures)?)
@@ -74,7 +78,7 @@ ON CONFLICT(import_id) DO UPDATE SET
         &self,
     ) -> anyhow::Result<Vec<ExternalAgentConfigImportHistoryRecord>> {
         let rows = sqlx::query(
-            "SELECT import_id, completed_at_ms, successes, failures \
+            "SELECT import_id, provider_id, completed_at_ms, successes, failures \
              FROM external_agent_config_imports \
              ORDER BY completed_at_ms DESC, import_id ASC",
         )
@@ -87,6 +91,7 @@ ON CONFLICT(import_id) DO UPDATE SET
                 let failures: String = row.try_get("failures")?;
                 Ok(ExternalAgentConfigImportHistoryRecord {
                     import_id: row.try_get("import_id")?,
+                    provider_id: row.try_get("provider_id")?,
                     completed_at_ms: row.try_get("completed_at_ms")?,
                     successes: serde_json::from_str(&successes)?,
                     failures: serde_json::from_str(&failures)?,

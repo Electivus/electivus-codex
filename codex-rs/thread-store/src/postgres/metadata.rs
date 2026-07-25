@@ -36,7 +36,8 @@ pub(super) async fn update_thread_metadata(
     let row = sqlx::query(AssertSqlSafe(format!(
         "SELECT projection, stream_version, fencing_token, writer_id, \
          writer_lease_expires_at > CURRENT_TIMESTAMP AS lease_active, \
-         CURRENT_TIMESTAMP AS database_now, created_at, updated_at, recency_at, archived_at \
+         CURRENT_TIMESTAMP AS database_now, created_at, updated_at, recency_at, archived_at, \
+         is_pinned \
          FROM {} WHERE thread_id = $1 FOR UPDATE",
         store.tables.threads
     )))
@@ -146,8 +147,8 @@ pub(super) async fn update_thread_metadata(
              WHEN history_projection_version = stream_version THEN $2 \
              ELSE history_projection_version \
          END, \
-         stream_version = $2, created_at = $3, updated_at = $4, recency_at = $5 \
-         WHERE thread_id = $6",
+         stream_version = $2, created_at = $3, updated_at = $4, recency_at = $5, is_pinned = $6 \
+         WHERE thread_id = $7",
         store.tables.threads
     )))
     .bind(projection_json)
@@ -155,6 +156,7 @@ pub(super) async fn update_thread_metadata(
     .bind(projection.created_at)
     .bind(projection.updated_at)
     .bind(projection.recency_at)
+    .bind(projection.is_pinned)
     .bind(params.thread_id.to_string())
     .execute(transaction.as_mut())
     .await
@@ -213,6 +215,9 @@ fn rebuild_projection(
     let archived_at = row
         .try_get("archived_at")
         .map_err(|error| database_error("repair thread metadata", error))?;
+    let is_pinned = row
+        .try_get("is_pinned")
+        .map_err(|error| database_error("repair thread metadata", error))?;
     let mut projection = StoredThread {
         thread_id,
         extra_config: None,
@@ -228,6 +233,7 @@ fn rebuild_projection(
         updated_at,
         recency_at,
         archived_at,
+        is_pinned,
         cwd: session_meta.meta.cwd.clone(),
         cli_version: session_meta.meta.cli_version.clone(),
         source: session_meta.meta.source.clone(),
@@ -364,6 +370,9 @@ pub(super) fn apply_metadata_patch(thread: &mut StoredThread, patch: &ThreadMeta
     }
     if let Some(first_user_message) = patch.first_user_message.clone() {
         thread.first_user_message = Some(first_user_message);
+    }
+    if let Some(is_pinned) = patch.is_pinned {
+        thread.is_pinned = is_pinned;
     }
     if let Some(git_info) = patch.git_info.as_ref() {
         thread.git_info =

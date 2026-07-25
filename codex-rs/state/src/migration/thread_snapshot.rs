@@ -7,8 +7,6 @@ use crate::ExtractionOutcome;
 use crate::SqliteConfig;
 use crate::ThreadMetadata;
 use crate::model::ThreadRow;
-use crate::state_db_path;
-use crate::thread_history_db_path;
 use anyhow::Context;
 use chrono::DateTime;
 use chrono::Utc;
@@ -206,6 +204,7 @@ pub struct ThreadItemProjectionSnapshot {
     pub(super) turn_id: String,
     pub(super) item_id: String,
     pub(super) rollout_ordinal: u64,
+    pub(super) updated_at_ordinal: u64,
     pub(super) created_at_ms: i64,
     pub(super) item: Value,
     pub(super) item_type: String,
@@ -239,11 +238,11 @@ pub async fn snapshot_runtime_state_migration_threads(
     history_reader: &impl CanonicalThreadHistoryReader,
 ) -> anyhow::Result<RuntimeStateThreadSnapshot> {
     let state_pool = source
-        .open_immutable_pool(&state_db_path(source.home()))
+        .open_immutable_pool(&source.state_db_path())
         .await
         .context("open immutable migration state DB")?;
     let history_pool = source
-        .open_immutable_pool(&thread_history_db_path(source.home()))
+        .open_immutable_pool(&source.thread_history_db_path())
         .await
         .context("open immutable migration thread history DB")?;
     let result = snapshot(
@@ -271,7 +270,7 @@ async fn snapshot(
          recency_at_ms AS recency_at, source, history_mode, thread_source, agent_nickname, \
          agent_role, agent_path, model_provider, model, reasoning_effort, cwd, cli_version, title, \
          name, preview, sandbox_policy, approval_mode, tokens_used, first_user_message, archived_at, \
-         git_sha, git_branch, git_origin_url, memory_mode FROM threads ORDER BY id",
+         is_pinned, git_sha, git_branch, git_origin_url, memory_mode FROM threads ORDER BY id",
     )
     .fetch_all(state_pool)
     .await?;
@@ -492,7 +491,7 @@ async fn read_thread_snapshot(
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let item_rows = sqlx::query("SELECT turn_id, item_id, rollout_ordinal, created_at_ms, item_json, item_type FROM thread_items WHERE thread_id = ? ORDER BY rollout_ordinal, turn_id, item_id")
+    let item_rows = sqlx::query("SELECT turn_id, item_id, rollout_ordinal, updated_at_ordinal, created_at_ms, item_json, item_type FROM thread_items WHERE thread_id = ? ORDER BY rollout_ordinal, turn_id, item_id")
         .bind(&thread_id)
         .fetch_all(history_pool)
         .await?;
@@ -503,6 +502,7 @@ async fn read_thread_snapshot(
                 turn_id: row.try_get("turn_id")?,
                 item_id: row.try_get("item_id")?,
                 rollout_ordinal: nonnegative(row.try_get("rollout_ordinal")?)?,
+                updated_at_ordinal: nonnegative(row.try_get("updated_at_ordinal")?)?,
                 created_at_ms: row.try_get("created_at_ms")?,
                 item: serde_json::from_str(&row.try_get::<String, _>("item_json")?)?,
                 item_type: row.try_get("item_type")?,

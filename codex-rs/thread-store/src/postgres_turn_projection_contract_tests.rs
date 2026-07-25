@@ -18,6 +18,7 @@ use sqlx::AssertSqlSafe;
 use crate::AppendBatchId;
 use crate::AppendThreadItemsBatch;
 use crate::ArchiveThreadParams;
+use crate::ItemSortKey;
 use crate::ListItemsParams;
 use crate::ListTurnsParams;
 use crate::LoadThreadHistoryParams;
@@ -63,6 +64,8 @@ async fn postgres_contract_damaged_projections_rebuild_once_for_concurrent_publi
             cursor: None,
             page_size: 10,
             sort_direction: SortDirection::Asc,
+            sort_key: ItemSortKey::CreatedAtOrdinal,
+            after_updated_at_ordinal: None,
         }),
         second_reader.list_turns(default_turn_params(thread_id)),
     );

@@ -207,7 +207,7 @@ async fn run_stage1_output_data_contract(
 async fn seed_sqlite(runtime: &StateRuntime, seeds: &[OutputSeed]) -> Result<()> {
     for seed in seeds {
         let mut metadata = test_thread_metadata(
-            runtime.codex_home(),
+            runtime.sqlite().home(),
             seed.output.thread_id,
             seed.output.cwd.clone(),
         );

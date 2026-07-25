@@ -53,7 +53,7 @@ async fn postgres_contract_preflight_inventories_all_source_authorities() -> any
     });
     let runtime =
         crate::StateRuntime::init_sqlite(source.clone(), "test-provider".to_string()).await?;
-    let history = open_thread_history_db(&source).await?;
+    let history = open_thread_history_db(runtime.sqlite()).await?;
     history.close().await;
     runtime.close().await;
     tokio::fs::create_dir_all(source.join("sessions/2026/07/22")).await?;
@@ -173,7 +173,7 @@ async fn postgres_contract_preflight_reports_a_positive_active_writer_check() ->
     });
     let runtime =
         crate::StateRuntime::init_sqlite(source.clone(), "test-provider".to_string()).await?;
-    let history = open_thread_history_db(&source).await?;
+    let history = open_thread_history_db(runtime.sqlite()).await?;
     history.close().await;
     runtime.close().await;
     std::fs::write(source.join("config.toml"), b"model = \"gpt-5\"\n")?;
@@ -186,7 +186,7 @@ async fn postgres_contract_preflight_reports_a_positive_active_writer_check() ->
         .arg("--exact")
         .arg("migration::tests::sqlite_writer_process_fixture")
         .arg("--nocapture")
-        .env("CODEX_MIGRATION_WRITER_DB", crate::state_db_path(&source))
+        .env("CODEX_MIGRATION_WRITER_DB", sqlite.state_db_path())
         .env("CODEX_MIGRATION_WRITER_READY", &ready_path)
         .env("CODEX_MIGRATION_WRITER_RELEASE", &release_path)
         .spawn()?;

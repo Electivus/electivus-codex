@@ -5,6 +5,7 @@ use std::time::Duration;
 #[cfg(target_os = "macos")]
 use codex_network_proxy::ManagedNetworkSandboxContext;
 use codex_network_proxy::NetworkProxyConfig;
+use codex_network_proxy::PROXY_ATTRIBUTION_TOKEN_ENV_KEY;
 use codex_network_proxy::RemoteNetworkProxyConfig;
 use codex_network_proxy::RemoteNetworkProxyLaunchConfig;
 #[cfg(windows)]
@@ -64,9 +65,14 @@ async fn sandbox_request_wraps_native_argv_on_executor() {
         network_proxy: None,
     };
 
-    let prepared = prepare_exec_request(&params, HashMap::new(), Some(&runtime_paths))
-        .await
-        .expect("prepare sandboxed request");
+    let prepared = prepare_exec_request(
+        &params,
+        HashMap::new(),
+        Some(&runtime_paths),
+        /*network_policy_decider*/ None,
+    )
+    .await
+    .expect("prepare sandboxed request");
 
     assert_ne!(prepared.command, params.argv);
     assert_eq!(prepared.cwd, cwd);
@@ -127,9 +133,14 @@ async fn sandbox_request_routes_custom_arg0_to_inner_helper() {
         network_proxy: None,
     };
 
-    let prepared = prepare_exec_request(&params, HashMap::new(), Some(&runtime_paths))
-        .await
-        .expect("prepare sandboxed request");
+    let prepared = prepare_exec_request(
+        &params,
+        HashMap::new(),
+        Some(&runtime_paths),
+        /*network_policy_decider*/ None,
+    )
+    .await
+    .expect("prepare sandboxed request");
     let helper_mode = prepared
         .command
         .iter()
@@ -185,9 +196,14 @@ async fn sandbox_request_allows_prepared_managed_proxy_port() {
         network_proxy: None,
     };
 
-    let prepared = prepare_exec_request(&params, HashMap::new(), Some(&runtime_paths))
-        .await
-        .expect("prepare managed-network sandbox request");
+    let prepared = prepare_exec_request(
+        &params,
+        HashMap::new(),
+        Some(&runtime_paths),
+        /*network_policy_decider*/ None,
+    )
+    .await
+    .expect("prepare managed-network sandbox request");
     let policy = prepared
         .command
         .windows(2)
@@ -220,9 +236,14 @@ async fn native_request_preserves_native_launch_fields() {
         network_proxy: None,
     };
 
-    let prepared = prepare_exec_request(&params, env.clone(), /*runtime_paths*/ None)
-        .await
-        .expect("prepare native request");
+    let prepared = prepare_exec_request(
+        &params,
+        env.clone(),
+        /*runtime_paths*/ None,
+        /*network_policy_decider*/ None,
+    )
+    .await
+    .expect("prepare native request");
 
     assert_eq!(prepared.command, params.argv);
     assert_eq!(prepared.cwd, cwd);
@@ -231,7 +252,7 @@ async fn native_request_preserves_native_launch_fields() {
 }
 
 #[tokio::test]
-async fn remote_proxy_config_starts_executor_local_proxy() {
+async fn native_request_handles_remote_proxy_config_for_platform() {
     let cwd: AbsolutePathBuf = std::env::current_dir()
         .expect("current directory")
         .try_into()
@@ -261,15 +282,32 @@ async fn remote_proxy_config_starts_executor_local_proxy() {
         ),
     };
     let stale_proxy = "http://127.0.0.1:9".to_string();
-    let env = HashMap::from([("HTTP_PROXY".to_string(), stale_proxy.clone())]);
+    let env = HashMap::from([
+        ("HTTP_PROXY".to_string(), stale_proxy.clone()),
+        ("TEST_ENV".to_string(), "value".to_string()),
+        (
+            PROXY_ATTRIBUTION_TOKEN_ENV_KEY.to_string(),
+            "foreign-token".to_string(),
+        ),
+    ]);
 
-    let prepared = prepare_exec_request(&params, env, /*runtime_paths*/ None)
-        .await
-        .expect("prepare request with executor-local proxy");
+    let prepared = prepare_exec_request(
+        &params, env, /*runtime_paths*/ None, /*network_policy_decider*/ None,
+    )
+    .await
+    .expect("prepare request with executor-local proxy");
+
+    if cfg!(target_os = "windows") {
+        assert_eq!(prepared.env.get("HTTP_PROXY"), None);
+        assert_eq!(prepared.env.get("TEST_ENV"), Some(&"value".to_string()));
+        assert!(prepared.network_proxy_handle.is_none());
+        return;
+    }
 
     let http_proxy = prepared.env.get("HTTP_PROXY").expect("HTTP proxy env");
     assert_ne!(http_proxy, &stale_proxy);
     assert!(http_proxy.starts_with("http://127.0.0.1:"));
+    assert!(!prepared.env.contains_key(PROXY_ATTRIBUTION_TOKEN_ENV_KEY));
     let proxy_addr: SocketAddr = http_proxy
         .strip_prefix("http://")
         .expect("HTTP proxy scheme")
@@ -297,6 +335,7 @@ async fn remote_proxy_config_starts_executor_local_proxy() {
         .expect("shut down executor proxy");
 }
 
+#[cfg(not(target_os = "windows"))]
 #[tokio::test]
 async fn disabled_remote_proxy_config_is_rejected_before_exporting_ports() {
     let cwd: AbsolutePathBuf = std::env::current_dir()
@@ -321,10 +360,15 @@ async fn disabled_remote_proxy_config_is_rejected_before_exporting_ports() {
         network_proxy: Some(RemoteNetworkProxyLaunchConfig::new(proxy_config)),
     };
 
-    let error = prepare_exec_request(&params, HashMap::new(), /*runtime_paths*/ None)
-        .await
-        .err()
-        .expect("disabled executor proxy launch must fail closed");
+    let error = prepare_exec_request(
+        &params,
+        HashMap::new(),
+        /*runtime_paths*/ None,
+        /*network_policy_decider*/ None,
+    )
+    .await
+    .err()
+    .expect("disabled executor proxy launch must fail closed");
 
     assert_eq!(error.code, -32602);
     assert!(
@@ -350,6 +394,14 @@ async fn managed_network_selects_elevated_windows_spawn() {
         cwd_uri.clone(),
     );
     sandbox.windows_sandbox_level = WindowsSandboxLevel::RestrictedToken;
+    sandbox.windows_sandbox_proxy_settings_mode =
+        Some(codex_sandboxing::WindowsSandboxProxySettingsMode::Preserve);
+    let proxy_config = RemoteNetworkProxyConfig::from_effective_config(&NetworkProxyConfig {
+        enabled: true,
+        enable_socks5: false,
+        ..NetworkProxyConfig::default()
+    })
+    .expect("supported remote proxy config");
     let params = ExecParams {
         process_id: ProcessId::from("process-managed-network"),
         argv: vec!["cmd.exe".to_string(), "/c".to_string(), "exit".to_string()],
@@ -362,21 +414,40 @@ async fn managed_network_selects_elevated_windows_spawn() {
         sandbox: Some(sandbox),
         enforce_managed_network: true,
         managed_network: None,
-        network_proxy: None,
+        network_proxy: Some(RemoteNetworkProxyLaunchConfig::new(proxy_config)),
     };
 
-    let prepared = prepare_exec_request(&params, HashMap::new(), Some(&runtime_paths))
-        .await
-        .expect("prepare sandboxed request");
-    let spawn = prepared
-        .windows_sandbox_spawn_request()
-        .expect("Windows sandbox spawn request");
+    let mut prepared = prepare_exec_request(
+        &params,
+        HashMap::new(),
+        Some(&runtime_paths),
+        /*network_policy_decider*/ None,
+    )
+    .await
+    .expect("prepare sandboxed request");
+    {
+        let spawn = prepared
+            .windows_sandbox_spawn_request()
+            .expect("Windows sandbox spawn request");
 
-    assert_eq!(
-        spawn.windows_sandbox_level,
-        WindowsSandboxLevel::RestrictedToken
-    );
-    assert!(spawn.proxy_enforced);
-    assert_eq!(spawn.permission_profile, &permissions);
-    assert_eq!(spawn.workspace_roots, std::slice::from_ref(&cwd));
+        assert_eq!(
+            spawn.windows_sandbox_level,
+            WindowsSandboxLevel::RestrictedToken
+        );
+        assert!(spawn.proxy_enforced);
+        assert!(spawn.network_proxy_restricting_sid.is_some());
+        assert_eq!(
+            spawn.proxy_settings_mode,
+            codex_sandboxing::WindowsSandboxProxySettingsMode::Preserve
+        );
+        assert_eq!(spawn.permission_profile, &permissions);
+        assert_eq!(spawn.workspace_roots, std::slice::from_ref(&cwd));
+    }
+    prepared
+        .network_proxy_handle
+        .take()
+        .expect("running executor proxy")
+        .shutdown()
+        .await
+        .expect("shut down executor proxy");
 }

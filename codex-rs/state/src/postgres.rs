@@ -23,7 +23,7 @@ pub use initialize::initialize_postgres_runtime_state;
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
 const MINIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
-pub(crate) const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 17;
+pub(crate) const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 20;
 const BASELINE_SCHEMA_VERSION: i64 = 1;
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
@@ -105,6 +105,21 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         17,
         include_str!("../postgres_migrations/0017_runtime_state_migration.sql"),
         "prepare explicit Runtime State Migration",
+    ),
+    (
+        18,
+        include_str!("../postgres_migrations/0018_external_agent_config_imports_provider_id.sql"),
+        "track external-agent provider identifiers",
+    ),
+    (
+        19,
+        include_str!("../postgres_migrations/0019_thread_item_update_ordinals.sql"),
+        "track thread item update ordinals",
+    ),
+    (
+        20,
+        include_str!("../postgres_migrations/0020_threads_is_pinned.sql"),
+        "track pinned threads",
     ),
 ];
 

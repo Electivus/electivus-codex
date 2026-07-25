@@ -1,6 +1,4 @@
-use super::LOGS_DB;
 use super::LogStore;
-use super::open_logs_sqlite;
 use super::test_support::unique_temp_dir;
 use crate::LogEntry;
 use crate::LogQuery;
@@ -15,16 +13,13 @@ async fn sqlite_replicas() -> anyhow::Result<(LogStore, LogStore, std::path::Pat
     let codex_home = unique_temp_dir();
     tokio::fs::create_dir_all(&codex_home).await?;
     let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(codex_home.clone())?);
-    let logs_path = LOGS_DB.path(&codex_home);
     let migrator = runtime_logs_migrator();
-    let writer = open_logs_sqlite(
-        &sqlite, &logs_path, &migrator, /*telemetry_override*/ None,
-    )
-    .await?;
-    let reader = open_logs_sqlite(
-        &sqlite, &logs_path, &migrator, /*telemetry_override*/ None,
-    )
-    .await?;
+    let writer = sqlite
+        .open_logs_db(&migrator, /*telemetry_override*/ None)
+        .await?;
+    let reader = sqlite
+        .open_logs_db(&migrator, /*telemetry_override*/ None)
+        .await?;
     Ok((
         LogStore::from_sqlite(Arc::new(writer)),
         LogStore::from_sqlite(Arc::new(reader)),

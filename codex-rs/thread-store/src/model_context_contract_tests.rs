@@ -27,6 +27,7 @@ use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::user_input::UserInput;
+use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
@@ -51,7 +52,7 @@ async fn local_latest_model_context_matches_public_store_contract()
     let store = LocalThreadStore::new(
         LocalThreadStoreConfig {
             codex_home: home.path().to_path_buf(),
-            sqlite_home: home.path().to_path_buf(),
+            sqlite: codex_state::SqliteConfig::new_for_testing(home.path().abs()),
             default_model_provider_id: "model-context-contract".to_string(),
         },
         /*state_db*/ None,
@@ -516,6 +517,7 @@ fn create_thread_params(
         selected_capability_roots: selected_capability_roots_fixture(),
         multi_agent_version: None,
         history_mode,
+        history_base: None,
         subagent_history_start_ordinal: None,
         initial_window_id: "model-context-window".to_string(),
         metadata: ThreadPersistenceMetadata {

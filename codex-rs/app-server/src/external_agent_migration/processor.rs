@@ -14,10 +14,13 @@ use codex_app_server_protocol::ExternalAgentConfigDetectParams;
 use codex_app_server_protocol::ExternalAgentConfigDetectResponse;
 use codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification;
 use codex_app_server_protocol::ExternalAgentConfigImportHistoriesReadResponse;
+use codex_app_server_protocol::ExternalAgentConfigImportHistoryRecordParams;
+use codex_app_server_protocol::ExternalAgentConfigImportHistoryRecordResponse;
 use codex_app_server_protocol::ExternalAgentConfigImportItemTypeFailure as ProtocolImportFailure;
 use codex_app_server_protocol::ExternalAgentConfigImportParams;
 use codex_app_server_protocol::ExternalAgentConfigImportProgressNotification;
 use codex_app_server_protocol::ExternalAgentConfigImportResponse;
+use codex_app_server_protocol::ExternalAgentConfigImportTypeResult as ProtocolImportTypeResult;
 use codex_app_server_protocol::ExternalAgentConfigMigrationItem;
 use codex_app_server_protocol::ExternalAgentConfigMigrationItemType;
 use codex_app_server_protocol::ExternalAgentImportedConnectorCandidate;
@@ -173,7 +176,7 @@ impl ExternalAgentConfigRequestProcessor {
         }
         let import_id = Uuid::new_v4().to_string();
         let analytics_source = params.source.clone().unwrap_or_default();
-        let provider_id = params.provider_id.clone().unwrap_or_default();
+        let provider_id = params.provider_id.clone();
         let migration_service = self
             .migration_service
             .with_migration_source(params.migration_source.as_deref());
@@ -391,6 +394,28 @@ impl ExternalAgentConfigRequestProcessor {
         Ok(ExternalAgentConfigImportHistoriesReadResponse { data, connectors })
     }
 
+    pub(crate) async fn record_import_history(
+        &self,
+        params: ExternalAgentConfigImportHistoryRecordParams,
+    ) -> Result<ExternalAgentConfigImportHistoryRecordResponse, JSONRPCErrorError> {
+        let state_db = self
+            .state_db
+            .as_ref()
+            .ok_or_else(|| internal_error("state database is unavailable"))?;
+        let import_id = Uuid::new_v4().to_string();
+        record_import_history(
+            state_db,
+            import_id.as_str(),
+            Some(params.provider_id.as_str()),
+            &params.item_type_results,
+            /*memory_import*/ None,
+        )
+        .await
+        .map_err(|err| internal_error(format!("failed to record import history: {err}")))?;
+
+        Ok(ExternalAgentConfigImportHistoryRecordResponse { import_id })
+    }
+
     fn validate_pending_session_imports(
         &self,
         params: &ExternalAgentConfigImportParams,
@@ -493,7 +518,7 @@ async fn send_import_progress(
 struct CompletedImport {
     import_id: String,
     analytics_source: String,
-    provider_id: String,
+    provider_id: Option<String>,
     item_results: Vec<CoreImportItemResult>,
     memory_import: Option<ExternalAgentMemoryImport>,
 }
@@ -513,9 +538,13 @@ async fn send_completed_import_notification(
     } = completed_import;
     let mut notification = completed_notification(import_id, &item_results);
     if let Some(state_db) = state_db
-        && let Err(err) =
-            record_completed_import_notification(state_db, &notification, memory_import.as_ref())
-                .await
+        && let Err(err) = record_completed_import_notification(
+            state_db,
+            provider_id.as_deref(),
+            &notification,
+            memory_import.as_ref(),
+        )
+        .await
     {
         tracing::warn!(
             import_id = %notification.import_id,
@@ -528,7 +557,7 @@ async fn send_completed_import_notification(
     track_completed_import_notification(
         analytics_events_client,
         &analytics_source,
-        &provider_id,
+        provider_id.as_deref().unwrap_or_default(),
         &notification,
     );
     outgoing
@@ -632,11 +661,28 @@ fn analytics_migration_item_type(item_type: ExternalAgentConfigMigrationItemType
 
 async fn record_completed_import_notification(
     state_db: &StateDbHandle,
+    provider_id: Option<&str>,
     notification: &ExternalAgentConfigImportCompletedNotification,
     memory_import: Option<&ExternalAgentMemoryImport>,
 ) -> anyhow::Result<()> {
-    let successes = notification
-        .item_type_results
+    record_import_history(
+        state_db,
+        notification.import_id.as_str(),
+        provider_id,
+        &notification.item_type_results,
+        memory_import,
+    )
+    .await
+}
+
+async fn record_import_history(
+    state_db: &StateDbHandle,
+    import_id: &str,
+    provider_id: Option<&str>,
+    item_type_results: &[ProtocolImportTypeResult],
+    memory_import: Option<&ExternalAgentMemoryImport>,
+) -> anyhow::Result<()> {
+    let successes = item_type_results
         .iter()
         .flat_map(|type_result| type_result.successes.iter())
         .map(|success| {
@@ -648,8 +694,7 @@ async fn record_completed_import_notification(
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let failures = notification
-        .item_type_results
+    let failures = item_type_results
         .iter()
         .flat_map(|type_result| type_result.failures.iter())
         .map(|failure| {
@@ -668,7 +713,8 @@ async fn record_completed_import_notification(
         Some(memory_import) => {
             state_db
                 .record_external_agent_config_import_completed_with_memory_import(
-                    notification.import_id.as_str(),
+                    import_id,
+                    provider_id,
                     &successes,
                     &failures,
                     memory_import,
@@ -678,7 +724,8 @@ async fn record_completed_import_notification(
         None => {
             state_db
                 .record_external_agent_config_import_completed(
-                    notification.import_id.as_str(),
+                    import_id,
+                    provider_id,
                     &successes,
                     &failures,
                 )

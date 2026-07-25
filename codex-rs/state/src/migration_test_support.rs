@@ -51,7 +51,7 @@ pub(super) async fn initialized_runtime_source(
     std::fs::create_dir(&source)?;
     let runtime =
         crate::StateRuntime::init_sqlite(source.clone(), "test-provider".to_string()).await?;
-    let history = open_thread_history_db(&source).await?;
+    let history = open_thread_history_db(runtime.sqlite()).await?;
     history.close().await;
     std::fs::write(source.join("config.toml"), b"model = \"gpt-5\"\n")?;
     Ok((source, runtime))

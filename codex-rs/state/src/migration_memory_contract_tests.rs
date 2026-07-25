@@ -13,7 +13,6 @@ use crate::Phase2JobClaimOutcome;
 use crate::PostgresNamespaceAction;
 use crate::PostgresRuntimeStatePool;
 use crate::SqliteConfig;
-use crate::memories_db_path;
 use crate::postgres::qualified_table;
 use crate::postgres::test_support::PostgresContractFixture;
 use crate::postgres::test_support::test_database_url;
@@ -197,7 +196,7 @@ async fn postgres_contract_imports_complete_memory_generation_read_only() -> any
 
     let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(source.as_path())?);
     let memory_pool = sqlite
-        .open_immutable_pool(&memories_db_path(&source))
+        .open_immutable_pool(&sqlite.memories_db_path())
         .await?;
     let expected_jobs = sqlite_jobs(&memory_pool).await?;
     let expected_usage: (Option<i64>, Option<i64>, bool, Option<i64>) = sqlx::query_as(

@@ -10,6 +10,7 @@ use sqlx::AssertSqlSafe;
 
 use crate::AppendBatchId;
 use crate::AppendThreadItemsBatch;
+use crate::ItemSortKey;
 use crate::ListItemsParams;
 use crate::PostgresThreadStore;
 use crate::SortDirection;
@@ -43,6 +44,8 @@ async fn postgres_contract_canonical_appends_project_items_for_bidirectional_pag
             cursor: None,
             page_size: 2,
             sort_direction: SortDirection::Asc,
+            sort_key: ItemSortKey::CreatedAtOrdinal,
+            after_updated_at_ordinal: None,
         })
         .await?;
     assert_eq!(item_ids(&first_page), vec!["item-1", "item-2"]);
@@ -54,6 +57,8 @@ async fn postgres_contract_canonical_appends_project_items_for_bidirectional_pag
             cursor: first_page.next_cursor,
             page_size: 2,
             sort_direction: SortDirection::Asc,
+            sort_key: ItemSortKey::CreatedAtOrdinal,
+            after_updated_at_ordinal: None,
         })
         .await?;
     assert_eq!(item_ids(&second_page), vec!["item-3", "item-4"]);
@@ -65,6 +70,8 @@ async fn postgres_contract_canonical_appends_project_items_for_bidirectional_pag
             cursor: second_page.backwards_cursor,
             page_size: 2,
             sort_direction: SortDirection::Desc,
+            sort_key: ItemSortKey::CreatedAtOrdinal,
+            after_updated_at_ordinal: None,
         })
         .await?;
     assert_eq!(item_ids(&backwards_page), vec!["item-3", "item-2"]);
@@ -76,6 +83,8 @@ async fn postgres_contract_canonical_appends_project_items_for_bidirectional_pag
             cursor: None,
             page_size: 2,
             sort_direction: SortDirection::Desc,
+            sort_key: ItemSortKey::CreatedAtOrdinal,
+            after_updated_at_ordinal: None,
         })
         .await?;
     assert_eq!(item_ids(&turn_page), vec!["item-4", "item-3"]);
@@ -89,6 +98,8 @@ async fn postgres_contract_canonical_appends_project_items_for_bidirectional_pag
             cursor: None,
             page_size: 10,
             sort_direction: SortDirection::Asc,
+            sort_key: ItemSortKey::CreatedAtOrdinal,
+            after_updated_at_ordinal: None,
         })
         .await?;
     assert_eq!(
@@ -121,6 +132,8 @@ async fn postgres_contract_canonical_appends_project_items_for_bidirectional_pag
             cursor: None,
             page_size: 10,
             sort_direction: SortDirection::Asc,
+            sort_key: ItemSortKey::CreatedAtOrdinal,
+            after_updated_at_ordinal: None,
         })
         .await
         .expect_err("an unindexed thread must preserve the local list-items contract");
@@ -189,6 +202,8 @@ async fn postgres_contract_projection_failure_rolls_back_canonical_append()
                 cursor: None,
                 page_size: 10,
                 sort_direction: SortDirection::Asc,
+                sort_key: ItemSortKey::CreatedAtOrdinal,
+                after_updated_at_ordinal: None,
             })
             .await?
             .items,
@@ -206,6 +221,8 @@ async fn postgres_contract_projection_failure_rolls_back_canonical_append()
                     cursor: None,
                     page_size: 10,
                     sort_direction: SortDirection::Asc,
+                    sort_key: ItemSortKey::CreatedAtOrdinal,
+                    after_updated_at_ordinal: None,
                 })
                 .await?
         ),
@@ -247,6 +264,8 @@ async fn postgres_contract_item_projection_excludes_inherited_subagent_prefix()
             cursor: None,
             page_size: 10,
             sort_direction: SortDirection::Asc,
+            sort_key: ItemSortKey::CreatedAtOrdinal,
+            after_updated_at_ordinal: None,
         })
         .await?;
     assert_eq!(item_ids(&page), vec!["item-3", "item-4"]);
@@ -432,6 +451,8 @@ fn default_item_params(thread_id: ThreadId) -> ListItemsParams {
         cursor: None,
         page_size: 10,
         sort_direction: SortDirection::Asc,
+        sort_key: ItemSortKey::CreatedAtOrdinal,
+        after_updated_at_ordinal: None,
     }
 }
 

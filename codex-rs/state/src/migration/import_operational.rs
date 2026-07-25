@@ -175,7 +175,8 @@ async fn validate_operational_state(
         .fetch_all(&mut *connection)
         .await?,
         imports: sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT import_id, completed_at_ms, successes, failures FROM {imports} ORDER BY import_id"
+            "SELECT import_id, provider_id, completed_at_ms, successes, failures \
+             FROM {imports} ORDER BY import_id"
         )))
         .fetch_all(&mut *connection)
         .await?,
@@ -294,10 +295,11 @@ async fn write_operational_state(
     let imports = qualified_table(schema, "external_agent_config_imports");
     for row in &snapshot.imports {
         sqlx::query(AssertSqlSafe(format!(
-            "INSERT INTO {imports} (import_id, completed_at_ms, successes, failures) \
-             VALUES ($1, $2, $3, $4)"
+            "INSERT INTO {imports} (import_id, provider_id, completed_at_ms, successes, failures) \
+             VALUES ($1, $2, $3, $4, $5)"
         )))
         .bind(&row.import_id)
+        .bind(&row.provider_id)
         .bind(row.completed_at_ms)
         .bind(&row.successes)
         .bind(&row.failures)

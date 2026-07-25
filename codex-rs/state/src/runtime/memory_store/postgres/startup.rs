@@ -33,6 +33,8 @@ struct PostgresThreadProjection {
     updated_at: DateTime<Utc>,
     recency_at: DateTime<Utc>,
     archived_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    is_pinned: bool,
     cwd: PathBuf,
     cli_version: String,
     source: SessionSource,
@@ -329,6 +331,7 @@ fn thread_metadata_from_projection(
             .map_or(0, |usage| usage.total_tokens.max(0)),
         first_user_message: projection.first_user_message,
         archived_at: projection.archived_at,
+        is_pinned: projection.is_pinned,
         git_sha,
         git_branch,
         git_origin_url,

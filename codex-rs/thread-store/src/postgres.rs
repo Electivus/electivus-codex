@@ -198,6 +198,7 @@ impl PostgresThreadStore {
             updated_at: created_at,
             recency_at: created_at,
             archived_at: None,
+            is_pinned: false,
             cwd: params.metadata.cwd.clone().unwrap_or_default(),
             cli_version: env!("CARGO_PKG_VERSION").to_string(),
             source: params.source.clone(),

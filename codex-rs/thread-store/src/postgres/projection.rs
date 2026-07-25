@@ -239,9 +239,11 @@ pub(super) async fn apply_history_projections(
             let item_id = change.item.id().to_string();
             let item = serde_json::to_value(change.item).map_err(serialization_error)?;
             sqlx::query(AssertSqlSafe(format!(
-                "INSERT INTO {} (thread_id, turn_id, item_id, rollout_ordinal, created_at_ms, item) \
-                 VALUES ($1, $2, $3, $4, $5, $6) \
-                 ON CONFLICT (thread_id, turn_id, item_id) DO UPDATE SET item = EXCLUDED.item",
+                "INSERT INTO {} (thread_id, turn_id, item_id, rollout_ordinal, \
+                 updated_at_ordinal, created_at_ms, item) \
+                 VALUES ($1, $2, $3, $4, $4, $5, $6) \
+                 ON CONFLICT (thread_id, turn_id, item_id) DO UPDATE SET \
+                 updated_at_ordinal = EXCLUDED.updated_at_ordinal, item = EXCLUDED.item",
                 tables.items
             )))
             .bind(thread_id.to_string())

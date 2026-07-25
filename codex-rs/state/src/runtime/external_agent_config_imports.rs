@@ -147,6 +147,7 @@ pub struct ExternalAgentConfigImportDetailsRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalAgentConfigImportHistoryRecord {
     pub import_id: String,
+    pub provider_id: Option<String>,
     pub completed_at_ms: i64,
     pub successes: Vec<ExternalAgentConfigImportSuccessRecord>,
     pub failures: Vec<ExternalAgentConfigImportFailureRecord>,
@@ -195,13 +196,28 @@ impl ExternalAgentConfigImportStore {
         successes: &[ExternalAgentConfigImportSuccessRecord],
         failures: &[ExternalAgentConfigImportFailureRecord],
     ) -> anyhow::Result<()> {
+        self.record_completed_with_provider(
+            import_id, /*provider_id*/ None, successes, failures,
+        )
+        .await
+    }
+
+    pub async fn record_completed_with_provider(
+        &self,
+        import_id: &str,
+        provider_id: Option<&str>,
+        successes: &[ExternalAgentConfigImportSuccessRecord],
+        failures: &[ExternalAgentConfigImportFailureRecord],
+    ) -> anyhow::Result<()> {
         match &self.backend {
             ExternalAgentConfigImportStoreBackend::Postgres(store) => {
-                store.record_completed(import_id, successes, failures).await
+                store
+                    .record_completed(import_id, provider_id, successes, failures)
+                    .await
             }
             ExternalAgentConfigImportStoreBackend::Sqlite { imports, .. } => {
                 imports
-                    .record_completed(import_id, successes, failures)
+                    .record_completed(import_id, provider_id, successes, failures)
                     .await
             }
         }
@@ -216,11 +232,30 @@ impl ExternalAgentConfigImportStore {
         failures: &[ExternalAgentConfigImportFailureRecord],
         memory_import: &ExternalAgentMemoryImport,
     ) -> anyhow::Result<()> {
+        self.record_completed_with_memory_import_and_provider(
+            import_id,
+            /*provider_id*/ None,
+            successes,
+            failures,
+            memory_import,
+        )
+        .await
+    }
+
+    pub async fn record_completed_with_memory_import_and_provider(
+        &self,
+        import_id: &str,
+        provider_id: Option<&str>,
+        successes: &[ExternalAgentConfigImportSuccessRecord],
+        failures: &[ExternalAgentConfigImportFailureRecord],
+        memory_import: &ExternalAgentMemoryImport,
+    ) -> anyhow::Result<()> {
         match &self.backend {
             ExternalAgentConfigImportStoreBackend::Postgres(store) => {
                 store
                     .record_completed_with_memory_import(
                         import_id,
+                        provider_id,
                         successes,
                         failures,
                         memory_import,
@@ -229,7 +264,7 @@ impl ExternalAgentConfigImportStore {
             }
             ExternalAgentConfigImportStoreBackend::Sqlite { imports, memories } => {
                 imports
-                    .record_completed(import_id, successes, failures)
+                    .record_completed(import_id, provider_id, successes, failures)
                     .await?;
                 memories
                     .enqueue_global_consolidation(Utc::now().timestamp())
@@ -266,23 +301,31 @@ impl StateRuntime {
     pub async fn record_external_agent_config_import_completed(
         &self,
         import_id: &str,
+        provider_id: Option<&str>,
         successes: &[ExternalAgentConfigImportSuccessRecord],
         failures: &[ExternalAgentConfigImportFailureRecord],
     ) -> anyhow::Result<()> {
         self.external_agent_config_imports
-            .record_completed(import_id, successes, failures)
+            .record_completed_with_provider(import_id, provider_id, successes, failures)
             .await
     }
 
     pub async fn record_external_agent_config_import_completed_with_memory_import(
         &self,
         import_id: &str,
+        provider_id: Option<&str>,
         successes: &[ExternalAgentConfigImportSuccessRecord],
         failures: &[ExternalAgentConfigImportFailureRecord],
         memory_import: &ExternalAgentMemoryImport,
     ) -> anyhow::Result<()> {
         self.external_agent_config_imports
-            .record_completed_with_memory_import(import_id, successes, failures, memory_import)
+            .record_completed_with_memory_import_and_provider(
+                import_id,
+                provider_id,
+                successes,
+                failures,
+                memory_import,
+            )
             .await
     }
 

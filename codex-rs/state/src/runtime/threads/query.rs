@@ -31,6 +31,7 @@ SELECT
     threads.tokens_used,
     threads.first_user_message,
     threads.archived_at,
+    threads.is_pinned,
     threads.git_sha,
     threads.git_branch,
     threads.git_origin_url
@@ -44,6 +45,7 @@ pub struct ThreadFilterOptions<'a> {
     pub allowed_sources: &'a [String],
     pub model_providers: Option<&'a [String]>,
     pub cwd_filters: Option<&'a [PathBuf]>,
+    pub is_pinned: Option<bool>,
     pub anchor: Option<&'a crate::Anchor>,
     pub sort_key: SortKey,
     pub sort_direction: SortDirection,
@@ -60,6 +62,7 @@ pub(in crate::runtime) fn push_thread_filters<'a>(
         allowed_sources,
         model_providers,
         cwd_filters,
+        is_pinned,
         anchor,
         sort_key,
         sort_direction,
@@ -72,6 +75,10 @@ pub(in crate::runtime) fn push_thread_filters<'a>(
         builder.push(" AND threads.archived = 0");
     }
     builder.push(" AND threads.preview <> ''");
+    if let Some(is_pinned) = is_pinned {
+        builder.push(" AND threads.is_pinned = ");
+        builder.push_bind(is_pinned);
+    }
     if !allowed_sources.is_empty() {
         builder.push(" AND threads.source IN (");
         let mut separated = builder.separated(", ");

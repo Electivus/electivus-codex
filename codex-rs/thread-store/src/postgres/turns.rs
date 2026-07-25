@@ -57,7 +57,13 @@ pub(super) async fn list_turns(
         store.tables.turns
     ));
     query.push_bind(params.thread_id.to_string());
-    push_pagination_clause(&mut query, params.sort_direction, cursor.as_ref(), limit);
+    push_pagination_clause(
+        &mut query,
+        params.sort_direction,
+        cursor.as_ref(),
+        "rollout_ordinal",
+        limit,
+    );
     let rows = query
         .build()
         .fetch_all(transaction.as_mut())
@@ -115,7 +121,8 @@ async fn load_summary_items(
 ) -> ThreadStoreResult<Vec<crate::StoredThreadItem>> {
     let items = &store.tables.items;
     let rows = sqlx::query(AssertSqlSafe(format!(
-        "SELECT turn_id, item_id, rollout_ordinal, created_at_ms, item FROM {items} \
+        "SELECT turn_id, item_id, rollout_ordinal, updated_at_ordinal, created_at_ms, item \
+         FROM {items} \
          WHERE thread_id = $1 AND turn_id = $2 AND ( \
             item_id = (SELECT item_id FROM {items} WHERE thread_id = $1 AND turn_id = $2 \
                 AND item->>'type' = 'userMessage' ORDER BY rollout_ordinal ASC LIMIT 1) \

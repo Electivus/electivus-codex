@@ -375,9 +375,9 @@ async fn sqlite_stage1_claim_and_output_satisfies_shared_contract() -> Result<()
     let thread_id = ThreadId::new();
     first
         .upsert_thread(&test_thread_metadata(
-            first.codex_home(),
+            first.sqlite().home(),
             thread_id,
-            first.codex_home().join("workspace"),
+            first.sqlite().home().join("workspace"),
         ))
         .await?;
 

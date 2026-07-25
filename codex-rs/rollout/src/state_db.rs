@@ -47,7 +47,7 @@ pub async fn init(config: &impl RolloutConfigView) -> Option<StateDbHandle> {
     let config = RolloutConfig::from_view(config);
     match try_init_with_roots_and_backend(
         config.codex_home,
-        config.sqlite_home,
+        config.sqlite,
         config.model_provider_id,
         selected_backend,
     )
@@ -70,7 +70,7 @@ pub async fn try_init(config: &impl RolloutConfigView) -> anyhow::Result<StateDb
     let config = RolloutConfig::from_view(config);
     try_init_with_roots_and_backend(
         config.codex_home,
-        config.sqlite_home,
+        config.sqlite,
         config.model_provider_id,
         selected_backend,
     )
@@ -79,23 +79,31 @@ pub async fn try_init(config: &impl RolloutConfigView) -> anyhow::Result<StateDb
 
 async fn try_init_with_roots_and_backend(
     codex_home: PathBuf,
-    sqlite_home: PathBuf,
+    sqlite: SqliteConfig,
     default_model_provider_id: String,
     selected_backend: Option<RuntimeStateBackendConfig>,
 ) -> anyhow::Result<StateDbHandle> {
-    if let Some(backend @ RuntimeStateBackendConfig::Postgresql { .. }) = selected_backend {
-        return codex_state::StateRuntime::init_with_backend(backend, default_model_provider_id)
+    let backend = match selected_backend {
+        Some(backend @ RuntimeStateBackendConfig::Postgresql { .. }) => {
+            return codex_state::StateRuntime::init_with_backend(
+                backend,
+                default_model_provider_id,
+            )
             .await;
-    }
-    // `sqlite_home` remains the compatibility authority for SQLite callers.
-    // Rebuild the SQLite backend from the live config view so callers that
-    // override that field do not retain a stale path captured during loading.
-    let backend = RuntimeStateBackendConfig::Sqlite(SqliteConfig::from_sqlite_home(
-        sqlite_home.clone().try_into()?,
-    ));
+        }
+        Some(backend @ RuntimeStateBackendConfig::Sqlite(_)) => backend,
+        Some(backend) => {
+            return codex_state::StateRuntime::init_with_backend(
+                backend,
+                default_model_provider_id,
+            )
+            .await;
+        }
+        None => RuntimeStateBackendConfig::Sqlite(sqlite.clone()),
+    };
     try_init_with_roots_inner(
         codex_home,
-        sqlite_home,
+        sqlite,
         default_model_provider_id,
         /*backfill_lease_duration*/ None,
         backend,
@@ -106,16 +114,14 @@ async fn try_init_with_roots_and_backend(
 #[cfg(test)]
 async fn try_init_with_roots_and_backfill_lease(
     codex_home: PathBuf,
-    sqlite_home: PathBuf,
+    sqlite: SqliteConfig,
     default_model_provider_id: String,
     backfill_lease_duration: Duration,
 ) -> anyhow::Result<StateDbHandle> {
-    let backend = RuntimeStateBackendConfig::Sqlite(SqliteConfig::from_sqlite_home(
-        sqlite_home.clone().try_into()?,
-    ));
+    let backend = RuntimeStateBackendConfig::Sqlite(sqlite.clone());
     try_init_with_roots_inner(
         codex_home,
-        sqlite_home,
+        sqlite,
         default_model_provider_id,
         Some(backfill_lease_duration),
         backend,
@@ -125,7 +131,7 @@ async fn try_init_with_roots_and_backfill_lease(
 
 async fn try_init_with_roots_inner(
     codex_home: PathBuf,
-    sqlite_home: PathBuf,
+    sqlite: SqliteConfig,
     default_model_provider_id: String,
     backfill_lease_duration: Option<Duration>,
     backend: RuntimeStateBackendConfig,
@@ -136,7 +142,7 @@ async fn try_init_with_roots_inner(
             .with_context(|| {
                 format!(
                     "failed to initialize state runtime at {}",
-                    sqlite_home.display()
+                    sqlite.home().display()
                 )
             })?;
     let backfill_gate_started = Instant::now();
@@ -265,7 +271,7 @@ pub async fn get_state_db(config: &impl RolloutConfigView) -> Option<StateDbHand
             }
         };
     }
-    let state_path = codex_state::state_db_path(config.sqlite_home());
+    let state_path = config.sqlite_config().state_db_path();
     if !tokio::fs::try_exists(&state_path).await.unwrap_or(false) {
         codex_state::record_fallback(
             "get_state_db",
@@ -274,8 +280,8 @@ pub async fn get_state_db(config: &impl RolloutConfigView) -> Option<StateDbHand
         );
         return None;
     }
-    let runtime = match codex_state::StateRuntime::init_sqlite(
-        config.sqlite_home().to_path_buf(),
+    let runtime = match codex_state::StateRuntime::init(
+        config.sqlite_config().clone(),
         config.model_provider_id().to_string(),
     )
     .await
@@ -290,7 +296,7 @@ pub async fn get_state_db(config: &impl RolloutConfigView) -> Option<StateDbHand
             return None;
         }
     };
-    require_backfill_complete(runtime, config.sqlite_home()).await
+    require_backfill_complete(runtime, config.sqlite_config().home()).await
 }
 
 /// Build a SQLite telemetry recorder backed by an OTEL metrics client.
@@ -354,7 +360,7 @@ pub fn normalize_cwd_for_state_db(cwd: &Path) -> PathBuf {
 #[allow(clippy::too_many_arguments)]
 pub async fn list_thread_ids_db(
     context: Option<&codex_state::StateRuntime>,
-    codex_home: &Path,
+    sqlite: &codex_state::SqliteConfig,
     page_size: usize,
     cursor: Option<&Cursor>,
     sort_key: ThreadSortKey,
@@ -364,12 +370,13 @@ pub async fn list_thread_ids_db(
     stage: &str,
 ) -> Option<Vec<ThreadId>> {
     let ctx = context?;
-    if ctx.codex_home() != codex_home {
+    if ctx.sqlite() != sqlite {
         warn!(
-            "state db codex_home mismatch: expected {}, got {}",
-            ctx.codex_home().display(),
-            codex_home.display()
+            "state db SQLite home mismatch: expected {}, got {}",
+            sqlite.home().display(),
+            ctx.sqlite().home().display()
         );
+        return None;
     }
 
     let anchor = cursor_to_anchor(cursor);
@@ -409,7 +416,7 @@ pub async fn list_thread_ids_db(
 #[allow(clippy::too_many_arguments)]
 pub async fn list_threads_db(
     context: Option<&codex_state::StateRuntime>,
-    codex_home: &Path,
+    sqlite: &codex_state::SqliteConfig,
     page_size: usize,
     cursor: Option<&Cursor>,
     sort_key: ThreadSortKey,
@@ -419,15 +426,17 @@ pub async fn list_threads_db(
     cwd_filters: Option<&[PathBuf]>,
     relation_filter: Option<codex_state::ThreadRelationFilter>,
     archived: bool,
+    is_pinned: Option<bool>,
     search_term: Option<&str>,
 ) -> Option<codex_state::ThreadsPage> {
     let ctx = context?;
-    if ctx.codex_home() != codex_home {
+    if ctx.sqlite() != sqlite {
         warn!(
-            "state db codex_home mismatch: expected {}, got {}",
-            ctx.codex_home().display(),
-            codex_home.display()
+            "state db SQLite home mismatch: expected {}, got {}",
+            sqlite.home().display(),
+            ctx.sqlite().home().display()
         );
+        return None;
     }
 
     let anchor = cursor_to_anchor(cursor);
@@ -448,6 +457,7 @@ pub async fn list_threads_db(
     });
     let filters = codex_state::ThreadFilterOptions {
         archived_only: archived,
+        is_pinned,
         allowed_sources: allowed_sources.as_slice(),
         model_providers: model_providers.as_deref(),
         cwd_filters: normalized_cwd_filters.as_deref(),

@@ -208,6 +208,7 @@ async fn snapshot_preserves_complete_legacy_and_current_thread_domain_read_only(
                     turn_id: "turn-1".to_string(),
                     item_id: "user-1".to_string(),
                     rollout_ordinal: 1,
+                    updated_at_ordinal: 0,
                     created_at_ms: 12_345,
                     item: json!({"id":"user-1","type":"userMessage"}),
                     item_type: "userMessage".to_string(),
@@ -241,9 +242,7 @@ async fn snapshot_preserves_complete_legacy_and_current_thread_domain_read_only(
 
 async fn seed_sqlite_thread_state(source: &Path, thread_id: ThreadId) -> anyhow::Result<()> {
     let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(source)?);
-    let pool = sqlite
-        .open_read_write_pool(&crate::state_db_path(source))
-        .await?;
+    let pool = sqlite.open_read_write_pool(&sqlite.state_db_path()).await?;
     sqlx::query("INSERT INTO thread_dynamic_tools (thread_id, position, name, description, input_schema, defer_loading, namespace) VALUES (?, 0, 'lookup', 'Lookup ticket', '{\"type\":\"object\"}', 1, 'tickets')")
         .bind(thread_id.to_string())
         .execute(&pool)
@@ -256,7 +255,8 @@ async fn seed_sqlite_thread_state(source: &Path, thread_id: ThreadId) -> anyhow:
 }
 
 async fn seed_thread_history_projections(source: &Path, thread_id: ThreadId) -> anyhow::Result<()> {
-    let pool = open_thread_history_db(source).await?;
+    let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(source)?);
+    let pool = open_thread_history_db(&sqlite).await?;
     sqlx::query("INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, 321, 2)")
         .bind(thread_id.to_string())
         .execute(&pool)
@@ -294,7 +294,7 @@ fn inventory<const N: usize>(
         configuration: None,
         session_index: None,
         destination_schema: "unused".to_string(),
-        destination_schema_version: 17,
+        destination_schema_version: 20,
     })
 }
 

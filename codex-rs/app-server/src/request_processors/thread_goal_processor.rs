@@ -5,6 +5,7 @@ use codex_goal_extension::GoalService;
 use codex_goal_extension::GoalServiceError;
 use codex_goal_extension::GoalSetRequest;
 use codex_goal_extension::GoalTokenBudgetUpdate;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
 use codex_protocol::protocol::ThreadSettingsSnapshot;
 
@@ -304,7 +305,7 @@ impl ThreadGoalRequestProcessor {
                 .await
             {
                 Ok(_) => return Ok(state_db),
-                Err(CodexErr::ThreadNotFound(_)) => {
+                Err(error) if matches!(error.details(), CodexErrorDetails::ThreadNotFound(_)) => {
                     return Err(invalid_request(format!("thread not found: {thread_id}")));
                 }
                 Err(error) => {

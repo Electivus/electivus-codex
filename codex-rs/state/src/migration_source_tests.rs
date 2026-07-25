@@ -16,7 +16,10 @@ async fn postgres_contract_preflight_rejects_each_missing_sqlite_database_withou
     let mut destination =
         PostgresContractFixture::new(test_database_url()?, "preflight_missing_db")?;
     destination.manage(PostgresNamespaceAction::Migrate).await?;
-    for database in crate::runtime_db_paths(Path::new("placeholder")) {
+    let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(
+        std::env::current_dir()?.join("placeholder"),
+    )?);
+    for database in sqlite.runtime_db_paths() {
         let source = test_support::initialized_source("missing-db").await?;
         let database_path = source.join(
             database
@@ -41,7 +44,8 @@ async fn postgres_contract_preflight_rejects_corrupt_sqlite_without_writes() -> 
     let _cleanup = scopeguard::guard(source.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
     });
-    std::fs::write(crate::goals_db_path(&source), b"not a SQLite database")?;
+    let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(source.as_path())?);
+    std::fs::write(sqlite.goals_db_path(), b"not a SQLite database")?;
     let mut destination = PostgresContractFixture::new(test_database_url()?, "preflight_corrupt")?;
     destination.manage(PostgresNamespaceAction::Migrate).await?;
 
@@ -49,7 +53,7 @@ async fn postgres_contract_preflight_rejects_corrupt_sqlite_without_writes() -> 
 
     assert!(error.contains("goals DB"), "{error}");
     assert!(error.contains("restore a healthy source backup"), "{error}");
-    std::fs::write(crate::goals_db_path(&source), [])?;
+    std::fs::write(sqlite.goals_db_path(), [])?;
     let error = assert_rejected_unchanged(&source, &destination).await?;
     assert!(error.contains("incompatible schema"), "{error}");
     destination.cleanup().await?;
@@ -64,7 +68,8 @@ async fn postgres_contract_preflight_distinguishes_stale_sidecar_from_active_wri
     let _cleanup = scopeguard::guard(source.clone(), |path| {
         let _ = std::fs::remove_dir_all(path);
     });
-    let mut sidecar = OsString::from(crate::goals_db_path(&source));
+    let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(source.as_path())?);
+    let mut sidecar = OsString::from(sqlite.goals_db_path());
     sidecar.push("-journal");
     std::fs::write(sidecar, b"stale")?;
     let mut destination = PostgresContractFixture::new(test_database_url()?, "preflight_sidecar")?;

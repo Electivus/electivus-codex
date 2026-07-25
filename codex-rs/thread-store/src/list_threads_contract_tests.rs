@@ -9,6 +9,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
+use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
@@ -35,7 +36,7 @@ async fn local_list_threads_matches_public_store_contract() -> Result<(), Box<dy
     let home = TempDir::new()?;
     let config = LocalThreadStoreConfig {
         codex_home: home.path().to_path_buf(),
-        sqlite_home: home.path().to_path_buf(),
+        sqlite: codex_state::SqliteConfig::new_for_testing(home.path().abs()),
         default_model_provider_id: "list-contract-provider".to_string(),
     };
     let runtime = codex_state::StateRuntime::init_sqlite(
@@ -320,6 +321,34 @@ async fn assert_list_threads_contract(
     combined.cwd_filters = Some(Vec::new());
     assert!(store.list_threads(combined).await?.items.is_empty());
 
+    let pinned = store
+        .update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id: thread_ids[0],
+            patch: ThreadMetadataPatch {
+                is_pinned: Some(true),
+                ..Default::default()
+            },
+            include_archived: false,
+        })
+        .await?;
+    assert!(pinned.is_pinned);
+    let mut pin_filter = list_params(
+        /*page_size*/ 10,
+        /*cursor*/ None,
+        ThreadSortKey::CreatedAt,
+        SortDirection::Desc,
+    );
+    pin_filter.is_pinned = Some(true);
+    assert_eq!(
+        thread_ids_from_page(&store.list_threads(pin_filter.clone()).await?),
+        vec![thread_ids[0]]
+    );
+    pin_filter.is_pinned = Some(false);
+    assert_eq!(
+        thread_ids_from_page(&store.list_threads(pin_filter).await?),
+        vec![thread_ids[2], thread_ids[1]]
+    );
+
     store
         .archive_thread(ArchiveThreadParams {
             thread_id: thread_ids[2],
@@ -513,6 +542,7 @@ pub(super) async fn create_listed_thread(
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
             history_mode,
+            history_base: None,
             subagent_history_start_ordinal: None,
             initial_window_id: "list-threads-window".to_string(),
             metadata: ThreadPersistenceMetadata {
@@ -590,6 +620,7 @@ fn list_params(
         allowed_sources: Vec::new(),
         model_providers: Some(Vec::new()),
         cwd_filters: None,
+        is_pinned: None,
         archived: false,
         search_term: None,
         relation_filter: None,

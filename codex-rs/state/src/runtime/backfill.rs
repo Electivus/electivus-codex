@@ -320,9 +320,12 @@ mod tests {
     #[tokio::test]
     async fn backfill_state_persists_progress_and_completion() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("initialize runtime");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("initialize runtime");
 
         let initial = runtime
             .get_backfill_state()
@@ -373,11 +376,12 @@ mod tests {
     #[tokio::test]
     async fn get_backfill_state_succeeds_while_another_connection_holds_writer_slot() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
+        let sqlite = crate::SqliteConfig::new_for_testing(codex_home.as_path().abs());
+        let runtime = StateRuntime::init(sqlite.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
-        let write_pool = crate::SqliteConfig::new_for_testing(codex_home.as_path().abs())
-            .open_read_write_pool(&crate::state_db_path(codex_home.as_path()))
+        let write_pool = sqlite
+            .open_read_write_pool(&sqlite.state_db_path())
             .await
             .expect("open write pool");
         let mut write_connection = write_pool.acquire().await.expect("open write connection");
@@ -402,9 +406,12 @@ mod tests {
     #[tokio::test]
     async fn get_backfill_state_repairs_a_missing_singleton_row() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("initialize runtime");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("initialize runtime");
         sqlx::query("DELETE FROM backfill_state WHERE id = 1")
             .execute(runtime.sqlite_pool().expect("SQLite runtime"))
             .await
@@ -428,9 +435,12 @@ mod tests {
     #[tokio::test]
     async fn backfill_claim_is_singleton_until_stale_and_blocked_when_complete() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("initialize runtime");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("initialize runtime");
 
         let claimed = runtime
             .try_claim_backfill(/*lease_seconds*/ 3600)

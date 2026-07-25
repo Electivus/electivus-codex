@@ -290,9 +290,12 @@ async fn sqlite_phase2_success_satisfies_shared_contract() -> Result<()> {
     for (index, thread_id) in thread_ids.into_iter().enumerate() {
         first
             .upsert_thread(&test_thread_metadata(
-                first.codex_home(),
+                first.sqlite().home(),
                 thread_id,
-                first.codex_home().join(format!("phase2-success-{index}")),
+                first
+                    .sqlite()
+                    .home()
+                    .join(format!("phase2-success-{index}")),
             ))
             .await?;
     }

@@ -32,6 +32,7 @@ use codex_app_server_protocol::UserInput;
 use codex_state::PostgresNamespaceAction;
 use codex_state::PostgresNamespaceConfig;
 use codex_state::PostgresPoolConfig;
+use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -252,7 +253,8 @@ async fn postgres_contract_app_server_rejects_missing_feature_gate_without_sqlit
         .await?;
     assert!(stderr.contains("state.backend"));
     home.assert_sqlite_untouched()?;
-    for database in codex_state::runtime_db_paths(home.path()) {
+    let sqlite = codex_state::SqliteConfig::new_for_testing(home.path().abs());
+    for database in sqlite.runtime_db_paths() {
         assert!(
             !database.path.exists(),
             "invalid PostgreSQL selection must not fall back to {} at {}",
@@ -406,6 +408,7 @@ async fn list_threads(
             model_providers: Some(Vec::new()),
             source_kinds: Some(Vec::new()),
             archived: Some(false),
+            is_pinned: None,
             cwd: None,
             use_state_db_only: true,
             search_term: None,
@@ -542,7 +545,8 @@ stream_max_retries = 0
             !self.sqlite_home.exists(),
             "PostgreSQL startup must not create the configured SQLite home"
         );
-        for database in codex_state::runtime_db_paths(&self.sqlite_home) {
+        let sqlite = codex_state::SqliteConfig::new_for_testing(self.sqlite_home.abs());
+        for database in sqlite.runtime_db_paths() {
             assert!(
                 !database.path.exists(),
                 "PostgreSQL startup must not create {} at {}",

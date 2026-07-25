@@ -13,6 +13,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::TurnContextItem;
+use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
@@ -37,7 +38,7 @@ async fn local_metadata_contract_matches_public_thread_store_semantics()
     let home = TempDir::new()?;
     let config = LocalThreadStoreConfig {
         codex_home: home.path().to_path_buf(),
-        sqlite_home: home.path().to_path_buf(),
+        sqlite: codex_state::SqliteConfig::new_for_testing(home.path().abs()),
         default_model_provider_id: "metadata-contract-provider".to_string(),
     };
     let runtime = codex_state::StateRuntime::init_sqlite(
@@ -404,6 +405,7 @@ fn create_thread_params(
         selected_capability_roots: Vec::new(),
         multi_agent_version: None,
         history_mode,
+        history_base: None,
         subagent_history_start_ordinal: None,
         initial_window_id: "metadata-contract-window".to_string(),
         metadata: ThreadPersistenceMetadata {

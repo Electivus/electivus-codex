@@ -34,18 +34,21 @@ impl PostgresExternalAgentConfigImportStore {
     pub(super) async fn record_completed(
         &self,
         import_id: &str,
+        provider_id: Option<&str>,
         successes: &[ExternalAgentConfigImportSuccessRecord],
         failures: &[ExternalAgentConfigImportFailureRecord],
     ) -> anyhow::Result<()> {
         sqlx::query(AssertSqlSafe(format!(
-            "INSERT INTO {} (import_id, completed_at_ms, successes, failures) \
-             VALUES ($1, $2, $3, $4) \
+            "INSERT INTO {} (import_id, provider_id, completed_at_ms, successes, failures) \
+             VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT(import_id) DO UPDATE SET \
-             completed_at_ms = excluded.completed_at_ms, successes = excluded.successes, \
+             provider_id = excluded.provider_id, completed_at_ms = excluded.completed_at_ms, \
+             successes = excluded.successes, \
              failures = excluded.failures",
             self.table
         )))
         .bind(import_id)
+        .bind(provider_id)
         .bind(datetime_to_epoch_millis(Utc::now()))
         .bind(serde_json::to_value(successes)?)
         .bind(serde_json::to_value(failures)?)
@@ -57,6 +60,7 @@ impl PostgresExternalAgentConfigImportStore {
     pub(super) async fn record_completed_with_memory_import(
         &self,
         import_id: &str,
+        provider_id: Option<&str>,
         successes: &[ExternalAgentConfigImportSuccessRecord],
         failures: &[ExternalAgentConfigImportFailureRecord],
         memory_import: &ExternalAgentMemoryImport,
@@ -83,6 +87,7 @@ impl PostgresExternalAgentConfigImportStore {
             self.update_completed_payload_in_transaction(
                 &mut transaction,
                 import_id,
+                provider_id,
                 successes,
                 failures,
             )
@@ -96,17 +101,19 @@ impl PostgresExternalAgentConfigImportStore {
             .apply_external_agent_import_in_transaction(&mut transaction, memory_import)
             .await?;
         sqlx::query(AssertSqlSafe(format!(
-            "INSERT INTO {} (import_id, completed_at_ms, successes, failures, \
+            "INSERT INTO {} (import_id, provider_id, completed_at_ms, successes, failures, \
              memory_import_fingerprint, memory_generation_id) \
-             VALUES ($1, $2, $3, $4, $5, $6) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) \
              ON CONFLICT(import_id) DO UPDATE SET \
-             completed_at_ms = excluded.completed_at_ms, successes = excluded.successes, \
+             provider_id = excluded.provider_id, completed_at_ms = excluded.completed_at_ms, \
+             successes = excluded.successes, \
              failures = excluded.failures, \
              memory_import_fingerprint = excluded.memory_import_fingerprint, \
              memory_generation_id = excluded.memory_generation_id",
             self.table
         )))
         .bind(import_id)
+        .bind(provider_id)
         .bind(datetime_to_epoch_millis(Utc::now()))
         .bind(serde_json::to_value(successes)?)
         .bind(serde_json::to_value(failures)?)
@@ -122,14 +129,16 @@ impl PostgresExternalAgentConfigImportStore {
         &self,
         transaction: &mut Transaction<'_, sqlx::Postgres>,
         import_id: &str,
+        provider_id: Option<&str>,
         successes: &[ExternalAgentConfigImportSuccessRecord],
         failures: &[ExternalAgentConfigImportFailureRecord],
     ) -> anyhow::Result<()> {
         sqlx::query(AssertSqlSafe(format!(
-            "UPDATE {} SET completed_at_ms = $1, successes = $2, failures = $3 \
-             WHERE import_id = $4",
+            "UPDATE {} SET provider_id = $1, completed_at_ms = $2, successes = $3, failures = $4 \
+             WHERE import_id = $5",
             self.table
         )))
+        .bind(provider_id)
         .bind(datetime_to_epoch_millis(Utc::now()))
         .bind(serde_json::to_value(successes)?)
         .bind(serde_json::to_value(failures)?)
@@ -166,7 +175,7 @@ impl PostgresExternalAgentConfigImportStore {
         &self,
     ) -> anyhow::Result<Vec<ExternalAgentConfigImportHistoryRecord>> {
         let rows = sqlx::query(AssertSqlSafe(format!(
-            "SELECT import_id, completed_at_ms, successes, failures FROM {} \
+            "SELECT import_id, provider_id, completed_at_ms, successes, failures FROM {} \
              ORDER BY completed_at_ms DESC, import_id ASC",
             self.table
         )))
@@ -179,6 +188,7 @@ impl PostgresExternalAgentConfigImportStore {
                 let failures: Value = row.try_get("failures")?;
                 Ok(ExternalAgentConfigImportHistoryRecord {
                     import_id: row.try_get("import_id")?,
+                    provider_id: row.try_get("provider_id")?,
                     completed_at_ms: row.try_get("completed_at_ms")?,
                     successes: serde_json::from_value(successes)?,
                     failures: serde_json::from_value(failures)?,

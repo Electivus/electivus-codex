@@ -10,6 +10,7 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::user_input::UserInput;
+use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
 use tempfile::TempDir;
@@ -41,7 +42,7 @@ async fn local_occurrence_search_matches_public_store_contract() -> TestResult {
     let home = TempDir::new()?;
     let config = LocalThreadStoreConfig {
         codex_home: home.path().to_path_buf(),
-        sqlite_home: home.path().to_path_buf(),
+        sqlite: codex_state::SqliteConfig::new_for_testing(home.path().abs()),
         default_model_provider_id: "occurrence-search-contract".to_string(),
     };
     let runtime = codex_state::StateRuntime::init_sqlite(

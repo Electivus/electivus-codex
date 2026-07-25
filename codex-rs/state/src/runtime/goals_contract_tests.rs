@@ -550,9 +550,9 @@ async fn sqlite_goal_lifecycle_satisfies_shared_contract() -> Result<()> {
     let thread_id = ThreadId::new();
     writer
         .upsert_thread(&test_thread_metadata(
-            writer.codex_home(),
+            writer.sqlite().home(),
             thread_id,
-            writer.codex_home().join("workspace"),
+            writer.sqlite().home().join("workspace"),
         ))
         .await?;
 

@@ -129,7 +129,7 @@ async fn assert_stale_projection(
     mutation: &'static str,
     expected_error: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let history_pool = codex_state::open_thread_history_db(source.config.home()).await?;
+    let history_pool = codex_state::open_thread_history_db(&source.config).await?;
     sqlx::query(mutation)
         .bind(source.thread_id.to_string())
         .execute(&history_pool)

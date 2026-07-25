@@ -1,3 +1,4 @@
+use crate::ItemSortKey;
 use crate::ListItemsParams;
 use crate::ListThreadsParams;
 use crate::ListTurnsParams;
@@ -27,7 +28,6 @@ use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionMeta;
@@ -185,11 +185,7 @@ async fn postgres_contract_runtime_state_thread_import_is_visible_to_another_poo
             Some(source.legacy_id),
             None,
             Some("disabled"),
-            Some(HistoryPosition {
-                thread_id: source.legacy_id,
-                end_ordinal_exclusive: 4,
-                end_byte_offset: 256,
-            }),
+            None,
             Some(1),
         )
     );
@@ -208,6 +204,7 @@ async fn postgres_contract_runtime_state_thread_import_is_visible_to_another_poo
             allowed_sources: Vec::new(),
             model_providers: Some(Vec::new()),
             cwd_filters: None,
+            is_pinned: None,
             archived: true,
             search_term: None,
             relation_filter: None,
@@ -226,6 +223,7 @@ async fn postgres_contract_runtime_state_thread_import_is_visible_to_another_poo
                 allowed_sources: Vec::new(),
                 model_providers: Some(Vec::new()),
                 cwd_filters: None,
+                is_pinned: None,
                 archived: true,
                 search_term: None,
                 relation_filter: None,
@@ -277,6 +275,8 @@ async fn postgres_contract_runtime_state_thread_import_is_visible_to_another_poo
         cursor: None,
         page_size: 10,
         sort_direction: SortDirection::Asc,
+        sort_key: ItemSortKey::CreatedAtOrdinal,
+        after_updated_at_ordinal: None,
     };
     let items = replica.list_items(item_params.clone()).await?;
     assert_eq!(
@@ -655,7 +655,8 @@ pub(super) async fn migration_source(
         "test-provider".to_string(),
     )
     .await?;
-    open_thread_history_db(source.path()).await?.close().await;
+    let config = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(source.path())?);
+    open_thread_history_db(&config).await?.close().await;
     let created_at = Utc
         .with_ymd_and_hms(2026, 7, 22, 10, 0, 0)
         .single()
@@ -714,11 +715,10 @@ pub(super) async fn migration_source(
             )
             .await?;
     }
-    let config = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(source.path())?);
     let local = LocalThreadStore::new(
         LocalThreadStoreConfig {
             codex_home: source.path().to_path_buf(),
-            sqlite_home: source.path().to_path_buf(),
+            sqlite: config.clone(),
             default_model_provider_id: "test-provider".to_string(),
         },
         Some(runtime.clone()),
@@ -766,7 +766,7 @@ pub(super) async fn migration_source(
     let rollout_local = LocalThreadStore::new(
         LocalThreadStoreConfig {
             codex_home: source.path().to_path_buf(),
-            sqlite_home: source.path().to_path_buf(),
+            sqlite: config.clone(),
             default_model_provider_id: "test-provider".to_string(),
         },
         /*state_db*/ None,
@@ -780,7 +780,7 @@ pub(super) async fn migration_source(
             })
             .await?,
     )?;
-    open_thread_history_db(source.path()).await?.close().await;
+    open_thread_history_db(&config).await?.close().await;
     std::fs::write(source.path().join("config.toml"), b"model = \"gpt-5\"\n")?;
     std::fs::create_dir_all(source.path().join("memories"))?;
     std::fs::write(
@@ -891,6 +891,8 @@ async fn thread_public_view(
             cursor: None,
             page_size: 10,
             sort_direction: SortDirection::Asc,
+            sort_key: ItemSortKey::CreatedAtOrdinal,
+            after_updated_at_ordinal: None,
         })
         .await?;
     let legacy_history = store
@@ -921,6 +923,7 @@ fn list_params(archived: bool) -> ListThreadsParams {
         allowed_sources: Vec::new(),
         model_providers: Some(Vec::new()),
         cwd_filters: None,
+        is_pinned: None,
         archived,
         search_term: None,
         relation_filter: None,
@@ -1002,11 +1005,7 @@ fn history(thread_id: ThreadId, source: &std::path::Path) -> Vec<RolloutLine> {
         model_provider: Some("test-provider".to_string()),
         memory_mode: Some("disabled".to_string()),
         history_mode: ThreadHistoryMode::Paginated,
-        history_base: Some(HistoryPosition {
-            thread_id: ancestor,
-            end_ordinal_exclusive: 4,
-            end_byte_offset: 256,
-        }),
+        history_base: None,
         ..SessionMeta::default()
     };
     meta.dynamic_tools = Some(vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {

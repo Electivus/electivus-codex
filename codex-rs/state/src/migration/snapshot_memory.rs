@@ -3,7 +3,6 @@ use super::SourceFileInventory;
 use crate::MemoryArtifact;
 use crate::MemoryArtifactSet;
 use crate::SqliteConfig;
-use crate::memories_db_path;
 use anyhow::Context;
 use serde::Serialize;
 use sha2::Digest;
@@ -155,7 +154,7 @@ pub(super) async fn snapshot_memory_state(
     inventory: &RuntimeStateMigrationInventory,
 ) -> anyhow::Result<MemoryMigrationSnapshot> {
     let pool = source
-        .open_immutable_pool(&memories_db_path(source.home()))
+        .open_immutable_pool(&source.memories_db_path())
         .await?;
     let records = async {
         let outputs = sqlx::query_as::<_, SqliteMemoryOutputRow>(

@@ -1,6 +1,5 @@
 use crate::PostgresNamespaceConfig;
 use crate::SqliteConfig;
-use crate::runtime_db_paths;
 use anyhow::Context;
 use sha2::Digest;
 use sha2::Sha256;
@@ -294,7 +293,7 @@ async fn inspect_sqlite_databases(
     source: &SqliteConfig,
 ) -> anyhow::Result<Vec<SqliteDatabaseInventory>> {
     let mut databases = Vec::new();
-    for database in runtime_db_paths(source.home()) {
+    for database in source.runtime_db_paths() {
         let relative_path = database
             .path
             .strip_prefix(source.home())

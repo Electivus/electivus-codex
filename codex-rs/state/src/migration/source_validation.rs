@@ -1,6 +1,5 @@
 use super::SourceFileInventory;
 use crate::SqliteConfig;
-use crate::state_db_path;
 use anyhow::Context;
 use std::collections::HashSet;
 use std::io::BufRead;
@@ -22,11 +21,11 @@ pub(super) async fn validate_database_schema(
     tables: &[String],
 ) -> anyhow::Result<()> {
     let (version, required_tables) = match label {
-        "state DB" => (43, STATE_TABLES),
+        "state DB" => (45, STATE_TABLES),
         "log DB" => (2, "_sqlx_migrations,logs"),
         "goals DB" => (3, GOALS_TABLES),
         "memories DB" => (1, "_sqlx_migrations,jobs,stage1_outputs"),
-        "thread history DB" => (2, THREAD_HISTORY_TABLES),
+        "thread history DB" => (4, THREAD_HISTORY_TABLES),
         _ => anyhow::bail!("unknown mandatory SQLite database `{label}`"),
     };
     anyhow::ensure!(
@@ -85,7 +84,7 @@ pub(super) async fn validate_rollout_files(
 }
 
 async fn referenced_rollout_paths(source: &SqliteConfig) -> anyhow::Result<Vec<PathBuf>> {
-    let path = state_db_path(source.home());
+    let path = source.state_db_path();
     let pool = source.open_immutable_pool(&path).await.with_context(|| {
         format!(
             "failed to open SQLite state DB at {} while validating rollout references",

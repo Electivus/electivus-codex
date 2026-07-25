@@ -1,5 +1,6 @@
 use anyhow::Context;
 use anyhow::Result;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cargo_bin::cargo_bin;
 use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
@@ -21,14 +22,17 @@ async fn state_migrate_process_runs_the_complete_offline_migration() -> Result<(
         "test-provider".to_string(),
     )
     .await?;
-    codex_state::open_thread_history_db(source.path())
+    let sqlite =
+        codex_state::SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(source.path())?);
+    codex_state::open_thread_history_db(&sqlite)
         .await?
         .close()
         .await;
     runtime.close().await;
+    let runtime_db_paths = sqlite.runtime_db_paths();
     anyhow::ensure!(
-        codex_state::runtime_db_paths(source.path()).len() == 5
-            && codex_state::runtime_db_paths(source.path())
+        runtime_db_paths.len() == 5
+            && runtime_db_paths
                 .iter()
                 .all(|database| database.path.is_file()),
         "process fixture must contain every SQLite Runtime State authority"

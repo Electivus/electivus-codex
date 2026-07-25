@@ -49,41 +49,24 @@ impl ThreadRequestProcessor {
             .as_ref()
             .filter(|state_db| !state_db.uses_local_rollout_history());
         let deleted_subtree = if let Some(state_db) = integral_state_db {
-            let deleted_subtree = state_db
+            state_db
                 .delete_thread_spawn_subtree_strict(thread_id)
                 .await
                 .map_err(|err| {
                     internal_error(format!(
                         "failed to delete app-server state for {thread_id}: {err}"
                     ))
-                })?;
-            for deleted_thread_id in deleted_subtree.iter().copied() {
-                self.prepare_thread_for_delete(deleted_thread_id).await;
-            }
-            deleted_subtree
+                })?
         } else {
             let mut delete_order: Vec<_> = thread_ids.iter().skip(1).rev().copied().collect();
             delete_order.push(thread_id);
 
-            for thread_id_to_delete in delete_order.iter().copied() {
-                match self
-                    .thread_store
-                    .delete_thread(StoreDeleteThreadParams {
-                        thread_id: thread_id_to_delete,
-                    })
-                    .await
-                {
-                    Ok(()) => {}
-                    Err(ThreadStoreError::ThreadNotFound { .. }) => {
-                        warn!(
-                            "thread {thread_id_to_delete} was already missing while deleting {thread_id}"
-                        );
-                    }
-                    Err(err) => {
-                        return Err(thread_store_delete_error(err));
-                    }
-                }
-            }
+            self.thread_store
+                .delete_threads(StoreDeleteThreadsParams {
+                    thread_ids: delete_order,
+                })
+                .await
+                .map_err(thread_store_delete_error)?;
 
             if let Some(state_db) = self.state_db.as_ref() {
                 state_db
@@ -191,7 +174,9 @@ fn thread_store_delete_error(err: ThreadStoreError) -> JSONRPCErrorError {
         ThreadStoreError::ThreadNotFound { thread_id } => {
             invalid_request(format!("thread not found: {thread_id}"))
         }
-        ThreadStoreError::InvalidRequest { message } => invalid_request(message),
+        ThreadStoreError::InvalidRequest { message } | ThreadStoreError::Conflict { message } => {
+            invalid_request(message)
+        }
         ThreadStoreError::Unsupported { operation } => {
             unsupported_thread_store_operation(operation)
         }

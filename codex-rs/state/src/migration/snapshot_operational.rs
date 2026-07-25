@@ -1,7 +1,4 @@
 use crate::SqliteConfig;
-use crate::goals_db_path;
-use crate::logs_db_path;
-use crate::state_db_path;
 use anyhow::Context;
 use serde_json::Value;
 
@@ -69,6 +66,7 @@ pub(super) struct OperationalRemoteControlEnrollmentSnapshot {
 #[derive(sqlx::FromRow)]
 struct OperationalExternalAgentImportRow {
     import_id: String,
+    provider_id: Option<String>,
     completed_at_ms: i64,
     successes: String,
     failures: String,
@@ -77,6 +75,7 @@ struct OperationalExternalAgentImportRow {
 #[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
 pub(super) struct OperationalExternalAgentImportSnapshot {
     pub(super) import_id: String,
+    pub(super) provider_id: Option<String>,
     pub(super) completed_at_ms: i64,
     pub(super) successes: Value,
     pub(super) failures: Value,
@@ -85,9 +84,7 @@ pub(super) struct OperationalExternalAgentImportSnapshot {
 pub(super) async fn snapshot_operational_state(
     source: &SqliteConfig,
 ) -> anyhow::Result<OperationalSnapshot> {
-    let logs_pool = source
-        .open_immutable_pool(&logs_db_path(source.home()))
-        .await?;
+    let logs_pool = source.open_immutable_pool(&source.logs_db_path()).await?;
     let logs = sqlx::query_as::<_, OperationalLogSnapshot>(
         "SELECT id, ts, ts_nanos, level, target, feedback_log_body, module_path, file, line, \
          thread_id, process_uuid, estimated_bytes FROM logs ORDER BY id",
@@ -97,9 +94,7 @@ pub(super) async fn snapshot_operational_state(
     logs_pool.close().await;
     let logs = logs.context("read operational logs from SQLite")?;
 
-    let goals_pool = source
-        .open_immutable_pool(&goals_db_path(source.home()))
-        .await?;
+    let goals_pool = source.open_immutable_pool(&source.goals_db_path()).await?;
     let goals_result = async {
         let goals = sqlx::query_as::<_, OperationalGoalSnapshot>(
             "SELECT goals.thread_id, goals.goal_id, goals.objective, goals.status, \
@@ -122,9 +117,7 @@ pub(super) async fn snapshot_operational_state(
     goals_pool.close().await;
     let (goals, accounting_events) = goals_result.context("read operational goals from SQLite")?;
 
-    let state_pool = source
-        .open_immutable_pool(&state_db_path(source.home()))
-        .await?;
+    let state_pool = source.open_immutable_pool(&source.state_db_path()).await?;
     let state_result = async {
         let enrollments = sqlx::query_as::<_, OperationalRemoteControlEnrollmentSnapshot>(
             "SELECT websocket_url, account_id, app_server_client_name, server_id, environment_id, \
@@ -134,7 +127,7 @@ pub(super) async fn snapshot_operational_state(
         .fetch_all(&state_pool)
         .await?;
         let imports = sqlx::query_as::<_, OperationalExternalAgentImportRow>(
-            "SELECT import_id, completed_at_ms, successes, failures \
+            "SELECT import_id, provider_id, completed_at_ms, successes, failures \
              FROM external_agent_config_imports ORDER BY import_id",
         )
         .fetch_all(&state_pool)
@@ -145,6 +138,7 @@ pub(super) async fn snapshot_operational_state(
                 |row| -> anyhow::Result<OperationalExternalAgentImportSnapshot> {
                     Ok(OperationalExternalAgentImportSnapshot {
                         import_id: row.import_id,
+                        provider_id: row.provider_id,
                         completed_at_ms: row.completed_at_ms,
                         successes: serde_json::from_str(&row.successes)?,
                         failures: serde_json::from_str(&row.failures)?,

@@ -11,6 +11,7 @@ use super::database_error;
 use super::projection::begin_consistent_read;
 use super::serialization_error;
 use crate::ItemPage;
+use crate::ItemSortKey;
 use crate::ListItemsParams;
 use crate::SortDirection;
 use crate::StoredThreadItem;
@@ -20,17 +21,18 @@ use crate::ThreadStoreResult;
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct HistoryCursor {
-    thread_id: ThreadId,
-    scope: CursorScope,
+    requested_thread_id: ThreadId,
     rollout_ordinal: i64,
     include_anchor: bool,
+    scope: CursorScope,
 }
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub(super) enum CursorScope {
     Turns,
-    Items,
+    ItemsByCreatedAtOrdinal,
+    ItemsByUpdatedAtOrdinal,
 }
 
 pub(super) struct StoredThreadItemRow {
@@ -49,21 +51,45 @@ pub(super) async fn list_items(
         "list_items",
     )
     .await?;
-    let cursor = parse_cursor(
-        params.cursor.as_deref(),
-        params.thread_id,
-        CursorScope::Items,
-    )?;
+    let (cursor_scope, sort_column) = match params.sort_key {
+        ItemSortKey::CreatedAtOrdinal => (CursorScope::ItemsByCreatedAtOrdinal, "rollout_ordinal"),
+        ItemSortKey::UpdatedAtOrdinal => {
+            if params.after_updated_at_ordinal.is_none() {
+                return Err(ThreadStoreError::InvalidRequest {
+                    message: "update-ordinal item sorting requires an update watermark".to_string(),
+                });
+            }
+            (CursorScope::ItemsByUpdatedAtOrdinal, "updated_at_ordinal")
+        }
+    };
+    let cursor = parse_cursor(params.cursor.as_deref(), params.thread_id, cursor_scope)?;
     let limit = page_limit(params.page_size)?;
     let mut query = QueryBuilder::<Postgres>::new(format!(
-        "SELECT turn_id, item_id, rollout_ordinal, created_at_ms, item FROM {} WHERE thread_id = ",
-        store.tables.items
+        "SELECT turn_id, item_id, {sort_column} AS rollout_ordinal, updated_at_ordinal, \
+         created_at_ms, item FROM {} WHERE thread_id = ",
+        store.tables.items,
     ));
     query.push_bind(params.thread_id.to_string());
+    if let Some(after_updated_at_ordinal) = params.after_updated_at_ordinal {
+        let after_updated_at_ordinal = i64::try_from(after_updated_at_ordinal).map_err(|_| {
+            ThreadStoreError::InvalidRequest {
+                message: "updated-at ordinal is too large".to_string(),
+            }
+        })?;
+        query
+            .push(" AND updated_at_ordinal > ")
+            .push_bind(after_updated_at_ordinal);
+    }
     if let Some(turn_id) = params.turn_id.as_deref() {
         query.push(" AND turn_id = ").push_bind(turn_id);
     }
-    push_pagination_clause(&mut query, params.sort_direction, cursor.as_ref(), limit);
+    push_pagination_clause(
+        &mut query,
+        params.sort_direction,
+        cursor.as_ref(),
+        sort_column,
+        limit,
+    );
     let rows = query
         .build()
         .fetch_all(transaction.as_mut())
@@ -77,7 +103,7 @@ pub(super) async fn list_items(
     item_rows.truncate(params.page_size);
     let (next_cursor, backwards_cursor) = page_cursors(
         params.thread_id,
-        CursorScope::Items,
+        cursor_scope,
         item_rows.first().map(|row| row.rollout_ordinal),
         item_rows.last().map(|row| row.rollout_ordinal),
         has_more,
@@ -120,7 +146,7 @@ pub(super) fn parse_cursor(
     };
     let cursor_value: HistoryCursor =
         serde_json::from_str(cursor).map_err(|_| invalid_cursor(cursor))?;
-    if cursor_value.thread_id != thread_id || cursor_value.scope != scope {
+    if cursor_value.requested_thread_id != thread_id || cursor_value.scope != scope {
         return Err(invalid_cursor(cursor));
     }
     Ok(Some(cursor_value))
@@ -130,6 +156,7 @@ pub(super) fn push_pagination_clause(
     query: &mut QueryBuilder<Postgres>,
     direction: SortDirection,
     cursor: Option<&HistoryCursor>,
+    sort_column: &'static str,
     limit: i64,
 ) {
     if let Some(cursor) = cursor {
@@ -140,7 +167,9 @@ pub(super) fn push_pagination_clause(
             (SortDirection::Desc, false) => "<",
         };
         query
-            .push(" AND rollout_ordinal ")
+            .push(" AND ")
+            .push(sort_column)
+            .push(" ")
             .push(comparator)
             .push(" ")
             .push_bind(cursor.rollout_ordinal);
@@ -150,7 +179,9 @@ pub(super) fn push_pagination_clause(
         SortDirection::Desc => "DESC",
     };
     query
-        .push(" ORDER BY rollout_ordinal ")
+        .push(" ORDER BY ")
+        .push(sort_column)
+        .push(" ")
         .push(order)
         .push(" LIMIT ")
         .push_bind(limit);
@@ -163,10 +194,10 @@ pub(super) fn serialize_cursor(
     include_anchor: bool,
 ) -> ThreadStoreResult<String> {
     serde_json::to_string(&HistoryCursor {
-        thread_id,
-        scope,
+        requested_thread_id: thread_id,
         rollout_ordinal,
         include_anchor,
+        scope,
     })
     .map_err(serialization_error)
 }
@@ -209,6 +240,13 @@ pub(super) fn stored_thread_item_row(
     let item = row
         .try_get::<Value, _>("item")
         .map_err(|error| database_error("list thread items", error))?;
+    let updated_at_ordinal = row
+        .try_get::<i64, _>("updated_at_ordinal")
+        .map_err(|error| database_error("list thread items", error))?;
+    let updated_at_ordinal =
+        u64::try_from(updated_at_ordinal).map_err(|_| ThreadStoreError::Internal {
+            message: format!("invalid stored item updated-at ordinal: {updated_at_ordinal}"),
+        })?;
     Ok(StoredThreadItemRow {
         item: StoredThreadItem {
             turn_id: row
@@ -217,6 +255,7 @@ pub(super) fn stored_thread_item_row(
             item_id: row
                 .try_get("item_id")
                 .map_err(|error| database_error("list thread items", error))?,
+            updated_at_ordinal,
             created_at_ms: row
                 .try_get("created_at_ms")
                 .map_err(|error| database_error("list thread items", error))?,
