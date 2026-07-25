@@ -209,22 +209,39 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
     assert!(resumed.turns_backwards_cursor.is_some());
     assert!(resumed.items_backwards_cursor.is_some());
 
-    for (id, exclude_turns) in [(11, false), (12, true)] {
-        let error = client
-            .request(api::ClientRequest::ThreadFork {
-                request_id: request_id(id),
-                params: api::ThreadForkParams {
-                    thread_id: thread_id.clone(),
-                    ephemeral: true,
-                    exclude_turns,
-                    ..Default::default()
-                },
-            })
-            .await?
-            .expect_err("ephemeral paginated forks should be rejected before session creation");
-        assert_eq!(error.code, -32601);
-        assert_eq!(error.message, "paginated_threads is not supported yet");
-    }
+    let error = client
+        .request(api::ClientRequest::ThreadFork {
+            request_id: request_id(/*id*/ 11),
+            params: api::ThreadForkParams {
+                thread_id: thread_id.clone(),
+                ephemeral: true,
+                ..Default::default()
+            },
+        })
+        .await?
+        .expect_err("ephemeral paginated forks should require metadata-only responses");
+    assert_eq!(error.code, -32600);
+    assert_eq!(
+        error.message,
+        "ephemeral paginated thread/fork requires `excludeTurns: true`"
+    );
+
+    let ephemeral_fork: api::ThreadForkResponse = request(
+        &client,
+        api::ClientRequest::ThreadFork {
+            request_id: request_id(/*id*/ 12),
+            params: api::ThreadForkParams {
+                thread_id: thread_id.clone(),
+                ephemeral: true,
+                exclude_turns: true,
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    assert!(ephemeral_fork.thread.ephemeral);
+    assert_eq!(ephemeral_fork.thread.path, None);
+    assert_eq!(ephemeral_fork.thread.turns, Vec::new());
 
     let forked: api::ThreadForkResponse = request(
         &client,
