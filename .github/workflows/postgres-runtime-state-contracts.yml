@@ -8,14 +8,14 @@ jobs:
   postgres-contracts:
     name: PostgreSQL 18 Runtime State contracts
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: codex-rs
     env:
       CARGO_INCREMENTAL: "0"
       CODEX_TEST_POSTGRES_URL: postgresql://codex:codex-test@localhost:5432/codex_runtime_state_test
-      SCCACHE_CACHE_SIZE: 10G
+      SCCACHE_CACHE_SIZE: 2G
     services:
       postgres:
         image: postgres:18
