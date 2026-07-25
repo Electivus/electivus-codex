@@ -75,6 +75,31 @@ A temporary shared commit baseline for concurrent fork changes that postpones up
 synchronization until conflict risk is lower and requires full revalidation after synchronization.
 _Avoid_: Maintained release line, indefinite divergence
 
+**Upstream synchronization**:
+The controlled integration of new `openai/codex` history into the Electivus default branch while
+preserving fork-owned behavior and validation.
+_Avoid_: Fork reset, upstream replacement, automatic update
+
+**Release baseline**:
+The most recently published non-draft GitHub Release from `openai/codex`, whether stable or
+pre-release, selected as the target of an Upstream synchronization.
+_Avoid_: Upstream main, latest stable, newest semantic version
+
+**Fork development version**:
+The `0.0.0` Rust workspace version that identifies Electivus source builds independently of the
+published version attached to a Release baseline.
+_Avoid_: Upstream release version, package version
+
+**Synchronization PR**:
+The single reviewable change that carries one pending Upstream synchronization through the Merge
+gate before it enters the default branch.
+_Avoid_: Sync branch, upstream alert, direct sync
+
+**Synchronization baseline**:
+The Release baseline fixed when a Synchronization PR is created and retained unchanged until that
+PR is merged or closed.
+_Avoid_: Rolling release target, latest available release
+
 **Validation PR**:
 A draft pull request used to prove a compatibility patch on real fork infrastructure before its
 merge gate is activated in repository rules.
