@@ -525,7 +525,7 @@ async fn postgres_contract_memories_startup_phase1_loads_pathless_canonical_thre
         .default_environment_selections(&test.config.cwd, &test.config.workspace_roots);
     let candidate = test
         .thread_manager
-        .start_thread_with_options(codex_core::StartThreadOptions {
+        .start_thread(codex_core::StartThreadOptions {
             config: test.config.clone(),
             allow_provider_model_fallback: false,
             initial_history: codex_protocol::protocol::InitialHistory::New,
@@ -535,7 +535,7 @@ async fn postgres_contract_memories_startup_phase1_loads_pathless_canonical_thre
             dynamic_tools: Vec::new(),
             metrics_service_name: None,
             parent_trace: None,
-            environments,
+            environments: Some(environments),
             thread_extension_init: Default::default(),
             supports_openai_form_elicitation: false,
         })
