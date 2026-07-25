@@ -9,7 +9,7 @@ use codex_app_server_protocol::RemoteControlPairingStartResponse;
 use codex_app_server_protocol::RemoteControlPairingStatusResponse;
 use codex_login::default_client::create_client_without_request_logging;
 use codex_state::RemoteControlEnrollmentRecord;
-use codex_state::StateRuntime;
+use codex_state::RemoteControlEnrollmentStore;
 use std::io;
 use std::io::ErrorKind;
 use time::OffsetDateTime;
@@ -243,22 +243,22 @@ impl RemoteControlEnrollment {
 }
 
 pub(super) async fn load_persisted_remote_control_enrollment(
-    state_db: Option<&StateRuntime>,
+    enrollment_store: Option<&RemoteControlEnrollmentStore>,
     remote_control_target: &RemoteControlTarget,
     account_id: &str,
     app_server_client_name: Option<&str>,
 ) -> io::Result<Option<RemoteControlEnrollment>> {
-    let Some(state_db) = state_db else {
+    let Some(enrollment_store) = enrollment_store else {
         return Err(io::Error::new(
             ErrorKind::NotFound,
             format!(
-                "remote control enrollment cache unavailable because sqlite state db is disabled: websocket_url={}, account_id={}, app_server_client_name={:?}",
+                "remote control enrollment persistence is unavailable: websocket_url={}, account_id={}, app_server_client_name={:?}",
                 remote_control_target.websocket_url, account_id, app_server_client_name
             ),
         ));
     };
-    let enrollment = match state_db
-        .get_remote_control_enrollment(
+    let enrollment = match enrollment_store
+        .get(
             &remote_control_target.websocket_url,
             account_id,
             app_server_client_name,
@@ -307,18 +307,18 @@ pub(super) async fn load_persisted_remote_control_enrollment(
 }
 
 pub(super) async fn update_persisted_remote_control_enrollment(
-    state_db: Option<&StateRuntime>,
+    enrollment_store: Option<&RemoteControlEnrollmentStore>,
     remote_control_target: &RemoteControlTarget,
     account_id: &str,
     app_server_client_name: Option<&str>,
     enrollment: Option<&RemoteControlEnrollment>,
     remote_control_enabled: Option<bool>,
 ) -> io::Result<()> {
-    let Some(state_db) = state_db else {
+    let Some(enrollment_store) = enrollment_store else {
         return Err(io::Error::new(
             ErrorKind::NotFound,
             format!(
-                "remote control enrollment persistence unavailable because sqlite state db is disabled: websocket_url={}, account_id={}, app_server_client_name={:?}, has_enrollment={}",
+                "remote control enrollment persistence is unavailable: websocket_url={}, account_id={}, app_server_client_name={:?}, has_enrollment={}",
                 remote_control_target.websocket_url,
                 account_id,
                 app_server_client_name,
@@ -335,8 +335,8 @@ pub(super) async fn update_persisted_remote_control_enrollment(
     }
 
     if let Some(enrollment) = enrollment {
-        state_db
-            .upsert_remote_control_enrollment(&RemoteControlEnrollmentRecord {
+        enrollment_store
+            .upsert(&RemoteControlEnrollmentRecord {
                 websocket_url: remote_control_target.websocket_url.clone(),
                 account_id: account_id.to_string(),
                 app_server_client_name: app_server_client_name.map(str::to_string),
@@ -357,8 +357,8 @@ pub(super) async fn update_persisted_remote_control_enrollment(
         );
         Ok(())
     } else {
-        let rows_affected = state_db
-            .delete_remote_control_enrollment(
+        let rows_affected = enrollment_store
+            .delete(
                 &remote_control_target.websocket_url,
                 account_id,
                 app_server_client_name,
@@ -474,6 +474,7 @@ mod tests {
     async fn persisted_remote_control_enrollment_round_trips_by_target_and_account() {
         let codex_home = TempDir::new().expect("temp dir should create");
         let state_db = remote_control_state_runtime(&codex_home).await;
+        let enrollment_store = state_db.remote_control_enrollment_store();
         let first_target = normalize_remote_control_url("https://chatgpt.com/remote/control")
             .expect("first target should parse");
         let second_target =
@@ -501,7 +502,7 @@ mod tests {
         };
 
         update_persisted_remote_control_enrollment(
-            Some(state_db.as_ref()),
+            Some(&enrollment_store),
             &first_target,
             "account-a",
             Some("desktop-client"),
@@ -511,7 +512,7 @@ mod tests {
         .await
         .expect("first enrollment should persist");
         update_persisted_remote_control_enrollment(
-            Some(state_db.as_ref()),
+            Some(&enrollment_store),
             &second_target,
             "account-a",
             Some("desktop-client"),
@@ -523,7 +524,7 @@ mod tests {
 
         assert_eq!(
             load_persisted_remote_control_enrollment(
-                Some(state_db.as_ref()),
+                Some(&enrollment_store),
                 &first_target,
                 "account-a",
                 Some("desktop-client"),
@@ -534,7 +535,7 @@ mod tests {
         );
         assert_eq!(
             load_persisted_remote_control_enrollment(
-                Some(state_db.as_ref()),
+                Some(&enrollment_store),
                 &first_target,
                 "account-b",
                 Some("desktop-client"),
@@ -545,7 +546,7 @@ mod tests {
         );
         assert_eq!(
             load_persisted_remote_control_enrollment(
-                Some(state_db.as_ref()),
+                Some(&enrollment_store),
                 &second_target,
                 "account-a",
                 Some("desktop-client"),
@@ -560,6 +561,7 @@ mod tests {
     async fn clearing_persisted_remote_control_enrollment_removes_only_matching_entry() {
         let codex_home = TempDir::new().expect("temp dir should create");
         let state_db = remote_control_state_runtime(&codex_home).await;
+        let enrollment_store = state_db.remote_control_enrollment_store();
         let first_target = normalize_remote_control_url("https://chatgpt.com/remote/control")
             .expect("first target should parse");
         let second_target =
@@ -587,7 +589,7 @@ mod tests {
         };
 
         update_persisted_remote_control_enrollment(
-            Some(state_db.as_ref()),
+            Some(&enrollment_store),
             &first_target,
             "account-a",
             /*app_server_client_name*/ None,
@@ -597,7 +599,7 @@ mod tests {
         .await
         .expect("first enrollment should persist");
         update_persisted_remote_control_enrollment(
-            Some(state_db.as_ref()),
+            Some(&enrollment_store),
             &second_target,
             "account-a",
             /*app_server_client_name*/ None,
@@ -608,7 +610,7 @@ mod tests {
         .expect("second enrollment should persist");
 
         update_persisted_remote_control_enrollment(
-            Some(state_db.as_ref()),
+            Some(&enrollment_store),
             &first_target,
             "account-a",
             /*app_server_client_name*/ None,
@@ -620,7 +622,7 @@ mod tests {
 
         assert_eq!(
             load_persisted_remote_control_enrollment(
-                Some(state_db.as_ref()),
+                Some(&enrollment_store),
                 &first_target,
                 "account-a",
                 /*app_server_client_name*/ None,
@@ -631,7 +633,7 @@ mod tests {
         );
         assert_eq!(
             load_persisted_remote_control_enrollment(
-                Some(state_db.as_ref()),
+                Some(&enrollment_store),
                 &second_target,
                 "account-a",
                 /*app_server_client_name*/ None,

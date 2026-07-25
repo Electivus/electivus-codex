@@ -7,7 +7,7 @@ use codex_rollout::parse_cursor;
 use super::LocalThreadStore;
 use super::helpers::resolve_thread_names;
 use super::helpers::set_thread_name;
-use super::helpers::stored_thread_from_rollout_item;
+use super::helpers::stored_thread_from_rollout_item_with_metadata;
 use crate::ListThreadsParams;
 use crate::SortDirection;
 use crate::ThreadPage;
@@ -62,17 +62,19 @@ pub(super) async fn list_threads(
         .as_ref()
         .and_then(|cursor| serde_json::to_value(cursor).ok())
         .and_then(|value| value.as_str().map(str::to_owned));
-    let mut items = page
-        .items
-        .into_iter()
-        .filter_map(|item| {
-            stored_thread_from_rollout_item(
-                item,
-                params.archived,
-                store.config.default_model_provider_id.as_str(),
-            )
-        })
-        .collect::<Vec<_>>();
+    let mut items = Vec::with_capacity(page.items.len());
+    for item in page.items {
+        if let Some(thread) = stored_thread_from_rollout_item_with_metadata(
+            store,
+            item,
+            params.archived,
+            store.config.default_model_provider_id.as_str(),
+        )
+        .await
+        {
+            items.push(thread);
+        }
+    }
 
     let thread_history_modes = items
         .iter()

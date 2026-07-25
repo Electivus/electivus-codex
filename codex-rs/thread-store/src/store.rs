@@ -4,6 +4,8 @@ use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::AppendBatchCommit;
+use crate::AppendThreadItemsBatch;
 use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
 use crate::ArchiveThreadsParams;
@@ -36,6 +38,32 @@ use crate::UpdateThreadMetadataParams;
 /// Future returned by [`ThreadStore`] operations.
 pub type ThreadStoreFuture<'a, T> = Pin<Box<dyn Future<Output = ThreadStoreResult<T>> + Send + 'a>>;
 
+/// Keeps a store-specific child registration fence alive through in-process publication.
+///
+/// Implementations with cross-process deletion should keep their durable read or lifecycle lock in
+/// this value. Callers must retain it until the child is visible in their local live-thread registry.
+#[must_use = "keep the guard alive until child registration is published"]
+pub struct ChildRegistrationGuard {
+    _hold: Box<dyn Any + Send>,
+}
+
+impl ChildRegistrationGuard {
+    pub(crate) fn unlocked() -> Self {
+        Self {
+            _hold: Box::new(()),
+        }
+    }
+
+    pub(crate) fn holding<T>(hold: T) -> Self
+    where
+        T: Any + Send,
+    {
+        Self {
+            _hold: Box::new(hold),
+        }
+    }
+}
+
 /// Storage-neutral thread persistence boundary.
 pub trait ThreadStore: Any + Send + Sync {
     /// Return this store as [`Any`] for implementation-owned escape hatches.
@@ -60,6 +88,21 @@ pub trait ThreadStore: Any + Send + Sync {
     /// Implementations should apply the shared rollout persistence policy before writing durable
     /// replay history and before updating any implementation-owned projections.
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()>;
+
+    /// Atomically appends an explicitly identified batch and returns its durable stream position.
+    ///
+    /// Callers may retry the same identity and content after an ambiguous response. Stores that
+    /// do not expose explicit Append Batches can continue implementing [`ThreadStore::append_items`].
+    fn append_batch(
+        &self,
+        _batch: AppendThreadItemsBatch,
+    ) -> ThreadStoreFuture<'_, AppendBatchCommit> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "append_batch",
+            })
+        })
+    }
 
     /// Materializes the thread if persistence is lazy, then persists all queued items.
     fn persist_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()>;
@@ -111,6 +154,19 @@ pub trait ThreadStore: Any + Send + Sync {
     /// Reads a thread summary and optionally its persisted history.
     fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread>;
 
+    /// Verifies that a newly initialized child can still be registered as live and returns a guard
+    /// that preserves that decision until publication.
+    ///
+    /// Stores with cross-process deletion should check their canonical record here. Local stores
+    /// can keep the default because their rollout metadata may become readable only after the
+    /// in-process registration step.
+    fn validate_child_registration(
+        &self,
+        _thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, ChildRegistrationGuard> {
+        Box::pin(async { Ok(ChildRegistrationGuard::unlocked()) })
+    }
+
     /// Reads a rollout-backed thread by path when the store supports path-addressed lookups.
     ///
     /// Deprecated: new callers should use [`ThreadStore::read_thread`] instead.
@@ -119,11 +175,21 @@ pub trait ThreadStore: Any + Send + Sync {
         params: ReadThreadByRolloutPathParams,
     ) -> ThreadStoreFuture<'_, StoredThread>;
 
+    /// Whether this store can resolve legacy path-addressed thread requests.
+    fn supports_rollout_path_lookup(&self) -> bool {
+        true
+    }
+
     /// Lists stored threads matching the supplied filters.
     fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage>;
 
     /// Whether paginated threads can hydrate durable history through turn and item lists.
     fn supports_paginated_history_lists(&self) -> bool {
+        false
+    }
+
+    /// Whether rollback markers atomically update this store's paginated history projections.
+    fn supports_paginated_rollback(&self) -> bool {
         false
     }
 

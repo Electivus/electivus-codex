@@ -13,6 +13,8 @@ use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadReadParams;
+use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadRollbackParams;
@@ -56,7 +58,7 @@ async fn thread_rollback_rejects_paginated_thread() -> Result<()> {
 
     let rollback_id = mcp
         .send_thread_rollback_request(ThreadRollbackParams {
-            thread_id: thread.id,
+            thread_id: thread.id.clone(),
             num_turns: 1,
         })
         .await?;
@@ -70,6 +72,60 @@ async fn thread_rollback_rejects_paginated_thread() -> Result<()> {
         rollback_err.error.message,
         "paginated threads do not support thread/rollback"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_rollback_rejects_ephemeral_thread_before_starting_rollback() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let start_id = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            ephemeral: Some(true),
+            ..Default::default()
+        })
+        .await?;
+    let start_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(start_id)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response(start_resp)?;
+
+    let rollback_id = mcp
+        .send_thread_rollback_request(ThreadRollbackParams {
+            thread_id: thread.id.clone(),
+            num_turns: 1,
+        })
+        .await?;
+    let rollback_err: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(rollback_id)),
+    )
+    .await??;
+    assert_eq!(rollback_err.error.code, -32600);
+    assert_eq!(
+        rollback_err.error.message,
+        "thread rollback requires persisted thread history"
+    );
+    let read_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: thread.id,
+            include_turns: false,
+        })
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let read: ThreadReadResponse = to_response(read_resp)?;
+    assert_eq!(read.thread.status, ThreadStatus::Idle);
 
     Ok(())
 }

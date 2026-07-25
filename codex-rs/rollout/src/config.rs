@@ -9,6 +9,10 @@ pub trait RolloutConfigView {
     fn cwd(&self) -> &Path;
     fn model_provider_id(&self) -> &str;
     fn generate_memories(&self) -> bool;
+
+    fn runtime_state_backend(&self) -> Option<&codex_state::RuntimeStateBackendConfig> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,6 +80,10 @@ impl<T: RolloutConfigView + ?Sized> RolloutConfigView for &T {
     fn generate_memories(&self) -> bool {
         (*self).generate_memories()
     }
+
+    fn runtime_state_backend(&self) -> Option<&codex_state::RuntimeStateBackendConfig> {
+        (*self).runtime_state_backend()
+    }
 }
 
 impl<T: RolloutConfigView + ?Sized> RolloutConfigView for Arc<T> {
@@ -97,5 +105,9 @@ impl<T: RolloutConfigView + ?Sized> RolloutConfigView for Arc<T> {
 
     fn generate_memories(&self) -> bool {
         self.as_ref().generate_memories()
+    }
+
+    fn runtime_state_backend(&self) -> Option<&codex_state::RuntimeStateBackendConfig> {
+        self.as_ref().runtime_state_backend()
     }
 }

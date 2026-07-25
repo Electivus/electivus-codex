@@ -250,25 +250,28 @@ async fn build_test_processor(
         outgoing_tx,
         analytics_events_client.clone(),
     ));
-    let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
-        outgoing,
-        analytics_events_client,
-        arg0_paths: Arg0DispatchPaths::default(),
-        config,
-        config_manager,
-        environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
-        feedback: CodexFeedback::new(),
-        log_db: None,
-        state_db: None,
-        config_warnings: Vec::new(),
-        session_source: SessionSource::VSCode,
-        auth_manager,
-        installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
-        code_mode_session_provider: None,
-        rpc_transport: AppServerRpcTransport::Stdio,
-        remote_control_handle: None,
-        plugin_startup_tasks: crate::PluginStartupTasks::Start,
-    }));
+    let processor = Arc::new(
+        MessageProcessor::new(MessageProcessorArgs {
+            outgoing,
+            analytics_events_client,
+            arg0_paths: Arg0DispatchPaths::default(),
+            config,
+            config_manager,
+            environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+            feedback: CodexFeedback::new(),
+            log_db: None,
+            state_db: None,
+            config_warnings: Vec::new(),
+            session_source: SessionSource::VSCode,
+            auth_manager,
+            installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
+            code_mode_session_provider: None,
+            rpc_transport: AppServerRpcTransport::Stdio,
+            remote_control_handle: None,
+            plugin_startup_tasks: crate::PluginStartupTasks::Start,
+        })
+        .expect("test message processor should initialize"),
+    );
     (processor, outgoing_rx)
 }
 

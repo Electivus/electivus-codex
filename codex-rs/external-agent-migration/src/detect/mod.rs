@@ -55,17 +55,19 @@ impl ExternalAgentConfigService {
             self.detect_migrations(&scope, &mut items).await?;
         }
 
-        if params.include_home
-            && params.include_memory
-            && self.source.supports_memory()
-            && let Some(item) = memory::detect(&self.codex_home, &self.external_agent_home)?
-        {
-            items.push(item);
-            emit_migration_metric(
-                EXTERNAL_AGENT_CONFIG_DETECT_METRIC,
-                ExternalAgentConfigMigrationItemType::Memory,
-                /*skills_count*/ None,
-            );
+        if params.include_home && params.include_memory && self.source.supports_memory() {
+            if self.state_db.is_some() {
+                crate::memory_import::prepare_workspace(&self.codex_home, self.state_db.as_ref())
+                    .await?;
+            }
+            if let Some(item) = memory::detect(&self.codex_home, &self.external_agent_home)? {
+                items.push(item);
+                emit_migration_metric(
+                    EXTERNAL_AGENT_CONFIG_DETECT_METRIC,
+                    ExternalAgentConfigMigrationItemType::Memory,
+                    /*skills_count*/ None,
+                );
+            }
         }
 
         Ok(items)

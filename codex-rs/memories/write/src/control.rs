@@ -1,4 +1,25 @@
+use crate::workspace_materialization::prepare_memory_workspace_from_store;
+use anyhow::Context;
+use codex_state::MemoryStore;
+use codex_state::MemoryWorkspaceMaterialization;
 use std::path::Path;
+
+/// Clears durable memory data and synchronizes the local disposable workspace.
+pub async fn reset_memories(store: &MemoryStore, codex_home: &Path) -> anyhow::Result<()> {
+    store.clear_memory_data().await?;
+    match store.memory_workspace_materialization().await? {
+        MemoryWorkspaceMaterialization::Preserve => {
+            clear_memory_roots_contents(codex_home).await?;
+        }
+        MemoryWorkspaceMaterialization::Replace { .. } | MemoryWorkspaceMaterialization::Clear => {
+            prepare_memory_workspace_from_store(store, &codex_home.join("memories")).await?;
+            clear_memory_root_contents(&codex_home.join("memories_extensions"))
+                .await
+                .context("clear memory extensions workspace")?;
+        }
+    }
+    Ok(())
+}
 
 pub async fn clear_memory_roots_contents(codex_home: &Path) -> std::io::Result<()> {
     for memory_root in [

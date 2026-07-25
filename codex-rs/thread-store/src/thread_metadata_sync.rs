@@ -20,6 +20,7 @@ use codex_protocol::protocol::user_message_preview;
 use crate::CreateThreadParams;
 use crate::GitInfoPatch;
 use crate::ResumeThreadParams;
+use crate::StoredThread;
 use crate::ThreadMetadataPatch;
 use crate::types::canonical_history_mode_from_rollout_items;
 
@@ -30,6 +31,7 @@ const THREAD_UPDATED_AT_TOUCH_INTERVAL: Duration = Duration::from_secs(5);
 /// Stores receive raw rollout items plus explicit metadata patches. This helper
 /// keeps append-derived metadata observation in the live layer without owning persistence-policy
 /// filtering or making `append_items` infer metadata inside a `ThreadStore` implementation.
+#[derive(Clone)]
 pub(crate) struct ThreadMetadataSync {
     thread_id: ThreadId,
     cwd_seen: bool,
@@ -49,6 +51,21 @@ pub(crate) struct PendingThreadMetadataPatch {
 }
 
 impl ThreadMetadataSync {
+    pub(crate) fn from_stored_thread(thread: &StoredThread) -> Self {
+        Self {
+            thread_id: thread.thread_id,
+            cwd_seen: !thread.cwd.as_os_str().is_empty(),
+            preview_seen: !thread.preview.is_empty(),
+            first_user_message_seen: thread.first_user_message.is_some(),
+            title_seen: thread.name.is_some(),
+            pending_update: None,
+            pending_update_generation: 0,
+            last_touch_persisted_at: None,
+            defer_create_update_until_history_exists: false,
+            defer_resume_update_until_append: false,
+        }
+    }
+
     pub(crate) async fn for_create(params: &CreateThreadParams) -> Self {
         let created_at = Utc::now();
         let cwd = params.metadata.cwd.clone().unwrap_or_default();
@@ -247,10 +264,8 @@ impl ThreadMetadataSync {
                     }
                 }
                 RolloutItem::TurnContext(turn_ctx) => {
-                    if !self.cwd_seen {
-                        self.cwd_seen = true;
-                        update.cwd = Some(turn_ctx.cwd.clone().into_path_buf());
-                    }
+                    self.cwd_seen = true;
+                    update.cwd = Some(turn_ctx.cwd.clone().into_path_buf());
                     update.model = Some(turn_ctx.model.clone());
                     update.reasoning_effort = Some(turn_ctx.effort.clone());
                     update.approval_mode = Some(turn_ctx.approval_policy);
@@ -394,6 +409,7 @@ fn git_info_patch_from_observation(git_info: GitInfo) -> GitInfoPatch {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use codex_protocol::config_types::ApprovalsReviewer;
@@ -415,6 +431,7 @@ mod tests {
     use codex_protocol::protocol::ThreadGoalUpdatedEvent;
     use codex_protocol::protocol::ThreadSettingsAppliedEvent;
     use codex_protocol::protocol::ThreadSettingsSnapshot;
+    use codex_protocol::protocol::TurnContextItem;
     use codex_protocol::protocol::TurnStartedEvent;
     use codex_protocol::protocol::UserMessageEvent;
     use codex_protocol::user_input::UserInput;
@@ -457,6 +474,30 @@ mod tests {
 
         sync.mark_pending_update_applied(&update);
         assert!(sync.take_pending_update().is_none());
+    }
+
+    #[test]
+    fn resume_history_uses_latest_turn_cwd() {
+        let thread_id = ThreadId::new();
+        let session_cwd = std::env::current_dir()
+            .expect("current directory")
+            .join("session-workspace");
+        let first_turn_cwd = session_cwd.join("first-turn");
+        let latest_turn_cwd = session_cwd.join("latest-turn");
+        let mut meta = session_meta(thread_id);
+        meta.meta.cwd = session_cwd;
+        let sync = ThreadMetadataSync::for_resume(&resume_params(
+            thread_id,
+            vec![
+                RolloutItem::SessionMeta(meta),
+                turn_context(first_turn_cwd, "first-turn"),
+                turn_context(latest_turn_cwd.clone(), "latest-turn"),
+            ],
+        ));
+
+        let update = sync.take_pending_update().expect("pending metadata update");
+
+        assert_eq!(update.patch.cwd, Some(latest_turn_cwd));
     }
 
     #[test]
@@ -723,6 +764,31 @@ mod tests {
             text_elements: Vec::new(),
             ..Default::default()
         }
+    }
+
+    fn turn_context(cwd: PathBuf, turn_id: &str) -> RolloutItem {
+        RolloutItem::TurnContext(TurnContextItem {
+            turn_id: Some(turn_id.to_string()),
+            cwd: cwd.try_into().expect("absolute cwd"),
+            workspace_roots: None,
+            current_date: None,
+            timezone: None,
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
+            permission_profile: None,
+            network: None,
+            file_system_sandbox_policy: None,
+            model: "test-model".to_string(),
+            comp_hash: None,
+            personality: None,
+            collaboration_mode: None,
+            multi_agent_version: None,
+            multi_agent_mode: None,
+            realtime_active: None,
+            effort: None,
+            summary: ReasoningSummary::Auto,
+        })
     }
 
     fn session_meta(thread_id: ThreadId) -> SessionMetaLine {

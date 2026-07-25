@@ -1911,10 +1911,13 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
         .thread_goals()
         .account_thread_goal_usage(
             thread_id,
-            /*time_delta_seconds*/ 12,
-            /*token_delta*/ 50,
-            codex_state::GoalAccountingMode::ActiveOnly,
-            Some(persisted_goal.goal_id.as_str()),
+            codex_state::GoalAccountingRequest {
+                event_id: "thread-resume-persisted-usage",
+                time_delta_seconds: 12,
+                token_delta: 50,
+                mode: codex_state::GoalAccountingMode::ActiveOnly,
+                target: codex_state::GoalAccountingTarget::GoalId(persisted_goal.goal_id.as_str()),
+            },
         )
         .await?;
 

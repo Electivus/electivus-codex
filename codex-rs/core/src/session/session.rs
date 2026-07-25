@@ -704,6 +704,10 @@ impl Session {
                 thread_store.as_any().downcast_ref::<LocalThreadStore>()
             {
                 local_store.state_db().await
+            } else if let Some(postgres_store) =
+                thread_store.as_any().downcast_ref::<PostgresThreadStore>()
+            {
+                postgres_store.state_db()
             } else {
                 None
             }

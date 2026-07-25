@@ -162,6 +162,38 @@ pub(super) fn stored_thread_from_rollout_item(
     })
 }
 
+pub(super) async fn stored_thread_from_rollout_item_with_metadata(
+    store: &super::LocalThreadStore,
+    item: ThreadItem,
+    archived: bool,
+    default_provider: &str,
+) -> Option<StoredThread> {
+    let rollout_thread = stored_thread_from_rollout_item(item, archived, default_provider)?;
+    let thread_id = rollout_thread.thread_id;
+    if let Some(runtime) = store.state_db().await
+        && let Ok(Some(metadata)) = runtime.get_thread(thread_id).await
+        && let Ok(mut thread) =
+            super::read_thread::stored_thread_from_sqlite_metadata(store, metadata).await
+    {
+        overlay_rollout_fields(&mut thread, rollout_thread);
+        return Some(thread);
+    }
+    Some(rollout_thread)
+}
+
+pub(super) fn overlay_rollout_fields(thread: &mut StoredThread, rollout_thread: StoredThread) {
+    thread.parent_thread_id = rollout_thread.parent_thread_id.or(thread.parent_thread_id);
+    thread.rollout_path = rollout_thread.rollout_path;
+    thread.preview = rollout_thread.preview;
+    thread.model_provider = rollout_thread.model_provider;
+    thread.created_at = rollout_thread.created_at;
+    thread.updated_at = rollout_thread.updated_at;
+    thread.cwd = rollout_thread.cwd;
+    thread.cli_version = rollout_thread.cli_version;
+    thread.source = rollout_thread.source;
+    thread.first_user_message = rollout_thread.first_user_message;
+}
+
 pub(super) fn permission_profile_from_metadata_value(value: &str, cwd: &Path) -> PermissionProfile {
     serde_json::from_str::<PermissionProfile>(value)
         .or_else(|_| {

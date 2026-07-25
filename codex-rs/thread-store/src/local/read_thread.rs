@@ -5,6 +5,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::TokenUsage;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::find_archived_thread_path_by_id_str;
 use codex_rollout::find_thread_name_by_id;
@@ -16,6 +17,7 @@ use codex_state::ThreadMetadata;
 use super::LocalThreadStore;
 use super::helpers::distinct_thread_metadata_title;
 use super::helpers::git_info_from_parts;
+use super::helpers::overlay_rollout_fields;
 use super::helpers::permission_profile_from_metadata_value;
 use super::helpers::rollout_path_is_archived;
 use super::helpers::set_thread_name;
@@ -53,22 +55,16 @@ pub(super) async fn read_thread(
         let mut thread = stored_thread_from_sqlite_metadata(store, metadata).await?;
         if !params.include_history
             && let Some(rollout_path) = thread.rollout_path.clone()
-            && let Ok(mut rollout_thread) = read_thread_from_rollout_path(store, rollout_path).await
+            && let Ok(rollout_thread) = read_thread_from_rollout_path(store, rollout_path).await
             && rollout_thread.thread_id == thread_id
             && (params.include_archived || rollout_thread.archived_at.is_none())
             && !rollout_thread.preview.is_empty()
         {
-            rollout_thread.recency_at = thread.recency_at;
-            rollout_thread.is_pinned = thread.is_pinned;
-            if thread.name.is_some() {
-                rollout_thread.name = thread.name;
-            }
-            rollout_thread.git_info = thread.git_info;
-            rollout_thread.permission_profile = permission_profile_from_metadata_value(
+            overlay_rollout_fields(&mut thread, rollout_thread);
+            thread.permission_profile = permission_profile_from_metadata_value(
                 &metadata_sandbox_policy,
-                rollout_thread.cwd.as_path(),
+                thread.cwd.as_path(),
             );
-            thread = rollout_thread;
         }
         reject_paginated_history(&thread, params.include_history)?;
         attach_history_if_requested(&mut thread, params.include_history).await?;
@@ -329,7 +325,7 @@ async fn read_sqlite_metadata(
     runtime.get_thread(thread_id).await.ok().flatten()
 }
 
-async fn stored_thread_from_sqlite_metadata(
+pub(super) async fn stored_thread_from_sqlite_metadata(
     store: &LocalThreadStore,
     metadata: ThreadMetadata,
 ) -> ThreadStoreResult<StoredThread> {
@@ -402,7 +398,10 @@ async fn stored_thread_from_sqlite_metadata(
         ),
         approval_mode: parse_or_default(&metadata.approval_mode, AskForApproval::OnRequest),
         permission_profile,
-        token_usage: None,
+        token_usage: (metadata.tokens_used != 0).then(|| TokenUsage {
+            total_tokens: metadata.tokens_used,
+            ..Default::default()
+        }),
         first_user_message: metadata.first_user_message,
         history: None,
     })
@@ -435,9 +434,15 @@ async fn stored_thread_from_session_meta(
 ) -> ThreadStoreResult<StoredThread> {
     let meta_line = read_required_session_meta_line(path.as_path()).await?;
     let archived = rollout_path_is_archived(store.config.codex_home.as_path(), path.as_path());
-    Ok(stored_thread_from_meta_line(
-        store, meta_line, path, archived,
-    ))
+    let mut thread = stored_thread_from_meta_line(store, meta_line, path, archived);
+    if thread.history_mode == ThreadHistoryMode::Legacy
+        && let Ok(Some(name)) =
+            find_thread_name_by_id(store.config.codex_home.as_path(), &thread.thread_id).await
+        && !name.trim().is_empty()
+    {
+        set_thread_name(&mut thread, name);
+    }
+    Ok(thread)
 }
 
 async fn read_required_session_meta_line(

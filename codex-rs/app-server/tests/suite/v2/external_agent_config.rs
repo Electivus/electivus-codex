@@ -1005,6 +1005,24 @@ async fn external_agent_config_detects_and_imports_project_memory_files() -> Res
         ]
     );
 
+    let state_db = codex_state::StateRuntime::init_sqlite(
+        codex_home.path().to_path_buf(),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    let claim = state_db
+        .memories()
+        .try_claim_global_phase2_job(codex_protocol::ThreadId::new(), /*lease_seconds*/ 60)
+        .await?;
+    let codex_state::Phase2JobClaimOutcome::Claimed {
+        input_watermark, ..
+    } = claim
+    else {
+        anyhow::bail!("expected imported-memory consolidation claim, got {claim:?}");
+    };
+    assert!(input_watermark > 0);
+    state_db.close().await;
+
     Ok(())
 }
 

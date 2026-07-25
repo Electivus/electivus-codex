@@ -328,6 +328,121 @@ async fn load_rollout_items_defaults_legacy_session_id() -> std::io::Result<()> 
 }
 
 #[tokio::test]
+async fn bounded_rollout_load_rejects_oversized_and_blank_decoded_lines() -> std::io::Result<()> {
+    let home = TempDir::new()?;
+    for (name, contents) in [("record", b"{}\n".as_slice()), ("blank", b" \n")] {
+        let plain = home.path().join(format!("{name}.jsonl"));
+        let compressed = plain.with_extension("jsonl.zst");
+        fs::write(&plain, contents)?;
+        fs::write(
+            &compressed,
+            zstd::stream::encode_all(contents, /*level*/ 0)?,
+        )?;
+        for path in [plain, compressed] {
+            assert!(
+                RolloutRecorder::load_rollout_lines_bounded(&path, /*maximum_source_bytes*/ 1)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_rollout_lines_preserves_complete_legacy_and_current_domain_items()
+-> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let rollout_path = home.path().join("rollout.jsonl");
+    let mut file = File::create(&rollout_path)?;
+    let thread_id = ThreadId::new();
+    let legacy_timestamp = "2025-01-03T12:00:00Z";
+    let current_timestamp = "2026-07-22T15:12:34.567Z";
+
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "timestamp": legacy_timestamp,
+            "type": "session_meta",
+            "payload": {
+                "id": thread_id,
+                "timestamp": legacy_timestamp,
+                "cwd": ".",
+                "originator": "legacy",
+                "cli_version": "0.1.0",
+                "source": "cli",
+                "model_provider": "legacy-provider",
+            },
+        })
+    )?;
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "timestamp": legacy_timestamp,
+            "type": "response_item",
+            "payload": {
+                "type": "ghost_snapshot",
+                "ghost_commit": {
+                    "id": "deadbeef",
+                    "preexisting_untracked_dirs": [],
+                    "preexisting_untracked_files": [],
+                },
+            },
+        })
+    )?;
+    let current_item = agent_message_item("current message");
+    writeln!(
+        file,
+        "{}",
+        serde_json::to_string(&RolloutLine {
+            timestamp: current_timestamp.to_string(),
+            ordinal: Some(7),
+            item: current_item.clone(),
+        })?
+    )?;
+    write!(file, "{{\"timestamp\":\"incomplete")?;
+    drop(file);
+
+    let (lines, loaded_thread_id, parse_errors) =
+        RolloutRecorder::load_rollout_lines(&rollout_path).await?;
+    let expected = vec![
+        RolloutLine {
+            timestamp: legacy_timestamp.to_string(),
+            ordinal: None,
+            item: RolloutItem::SessionMeta(SessionMetaLine {
+                meta: SessionMeta {
+                    session_id: SessionId::from(thread_id),
+                    id: thread_id,
+                    timestamp: legacy_timestamp.to_string(),
+                    cwd: PathBuf::from("."),
+                    originator: "legacy".to_string(),
+                    cli_version: "0.1.0".to_string(),
+                    source: SessionSource::Cli,
+                    model_provider: Some("legacy-provider".to_string()),
+                    ..SessionMeta::default()
+                },
+                git: None,
+            }),
+        },
+        RolloutLine {
+            timestamp: current_timestamp.to_string(),
+            ordinal: Some(7),
+            item: current_item,
+        },
+    ];
+
+    assert_eq!(loaded_thread_id, Some(thread_id));
+    assert_eq!(parse_errors, 1);
+    assert_eq!(
+        serde_json::to_value(lines).map_err(std::io::Error::other)?,
+        serde_json::to_value(expected).map_err(std::io::Error::other)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_rollout_items_ignores_unknown_fork_source_history_mode() -> std::io::Result<()> {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::new_v4();

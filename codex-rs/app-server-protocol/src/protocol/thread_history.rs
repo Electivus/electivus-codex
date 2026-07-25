@@ -90,6 +90,18 @@ pub fn build_turns_from_rollout_items(items: &[RolloutItem]) -> Vec<Turn> {
     builder.finish()
 }
 
+/// Convert canonical paginated [`RolloutItem`] entries into a sequence of [`Turn`] values.
+///
+/// Paginated history persists materialized `ItemCompleted(TurnItem)` records instead of the
+/// legacy item events, so these records are treated as the authoritative item snapshots.
+pub fn build_paginated_turns_from_rollout_items(items: &[RolloutItem]) -> Vec<Turn> {
+    let mut builder = ThreadHistoryBuilder::new_paginated();
+    for item in items {
+        builder.handle_rollout_item(item);
+    }
+    builder.finish()
+}
+
 /// A materialized `ThreadItem` snapshot that changed while handling one input.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThreadHistoryItemChange {
@@ -238,6 +250,13 @@ pub struct ThreadHistoryBuilder {
     current_rollout_index: usize,
     next_rollout_index: usize,
     active_change_set: Option<ThreadHistoryChangeSet>,
+    materialized_item_mode: MaterializedItemMode,
+}
+
+#[derive(Clone, Copy)]
+enum MaterializedItemMode {
+    LegacyEvents,
+    PaginatedItems,
 }
 
 impl Default for ThreadHistoryBuilder {
@@ -248,6 +267,14 @@ impl Default for ThreadHistoryBuilder {
 
 impl ThreadHistoryBuilder {
     pub fn new() -> Self {
+        Self::with_materialized_item_mode(MaterializedItemMode::LegacyEvents)
+    }
+
+    fn new_paginated() -> Self {
+        Self::with_materialized_item_mode(MaterializedItemMode::PaginatedItems)
+    }
+
+    fn with_materialized_item_mode(materialized_item_mode: MaterializedItemMode) -> Self {
         Self {
             turns: Vec::new(),
             current_turn: None,
@@ -255,11 +282,12 @@ impl ThreadHistoryBuilder {
             current_rollout_index: 0,
             next_rollout_index: 0,
             active_change_set: None,
+            materialized_item_mode,
         }
     }
 
     pub fn reset(&mut self) {
-        *self = Self::new();
+        *self = Self::with_materialized_item_mode(self.materialized_item_mode);
     }
 
     pub fn finish(mut self) -> Vec<Turn> {
@@ -592,7 +620,14 @@ impl ThreadHistoryBuilder {
     }
 
     fn handle_item_completed(&mut self, payload: &ItemCompletedEvent) {
-        self.handle_materialized_item_lifecycle(&payload.turn_id, &payload.item);
+        if matches!(
+            self.materialized_item_mode,
+            MaterializedItemMode::PaginatedItems
+        ) {
+            self.upsert_item_in_turn_id(&payload.turn_id, ThreadItem::from(payload.item.clone()));
+        } else {
+            self.handle_materialized_item_lifecycle(&payload.turn_id, &payload.item);
+        }
     }
 
     fn handle_materialized_item_lifecycle(

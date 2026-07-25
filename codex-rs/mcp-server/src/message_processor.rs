@@ -56,7 +56,7 @@ impl MessageProcessor {
         environment_manager: Arc<EnvironmentManager>,
         state_db: Option<StateDbHandle>,
         installation_id: String,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let outgoing = Arc::new(outgoing);
         let auth_manager = AuthManager::shared_from_config(
             config.as_ref(),
@@ -88,19 +88,19 @@ impl MessageProcessor {
             Arc::new(extensions.build()),
             user_instructions_provider,
             /*analytics_events_client*/ None,
-            codex_core::thread_store_from_config(config.as_ref(), state_db.clone()),
+            codex_core::thread_store_from_config(config.as_ref(), state_db.clone())?,
             codex_core::local_agent_graph_store_from_state_db(state_db.as_ref()),
             installation_id,
             /*attestation_provider*/ None,
             /*external_time_provider*/ None,
         ));
-        Self {
+        Ok(Self {
             outgoing,
             initialized: false,
             arg0_paths,
             thread_manager,
             running_requests_id_to_codex_uuid: Arc::new(Mutex::new(HashMap::new())),
-        }
+        })
     }
 
     pub(crate) async fn process_request(&mut self, request: JsonRpcRequest<ClientRequest>) {
