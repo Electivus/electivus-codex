@@ -3231,6 +3231,8 @@ mod tests {
         let sqlite =
             codex_state::SqliteConfig::new_for_testing(occupied_sqlite_home.as_path().abs());
         config.sqlite = sqlite.clone();
+        config.runtime_state_backend =
+            codex_state::RuntimeStateBackendConfig::Sqlite(sqlite.clone());
 
         let err =
             match init_state_db_for_app_server_target(&config, &AppServerTarget::Embedded).await {
@@ -3265,6 +3267,8 @@ mod tests {
         let sqlite = codex_state::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
         let logs_db_path = sqlite.logs_db_path();
         std::fs::write(&logs_db_path, "not a sqlite database")?;
+        config.runtime_state_backend =
+            codex_state::RuntimeStateBackendConfig::Sqlite(sqlite.clone());
         config.sqlite = sqlite;
 
         let err =
