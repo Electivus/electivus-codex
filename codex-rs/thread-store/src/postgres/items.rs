@@ -21,17 +21,17 @@ use crate::ThreadStoreResult;
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct HistoryCursor {
-    thread_id: ThreadId,
-    scope: CursorScope,
+    requested_thread_id: ThreadId,
     rollout_ordinal: i64,
     include_anchor: bool,
+    scope: CursorScope,
 }
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub(super) enum CursorScope {
     Turns,
-    Items,
+    ItemsByCreatedAtOrdinal,
     ItemsByUpdatedAtOrdinal,
 }
 
@@ -52,7 +52,7 @@ pub(super) async fn list_items(
     )
     .await?;
     let (cursor_scope, sort_column) = match params.sort_key {
-        ItemSortKey::CreatedAtOrdinal => (CursorScope::Items, "rollout_ordinal"),
+        ItemSortKey::CreatedAtOrdinal => (CursorScope::ItemsByCreatedAtOrdinal, "rollout_ordinal"),
         ItemSortKey::UpdatedAtOrdinal => {
             if params.after_updated_at_ordinal.is_none() {
                 return Err(ThreadStoreError::InvalidRequest {
@@ -146,7 +146,7 @@ pub(super) fn parse_cursor(
     };
     let cursor_value: HistoryCursor =
         serde_json::from_str(cursor).map_err(|_| invalid_cursor(cursor))?;
-    if cursor_value.thread_id != thread_id || cursor_value.scope != scope {
+    if cursor_value.requested_thread_id != thread_id || cursor_value.scope != scope {
         return Err(invalid_cursor(cursor));
     }
     Ok(Some(cursor_value))
@@ -194,10 +194,10 @@ pub(super) fn serialize_cursor(
     include_anchor: bool,
 ) -> ThreadStoreResult<String> {
     serde_json::to_string(&HistoryCursor {
-        thread_id,
-        scope,
+        requested_thread_id: thread_id,
         rollout_ordinal,
         include_anchor,
+        scope,
     })
     .map_err(serialization_error)
 }

@@ -33,6 +33,7 @@ struct PostgresThreadProjection {
     updated_at: DateTime<Utc>,
     recency_at: DateTime<Utc>,
     archived_at: Option<DateTime<Utc>>,
+    #[serde(default)]
     is_pinned: bool,
     cwd: PathBuf,
     cli_version: String,

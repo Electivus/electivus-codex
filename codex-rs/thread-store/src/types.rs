@@ -656,6 +656,7 @@ pub struct StoredThread {
     /// Thread archive timestamp, if archived.
     pub archived_at: Option<DateTime<Utc>>,
     /// Whether this thread has been pinned by the user.
+    #[serde(default)]
     pub is_pinned: bool,
     /// Working directory captured for the thread.
     pub cwd: PathBuf,

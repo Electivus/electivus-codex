@@ -204,6 +204,7 @@ pub struct ThreadItemProjectionSnapshot {
     pub(super) turn_id: String,
     pub(super) item_id: String,
     pub(super) rollout_ordinal: u64,
+    pub(super) updated_at_ordinal: u64,
     pub(super) created_at_ms: i64,
     pub(super) item: Value,
     pub(super) item_type: String,
@@ -490,7 +491,7 @@ async fn read_thread_snapshot(
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let item_rows = sqlx::query("SELECT turn_id, item_id, rollout_ordinal, created_at_ms, item_json, item_type FROM thread_items WHERE thread_id = ? ORDER BY rollout_ordinal, turn_id, item_id")
+    let item_rows = sqlx::query("SELECT turn_id, item_id, rollout_ordinal, updated_at_ordinal, created_at_ms, item_json, item_type FROM thread_items WHERE thread_id = ? ORDER BY rollout_ordinal, turn_id, item_id")
         .bind(&thread_id)
         .fetch_all(history_pool)
         .await?;
@@ -501,6 +502,7 @@ async fn read_thread_snapshot(
                 turn_id: row.try_get("turn_id")?,
                 item_id: row.try_get("item_id")?,
                 rollout_ordinal: nonnegative(row.try_get("rollout_ordinal")?)?,
+                updated_at_ordinal: nonnegative(row.try_get("updated_at_ordinal")?)?,
                 created_at_ms: row.try_get("created_at_ms")?,
                 item: serde_json::from_str(&row.try_get::<String, _>("item_json")?)?,
                 item_type: row.try_get("item_type")?,

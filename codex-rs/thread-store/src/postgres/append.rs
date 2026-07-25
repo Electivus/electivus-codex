@@ -216,15 +216,16 @@ pub(super) async fn append_batch(
         i64::try_from(WRITER_LEASE_DURATION.as_millis()).map_err(history_too_large)?;
     let updated = sqlx::query(AssertSqlSafe(format!(
         "UPDATE {} SET projection = $1, stream_version = $2, history_projection_version = $2, \
-         updated_at = $3, recency_at = $4, \
-         writer_lease_expires_at = CURRENT_TIMESTAMP + $5 * INTERVAL '1 millisecond' \
-         WHERE thread_id = $6 AND writer_id = $7 AND fencing_token = $8 AND stream_version = $9",
+         updated_at = $3, recency_at = $4, is_pinned = $5, \
+         writer_lease_expires_at = CURRENT_TIMESTAMP + $6 * INTERVAL '1 millisecond' \
+         WHERE thread_id = $7 AND writer_id = $8 AND fencing_token = $9 AND stream_version = $10",
         store.tables.threads
     )))
     .bind(projection_json)
     .bind(committed_stream_version)
     .bind(projection.updated_at)
     .bind(projection.recency_at)
+    .bind(projection.is_pinned)
     .bind(lease_millis)
     .bind(batch.thread_id.to_string())
     .bind(&store.writer_id)

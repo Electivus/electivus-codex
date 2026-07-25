@@ -321,6 +321,34 @@ async fn assert_list_threads_contract(
     combined.cwd_filters = Some(Vec::new());
     assert!(store.list_threads(combined).await?.items.is_empty());
 
+    let pinned = store
+        .update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id: thread_ids[0],
+            patch: ThreadMetadataPatch {
+                is_pinned: Some(true),
+                ..Default::default()
+            },
+            include_archived: false,
+        })
+        .await?;
+    assert!(pinned.is_pinned);
+    let mut pin_filter = list_params(
+        /*page_size*/ 10,
+        /*cursor*/ None,
+        ThreadSortKey::CreatedAt,
+        SortDirection::Desc,
+    );
+    pin_filter.is_pinned = Some(true);
+    assert_eq!(
+        thread_ids_from_page(&store.list_threads(pin_filter.clone()).await?),
+        vec![thread_ids[0]]
+    );
+    pin_filter.is_pinned = Some(false);
+    assert_eq!(
+        thread_ids_from_page(&store.list_threads(pin_filter).await?),
+        vec![thread_ids[2], thread_ids[1]]
+    );
+
     store
         .archive_thread(ArchiveThreadParams {
             thread_id: thread_ids[2],

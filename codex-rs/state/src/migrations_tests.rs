@@ -7,7 +7,7 @@ use std::borrow::Cow;
 
 use super::STATE_MIGRATOR;
 use super::THREAD_HISTORY_MIGRATOR;
-use super::repair_legacy_recency_migration_version;
+use super::repair_legacy_state_migration_versions;
 
 fn migrator_through(version: i64) -> Migrator {
     Migrator {
@@ -421,7 +421,7 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
         .await
         .expect("legacy recency migration should apply as version 38");
 
-    repair_legacy_recency_migration_version(&pool, &STATE_MIGRATOR)
+    repair_legacy_state_migration_versions(&pool, &STATE_MIGRATOR)
         .await
         .expect("legacy migration history should be repaired");
     STATE_MIGRATOR
@@ -447,6 +447,90 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
         .migrations
         .iter()
         .filter(|migration| migration.version >= 38)
+        .map(|migration| (migration.version, migration.checksum.to_vec()))
+        .collect::<Vec<_>>();
+    assert_eq!(applied, expected);
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn repairs_official_pin_and_provider_migrations_before_fork_migration() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = sqlite.state_db_path();
+    let pool = sqlite
+        .open_read_write_pool(&state_path)
+        .await
+        .expect("sqlite database should open");
+
+    let pin_migration = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .find(|migration| migration.version == 44)
+        .expect("pin migration should exist");
+    let provider_migration = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .find(|migration| migration.version == 45)
+        .expect("provider migration should exist");
+    let mut official_migrations = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .filter(|migration| migration.version <= 42)
+        .cloned()
+        .collect::<Vec<_>>();
+    official_migrations.push(Migration::new(
+        /*version*/ 43,
+        pin_migration.description.clone(),
+        pin_migration.migration_type,
+        pin_migration.sql.clone(),
+        pin_migration.no_tx,
+    ));
+    official_migrations.push(Migration::new(
+        /*version*/ 44,
+        provider_migration.description.clone(),
+        provider_migration.migration_type,
+        provider_migration.sql.clone(),
+        provider_migration.no_tx,
+    ));
+    Migrator::with_migrations(official_migrations)
+        .run(&pool)
+        .await
+        .expect("official migrations should apply");
+
+    repair_legacy_state_migration_versions(&pool, &STATE_MIGRATOR)
+        .await
+        .expect("official migration history should be repaired");
+    STATE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("fork migrations should apply after repair");
+
+    let applied = sqlx::query(
+        "SELECT version, checksum FROM _sqlx_migrations WHERE version >= 43 ORDER BY version",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("applied migrations should load")
+    .into_iter()
+    .map(|row| {
+        (
+            row.get::<i64, _>("version"),
+            row.get::<Vec<u8>, _>("checksum"),
+        )
+    })
+    .collect::<Vec<_>>();
+    let expected = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .filter(|migration| migration.version >= 43)
         .map(|migration| (migration.version, migration.checksum.to_vec()))
         .collect::<Vec<_>>();
     assert_eq!(applied, expected);
@@ -483,7 +567,7 @@ async fn repair_recency_migration_succeeds_while_another_connection_holds_writer
         .await
         .expect("write transaction should acquire the writer slot");
 
-    let repair_result = repair_legacy_recency_migration_version(&read_pool, &STATE_MIGRATOR).await;
+    let repair_result = repair_legacy_state_migration_versions(&read_pool, &STATE_MIGRATOR).await;
 
     write_transaction
         .rollback()

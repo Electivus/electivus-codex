@@ -208,6 +208,7 @@ async fn snapshot_preserves_complete_legacy_and_current_thread_domain_read_only(
                     turn_id: "turn-1".to_string(),
                     item_id: "user-1".to_string(),
                     rollout_ordinal: 1,
+                    updated_at_ordinal: 0,
                     created_at_ms: 12_345,
                     item: json!({"id":"user-1","type":"userMessage"}),
                     item_type: "userMessage".to_string(),
@@ -293,7 +294,7 @@ fn inventory<const N: usize>(
         configuration: None,
         session_index: None,
         destination_schema: "unused".to_string(),
-        destination_schema_version: 19,
+        destination_schema_version: 20,
     })
 }
 

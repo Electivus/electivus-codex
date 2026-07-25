@@ -28,7 +28,6 @@ use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionMeta;
@@ -186,11 +185,7 @@ async fn postgres_contract_runtime_state_thread_import_is_visible_to_another_poo
             Some(source.legacy_id),
             None,
             Some("disabled"),
-            Some(HistoryPosition {
-                thread_id: source.legacy_id,
-                end_ordinal_exclusive: 4,
-                end_byte_offset: 256,
-            }),
+            None,
             Some(1),
         )
     );
@@ -1010,11 +1005,7 @@ fn history(thread_id: ThreadId, source: &std::path::Path) -> Vec<RolloutLine> {
         model_provider: Some("test-provider".to_string()),
         memory_mode: Some("disabled".to_string()),
         history_mode: ThreadHistoryMode::Paginated,
-        history_base: Some(HistoryPosition {
-            thread_id: ancestor,
-            end_ordinal_exclusive: 4,
-            end_byte_offset: 256,
-        }),
+        history_base: None,
         ..SessionMeta::default()
     };
     meta.dynamic_tools = Some(vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {

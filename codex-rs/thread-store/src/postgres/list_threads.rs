@@ -119,6 +119,10 @@ pub(super) async fn list_threads(
         }
         None => {}
     }
+    if let Some(is_pinned) = params.is_pinned {
+        query.push(" AND threads.is_pinned = ");
+        query.push_bind(is_pinned);
+    }
     if let Some(search_term) = params.search_term.as_deref() {
         query.push(" AND (strpos(COALESCE(threads.projection ->> 'name', ''), ");
         query.push_bind(search_term);

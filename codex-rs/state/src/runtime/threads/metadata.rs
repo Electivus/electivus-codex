@@ -220,6 +220,9 @@ ON CONFLICT(id) DO NOTHING
         thread_id: ThreadId,
         is_pinned: bool,
     ) -> anyhow::Result<bool> {
+        if let Some((pool, schema)) = self.postgres_connection() {
+            return postgres::update_thread_pin(&pool, &schema, thread_id, is_pinned).await;
+        }
         let result = sqlx::query("UPDATE threads SET is_pinned = ? WHERE id = ?")
             .bind(is_pinned)
             .bind(thread_id.to_string())
