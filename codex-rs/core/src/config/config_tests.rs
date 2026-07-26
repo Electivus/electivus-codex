@@ -263,7 +263,9 @@ max_rollouts_per_startup = 9
 min_rollout_idle_hours = 24
 min_rate_limit_remaining_percent = 12
 extract_model = "gpt-5-mini"
+extract_model_reasoning_effort = "high"
 consolidation_model = "gpt-5.2"
+consolidation_model_reasoning_effort = "xhigh"
 "#;
     let memories_cfg =
         toml::from_str::<ConfigToml>(memories).expect("TOML deserialization should succeed");
@@ -280,7 +282,9 @@ consolidation_model = "gpt-5.2"
             min_rollout_idle_hours: Some(24),
             min_rate_limit_remaining_percent: Some(12),
             extract_model: Some("gpt-5-mini".to_string()),
+            extract_model_reasoning_effort: Some(ReasoningEffort::High),
             consolidation_model: Some("gpt-5.2".to_string()),
+            consolidation_model_reasoning_effort: Some(ReasoningEffort::XHigh),
         }),
         memories_cfg.memories
     );
@@ -306,7 +310,9 @@ consolidation_model = "gpt-5.2"
             min_rollout_idle_hours: 24,
             min_rate_limit_remaining_percent: 12,
             extract_model: Some("gpt-5-mini".to_string()),
+            extract_model_reasoning_effort: Some(ReasoningEffort::High),
             consolidation_model: Some("gpt-5.2".to_string()),
+            consolidation_model_reasoning_effort: Some(ReasoningEffort::XHigh),
         }
     );
 
@@ -321,6 +327,107 @@ consolidation_model = "gpt-5.2"
         )
         .disable_on_external_context
     );
+}
+
+#[tokio::test]
+async fn load_config_rejects_extract_effort_without_extract_model() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config_toml = toml::from_str("[memories]\nextract_model_reasoning_effort = \"high\"\n")
+        .expect("TOML should deserialize");
+
+    let error = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("orphaned extraction effort should be rejected");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        error.to_string(),
+        "`memories.extract_model_reasoning_effort` requires `memories.extract_model`"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_rejects_consolidation_effort_without_consolidation_model()
+-> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config_toml =
+        toml::from_str("[memories]\nconsolidation_model_reasoning_effort = \"high\"\n")
+            .expect("TOML should deserialize");
+
+    let error = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("orphaned consolidation effort should be rejected");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        error.to_string(),
+        "`memories.consolidation_model_reasoning_effort` requires `memories.consolidation_model`"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_pairs_memory_model_and_effort_across_layers() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let system_file = codex_home.path().join("system.toml").abs();
+    let user_file = codex_home.path().join(CONFIG_TOML_FILE).abs();
+    let config_layer_stack = ConfigLayerStack::new(
+        vec![
+            ConfigLayerEntry::new(
+                ConfigLayerSource::System { file: system_file },
+                toml::toml! {
+                    [memories]
+                    extract_model = "future-memory-model"
+                }
+                .into(),
+            ),
+            ConfigLayerEntry::new(
+                ConfigLayerSource::User {
+                    file: user_file,
+                    profile: None,
+                },
+                toml::toml! {
+                    [memories]
+                    extract_model_reasoning_effort = "future"
+                }
+                .into(),
+            ),
+        ],
+        Default::default(),
+        Default::default(),
+    )?;
+    let config_toml = config_layer_stack
+        .effective_config()
+        .try_into()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+
+    let config = Config::load_config_with_layer_stack(
+        LOCAL_FS.as_ref(),
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+        config_layer_stack,
+    )
+    .await?;
+
+    assert_eq!(
+        config.memories,
+        MemoriesConfig {
+            extract_model: Some("future-memory-model".to_string()),
+            extract_model_reasoning_effort: Some(ReasoningEffort::Custom("future".to_string())),
+            ..MemoriesConfig::default()
+        }
+    );
+    Ok(())
 }
 
 #[test]
