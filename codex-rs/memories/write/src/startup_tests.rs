@@ -418,66 +418,104 @@ async fn memories_startup_phase1_uses_live_thread_service_tier_and_detached_meta
 }
 
 #[tokio::test]
-async fn memories_startup_phase1_provider_default_drives_request_model() -> anyhow::Result<()> {
+async fn memories_startup_phase1_provider_defaults_drive_request() -> anyhow::Result<()> {
     let server = start_mock_server().await;
     let home = Arc::new(TempDir::new()?);
     let request =
         run_memory_phase_one_model_request_test(&server, home, startup_test_memories_config())
             .await?;
 
+    let body = request.body_json();
     assert_eq!(
-        request.body_json()["model"].as_str(),
-        Some(MOCK_PROVIDER_PHASE_ONE_MODEL)
+        (body["model"].as_str(), body["reasoning"]["effort"].as_str()),
+        (Some(MOCK_PROVIDER_PHASE_ONE_MODEL), Some("low"))
     );
 
     Ok(())
 }
 
 #[tokio::test]
-async fn memories_startup_phase2_provider_default_drives_request_model() -> anyhow::Result<()> {
+async fn memories_startup_phase2_provider_defaults_drive_request() -> anyhow::Result<()> {
     let server = start_mock_server().await;
     let home = Arc::new(TempDir::new()?);
     let request =
         run_memory_phase_two_model_request_test(&server, home, startup_test_memories_config())
             .await?;
 
+    let body = request.body_json();
     assert_eq!(
-        request.body_json()["model"].as_str(),
-        Some(MOCK_PROVIDER_PHASE_TWO_MODEL)
+        (body["model"].as_str(), body["reasoning"]["effort"].as_str()),
+        (Some(MOCK_PROVIDER_PHASE_TWO_MODEL), Some("medium"))
     );
 
     Ok(())
 }
 
 #[tokio::test]
-async fn memories_startup_phase1_explicit_model_override_drives_request_model() -> anyhow::Result<()>
-{
+async fn memories_startup_phase1_explicit_model_and_effort_drive_request() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    let mut memories = startup_test_memories_config();
+    memories.extract_model = Some("override.phase-one".to_string());
+    memories.extract_model_reasoning_effort = Some(ReasoningEffort::High);
+    let request = run_memory_phase_one_model_request_test(&server, home, memories).await?;
+    let body = request.body_json();
+
+    assert_eq!(
+        (body["model"].as_str(), body["reasoning"]["effort"].as_str()),
+        (Some("override.phase-one"), Some("high"))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn memories_startup_phase1_model_only_override_uses_default_effort() -> anyhow::Result<()> {
     let server = start_mock_server().await;
     let home = Arc::new(TempDir::new()?);
     let mut memories = startup_test_memories_config();
     memories.extract_model = Some("override.phase-one".to_string());
     let request = run_memory_phase_one_model_request_test(&server, home, memories).await?;
+    let body = request.body_json();
 
     assert_eq!(
-        request.body_json()["model"].as_str(),
-        Some("override.phase-one")
+        (body["model"].as_str(), body["reasoning"]["effort"].as_str()),
+        (Some("override.phase-one"), Some("low"))
     );
 
     Ok(())
 }
 
 #[tokio::test]
-async fn memories_startup_phase2_explicit_model_override_drives_request_model() -> anyhow::Result<()>
-{
+async fn memories_startup_phase2_explicit_model_and_effort_drive_request() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    let mut memories = startup_test_memories_config();
+    memories.consolidation_model = Some("override.phase-two".to_string());
+    memories.consolidation_model_reasoning_effort = Some(ReasoningEffort::XHigh);
+    let request = run_memory_phase_two_model_request_test(&server, home, memories).await?;
+    let body = request.body_json();
+
+    assert_eq!(
+        (body["model"].as_str(), body["reasoning"]["effort"].as_str()),
+        (Some("override.phase-two"), Some("xhigh"))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn memories_startup_phase2_model_only_override_uses_default_effort() -> anyhow::Result<()> {
     let server = start_mock_server().await;
     let home = Arc::new(TempDir::new()?);
     let mut memories = startup_test_memories_config();
     memories.consolidation_model = Some("override.phase-two".to_string());
     let request = run_memory_phase_two_model_request_test(&server, home, memories).await?;
+    let body = request.body_json();
 
     assert_eq!(
-        request.body_json()["model"].as_str(),
-        Some("override.phase-two")
+        (body["model"].as_str(), body["reasoning"]["effort"].as_str()),
+        (Some("override.phase-two"), Some("medium"))
     );
 
     Ok(())
@@ -722,7 +760,7 @@ async fn build_test_codex_with_memories_config(
                 .expect("test config should allow feature update");
             config.memories = memories;
         })
-        .build(server)
+        .build_with_auto_env(server)
         .await
 }
 

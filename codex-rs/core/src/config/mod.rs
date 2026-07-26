@@ -3399,7 +3399,26 @@ impl Config {
             Some(WindowsSandboxModeToml::Unelevated) => WindowsSandboxLevel::RestrictedToken,
             None => WindowsSandboxLevel::Disabled,
         };
-        let memories_config: MemoriesConfig = cfg.memories.clone().unwrap_or_default().into();
+        let memories_toml = cfg.memories.clone().unwrap_or_default();
+        if memories_toml.extract_model_reasoning_effort.is_some()
+            && memories_toml.extract_model.is_none()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "`memories.extract_model_reasoning_effort` requires `memories.extract_model`",
+            ));
+        }
+        if memories_toml
+            .consolidation_model_reasoning_effort
+            .is_some()
+            && memories_toml.consolidation_model.is_none()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "`memories.consolidation_model_reasoning_effort` requires `memories.consolidation_model`",
+            ));
+        }
+        let memories_config: MemoriesConfig = memories_toml.into();
         let memories_root = memory_root(&codex_home);
 
         let profiles_are_active = effective_permission_selection.profiles_are_active(

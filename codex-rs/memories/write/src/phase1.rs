@@ -198,8 +198,13 @@ async fn build_request_context(
             .memory_extraction_preferred_model()
             .to_string()
     });
+    let reasoning_effort = config
+        .memories
+        .extract_model_reasoning_effort
+        .clone()
+        .unwrap_or(crate::stage_one::REASONING_EFFORT);
     context
-        .stage_one_request_context(config, &model_name, crate::stage_one::REASONING_EFFORT)
+        .stage_one_request_context(config, &model_name, reasoning_effort)
         .await
 }
 

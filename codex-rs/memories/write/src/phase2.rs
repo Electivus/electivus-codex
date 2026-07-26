@@ -377,7 +377,13 @@ mod agent {
                 .clone()
                 .unwrap_or_else(|| provider.memory_consolidation_preferred_model().to_string()),
         );
-        agent_config.model_reasoning_effort = Some(crate::stage_two::REASONING_EFFORT);
+        agent_config.model_reasoning_effort = Some(
+            config
+                .memories
+                .consolidation_model_reasoning_effort
+                .clone()
+                .unwrap_or(crate::stage_two::REASONING_EFFORT),
+        );
 
         Some(agent_config)
     }

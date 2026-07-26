@@ -37,6 +37,24 @@ The pipeline is triggered when a root session starts, and only if:
 
 It runs asynchronously in the background and executes two phases in order: Phase 1, then Phase 2.
 
+## Model and reasoning-effort overrides
+
+Each phase can use an explicit model and reasoning effort:
+
+```toml
+[memories]
+extract_model = "gpt-5-mini"
+extract_model_reasoning_effort = "high"
+consolidation_model = "gpt-5.2"
+consolidation_model_reasoning_effort = "xhigh"
+```
+
+An effort override requires the corresponding model override in the effective merged
+configuration. A model override can be used on its own; when its effort is omitted, Phase 1 keeps
+its `low` default and Phase 2 keeps its `medium` default. These settings do not inherit the
+interactive session's `model_reasoning_effort`, and configured effort values are sent unchanged to
+the provider.
+
 ## Phase 1: Rollout Extraction (per-thread)
 
 Phase 1 finds recent eligible rollouts and extracts a structured memory from each one.
