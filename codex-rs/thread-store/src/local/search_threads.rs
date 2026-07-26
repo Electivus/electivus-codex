@@ -9,7 +9,7 @@ use codex_rollout::search_rollout_matches;
 use super::LocalThreadStore;
 use super::helpers::resolve_thread_names;
 use super::helpers::set_thread_name;
-use super::helpers::stored_thread_from_rollout_item;
+use super::helpers::stored_thread_from_rollout_item_with_metadata;
 use super::list_threads::list_rollout_threads;
 use crate::ListThreadsParams;
 use crate::SearchThreadsParams;
@@ -152,20 +152,22 @@ pub(super) async fn search_threads(
     .and_then(|cursor| serde_json::to_value(cursor).ok())
     .and_then(|value| value.as_str().map(str::to_owned));
 
-    let mut items = matching_items
-        .into_iter()
-        .filter_map(|item| {
-            stored_thread_from_rollout_item(
-                item.item,
-                params.archived,
-                store.config.default_model_provider_id.as_str(),
-            )
-            .map(|thread| StoredThreadSearchResult {
+    let mut items = Vec::with_capacity(matching_items.len());
+    for item in matching_items {
+        if let Some(thread) = stored_thread_from_rollout_item_with_metadata(
+            store,
+            item.item,
+            params.archived,
+            store.config.default_model_provider_id.as_str(),
+        )
+        .await
+        {
+            items.push(StoredThreadSearchResult {
                 thread,
                 snippet: item.snippet,
-            })
-        })
-        .collect::<Vec<_>>();
+            });
+        }
+    }
     set_thread_search_result_names(store, &mut items).await;
 
     Ok(ThreadSearchPage { items, next_cursor })

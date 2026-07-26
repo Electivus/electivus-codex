@@ -27,6 +27,7 @@ use codex_config::config_toml::DEFAULT_PROJECT_DOC_MAX_BYTES;
 use codex_config::config_toml::ProjectConfig;
 use codex_config::config_toml::RealtimeAudioConfig;
 use codex_config::config_toml::RealtimeConfig;
+use codex_config::config_toml::StateToml;
 use codex_config::config_toml::ThreadStoreToml;
 use codex_config::config_toml::validate_model_providers;
 use codex_config::loader::load_config_layers_state;
@@ -111,6 +112,10 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SandboxPolicy;
+pub use codex_state::PostgresNamespaceConfig;
+pub use codex_state::PostgresPoolConfig;
+pub use codex_state::RuntimeStateBackendConfig;
+pub use codex_state::SqliteConfig;
 pub use codex_thread_store::ExtraConfig;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
@@ -127,6 +132,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::config::permissions::BUILT_IN_READ_ONLY_PROFILE;
 use crate::config::permissions::BUILT_IN_WORKSPACE_PROFILE;
@@ -893,6 +899,9 @@ pub struct Config {
 
     /// Resolved configuration shared by all Codex SQLite databases.
     pub sqlite: codex_state::SqliteConfig,
+
+    /// Runtime State Backend selected for this process.
+    pub runtime_state_backend: RuntimeStateBackendConfig,
 
     /// Directory where Codex writes log files (defaults to `$CODEX_HOME/log`).
     pub log_dir: PathBuf,
@@ -2319,6 +2328,48 @@ fn thread_store_config(thread_store: Option<ThreadStoreToml>) -> ThreadStoreConf
         Some(ThreadStoreToml::Local {}) => ThreadStoreConfig::Local,
         Some(ThreadStoreToml::InMemory { id }) => ThreadStoreConfig::InMemory { id },
         None => ThreadStoreConfig::Local,
+    }
+}
+
+fn runtime_state_backend_config(
+    state: Option<StateToml>,
+    features: &ManagedFeatures,
+    codex_home: &AbsolutePathBuf,
+    sqlite_home: &Path,
+) -> std::io::Result<RuntimeStateBackendConfig> {
+    match state {
+        None | Some(StateToml::Sqlite {}) => {
+            let sqlite_home = AbsolutePathBuf::try_from(sqlite_home.to_path_buf())?;
+            Ok(RuntimeStateBackendConfig::Sqlite(
+                SqliteConfig::from_sqlite_home(sqlite_home),
+            ))
+        }
+        Some(StateToml::Postgresql { postgresql }) => {
+            if !features.enabled(Feature::PostgresqlState) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "`state.backend = \"postgresql\"` requires `features.postgresql_state = true`",
+                ));
+            }
+            let pool = PostgresPoolConfig::new(
+                postgresql.pool.max_connections,
+                Duration::from_millis(postgresql.pool.acquire_timeout_ms.get()),
+                Duration::from_millis(postgresql.pool.statement_timeout_ms.get()),
+            )
+            .map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+            })?;
+            let namespace =
+                PostgresNamespaceConfig::new(postgresql.url_env, postgresql.schema, pool).map_err(
+                    |error| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+                    },
+                )?;
+            Ok(RuntimeStateBackendConfig::Postgresql {
+                codex_home: codex_home.clone(),
+                namespace,
+            })
+        }
     }
 }
 
@@ -3848,6 +3899,7 @@ impl Config {
             .map(AbsolutePathBuf::to_path_buf)
             .unwrap_or_else(|| codex_home.join("log").to_path_buf());
         let sqlite_home_env = resolve_sqlite_home_env(&resolved_cwd);
+        let sqlite_home_was_explicit = cfg.sqlite_home.is_some() || sqlite_home_env.is_some();
         requirements::push_sqlite_home_env_override_warning(
             configured_sqlite_home.as_ref(),
             sqlite_home_env.as_deref(),
@@ -3860,6 +3912,23 @@ impl Config {
             .cloned()
             .or(sqlite_home_env)
             .unwrap_or_else(|| codex_home.clone());
+        let runtime_state_backend = runtime_state_backend_config(
+            cfg.state.clone(),
+            &features,
+            &codex_home,
+            sqlite_home.as_path(),
+        )?;
+        if sqlite_home_was_explicit
+            && matches!(
+                &runtime_state_backend,
+                RuntimeStateBackendConfig::Postgresql { .. }
+            )
+        {
+            startup_warnings.push(
+                "`sqlite_home` is configured but inactive because PostgreSQL is the selected Runtime State Backend."
+                    .to_string(),
+            );
+        }
         let original_permission_profile = permission_profile.clone();
         apply_requirement_constrained_value(
             "approval_policy",
@@ -4055,6 +4124,7 @@ impl Config {
             agent_interrupt_message_enabled,
             codex_home,
             sqlite: codex_state::SqliteConfig::from_sqlite_home(sqlite_home),
+            runtime_state_backend,
             log_dir,
             config_lock_export_dir: cfg
                 .debug

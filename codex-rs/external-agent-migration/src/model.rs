@@ -1,4 +1,6 @@
 use crate::sessions::ExternalAgentSessionMigration;
+use codex_state::ExternalAgentMemoryImport;
+use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -87,6 +89,25 @@ pub struct PluginImportOutcome {
 pub struct ExternalAgentConfigImportOutcome {
     pub pending_plugin_imports: Vec<PendingPluginImport>,
     pub item_results: Vec<ExternalAgentConfigImportItemResult>,
+    memory_import: Option<ExternalAgentMemoryImport>,
+}
+
+impl ExternalAgentConfigImportOutcome {
+    /// Returns the authoritative memory-resource replacement produced by this import.
+    pub fn memory_import(&self) -> Option<&ExternalAgentMemoryImport> {
+        self.memory_import.as_ref()
+    }
+
+    pub(crate) fn merge_memory_import(
+        &mut self,
+        memory_import: ExternalAgentMemoryImport,
+    ) -> io::Result<()> {
+        self.memory_import = Some(match self.memory_import.take() {
+            Some(existing) => existing.overlay(memory_import).map_err(io::Error::other)?,
+            None => memory_import,
+        });
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

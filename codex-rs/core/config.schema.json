@@ -624,6 +624,9 @@
             "plugins": {
               "type": "boolean"
             },
+            "postgresql_state": {
+              "type": "boolean"
+            },
             "prevent_idle_sleep": {
               "type": "boolean"
             },
@@ -2547,6 +2550,63 @@
       },
       "type": "object"
     },
+    "PostgresqlStatePoolToml": {
+      "additionalProperties": false,
+      "description": "PostgreSQL Runtime State connection-pool settings.",
+      "properties": {
+        "acquire_timeout_ms": {
+          "default": 10000,
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "max_connections": {
+          "default": 10,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "statement_timeout_ms": {
+          "default": 30000,
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "PostgresqlStateToml": {
+      "additionalProperties": false,
+      "description": "PostgreSQL Runtime State Namespace configuration.",
+      "properties": {
+        "pool": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/PostgresqlStatePoolToml"
+            }
+          ],
+          "default": {
+            "acquire_timeout_ms": 10000,
+            "max_connections": 10,
+            "statement_timeout_ms": 30000
+          },
+          "description": "Connection-pool configuration."
+        },
+        "schema": {
+          "default": "codex",
+          "description": "PostgreSQL schema containing this Runtime State Namespace.",
+          "type": "string"
+        },
+        "url_env": {
+          "description": "Name of the environment variable containing the PostgreSQL connection URL.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url_env"
+      ],
+      "type": "object"
+    },
     "ProfileTui": {
       "additionalProperties": false,
       "description": "TUI settings supported inside a named profile.",
@@ -3052,6 +3112,45 @@
         }
       },
       "type": "object"
+    },
+    "StateToml": {
+      "description": "Runtime State Backend selection.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "backend": {
+              "enum": [
+                "sqlite"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "backend"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "backend": {
+              "enum": [
+                "postgresql"
+              ],
+              "type": "string"
+            },
+            "postgresql": {
+              "$ref": "#/definitions/PostgresqlStateToml"
+            }
+          },
+          "required": [
+            "backend",
+            "postgresql"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "ThreadStoreToml": {
       "oneOf": [
@@ -5174,6 +5273,9 @@
         "plugins": {
           "type": "boolean"
         },
+        "postgresql_state": {
+          "type": "boolean"
+        },
         "prevent_idle_sleep": {
           "type": "boolean"
         },
@@ -5698,6 +5800,14 @@
         }
       ],
       "description": "Directory where Codex stores the SQLite state DB. Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`."
+    },
+    "state": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/StateToml"
+        }
+      ],
+      "description": "Selects and configures the Runtime State Backend. SQLite is used when this section is omitted."
     },
     "suppress_unstable_features_warning": {
       "description": "Suppress warnings about unstable (under development) features.",

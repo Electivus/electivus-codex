@@ -1340,6 +1340,11 @@ async fn find_thread_path_by_id_str_in_subdir(
         return Ok(None);
     }
 
+    // A remote Canonical Thread History authority never consults replica-local rollout files.
+    if state_db_ctx.is_some_and(|state_db| !state_db.uses_local_rollout_history()) {
+        return Ok(None);
+    }
+
     // Prefer DB lookup, then fall back to rollout file search.
     // TODO(jif): sqlite migration phase 1
     let archived_only = match subdir {

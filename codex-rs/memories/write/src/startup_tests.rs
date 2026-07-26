@@ -28,8 +28,15 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::SessionMeta;
+use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::user_input::UserInput;
 use codex_state::Phase2JobClaimOutcome;
+use codex_state::PostgresNamespaceAction;
+use codex_state::PostgresNamespaceConfig;
+use codex_state::PostgresPoolConfig;
+use codex_state::RuntimeStateBackendConfig;
 use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ResponsesRequest;
@@ -43,6 +50,7 @@ use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
+use sqlx::AssertSqlSafe;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -475,6 +483,128 @@ async fn memories_startup_phase2_explicit_model_override_drives_request_model() 
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_memories_startup_phase1_loads_pathless_canonical_thread_history()
+-> anyhow::Result<()> {
+    const DATABASE_URL_ENV: &str = "CODEX_TEST_POSTGRES_URL";
+    let database_url = std::env::var(DATABASE_URL_ENV)?;
+    let schema = format!("codex_memory_phase1_{}", uuid::Uuid::new_v4().simple());
+    let namespace = PostgresNamespaceConfig::new(
+        DATABASE_URL_ENV.to_string(),
+        schema.clone(),
+        PostgresPoolConfig::default(),
+    )?;
+    codex_state::manage_postgres_namespace(namespace.clone(), PostgresNamespaceAction::Migrate)
+        .await?;
+    mark_postgres_namespace_ready(&database_url, &schema).await?;
+
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    let configured_namespace = namespace.clone();
+    let mut builder = test_codex().with_home(home).with_config(move |config| {
+        config.memories = startup_test_memories_config();
+        config.runtime_state_backend = RuntimeStateBackendConfig::Postgresql {
+            codex_home: config.codex_home.clone(),
+            namespace: configured_namespace,
+        };
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+
+    let candidate_response = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("pathless-candidate"),
+            ev_assistant_message("pathless-candidate-message", "candidate complete"),
+            ev_completed("pathless-candidate"),
+        ]),
+    )
+    .await;
+    let environments = test
+        .thread_manager
+        .default_environment_selections(&test.config.cwd, &test.config.workspace_roots);
+    let candidate = test
+        .thread_manager
+        .start_thread(codex_core::StartThreadOptions {
+            config: test.config.clone(),
+            allow_provider_model_fallback: false,
+            initial_history: codex_protocol::protocol::InitialHistory::New,
+            history_mode: None,
+            session_source: Some(SessionSource::Cli),
+            thread_source: None,
+            dynamic_tools: Vec::new(),
+            metrics_service_name: None,
+            parent_trace: None,
+            environments: Some(environments),
+            thread_extension_init: Default::default(),
+            supports_openai_form_elicitation: false,
+        })
+        .await?;
+    candidate
+        .thread
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "remember canonical pathless history".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    wait_for_event(&candidate.thread, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    candidate.thread.submit(Op::Shutdown {}).await?;
+    wait_for_event(&candidate.thread, |event| {
+        matches!(event, EventMsg::ShutdownComplete)
+    })
+    .await;
+    test.thread_manager
+        .remove_thread(&candidate.thread_id)
+        .await;
+    assert_eq!(candidate_response.requests().len(), 1);
+
+    let provider = Arc::new(MockMemoryModelProvider::new(
+        test.config.model_provider.clone(),
+        Some(test.thread_manager.auth_manager()),
+    ));
+    let phase_one = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("pathless-phase1"),
+            ev_assistant_message(
+                "pathless-phase1-message",
+                r#"{"raw_memory":"raw memory","rollout_summary":"rollout summary","rollout_slug":"pathless"}"#,
+            ),
+            ev_completed("pathless-phase1"),
+        ]),
+    )
+    .await;
+    let (context, config) = memory_startup_context_with_provider(&test, provider).await;
+    phase1::run(context, config).await;
+    let request = wait_for_single_request(&phase_one).await;
+
+    assert!(
+        request
+            .message_input_texts("user")
+            .iter()
+            .any(|text| text.contains("remember canonical pathless history"))
+    );
+
+    shutdown_test_codex(&test).await?;
+    drop(candidate);
+    drop(test);
+    let cleanup_pool = sqlx::PgPool::connect(&database_url).await?;
+    sqlx::query(AssertSqlSafe(format!("DROP SCHEMA \"{schema}\" CASCADE")))
+        .execute(&cleanup_pool)
+        .await?;
+    cleanup_pool.close().await;
+    Ok(())
+}
+
 async fn run_memory_phase_one_model_request_test(
     server: &wiremock::MockServer,
     home: Arc<TempDir>,
@@ -743,6 +873,24 @@ async fn seed_stage1_candidate(
 ) -> anyhow::Result<ThreadId> {
     let thread_id = ThreadId::new();
     let rollout_path = codex_home.join(format!("rollout-{thread_id}.jsonl"));
+    let rollout_cwd = codex_home.join(format!("workspace-{rollout_slug}"));
+    let session_meta = RolloutLine {
+        timestamp: updated_at.to_rfc3339(),
+        ordinal: None,
+        item: RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                session_id: thread_id.into(),
+                id: thread_id,
+                timestamp: updated_at.to_rfc3339(),
+                cwd: rollout_cwd.clone(),
+                source: SessionSource::Cli,
+                model_provider: Some("test-provider".to_string()),
+                memory_mode: Some("enabled".to_string()),
+                ..Default::default()
+            },
+            git: None,
+        }),
+    };
     let line = RolloutLine {
         timestamp: updated_at.to_rfc3339(),
         ordinal: None,
@@ -756,8 +904,13 @@ async fn seed_stage1_candidate(
             internal_chat_message_metadata_passthrough: None,
         }),
     };
-    let jsonl = serde_json::to_string(&line)?;
-    tokio::fs::write(&rollout_path, format!("{jsonl}\n")).await?;
+    let session_meta_jsonl = serde_json::to_string(&session_meta)?;
+    let response_jsonl = serde_json::to_string(&line)?;
+    tokio::fs::write(
+        &rollout_path,
+        format!("{session_meta_jsonl}\n{response_jsonl}\n"),
+    )
+    .await?;
 
     let mut metadata_builder = codex_state::ThreadMetadataBuilder::new(
         thread_id,
@@ -765,7 +918,7 @@ async fn seed_stage1_candidate(
         updated_at,
         SessionSource::Cli,
     );
-    metadata_builder.cwd = codex_home.join(format!("workspace-{rollout_slug}"));
+    metadata_builder.cwd = rollout_cwd;
     metadata_builder.model_provider = Some("test-provider".to_string());
     metadata_builder.git_branch = Some(format!("branch-{rollout_slug}"));
     let mut metadata = metadata_builder.build("test-provider");
@@ -944,6 +1097,32 @@ async fn read_rollout_summary_bodies(memory_root: &Path) -> anyhow::Result<Vec<S
     }
     summaries.sort();
     Ok(summaries)
+}
+
+async fn mark_postgres_namespace_ready(database_url: &str, schema: &str) -> anyhow::Result<()> {
+    let pool = sqlx::PgPool::connect(database_url).await?;
+    let migration = format!("\"{schema}\".runtime_state_migration");
+    let evidence = serde_json::json!({
+        "sourceIdentity": "memory-phase1-contract",
+        "sourceFingerprint": "memory-phase1-contract-fingerprint",
+        "phase": "ready",
+        "ready": true,
+        "fencingToken": 4,
+        "namespaceDigest": "memory-phase1-contract-digest",
+        "globalReferentialIntegrityValidated": true,
+        "canonicalThreadHistoryOrderingValidated": true,
+    });
+    sqlx::query(AssertSqlSafe(format!(
+        "INSERT INTO {migration} (source_identity, source_fingerprint, phase, ready, \
+         phase_evidence, fencing_token) VALUES ($1, $2, 'ready', TRUE, $3, 4)"
+    )))
+    .bind("memory-phase1-contract")
+    .bind("memory-phase1-contract-fingerprint")
+    .bind(evidence)
+    .execute(&pool)
+    .await?;
+    pool.close().await;
+    Ok(())
 }
 
 async fn shutdown_test_codex(test: &TestCodex) -> anyhow::Result<()> {

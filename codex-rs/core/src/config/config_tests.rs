@@ -5452,6 +5452,105 @@ async fn sqlite_home_defaults_to_codex_home_for_workspace_write() -> std::io::Re
 }
 
 #[tokio::test]
+async fn runtime_state_backend_defaults_to_sqlite() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.runtime_state_backend,
+        RuntimeStateBackendConfig::Sqlite(SqliteConfig::from_sqlite_home(codex_home.abs()))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn postgresql_runtime_state_backend_requires_experimental_feature() {
+    let codex_home = TempDir::new().expect("create CODEX_HOME");
+    let config_toml = toml::from_str(
+        r#"
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+url_env = "CODEX_POSTGRES_URL"
+"#,
+    )
+    .expect("parse config");
+
+    let error = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("PostgreSQL selection should fail while the feature is disabled");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        error
+            .to_string()
+            .contains("requires `features.postgresql_state = true`")
+    );
+}
+
+#[tokio::test]
+async fn postgresql_runtime_state_backend_uses_stable_config_and_warns_for_sqlite_home()
+-> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let sqlite_sentinel = codex_home.path().join("must-not-be-accessed");
+    let config_toml = toml::from_str(&format!(
+        r#"
+sqlite_home = "{}"
+
+[features]
+postgresql_state = true
+
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+url_env = "CODEX_POSTGRES_URL"
+schema = "codex_test"
+"#,
+        sqlite_sentinel.display()
+    ))
+    .expect("parse config");
+
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.runtime_state_backend,
+        RuntimeStateBackendConfig::Postgresql {
+            codex_home: codex_home.abs(),
+            namespace: PostgresNamespaceConfig::new(
+                "CODEX_POSTGRES_URL".to_string(),
+                "codex_test".to_string(),
+                PostgresPoolConfig::default(),
+            )
+            .expect("valid namespace config"),
+        }
+    );
+    assert!(config.startup_warnings.iter().any(|warning| {
+        warning.contains("`sqlite_home` is configured but inactive")
+            && warning.contains("PostgreSQL")
+    }));
+    assert!(!sqlite_sentinel.exists());
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn workspace_write_includes_configured_writable_root_once_without_memories_root()
 -> std::io::Result<()> {
     let codex_home = TempDir::new()?;

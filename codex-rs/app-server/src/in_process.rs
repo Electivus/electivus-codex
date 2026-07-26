@@ -89,6 +89,7 @@ use codex_login::AuthManager;
 use codex_protocol::protocol::SessionSource;
 pub use codex_rollout::StateDbHandle;
 pub use codex_state::log_db::LogDbLayer;
+use codex_thread_store::ThreadStore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -352,7 +353,27 @@ impl InProcessClientHandle {
 /// This function sends `initialize` followed by `initialized` before returning
 /// the handle, so callers receive a ready-to-use runtime. If initialize fails,
 /// the runtime is shut down and an `InvalidData` error is returned.
-pub async fn start(mut args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
+pub async fn start(args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
+    start_inner(args, /*thread_store*/ None).await
+}
+
+/// Starts the regular in-process app-server with an explicitly supplied thread store.
+///
+/// This debug-only seam exists for integration tests that exercise database-backed stores before
+/// their production configuration selection is enabled.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub async fn start_with_thread_store(
+    args: InProcessStartArgs,
+    thread_store: Arc<dyn ThreadStore>,
+) -> IoResult<InProcessClientHandle> {
+    start_inner(args, Some(thread_store)).await
+}
+
+async fn start_inner(
+    mut args: InProcessStartArgs,
+    thread_store: Option<Arc<dyn ThreadStore>>,
+) -> IoResult<InProcessClientHandle> {
     if let Ok(Some(err)) = check_execpolicy_for_warnings(&args.config.config_layer_stack).await {
         let (path, range) = crate::exec_policy_warning_location(&err);
         args.config_warnings.push(ConfigWarningNotification {
@@ -363,7 +384,7 @@ pub async fn start(mut args: InProcessStartArgs) -> IoResult<InProcessClientHand
         });
     }
     let initialize = args.initialize.clone();
-    let client = start_uninitialized(args).await?;
+    let client = start_uninitialized(args, thread_store).await?;
 
     let initialize_response = client
         .request(ClientRequest::Initialize {
@@ -383,9 +404,17 @@ pub async fn start(mut args: InProcessStartArgs) -> IoResult<InProcessClientHand
     Ok(client)
 }
 
-async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
+async fn start_uninitialized(
+    args: InProcessStartArgs,
+    thread_store: Option<Arc<dyn ThreadStore>>,
+) -> IoResult<InProcessClientHandle> {
     let channel_capacity = args.channel_capacity.max(1);
     let installation_id = resolve_installation_id(&args.config.codex_home).await?;
+    let thread_store = match thread_store {
+        Some(thread_store) => thread_store,
+        None => codex_core::thread_store_from_config(&args.config, args.state_db.clone())
+            .map_err(|error| IoError::new(ErrorKind::InvalidInput, error))?,
+    };
     let (client_tx, mut client_rx) = mpsc::channel::<InProcessClientMessage>(channel_capacity);
     let (event_tx, event_rx) = mpsc::channel::<InProcessServerEvent>(channel_capacity);
 
@@ -436,7 +465,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
         );
         let (processor_tx, mut processor_rx) = mpsc::channel::<ProcessorCommand>(channel_capacity);
         let mut processor_handle = tokio::spawn(async move {
-            let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
+            let processor_args = MessageProcessorArgs {
                 outgoing: Arc::clone(&processor_outgoing),
                 analytics_events_client,
                 arg0_paths: args.arg0_paths,
@@ -454,7 +483,11 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 rpc_transport: AppServerRpcTransport::InProcess,
                 remote_control_handle: None,
                 plugin_startup_tasks: crate::PluginStartupTasks::Start,
-            }));
+            };
+            let processor = Arc::new(MessageProcessor::new_with_thread_store(
+                processor_args,
+                thread_store,
+            ));
             let mut thread_created_rx = processor.thread_created_receiver();
             let session = Arc::new(ConnectionSessionState::new());
             let mut listen_for_threads = true;

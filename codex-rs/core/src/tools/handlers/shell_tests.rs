@@ -65,12 +65,12 @@ fn commands_generated_by_shell_command_handler_can_be_matched_by_is_known_safe_c
 }
 
 fn assert_safe(shell: &Shell, command: &str) {
-    assert!(is_known_safe_command(&shell.derive_exec_args(
-        command, /* use_login_shell */ /*use_login_shell*/ true
-    )));
-    assert!(is_known_safe_command(&shell.derive_exec_args(
-        command, /* use_login_shell */ /*use_login_shell*/ false
-    )));
+    assert!(is_known_safe_command(
+        &shell.derive_exec_args(command, /*use_login_shell*/ true)
+    ));
+    assert!(is_known_safe_command(
+        &shell.derive_exec_args(command, /*use_login_shell*/ false)
+    ));
 }
 
 #[tokio::test]

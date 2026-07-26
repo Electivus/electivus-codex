@@ -320,3 +320,17 @@ Tests and features must support Linux, macOS and Windows unless feature is expli
 
 Codex supports running connected app-server and exec-server on different operating systems. See the
 `$remote-tests` skill for details about integration testing these configurations.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub Issues for `Electivus/electivus-codex`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage uses the five canonical Matt Pocock skills labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repository uses a multi-context domain documentation layout. See `docs/agents/domain.md`.
