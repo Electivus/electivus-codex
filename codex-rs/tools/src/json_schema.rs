@@ -68,9 +68,9 @@ pub struct JsonSchema {
     pub one_of: Option<Vec<JsonSchema>>,
     #[serde(rename = "allOf", skip_serializing_if = "Option::is_none")]
     pub all_of: Option<Vec<JsonSchema>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub minimum: Option<Number>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub maximum: Option<Number>,
     #[serde(rename = "$defs", skip_serializing_if = "Option::is_none")]
     pub defs: Option<BTreeMap<String, JsonSchema>>,

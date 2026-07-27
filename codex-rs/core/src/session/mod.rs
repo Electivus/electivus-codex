@@ -22,6 +22,7 @@ use crate::build_available_skills;
 use crate::compact;
 use crate::compact::CompactedHistoryMetadata;
 use crate::config::ManagedFeatures;
+use crate::config::resolve_tool_execution_config;
 use crate::config::resolve_tool_suggest_config_from_layer_stack;
 use crate::context::ApprovedCommandPrefixSaved;
 use crate::context::AvailableSkillsInstructions;
@@ -1802,6 +1803,21 @@ impl Session {
             }
             config.tool_suggest =
                 resolve_tool_suggest_config_from_layer_stack(&config.config_layer_stack);
+            let effective_config: codex_config::config_toml::ConfigToml =
+                match config.config_layer_stack.effective_config().try_into() {
+                    Ok(config) => config,
+                    Err(err) => {
+                        warn!("failed to resolve user config while reloading layer: {err}");
+                        return;
+                    }
+                };
+            config.tool_execution = match resolve_tool_execution_config(&effective_config) {
+                Ok(policy) => policy,
+                Err(err) => {
+                    warn!("failed to resolve tool execution config while reloading layer: {err}");
+                    return;
+                }
+            };
             config
         };
         self.services.skills_service.clear_cache();

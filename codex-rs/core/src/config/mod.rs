@@ -2247,6 +2247,16 @@ fn resolve_tool_suggest_config(
     resolve_tool_suggest_config_from_config(config_toml.tool_suggest.as_ref(), config_layer_stack)
 }
 
+pub(crate) fn resolve_tool_execution_config(
+    config_toml: &ConfigToml,
+) -> std::io::Result<codex_config::ToolExecutionPolicy> {
+    codex_config::ToolExecutionPolicy::resolve(
+        config_toml.tool_execution.as_ref(),
+        config_toml.background_terminal_max_timeout,
+    )
+    .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))
+}
+
 pub(crate) fn resolve_tool_suggest_config_from_layer_stack(
     config_layer_stack: &ConfigLayerStack,
 ) -> ToolSuggestConfig {
@@ -3280,6 +3290,7 @@ impl Config {
         }
 
         let tool_suggest = resolve_tool_suggest_config(&cfg, &config_layer_stack);
+        let tool_execution = resolve_tool_execution_config(&cfg)?;
         let feature_overrides = FeatureOverrides {
             web_search_request: override_tools_web_search_request,
         };
@@ -3778,13 +3789,6 @@ impl Config {
             .as_ref()
             .and_then(|agents| agents.interrupt_message)
             .unwrap_or(true);
-        let tool_execution = codex_config::ToolExecutionPolicy::resolve(
-            cfg.tool_execution.as_ref(),
-            cfg.background_terminal_max_timeout,
-        )
-        .map_err(|message| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
-        })?;
         let ghost_snapshot = {
             let mut config = GhostSnapshotConfig::default();
             if let Some(ghost_snapshot) = cfg.ghost_snapshot.as_ref()

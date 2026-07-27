@@ -1645,7 +1645,7 @@ async fn refresh_runtime_config_refreshes_hooks() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn reload_user_config_layer_updates_effective_tool_suggest_config() {
+async fn reload_user_config_layer_updates_effective_tool_execution_config() {
     let (session, _turn_context) = make_session_and_context().await;
     let codex_home = session.codex_home().await;
     std::fs::create_dir_all(&codex_home).expect("create codex home");
@@ -1657,6 +1657,11 @@ disabled_tools = [
   { type = "connector", id = " calendar " },
   { type = "plugin", id = "slack@openai-curated" },
 ]
+
+[tool_execution.yield]
+min_ms = 20_000
+default_ms = 40_000
+max_ms = 80_000
 "#,
     )
     .expect("write user config");
@@ -1670,6 +1675,13 @@ disabled_tools = [
             ToolSuggestDisabledTool::connector("calendar"),
             ToolSuggestDisabledTool::plugin("slack@openai-curated"),
         ]
+    );
+    assert_eq!(
+        config.tool_execution.yield_time(),
+        codex_config::ToolExecutionTimingRange::new(
+            /*min_ms*/ 20_000, /*default_ms*/ 40_000, /*max_ms*/ 80_000,
+        )
+        .expect("reloaded timing range should be valid")
     );
 }
 

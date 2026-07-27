@@ -10,6 +10,7 @@ use crate::tools::registry::ToolExecutor;
 use crate::tools::timing::TimingParameter;
 use crate::tools::timing::YieldTimingClass;
 use crate::tools::timing::adjustment_message;
+use crate::tools::timing::error_with_timing_adjustment;
 use crate::tools::timing::resolve_yield_timing;
 use crate::unified_exec::WriteStdinInteractionEvent;
 use crate::unified_exec::WriteStdinRequest;
@@ -113,7 +114,11 @@ impl WriteStdinHandler {
             })
             .await
             .map_err(|err| {
-                FunctionCallError::RespondToModel(format!("write_stdin failed: {err}"))
+                FunctionCallError::RespondToModel(error_with_timing_adjustment(
+                    TimingParameter::Yield,
+                    resolved_yield,
+                    format!("write_stdin failed: {err}"),
+                ))
             })?;
         response.timing_adjustment = adjustment_message(TimingParameter::Yield, resolved_yield);
 

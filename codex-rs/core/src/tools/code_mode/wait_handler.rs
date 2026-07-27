@@ -12,6 +12,7 @@ use crate::tools::registry::ToolExecutor;
 use crate::tools::timing::TimingParameter;
 use crate::tools::timing::YieldTimingClass;
 use crate::tools::timing::adjustment_message;
+use crate::tools::timing::error_with_timing_adjustment;
 use crate::tools::timing::resolve_yield_timing;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
@@ -119,7 +120,14 @@ impl CodeModeWaitHandler {
                         Some(resolved_yield),
                     )
                 };
-                let wait_response = wait_response.map_err(FunctionCallError::RespondToModel)?;
+                let adjust_error = |error: String| match resolved_yield {
+                    Some(timing) => {
+                        error_with_timing_adjustment(TimingParameter::Yield, timing, error)
+                    }
+                    None => error,
+                };
+                let wait_response = wait_response
+                    .map_err(|err| FunctionCallError::RespondToModel(adjust_error(err)))?;
                 if let codex_code_mode::WaitOutcome::LiveCell(response) = &wait_response
                     && !matches!(response, codex_code_mode::RuntimeResponse::Yielded { .. })
                 {
@@ -152,7 +160,7 @@ impl CodeModeWaitHandler {
                     started_at,
                 )
                 .await
-                .map_err(FunctionCallError::RespondToModel)?;
+                .map_err(|err| FunctionCallError::RespondToModel(adjust_error(err)))?;
                 if let Some(message) = resolved_yield
                     .and_then(|timing| adjustment_message(TimingParameter::Yield, timing))
                 {

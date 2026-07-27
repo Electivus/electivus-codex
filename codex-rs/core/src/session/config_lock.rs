@@ -491,6 +491,23 @@ sandbox_private_desktop = false
     }
 
     #[tokio::test]
+    async fn lock_replay_normalizes_legacy_tool_execution_policy() {
+        let sc = crate::session::tests::make_session_configuration_for_tests().await;
+        let actual = sc.to_config_lockfile_toml().expect("lock should serialize");
+        let mut expected = actual.clone();
+        expected.config.tool_execution = None;
+        expected.config.background_terminal_max_timeout = Some(
+            sc.original_config_do_not_use
+                .tool_execution
+                .yield_time()
+                .max_ms(),
+        );
+
+        validate_config_lock_replay(&expected, &actual, ConfigLockReplayOptions::default())
+            .expect("legacy timing lock should match the resolved policy");
+    }
+
+    #[tokio::test]
     async fn lock_drops_unmanaged_model_catalog_input() {
         let codex_home = tempfile::tempdir().expect("create temp dir");
         let catalog_path = codex_home.path().join("user-models.json");

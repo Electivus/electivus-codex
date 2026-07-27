@@ -125,6 +125,14 @@ fn config_lock_for_comparison(
 ) -> ConfigLockfileToml {
     let mut lockfile = lockfile.clone();
     clear_config_lock_debug_controls(&mut lockfile.config);
+    if lockfile.config.tool_execution.is_none()
+        && let Some(legacy_yield_max_ms) = lockfile.config.background_terminal_max_timeout
+        && let Ok(policy) =
+            codex_config::ToolExecutionPolicy::resolve(None, Some(legacy_yield_max_ms))
+    {
+        lockfile.config.tool_execution = Some(policy.to_toml());
+        lockfile.config.background_terminal_max_timeout = None;
+    }
     if let Some(features) = lockfile.config.features.as_mut() {
         features.clear_removed_compatibility_entries();
     }

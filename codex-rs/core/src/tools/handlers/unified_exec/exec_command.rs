@@ -24,6 +24,7 @@ use crate::tools::registry::ToolExecutor;
 use crate::tools::timing::TimingParameter;
 use crate::tools::timing::YieldTimingClass;
 use crate::tools::timing::adjustment_message;
+use crate::tools::timing::error_with_timing_adjustment;
 use crate::tools::timing::resolve_yield_timing;
 use crate::unified_exec::ExecCommandRequest;
 use crate::unified_exec::UnifiedExecContext;
@@ -415,9 +416,13 @@ impl ExecCommandHandler {
                     hook_command: Some(hook_command),
                 }))
             }
-            Err(err) => Err(FunctionCallError::RespondToModel(format!(
-                "exec_command failed for `{command_for_display}`: {err:?}"
-            ))),
+            Err(err) => Err(FunctionCallError::RespondToModel(
+                error_with_timing_adjustment(
+                    TimingParameter::Yield,
+                    resolved_yield,
+                    format!("exec_command failed for `{command_for_display}`: {err:?}"),
+                ),
+            )),
         }
     }
 }

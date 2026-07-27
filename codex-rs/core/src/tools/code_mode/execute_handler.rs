@@ -8,6 +8,7 @@ use crate::tools::registry::ToolExecutor;
 use crate::tools::timing::TimingParameter;
 use crate::tools::timing::YieldTimingClass;
 use crate::tools::timing::adjustment_message;
+use crate::tools::timing::error_with_timing_adjustment;
 use crate::tools::timing::resolve_yield_timing;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
@@ -60,7 +61,13 @@ impl CodeModeExecuteHandler {
                 max_output_tokens: args.max_output_tokens,
             })
             .await
-            .map_err(FunctionCallError::RespondToModel)?;
+            .map_err(|err| {
+                FunctionCallError::RespondToModel(error_with_timing_adjustment(
+                    TimingParameter::Yield,
+                    resolved_yield,
+                    err,
+                ))
+            })?;
         let cell_id = started_cell.cell_id.clone();
         let runtime_cell_id = cell_id.to_string();
         let code_cell_trace = exec
@@ -77,10 +84,13 @@ impl CodeModeExecuteHandler {
             .services
             .code_mode_service
             .mark_cell_ready_for_dispatch(&cell_id);
-        let response = started_cell
-            .initial_response()
-            .await
-            .map_err(FunctionCallError::RespondToModel)?;
+        let response = started_cell.initial_response().await.map_err(|err| {
+            FunctionCallError::RespondToModel(error_with_timing_adjustment(
+                TimingParameter::Yield,
+                resolved_yield,
+                err,
+            ))
+        })?;
         // Record the raw runtime boundary. The model-visible custom-tool output
         // is produced by `handle_runtime_response` and later linked through
         // `CodeCell.output_item_ids` in the reduced trace.
@@ -98,7 +108,13 @@ impl CodeModeExecuteHandler {
         let mut output =
             handle_runtime_response(&exec, response, args.max_output_tokens, started_at)
                 .await
-                .map_err(FunctionCallError::RespondToModel)?;
+                .map_err(|err| {
+                    FunctionCallError::RespondToModel(error_with_timing_adjustment(
+                        TimingParameter::Yield,
+                        resolved_yield,
+                        err,
+                    ))
+                })?;
         if let Some(message) = adjustment_message(TimingParameter::Yield, resolved_yield) {
             output.prepend_text(message);
         }

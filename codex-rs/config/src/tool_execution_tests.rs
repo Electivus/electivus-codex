@@ -82,6 +82,23 @@ fn legacy_background_timeout_below_new_default_keeps_loading() {
 }
 
 #[test]
+fn unrepresentable_legacy_background_timeout_keeps_loading() {
+    let policy = ToolExecutionPolicy::resolve(
+        /*config*/ None,
+        /*legacy_yield_max_ms*/ Some(u64::MAX),
+    )
+    .expect("legacy timing config should continue loading");
+
+    assert!(
+        std::time::Instant::now()
+            .checked_add(std::time::Duration::from_millis(
+                policy.yield_time().max_ms()
+            ))
+            .is_some()
+    );
+}
+
+#[test]
 fn legacy_and_new_yield_maximum_conflict() {
     let config = ToolExecutionToml {
         yield_time: Some(ToolExecutionTimingRangeToml {

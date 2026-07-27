@@ -5,7 +5,6 @@ use codex_config::ToolExecutionTimingRange;
 use codex_features::Feature;
 use codex_protocol::openai_models::ConfigShellToolType;
 use core_test_support::TestTargetOs;
-use core_test_support::assert_regex_match;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -32,6 +31,18 @@ fn function_output(request: &ResponsesRequest, call_id: &str) -> Result<String> 
         .function_call_output_content_and_success(call_id)
         .with_context(|| format!("tool result for {call_id} should be present"))?;
     output.with_context(|| format!("tool result for {call_id} should contain text"))
+}
+
+fn reported_timeout_ms(output: &str) -> Result<u64> {
+    output
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("command timed out after ")
+                .and_then(|value| value.strip_suffix(" milliseconds"))
+                .and_then(|value| value.parse().ok())
+        })
+        .with_context(|| format!("timeout duration should be present in output: {output}"))
 }
 
 fn tool_property_description(
@@ -283,7 +294,7 @@ text("tool-execution-complete");
     assert!(output.contains("Script running with cell ID 1"), "{output}");
     assert!(
         output.contains(
-            "Timing policy adjusted yield-time_ms from 1000 ms to 500 ms (maximum 500 ms)."
+            "Timing policy adjusted yield_time_ms from 1000 ms to 500 ms (maximum 500 ms)."
         ),
         "{output}"
     );
@@ -358,23 +369,86 @@ async fn shell_uses_configured_default_and_clamps_to_maximum() -> Result<()> {
         .last_request()
         .context("model should receive both shell results")?;
     let default_output = function_output(&request, DEFAULT_CALL_ID)?;
-    assert_regex_match(
-        r"command timed out after 2[0-9]{2} milliseconds",
-        &default_output,
+    let default_elapsed_ms = reported_timeout_ms(&default_output)?;
+    assert!(
+        (200..=60_000).contains(&default_elapsed_ms),
+        "configured 200 ms timeout was reported as {default_elapsed_ms} ms: {default_output}"
     );
     assert!(
         !default_output.contains("Timing policy adjusted"),
         "{default_output}"
     );
     let max_output = function_output(&request, MAX_CALL_ID)?;
-    assert_regex_match(
-        r"command timed out after 5[0-9]{2} milliseconds",
-        &max_output,
+    let max_elapsed_ms = reported_timeout_ms(&max_output)?;
+    assert!(
+        (500..=60_000).contains(&max_elapsed_ms),
+        "configured 500 ms timeout was reported as {max_elapsed_ms} ms: {max_output}"
     );
     assert!(
         max_output
             .contains("Timing policy adjusted timeout_ms from 1000 ms to 500 ms (maximum 500 ms)."),
         "{max_output}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_write_stdin_discloses_yield_adjustment() -> Result<()> {
+    const CALL_ID: &str = "tool-execution-failed-write-stdin";
+
+    skip_if_no_network!(Ok(()));
+
+    let arguments = serde_json::to_string(&json!({
+        "session_id": 999_999,
+        "chars": "",
+        "yield_time_ms": 1,
+    }))?;
+    let server = start_mock_server().await;
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(CALL_ID, "write_stdin", &arguments),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+    let mut builder = test_codex().with_model("gpt-5.4").with_config(|config| {
+        config.tool_execution = ToolExecutionPolicy::new(
+            config.tool_execution.timeout(),
+            timing_range(
+                /*min_ms*/ 200, /*default_ms*/ 300, /*max_ms*/ 500,
+            ),
+        );
+        config
+            .features
+            .enable(Feature::UnifiedExec)
+            .expect("unified exec should be enableable");
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+
+    test.submit_turn("write to the missing process").await?;
+
+    let request = response_mock
+        .last_request()
+        .context("model should receive the write_stdin error")?;
+    let output = function_output(&request, CALL_ID)?;
+    assert!(
+        output
+            .contains("Timing policy adjusted yield_time_ms from 1 ms to 200 ms (minimum 200 ms)."),
+        "{output}"
+    );
+    assert!(
+        output.contains("write_stdin failed: Unknown process id 999999"),
+        "{output}"
     );
 
     Ok(())

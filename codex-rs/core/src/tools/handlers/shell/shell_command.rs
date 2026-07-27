@@ -27,6 +27,7 @@ use crate::tools::registry::ToolExecutor;
 use crate::tools::runtimes::shell::ShellRuntimeBackend;
 use crate::tools::timing::TimingParameter;
 use crate::tools::timing::adjustment_message;
+use crate::tools::timing::error_with_timing_adjustment;
 use codex_tools::ToolSpec;
 
 use super::super::shell_spec::CommandToolOptions;
@@ -249,12 +250,13 @@ impl ShellCommandHandler {
         {
             Ok(output) => output,
             Err(FunctionCallError::RespondToModel(output)) => {
-                let output = if let Some(message) = &timing_adjustment {
-                    format!("{message}\n{output}")
-                } else {
-                    output
-                };
-                return Err(FunctionCallError::RespondToModel(output));
+                return Err(FunctionCallError::RespondToModel(
+                    error_with_timing_adjustment(
+                        TimingParameter::Timeout,
+                        resolved_timeout,
+                        output,
+                    ),
+                ));
             }
             Err(err) => return Err(err),
         };

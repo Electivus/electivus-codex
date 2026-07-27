@@ -120,7 +120,7 @@ impl ToolExecutionPolicy {
         // The old key accepted every `u64` and normalized very small values at runtime. Preserve
         // config loading while respecting the new built-in default, which must remain inside the
         // effective range.
-        let legacy_yield_max_ms = legacy_yield_max_ms.map(|max_ms| max_ms.max(DEFAULT_YIELD_MS));
+        let legacy_yield_max_ms = legacy_yield_max_ms.map(normalize_legacy_yield_max_ms);
 
         Ok(Self {
             timeout: ToolExecutionTimingRange::resolve(
@@ -160,6 +160,28 @@ impl ToolExecutionPolicy {
             max_ms: DEFAULT_YIELD_MAX_MS,
         }
     }
+}
+
+fn normalize_legacy_yield_max_ms(max_ms: u64) -> u64 {
+    let max_ms = max_ms.max(DEFAULT_YIELD_MS);
+    let now = Instant::now();
+    if now.checked_add(Duration::from_millis(max_ms)).is_some() {
+        return max_ms;
+    }
+
+    // Some supported hosts cannot represent the largest `u64` millisecond durations as an
+    // `Instant` deadline. The deprecated key accepted those values, so retain load compatibility
+    // with a deterministic, effectively unbounded fallback rather than rejecting old config.
+    const ONE_YEAR_MS: u64 = 365 * 24 * 60 * 60 * 1_000;
+    let mut fallback_ms = ONE_YEAR_MS;
+    while fallback_ms > DEFAULT_YIELD_MS
+        && now
+            .checked_add(Duration::from_millis(fallback_ms))
+            .is_none()
+    {
+        fallback_ms = (fallback_ms / 2).max(DEFAULT_YIELD_MS);
+    }
+    fallback_ms
 }
 
 impl ToolExecutionTimingRange {

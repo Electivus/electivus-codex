@@ -47,7 +47,7 @@ pub(crate) fn adjustment_message(
     let adjustment = timing.adjustment?;
     let parameter = match parameter {
         TimingParameter::Timeout => "timeout_ms",
-        TimingParameter::Yield => "yield-time_ms",
+        TimingParameter::Yield => "yield_time_ms",
     };
     let bound = match adjustment.bound {
         TimingBound::Minimum => "minimum",
@@ -57,4 +57,16 @@ pub(crate) fn adjustment_message(
         "Timing policy adjusted {parameter} from {} ms to {} ms ({bound} {} ms).",
         adjustment.requested_ms, adjustment.effective_ms, adjustment.effective_ms
     ))
+}
+
+pub(crate) fn error_with_timing_adjustment(
+    parameter: TimingParameter,
+    timing: ResolvedTiming,
+    error: impl std::fmt::Display,
+) -> String {
+    let error = error.to_string();
+    match adjustment_message(parameter, timing) {
+        Some(message) => format!("{message}\n{error}"),
+        None => error,
+    }
 }
