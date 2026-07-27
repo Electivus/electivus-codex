@@ -127,8 +127,10 @@ fn config_lock_for_comparison(
     clear_config_lock_debug_controls(&mut lockfile.config);
     if lockfile.config.tool_execution.is_none()
         && let Some(legacy_yield_max_ms) = lockfile.config.background_terminal_max_timeout
-        && let Ok(policy) =
-            codex_config::ToolExecutionPolicy::resolve(None, Some(legacy_yield_max_ms))
+        && let Ok(policy) = codex_config::ToolExecutionPolicy::resolve(
+            /*config*/ None,
+            Some(legacy_yield_max_ms),
+        )
     {
         lockfile.config.tool_execution = Some(policy.to_toml());
         lockfile.config.background_terminal_max_timeout = None;

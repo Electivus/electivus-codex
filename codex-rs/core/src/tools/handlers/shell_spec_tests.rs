@@ -293,8 +293,8 @@ Examples of valid command strings:
                 Some(
                     "Maximum command runtime. Configured default is 600000 ms; effective range is 10000-3600000 ms.".to_string(),
                 ),
-                10_000,
-                3_600_000,
+                /*minimum*/ 10_000,
+                /*maximum*/ 3_600_000,
             ),
         ),
         (

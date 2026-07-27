@@ -105,8 +105,8 @@ mod tests {
                                 Some(
                                     "Wait before yielding more output. Configured default is 222 ms; effective range is 111-333 ms.".to_string(),
                                 ),
-                                111,
-                                333,
+                                /*minimum*/ 111,
+                                /*maximum*/ 333,
                             ),
                         ),
                     ]),
