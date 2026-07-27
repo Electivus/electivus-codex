@@ -41,9 +41,18 @@ fn partial_timing_overrides_resolve_before_requests_are_clamped() {
             }),
         }
     );
-    assert_eq!(policy.timeout().resolve_request(None).effective_ms, 600_000);
     assert_eq!(
-        policy.yield_time().resolve_request(None).effective_ms,
+        policy
+            .timeout()
+            .resolve_request(/*requested_ms*/ None)
+            .effective_ms,
+        600_000
+    );
+    assert_eq!(
+        policy
+            .yield_time()
+            .resolve_request(/*requested_ms*/ None)
+            .effective_ms,
         30_000
     );
 }
