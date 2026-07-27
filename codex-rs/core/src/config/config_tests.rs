@@ -12020,6 +12020,121 @@ speaker = "Desk Speakers"
     Ok(())
 }
 
+#[tokio::test]
+async fn tool_execution_partial_overrides_resolve_in_effective_config() -> std::io::Result<()> {
+    let config_toml = toml::from_str(
+        r#"
+[tool_execution.timeout]
+min_ms = 20000
+max_ms = 900000
+
+[tool_execution.yield]
+default_ms = 45000
+"#,
+    )
+    .expect("tool execution config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.tool_execution,
+        codex_config::ToolExecutionPolicy::new(
+            codex_config::ToolExecutionTimingRange::new(
+                /*min_ms*/ 20_000, /*default_ms*/ 600_000, /*max_ms*/ 900_000,
+            )
+            .expect("expected timeout range should be valid"),
+            codex_config::ToolExecutionTimingRange::new(
+                /*min_ms*/ 10_000, /*default_ms*/ 45_000, /*max_ms*/ 300_000,
+            )
+            .expect("expected yield range should be valid"),
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn tool_execution_fields_merge_from_root_into_named_profile() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"
+[tool_execution.timeout]
+min_ms = 20000
+default_ms = 600000
+max_ms = 900000
+"#,
+    )?;
+    let selected_config = codex_home.path().join("patient.config.toml");
+    std::fs::write(
+        &selected_config,
+        r#"
+[tool_execution.timeout]
+default_ms = 700000
+"#,
+    )?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .loader_overrides(LoaderOverrides {
+            user_config_path: Some(selected_config.abs()),
+            user_config_profile: Some("patient".parse().expect("profile-v2 name")),
+            ..LoaderOverrides::without_managed_config_for_tests()
+        })
+        .build()
+        .await?;
+
+    assert_eq!(
+        config.tool_execution.timeout(),
+        codex_config::ToolExecutionTimingRange::new(
+            /*min_ms*/ 20_000, /*default_ms*/ 700_000, /*max_ms*/ 900_000,
+        )
+        .expect("expected timeout range should be valid")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_yield_alias_conflicts_with_profile_maximum() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        "background_terminal_max_timeout = 90000\n",
+    )?;
+    let selected_config = codex_home.path().join("patient.config.toml");
+    std::fs::write(
+        &selected_config,
+        r#"
+[tool_execution.yield]
+max_ms = 120000
+"#,
+    )?;
+
+    let err = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .loader_overrides(LoaderOverrides {
+            user_config_path: Some(selected_config.abs()),
+            user_config_profile: Some("patient".parse().expect("profile-v2 name")),
+            ..LoaderOverrides::without_managed_config_for_tests()
+        })
+        .build()
+        .await
+        .expect_err("legacy and profile timing maxima should conflict");
+
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        err.to_string(),
+        "`background_terminal_max_timeout` conflicts with `tool_execution.yield.max_ms`; remove the deprecated key"
+    );
+    Ok(())
+}
+
 #[derive(Deserialize, Debug, PartialEq)]
 struct TuiTomlTest {
     #[serde(default, flatten)]

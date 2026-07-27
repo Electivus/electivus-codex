@@ -13,11 +13,27 @@ fn has_parameter(tool: &ToolSpec, parameter_name: &str) -> bool {
         .is_some()
 }
 
+fn parameter_description<'a>(tool: &'a ToolSpec, parameter_name: &str) -> &'a str {
+    let ToolSpec::Function(tool) = tool else {
+        panic!("expected function tool");
+    };
+    let properties = tool
+        .parameters
+        .properties
+        .as_ref()
+        .expect("expected object parameters");
+    properties[parameter_name]
+        .description
+        .as_deref()
+        .expect("parameter should have a description")
+}
+
 #[test]
 fn exec_command_tool_matches_expected_spec() {
     let tool = create_exec_command_tool(CommandToolOptions {
         allow_login_shell: true,
         exec_permission_approvals_enabled: false,
+        tool_execution: codex_config::ToolExecutionPolicy::default(),
     });
 
     let description = if cfg!(windows) {
@@ -29,11 +45,7 @@ fn exec_command_tool_matches_expected_spec() {
         "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
             .to_string()
     };
-    let yield_time_ms_description = if cfg!(windows) {
-        "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 2000-30000 ms. Set a shorter value only when intentionally starting a long-lived or interactive process and you want a session ID promptly."
-    } else {
-        "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."
-    };
+    let yield_time_ms_description = "Wait before yielding output. Non-interactive commands use the configured default 30000 ms and range 10000-300000 ms. TTY commands use the fixed default 10000 ms and range 250-30000 ms. Commands that finish sooner return immediately.";
 
     let mut properties = BTreeMap::from([
         (
@@ -104,6 +116,7 @@ fn exec_command_tool_can_hide_shell_parameter() {
         CommandToolOptions {
             allow_login_shell: true,
             exec_permission_approvals_enabled: false,
+            tool_execution: codex_config::ToolExecutionPolicy::default(),
         },
         /*include_environment_id*/ false,
         /*include_shell_parameter*/ false,
@@ -115,7 +128,7 @@ fn exec_command_tool_can_hide_shell_parameter() {
 
 #[test]
 fn write_stdin_tool_matches_expected_spec() {
-    let tool = create_write_stdin_tool();
+    let tool = create_write_stdin_tool(codex_config::ToolExecutionPolicy::default());
 
     let properties = BTreeMap::from([
         (
@@ -133,7 +146,7 @@ fn write_stdin_tool_matches_expected_spec() {
         (
             "yield_time_ms".to_string(),
             JsonSchema::number(Some(
-                "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default.".to_string(),
+                "Wait before yielding output. Empty polls use the configured default 30000 ms and range 10000-300000 ms. Non-empty writes use the fixed default 250 ms and range 250-30000 ms.".to_string(),
             )),
         ),
         (
@@ -160,6 +173,38 @@ fn write_stdin_tool_matches_expected_spec() {
             ),
             output_schema: Some(unified_exec_output_schema()),
         })
+    );
+}
+
+#[test]
+fn execution_tool_descriptions_use_resolved_timing_policy() {
+    let tool_execution = codex_config::ToolExecutionPolicy::new(
+        codex_config::ToolExecutionTimingRange::new(
+            /*min_ms*/ 111, /*default_ms*/ 222, /*max_ms*/ 333,
+        )
+        .expect("test timeout range should be valid"),
+        codex_config::ToolExecutionTimingRange::new(
+            /*min_ms*/ 444, /*default_ms*/ 555, /*max_ms*/ 666,
+        )
+        .expect("test yield range should be valid"),
+    );
+    let options = CommandToolOptions {
+        allow_login_shell: false,
+        exec_permission_approvals_enabled: false,
+        tool_execution,
+    };
+
+    assert_eq!(
+        [
+            parameter_description(&create_shell_command_tool(options), "timeout_ms"),
+            parameter_description(&create_exec_command_tool(options), "yield_time_ms"),
+            parameter_description(&create_write_stdin_tool(tool_execution), "yield_time_ms"),
+        ],
+        [
+            "Maximum command runtime. Configured default is 222 ms; effective range is 111-333 ms.",
+            "Wait before yielding output. Non-interactive commands use the configured default 555 ms and range 444-666 ms. TTY commands use the fixed default 10000 ms and range 250-30000 ms. Commands that finish sooner return immediately.",
+            "Wait before yielding output. Empty polls use the configured default 555 ms and range 444-666 ms. Non-empty writes use the fixed default 250 ms and range 250-30000 ms.",
+        ]
     );
 }
 
@@ -207,6 +252,7 @@ fn shell_command_tool_matches_expected_spec() {
     let tool = create_shell_command_tool(CommandToolOptions {
         allow_login_shell: true,
         exec_permission_approvals_enabled: false,
+        tool_execution: codex_config::ToolExecutionPolicy::default(),
     });
 
     let description = if cfg!(windows) {
@@ -243,9 +289,13 @@ Examples of valid command strings:
         ),
         (
             "timeout_ms".to_string(),
-            JsonSchema::number(Some(
-                "Maximum command runtime. Defaults to 10000 ms.".to_string(),
-            )),
+            JsonSchema::number_with_bounds(
+                Some(
+                    "Maximum command runtime. Configured default is 600000 ms; effective range is 10000-3600000 ms.".to_string(),
+                ),
+                /*minimum*/ 10_000,
+                /*maximum*/ 3_600_000,
+            ),
         ),
         (
             "login".to_string(),

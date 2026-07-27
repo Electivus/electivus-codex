@@ -9,6 +9,7 @@ use std::path::Path;
 use crate::HooksToml;
 use crate::permissions_toml::PermissionsToml;
 use crate::profile_toml::ConfigProfile;
+use crate::tool_execution::ToolExecutionToml;
 use crate::types::AnalyticsConfigToml;
 use crate::types::ApprovalsReviewer;
 use crate::types::AppsConfigToml;
@@ -295,8 +296,11 @@ pub struct ConfigToml {
     /// Token budget applied when storing tool/function outputs in the context manager.
     pub tool_output_token_limit: Option<usize>,
 
-    /// Maximum poll window for background terminal output (`write_stdin`), in milliseconds.
-    /// Default: `300000` (5 minutes).
+    /// Timing policy for model-controlled command execution.
+    pub tool_execution: Option<ToolExecutionToml>,
+
+    /// Deprecated alias for `tool_execution.yield.max_ms`. Legacy values below the built-in yield
+    /// default are raised to that default.
     pub background_terminal_max_timeout: Option<u64>,
 
     /// Deprecated: ignored.

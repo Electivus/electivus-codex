@@ -213,18 +213,35 @@ fn parse_tool_input_schema_infers_object_shape_from_boolean_additional_propertie
 fn parse_tool_input_schema_infers_number_from_numeric_keywords() {
     // Example schema shape:
     // {
-    //   "minimum": 1
+    //   "minimum": 1,
+    //   "maximum": 9
     // }
     //
     // Expected normalization behavior:
     // - Numeric constraint keywords imply a number schema when `type` is
     //   omitted.
     let schema = parse_tool_input_schema(&serde_json::json!({
-        "minimum": 1
+        "minimum": 1,
+        "maximum": 9
     }))
     .expect("parse schema");
 
     assert_eq!(schema, JsonSchema::number(/*description*/ None));
+}
+
+#[test]
+fn explicit_numeric_bounds_serialize_without_changing_parsed_schemas() {
+    assert_eq!(
+        serde_json::to_value(JsonSchema::number_with_bounds(
+            /*description*/ None, /*minimum*/ 1, /*maximum*/ 9,
+        ))
+        .expect("schema should serialize"),
+        serde_json::json!({
+            "type": "number",
+            "minimum": 1,
+            "maximum": 9,
+        })
+    );
 }
 
 #[test]

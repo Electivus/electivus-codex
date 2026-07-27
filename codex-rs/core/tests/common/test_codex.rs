@@ -1236,6 +1236,24 @@ pub fn test_codex() -> TestCodexBuilder {
                 .features
                 .disable(Feature::ShellSnapshot)
                 .expect("test config should allow ShellSnapshot override");
+            // Most integration tests use short explicit waits to stay fast and are not exercising
+            // the product timing bounds. Timing-policy tests override these ranges explicitly.
+            let timeout = config.tool_execution.timeout();
+            let yield_time = config.tool_execution.yield_time();
+            config.tool_execution = codex_config::ToolExecutionPolicy::new(
+                codex_config::ToolExecutionTimingRange::new(
+                    /*min_ms*/ 1,
+                    timeout.default_ms(),
+                    timeout.max_ms(),
+                )
+                .expect("test timeout range should be valid"),
+                codex_config::ToolExecutionTimingRange::new(
+                    /*min_ms*/ 1,
+                    yield_time.default_ms(),
+                    yield_time.max_ms(),
+                )
+                .expect("test yield range should be valid"),
+            );
         })],
         auth: CodexAuth::from_api_key("dummy"),
         pre_build_hooks: vec![],

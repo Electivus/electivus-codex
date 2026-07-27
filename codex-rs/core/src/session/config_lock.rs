@@ -144,7 +144,8 @@ fn save_config_resolved_fields(
     lock_config.include_collaboration_mode_instructions =
         Some(config.include_collaboration_mode_instructions);
     lock_config.include_environment_context = Some(config.include_environment_context);
-    lock_config.background_terminal_max_timeout = Some(config.background_terminal_max_timeout);
+    lock_config.tool_execution = Some(config.tool_execution.to_toml());
+    lock_config.background_terminal_max_timeout = None;
 
     // Feature aliases and feature configs need to be written in their resolved
     // form; otherwise replay can drift when a legacy key maps to the same
@@ -286,6 +287,16 @@ mod tests {
             .features
             .enable(Feature::CurrentTimeReminder)
             .expect("current_time_reminder should be enableable in tests");
+        config.tool_execution = codex_config::ToolExecutionPolicy::new(
+            codex_config::ToolExecutionTimingRange::new(
+                /*min_ms*/ 111, /*default_ms*/ 222, /*max_ms*/ 333,
+            )
+            .expect("test timeout range should be valid"),
+            codex_config::ToolExecutionTimingRange::new(
+                /*min_ms*/ 444, /*default_ms*/ 555, /*max_ms*/ 666,
+            )
+            .expect("test yield range should be valid"),
+        );
         sc.original_config_do_not_use = Arc::new(config);
         sc.base_instructions = "resolved instructions".to_string();
         sc.developer_instructions = Some("resolved developer instructions".to_string());
@@ -310,6 +321,11 @@ mod tests {
                 .is_none_or(|debug| debug.config_lockfile.is_none())
         );
         assert!(lock.memories.is_some());
+        assert_eq!(
+            lock.tool_execution,
+            Some(sc.original_config_do_not_use.tool_execution.to_toml())
+        );
+        assert_eq!(lock.background_terminal_max_timeout, None);
         let features = lock
             .features
             .as_ref()
@@ -472,6 +488,23 @@ sandbox_private_desktop = false
                 .and_then(|windows| windows.sandbox_private_desktop),
             Some(false)
         );
+    }
+
+    #[tokio::test]
+    async fn lock_replay_normalizes_legacy_tool_execution_policy() {
+        let sc = crate::session::tests::make_session_configuration_for_tests().await;
+        let actual = sc.to_config_lockfile_toml().expect("lock should serialize");
+        let mut expected = actual.clone();
+        expected.config.tool_execution = None;
+        expected.config.background_terminal_max_timeout = Some(
+            sc.original_config_do_not_use
+                .tool_execution
+                .yield_time()
+                .max_ms(),
+        );
+
+        validate_config_lock_replay(&expected, &actual, ConfigLockReplayOptions::default())
+            .expect("legacy timing lock should match the resolved policy");
     }
 
     #[tokio::test]

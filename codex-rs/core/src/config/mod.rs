@@ -1,8 +1,6 @@
 use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
 use crate::path_utils::normalize_for_native_workdir;
-use crate::unified_exec::DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS;
-use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
 use crate::windows_sandbox::WindowsSandboxLevelExt;
 use crate::windows_sandbox::resolve_windows_sandbox_mode;
 use crate::windows_sandbox::resolve_windows_sandbox_private_desktop;
@@ -1048,9 +1046,8 @@ pub struct Config {
     /// If set to `true`, used only the experimental unified exec tool.
     pub use_experimental_unified_exec_tool: bool,
 
-    /// Maximum poll window for background terminal output (`write_stdin`), in milliseconds.
-    /// Default: `300000` (5 minutes).
-    pub background_terminal_max_timeout: u64,
+    /// Resolved timing policy for model-controlled command execution.
+    pub tool_execution: codex_config::ToolExecutionPolicy,
 
     /// Compatibility-only settings retained for legacy `ghost_snapshot`
     /// config loading.
@@ -2250,6 +2247,16 @@ fn resolve_tool_suggest_config(
     resolve_tool_suggest_config_from_config(config_toml.tool_suggest.as_ref(), config_layer_stack)
 }
 
+pub(crate) fn resolve_tool_execution_config(
+    config_toml: &ConfigToml,
+) -> std::io::Result<codex_config::ToolExecutionPolicy> {
+    codex_config::ToolExecutionPolicy::resolve(
+        config_toml.tool_execution.as_ref(),
+        config_toml.background_terminal_max_timeout,
+    )
+    .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))
+}
+
 pub(crate) fn resolve_tool_suggest_config_from_layer_stack(
     config_layer_stack: &ConfigLayerStack,
 ) -> ToolSuggestConfig {
@@ -3283,6 +3290,7 @@ impl Config {
         }
 
         let tool_suggest = resolve_tool_suggest_config(&cfg, &config_layer_stack);
+        let tool_execution = resolve_tool_execution_config(&cfg)?;
         let feature_overrides = FeatureOverrides {
             web_search_request: override_tools_web_search_request,
         };
@@ -3781,11 +3789,6 @@ impl Config {
             .as_ref()
             .and_then(|agents| agents.interrupt_message)
             .unwrap_or(true);
-        let background_terminal_max_timeout = cfg
-            .background_terminal_max_timeout
-            .unwrap_or(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS)
-            .max(MIN_EMPTY_YIELD_TIME_MS);
-
         let ghost_snapshot = {
             let mut config = GhostSnapshotConfig::default();
             if let Some(ghost_snapshot) = cfg.ghost_snapshot.as_ref()
@@ -4224,7 +4227,7 @@ impl Config {
             update_plan_enabled,
             code_mode,
             use_experimental_unified_exec_tool,
-            background_terminal_max_timeout,
+            tool_execution,
             ghost_snapshot,
             multi_agent_v2,
             token_budget,
