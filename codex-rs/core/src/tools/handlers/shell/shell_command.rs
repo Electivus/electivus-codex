@@ -25,6 +25,8 @@ use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolExecutor;
 use crate::tools::runtimes::shell::ShellRuntimeBackend;
+use crate::tools::timing::TimingParameter;
+use crate::tools::timing::adjustment_message;
 use codex_tools::ToolSpec;
 
 use super::super::shell_spec::CommandToolOptions;
@@ -49,6 +51,7 @@ pub(crate) struct ShellCommandHandlerOptions {
     pub(crate) backend_config: ShellCommandBackendConfig,
     pub(crate) allow_login_shell: bool,
     pub(crate) exec_permission_approvals_enabled: bool,
+    pub(crate) tool_execution: codex_config::ToolExecutionPolicy,
 }
 
 impl ShellCommandHandler {
@@ -91,6 +94,7 @@ impl ShellCommandHandler {
         turn_environment: &TurnEnvironment,
         cwd: AbsolutePathBuf,
         allow_login_shell: bool,
+        timeout_ms: u64,
     ) -> Result<ExecParams, FunctionCallError> {
         let session_shell = session.user_shell();
         let shell = turn_environment
@@ -110,7 +114,7 @@ impl ShellCommandHandler {
         Ok(ExecParams {
             command,
             cwd,
-            expiration: params.timeout_ms.into(),
+            expiration: timeout_ms.into(),
             capture_policy: ExecCapturePolicy::ShellTool,
             env,
             network: turn_context.network.clone(),
@@ -133,6 +137,7 @@ impl From<ShellCommandBackendConfig> for ShellCommandHandler {
             backend_config,
             allow_login_shell: false,
             exec_permission_approvals_enabled: false,
+            tool_execution: codex_config::ToolExecutionPolicy::default(),
         })
     }
 }
@@ -146,6 +151,7 @@ impl ToolExecutor<ToolInvocation> for ShellCommandHandler {
         create_shell_command_tool(CommandToolOptions {
             allow_login_shell: self.options.allow_login_shell,
             exec_permission_approvals_enabled: self.options.exec_permission_approvals_enabled,
+            tool_execution: self.options.tool_execution,
         })
     }
 
@@ -195,6 +201,11 @@ impl ShellCommandHandler {
         })?;
         let cwd = resolve_workdir_base_path(&arguments, &environment_cwd)?;
         let params: ShellCommandToolCallParams = parse_arguments_with_base_path(&arguments, &cwd)?;
+        let resolved_timeout = turn
+            .config
+            .tool_execution
+            .timeout()
+            .resolve_request(params.timeout_ms);
         maybe_emit_implicit_skill_invocation(
             session.as_ref(),
             turn.as_ref(),
@@ -210,6 +221,7 @@ impl ShellCommandHandler {
             &turn_environment,
             cwd,
             turn.config.permissions.allow_login_shell,
+            resolved_timeout.effective_ms,
         )?;
         let shell_type = Some(
             turn_environment
@@ -217,7 +229,8 @@ impl ShellCommandHandler {
                 .as_ref()
                 .map_or_else(|| session.user_shell().shell_type, |shell| shell.shell_type),
         );
-        run_exec_like(RunExecLikeArgs {
+        let timing_adjustment = adjustment_message(TimingParameter::Timeout, resolved_timeout);
+        let mut output = match run_exec_like(RunExecLikeArgs {
             tool_name,
             exec_params,
             cancellation_token,
@@ -233,7 +246,22 @@ impl ShellCommandHandler {
             shell_runtime_backend: self.shell_runtime_backend(),
         })
         .await
-        .map(boxed_tool_output)
+        {
+            Ok(output) => output,
+            Err(FunctionCallError::RespondToModel(output)) => {
+                let output = if let Some(message) = &timing_adjustment {
+                    format!("{message}\n{output}")
+                } else {
+                    output
+                };
+                return Err(FunctionCallError::RespondToModel(output));
+            }
+            Err(err) => return Err(err),
+        };
+        if let Some(message) = timing_adjustment {
+            output.prepend_text(message);
+        }
+        Ok(boxed_tool_output(output))
     }
 }
 

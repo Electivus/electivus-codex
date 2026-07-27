@@ -5,6 +5,10 @@ use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
+use crate::tools::timing::TimingParameter;
+use crate::tools::timing::YieldTimingClass;
+use crate::tools::timing::adjustment_message;
+use crate::tools::timing::resolve_yield_timing;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 
@@ -36,6 +40,11 @@ impl CodeModeExecuteHandler {
         let args =
             codex_code_mode::parse_exec_source(&code).map_err(FunctionCallError::RespondToModel)?;
         let exec = ExecContext { session, turn };
+        let resolved_yield = resolve_yield_timing(
+            exec.turn.config.tool_execution,
+            YieldTimingClass::Global,
+            args.yield_time_ms,
+        );
         let enabled_tools =
             codex_tools::collect_code_mode_tool_definitions(&self.nested_tool_specs);
         let started_at = std::time::Instant::now();
@@ -47,7 +56,7 @@ impl CodeModeExecuteHandler {
                 tool_call_id: call_id.clone(),
                 enabled_tools,
                 source: args.code.clone(),
-                yield_time_ms: args.yield_time_ms,
+                yield_time_ms: Some(resolved_yield.effective_ms),
                 max_output_tokens: args.max_output_tokens,
             })
             .await
@@ -86,9 +95,14 @@ impl CodeModeExecuteHandler {
                 .finish_cell_dispatch(&cell_id);
         }
         exec.session.services.elicitations.wait_until_clear().await;
-        handle_runtime_response(&exec, response, args.max_output_tokens, started_at)
-            .await
-            .map_err(FunctionCallError::RespondToModel)
+        let mut output =
+            handle_runtime_response(&exec, response, args.max_output_tokens, started_at)
+                .await
+                .map_err(FunctionCallError::RespondToModel)?;
+        if let Some(message) = adjustment_message(TimingParameter::Yield, resolved_yield) {
+            output.prepend_text(message);
+        }
+        Ok(output)
     }
 }
 

@@ -61,12 +61,6 @@ pub(crate) use process::SpawnLifecycle;
 pub(crate) use process::SpawnLifecycleHandle;
 pub(crate) use process::UnifiedExecProcess;
 
-pub(crate) const MIN_YIELD_TIME_MS: u64 = 250;
-pub(crate) const WINDOWS_INITIAL_EXEC_YIELD_TIME_FLOOR_MS: u64 = 2_000;
-// Minimum yield time for an empty `write_stdin`.
-pub(crate) const MIN_EMPTY_YIELD_TIME_MS: u64 = 5_000;
-pub(crate) const MAX_YIELD_TIME_MS: u64 = 30_000;
-pub(crate) const DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS: u64 = 300_000;
 pub(crate) const DEFAULT_MAX_OUTPUT_TOKENS: usize = 10_000;
 pub(crate) const UNIFIED_EXEC_OUTPUT_MAX_BYTES: usize = 1024 * 1024; // 1 MiB
 pub(crate) const UNIFIED_EXEC_OUTPUT_MAX_TOKENS: usize = UNIFIED_EXEC_OUTPUT_MAX_BYTES / 4;
@@ -145,22 +139,19 @@ impl ProcessStore {
 
 pub(crate) struct UnifiedExecProcessManager {
     process_store: Mutex<ProcessStore>,
-    max_write_stdin_yield_time_ms: u64,
 }
 
 impl UnifiedExecProcessManager {
-    pub(crate) fn new(max_write_stdin_yield_time_ms: u64) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             process_store: Mutex::new(ProcessStore::default()),
-            max_write_stdin_yield_time_ms: max_write_stdin_yield_time_ms
-                .max(MIN_EMPTY_YIELD_TIME_MS),
         }
     }
 }
 
 impl Default for UnifiedExecProcessManager {
     fn default() -> Self {
-        Self::new(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS)
+        Self::new()
     }
 }
 
@@ -175,15 +166,6 @@ struct ProcessEntry {
     network_approval: Option<DeferredNetworkApproval>,
     session: Weak<Session>,
     last_used: tokio::time::Instant,
-}
-
-pub(crate) fn clamp_yield_time(yield_time_ms: u64) -> u64 {
-    let yield_time_ms = if cfg!(windows) {
-        yield_time_ms.max(WINDOWS_INITIAL_EXEC_YIELD_TIME_FLOOR_MS)
-    } else {
-        yield_time_ms
-    };
-    yield_time_ms.clamp(MIN_YIELD_TIME_MS, MAX_YIELD_TIME_MS)
 }
 
 pub(crate) fn resolve_max_tokens(max_tokens: Option<usize>) -> usize {
