@@ -55,6 +55,25 @@ its `low` default and Phase 2 keeps its `medium` default. These settings do not 
 interactive session's `model_reasoning_effort`, and configured effort values are sent unchanged to
 the provider.
 
+## Repository provenance and scope
+
+Runtime State preserves the raw `git_info.repository_url` in thread metadata for existing runtime
+and API consumers. Memory-output reads hydrate that raw value from the latest thread metadata
+alongside `cwd` and branch; it is not copied into the persisted Stage 1 output row.
+
+At the `codex-memories-write` boundary, the raw value is converted with
+`codex_git_utils::canonicalize_git_remote_url` into an optional, credential-free Repository
+identity such as `github.com/openai/codex`. Only that canonical `repository` value may enter model
+requests or Memory Artifacts. Missing or invalid origins omit `repository`; no unknown, empty,
+cwd-derived, or local-path identity is synthesized.
+
+Repository scope permits task- or workflow-affine evidence from different Checkout scopes to be
+consolidated, but matching Repository identity does not force a merge. Unrelated task families in
+one repository remain independently routable. Different Repository identities, including fork and
+upstream origins, remain separate for repository-specific knowledge; only explicitly
+repository-agnostic evidence may cross repositories. `cwd` remains a qualifier whenever known and
+is the complete fallback when Repository identity is absent.
+
 ## Phase 1: Rollout Extraction (per-thread)
 
 Phase 1 finds recent eligible rollouts and extracts a structured memory from each one.
@@ -77,6 +96,8 @@ What it does:
   - a detailed `raw_memory`
   - a compact `rollout_summary`
   - an optional `rollout_slug`
+- provides the canonical `repository` to the extraction model when current thread metadata has a
+  usable origin, and defines it as an optional raw-memory frontmatter field
 - redacts secrets from the generated memory fields
 - stores successful outputs back into the state DB as stage-1 outputs
 
@@ -112,8 +133,10 @@ What it does:
     `last_usage` / `generated_at`
 - computes a completion watermark from the claimed watermark + newest input timestamps
 - syncs local memory artifacts under the memories root:
-  - `raw_memories.md` (merged raw memories, stable ascending thread-id order)
-  - `rollout_summaries/` (one summary file per selected rollout)
+  - `raw_memories.md` (merged raw memories with current canonical `repository`, retained `cwd`, and
+    stable ascending thread-id order)
+  - `rollout_summaries/` (one summary file per selected rollout, with the same current mechanical
+    provenance)
 - keeps the memories root itself as a git-baseline directory, initialized under
   `~/.codex/memories/.git` by `codex-git-utils`
 - prunes stale rollout summaries that are no longer selected
@@ -137,6 +160,14 @@ If the memory workspace has changes, it then:
   kept in the prompt artifact or unreachable git objects
 - marks the phase-2 job success/failure in the state DB when the agent finishes
 
+Consolidation uses current mechanical `repository` provenance as authoritative over stale
+extraction-time frontmatter. Repository-backed `MEMORY.md` applicability records retain
+`repository`, `cwd`, and the reuse rule when known, and task-local rollout annotations retain
+`repository` when supplied alongside their existing provenance. `memory_summary.md` remains `v1`
+with its existing top-level structure, but routes repository-backed topics by repository or
+practical project scope first; raw `cwd` is included when it improves routing or communicates
+checkout sensitivity.
+
 Selection and workspace-diff behavior:
 
 - successful Phase 2 runs mark the exact stage-1 snapshots they consumed with
@@ -149,6 +180,9 @@ Selection and workspace-diff behavior:
   in stable ascending thread-id order to avoid usage-rank churn, then lets the
   git-style workspace diff surface additions, modifications, and deletions
   against the previous successful memory baseline
+- because Repository identity is hydrated from current thread metadata during that sync, an
+  already-selected historical output gains or changes canonical `repository` on the next normal
+  Phase 2 run without another Phase 1 request
 - when the selected input set is empty, stale `rollout_summaries/` files are
   removed and `raw_memories.md` is rewritten to the empty-input placeholder;
   consolidated outputs such as `MEMORY.md`, `memory_summary.md`, and `skills/`
@@ -168,6 +202,12 @@ Watermark behavior:
   decide whether Phase 2 has work.
 
 In practice, this phase is responsible for refreshing the on-disk memory workspace and producing/updating the higher-level consolidated memory outputs.
+
+This is an additive artifact migration: existing Stage 1 outputs and `memory_summary.md` v1 files
+remain valid. No Runtime State migration, backfill, forced re-extraction, feature flag, or summary
+schema reset is required. Canonicalization before rendering is the security boundary: raw remote
+URLs and embedded credentials must not enter model requests, mechanical artifacts, the generated
+workspace diff, or consolidated memory outputs.
 
 ## Why it is split into two phases
 

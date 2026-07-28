@@ -1,8 +1,10 @@
-use crate::build_stage_one_input_message;
 use crate::metrics::MEMORY_PHASE_ONE_E2E_MS;
 use crate::metrics::MEMORY_PHASE_ONE_JOBS;
 use crate::metrics::MEMORY_PHASE_ONE_OUTPUT;
 use crate::metrics::MEMORY_PHASE_ONE_TOKEN_USAGE;
+use crate::prompts::StageOneRolloutContext;
+use crate::prompts::build_stage_one_input_message_with_context;
+use crate::repository::RepositoryIdentity;
 use crate::runtime::MemoryStartupContext;
 use crate::runtime::StageOneRequestContext;
 use codex_config::types::MemoriesConfig;
@@ -261,6 +263,7 @@ mod job {
                 thread_id,
                 &claimed_thread.rollout_path,
                 &claimed_thread.cwd,
+                RepositoryIdentity::from_git_origin_url(claimed_thread.git_origin_url.as_deref()),
                 stage_one_context,
             ),
             |sample_result| async {
@@ -338,6 +341,7 @@ mod job {
         thread_id: codex_protocol::ThreadId,
         rollout_path: &Path,
         rollout_cwd: &Path,
+        repository: Option<RepositoryIdentity>,
         stage_one_context: &StageOneRequestContext,
     ) -> anyhow::Result<(StageOneOutput, Option<TokenUsage>)> {
         let rollout_items = context.load_thread_history(thread_id).await?;
@@ -348,10 +352,13 @@ mod job {
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
-                text: build_stage_one_input_message(
+                text: build_stage_one_input_message_with_context(
                     &stage_one_context.model_info,
-                    rollout_path,
-                    rollout_cwd,
+                    StageOneRolloutContext {
+                        rollout_path,
+                        rollout_cwd,
+                        repository: repository.as_ref(),
+                    },
                     &rollout_contents,
                 )?,
             }],

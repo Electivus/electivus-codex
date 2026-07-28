@@ -12,6 +12,7 @@ mod phase1;
 mod phase2;
 mod phase2_completion;
 mod prompts;
+mod repository;
 mod runtime;
 mod start;
 mod storage;

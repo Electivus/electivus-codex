@@ -12,6 +12,7 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use sqlx::AssertSqlSafe;
 use sqlx::PgPool;
+use std::future::Future;
 use std::path::PathBuf;
 
 const USED: usize = 0;
@@ -113,6 +114,9 @@ fn contract_seeds() -> Result<Vec<OutputSeed>> {
                         rollout_slug: (index % 2 == 0).then(|| format!("output-{index}")),
                         cwd: PathBuf::from(format!("/contract/workspaces/workspace-{index}")),
                         git_branch: Some(format!("contract/branch-{index}")),
+                        git_origin_url: Some(format!(
+                            "https://contract-user:contract-token@example.test/org/repo-{index}.git"
+                        )),
                         generated_at: timestamp(source_updated_at + 10)?,
                     },
                     usage_count,
@@ -130,11 +134,16 @@ fn timestamp(seconds: i64) -> Result<DateTime<Utc>> {
         .ok_or_else(|| anyhow::anyhow!("invalid contract timestamp: {seconds}"))
 }
 
-async fn run_stage1_output_data_contract(
+async fn run_stage1_output_data_contract<F, Fut>(
     writer: &MemoryStore,
     reader: &MemoryStore,
     seeds: &[OutputSeed],
-) -> Result<()> {
+    update_git_origin_url: F,
+) -> Result<()>
+where
+    F: FnOnce(ThreadId, String) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
     assert_eq!(
         reader.list_stage1_outputs_for_global(/*n*/ 0).await?,
         Vec::<Stage1Output>::new()
@@ -168,6 +177,34 @@ async fn run_stage1_output_data_contract(
         expected_candidates
     );
 
+    let updated_git_origin_url =
+        "ssh://updated-user:updated-token@example.test/org/reclassified.git".to_string();
+    update_git_origin_url(
+        seeds[FRESH].output.thread_id,
+        updated_git_origin_url.clone(),
+    )
+    .await?;
+    let mut expected_updated_output = seeds[FRESH].output.clone();
+    expected_updated_output.git_origin_url = Some(updated_git_origin_url);
+    assert_eq!(
+        reader.list_stage1_outputs_for_global(/*n*/ 2).await?,
+        vec![
+            seeds[FRESH_TIE].output.clone(),
+            expected_updated_output.clone()
+        ]
+    );
+    let expected_candidates = vec![
+        seeds[USED].output.clone(),
+        expected_updated_output.clone(),
+        seeds[FRESH_TIE].output.clone(),
+    ];
+    assert_eq!(
+        reader
+            .get_phase2_input_selection(/*n*/ 10, /*max_unused_days*/ 30)
+            .await?,
+        expected_candidates
+    );
+
     assert_eq!(
         writer
             .prune_stage1_outputs_for_retention(/*max_unused_days*/ 30, /*limit*/ 1)
@@ -190,7 +227,7 @@ async fn run_stage1_output_data_contract(
         reader.list_stage1_outputs_for_global(/*n*/ 100).await?,
         vec![
             seeds[FRESH_TIE].output.clone(),
-            seeds[FRESH].output.clone(),
+            expected_updated_output,
             seeds[USED].output.clone(),
             seeds[SELECTED_BASELINE].output.clone(),
         ]
@@ -213,6 +250,7 @@ async fn seed_sqlite(runtime: &StateRuntime, seeds: &[OutputSeed]) -> Result<()>
         );
         metadata.rollout_path = seed.output.rollout_path.clone();
         metadata.git_branch = seed.output.git_branch.clone();
+        metadata.git_origin_url = seed.output.git_origin_url.clone();
         runtime.upsert_thread(&metadata).await?;
         if !seed.enabled {
             runtime
@@ -251,9 +289,26 @@ pub(crate) async fn run_postgres_stage1_output_data_contract(
 ) -> Result<()> {
     let seeds = contract_seeds()?;
     seed_postgres(&writer_pool, schema, &seeds).await?;
+    let metadata_writer_pool = writer_pool.clone();
     let writer = MemoryStore::from_postgres(writer_pool, schema.to_string());
     let reader = MemoryStore::from_postgres(reader_pool, schema.to_string());
-    run_stage1_output_data_contract(&writer, &reader, &seeds).await?;
+    let threads_table = qualified_table(schema, "threads");
+    run_stage1_output_data_contract(&writer, &reader, &seeds, |thread_id, repository_url| {
+        let writer_pool = metadata_writer_pool;
+        let threads_table = threads_table.clone();
+        async move {
+            sqlx::query(AssertSqlSafe(format!(
+                "UPDATE {threads_table} SET projection = jsonb_set(projection, \
+                 '{{git_info,repository_url}}', to_jsonb($2::text), TRUE) WHERE thread_id = $1"
+            )))
+            .bind(thread_id.to_string())
+            .bind(repository_url)
+            .execute(&writer_pool)
+            .await?;
+            Ok(())
+        }
+    })
+    .await?;
     writer.close().await;
     reader.close().await;
     Ok(())
@@ -267,7 +322,10 @@ async fn seed_postgres(pool: &PgPool, schema: &str, seeds: &[OutputSeed]) -> Res
         let projection = json!({
             "rollout_path": seed.output.rollout_path,
             "cwd": seed.output.cwd,
-            "git_info": { "branch": seed.output.git_branch },
+            "git_info": {
+                "branch": seed.output.git_branch,
+                "repository_url": seed.output.git_origin_url,
+            },
         });
         sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO {threads_table} (thread_id, projection, stream_version, fencing_token, \
@@ -337,8 +395,27 @@ async fn sqlite_stage1_output_data_satisfies_shared_contract() -> Result<()> {
     let reader = StateRuntime::init_sqlite(codex_home, "test-provider".to_string()).await?;
     let seeds = contract_seeds()?;
     seed_sqlite(&writer, &seeds).await?;
+    let metadata_writer = writer.clone();
 
-    run_stage1_output_data_contract(writer.memories(), reader.memories(), &seeds).await?;
+    run_stage1_output_data_contract(
+        writer.memories(),
+        reader.memories(),
+        &seeds,
+        move |thread_id, repository_url| async move {
+            assert!(
+                metadata_writer
+                    .update_thread_git_info(
+                        thread_id,
+                        /*git_sha*/ None,
+                        /*git_branch*/ None,
+                        /*git_origin_url*/ Some(Some(&repository_url)),
+                    )
+                    .await?
+            );
+            Ok(())
+        },
+    )
+    .await?;
 
     writer.close().await;
     reader.close().await;

@@ -421,9 +421,13 @@ async fn memories_startup_phase1_uses_live_thread_service_tier_and_detached_meta
 async fn memories_startup_phase1_provider_defaults_drive_request() -> anyhow::Result<()> {
     let server = start_mock_server().await;
     let home = Arc::new(TempDir::new()?);
-    let request =
-        run_memory_phase_one_model_request_test(&server, home, startup_test_memories_config())
-            .await?;
+    let request = run_memory_phase_one_model_request_test(
+        &server,
+        home,
+        startup_test_memories_config(),
+        RepositoryMetadataUpdate::Set(CREDENTIAL_BEARING_ORIGIN),
+    )
+    .await?;
 
     let body = request.body_json();
     assert_eq!(
@@ -435,12 +439,57 @@ async fn memories_startup_phase1_provider_defaults_drive_request() -> anyhow::Re
 }
 
 #[tokio::test]
+async fn memories_startup_phase1_uses_canonical_repository_identity_without_origin_credentials()
+-> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    let request = run_memory_phase_one_model_request_test(
+        &server,
+        home,
+        startup_test_memories_config(),
+        RepositoryMetadataUpdate::Set(CREDENTIAL_BEARING_ORIGIN),
+    )
+    .await?;
+    let body = request.body_json().to_string();
+
+    assert!(body.contains("repository: github.com/openai/codex"));
+    assert_origin_credentials_absent(&body);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn memories_startup_phase1_omits_repository_when_current_metadata_is_missing()
+-> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    let request = run_memory_phase_one_model_request_test(
+        &server,
+        home,
+        startup_test_memories_config(),
+        RepositoryMetadataUpdate::Clear,
+    )
+    .await?;
+    let user_message = request.message_input_texts("user").join("\n");
+
+    assert!(user_message.contains("rollout_cwd:"));
+    assert!(!user_message.contains("repository:"));
+    assert_origin_credentials_absent(&user_message);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn memories_startup_phase2_provider_defaults_drive_request() -> anyhow::Result<()> {
     let server = start_mock_server().await;
     let home = Arc::new(TempDir::new()?);
-    let request =
-        run_memory_phase_two_model_request_test(&server, home, startup_test_memories_config())
-            .await?;
+    let request = run_memory_phase_two_model_request_test(
+        &server,
+        home,
+        startup_test_memories_config(),
+        RepositoryMetadataUpdate::Set(UPDATED_CREDENTIAL_BEARING_ORIGIN),
+    )
+    .await?;
 
     let body = request.body_json();
     assert_eq!(
@@ -452,13 +501,70 @@ async fn memories_startup_phase2_provider_defaults_drive_request() -> anyhow::Re
 }
 
 #[tokio::test]
+async fn memories_startup_phase2_materializes_latest_canonical_repository_without_credentials()
+-> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    let request = run_memory_phase_two_model_request_test(
+        &server,
+        Arc::clone(&home),
+        startup_test_memories_config(),
+        RepositoryMetadataUpdate::Set(UPDATED_CREDENTIAL_BEARING_ORIGIN),
+    )
+    .await?;
+    let memory_root = home.path().join("memories");
+    let raw_memories = tokio::fs::read_to_string(memory_root.join("raw_memories.md")).await?;
+    let rollout_summaries = read_rollout_summary_bodies(&memory_root).await?;
+    let artifacts = format!("{raw_memories}\n{}", rollout_summaries.join("\n"));
+
+    assert!(artifacts.contains("repository: github.com/electivus/electivus-codex"));
+    assert!(artifacts.contains("cwd: "));
+    assert_origin_credentials_absent(&artifacts);
+
+    let request_body = request.body_json().to_string();
+    assert_origin_credentials_absent(&request_body);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn memories_startup_phase2_uses_cwd_only_when_current_repository_is_missing()
+-> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    let _request = run_memory_phase_two_model_request_test(
+        &server,
+        Arc::clone(&home),
+        startup_test_memories_config(),
+        RepositoryMetadataUpdate::Clear,
+    )
+    .await?;
+    let memory_root = home.path().join("memories");
+    let raw_memories = tokio::fs::read_to_string(memory_root.join("raw_memories.md")).await?;
+    let rollout_summaries = read_rollout_summary_bodies(&memory_root).await?;
+    let artifacts = format!("{raw_memories}\n{}", rollout_summaries.join("\n"));
+
+    assert!(artifacts.contains("cwd: "));
+    assert!(!artifacts.contains("repository:"));
+    assert_origin_credentials_absent(&artifacts);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn memories_startup_phase1_explicit_model_and_effort_drive_request() -> anyhow::Result<()> {
     let server = start_mock_server().await;
     let home = Arc::new(TempDir::new()?);
     let mut memories = startup_test_memories_config();
     memories.extract_model = Some("override.phase-one".to_string());
     memories.extract_model_reasoning_effort = Some(ReasoningEffort::High);
-    let request = run_memory_phase_one_model_request_test(&server, home, memories).await?;
+    let request = run_memory_phase_one_model_request_test(
+        &server,
+        home,
+        memories,
+        RepositoryMetadataUpdate::Set(CREDENTIAL_BEARING_ORIGIN),
+    )
+    .await?;
     let body = request.body_json();
 
     assert_eq!(
@@ -475,7 +581,13 @@ async fn memories_startup_phase1_model_only_override_uses_default_effort() -> an
     let home = Arc::new(TempDir::new()?);
     let mut memories = startup_test_memories_config();
     memories.extract_model = Some("override.phase-one".to_string());
-    let request = run_memory_phase_one_model_request_test(&server, home, memories).await?;
+    let request = run_memory_phase_one_model_request_test(
+        &server,
+        home,
+        memories,
+        RepositoryMetadataUpdate::Set(CREDENTIAL_BEARING_ORIGIN),
+    )
+    .await?;
     let body = request.body_json();
 
     assert_eq!(
@@ -493,7 +605,13 @@ async fn memories_startup_phase2_explicit_model_and_effort_drive_request() -> an
     let mut memories = startup_test_memories_config();
     memories.consolidation_model = Some("override.phase-two".to_string());
     memories.consolidation_model_reasoning_effort = Some(ReasoningEffort::XHigh);
-    let request = run_memory_phase_two_model_request_test(&server, home, memories).await?;
+    let request = run_memory_phase_two_model_request_test(
+        &server,
+        home,
+        memories,
+        RepositoryMetadataUpdate::Set(UPDATED_CREDENTIAL_BEARING_ORIGIN),
+    )
+    .await?;
     let body = request.body_json();
 
     assert_eq!(
@@ -510,7 +628,13 @@ async fn memories_startup_phase2_model_only_override_uses_default_effort() -> an
     let home = Arc::new(TempDir::new()?);
     let mut memories = startup_test_memories_config();
     memories.consolidation_model = Some("override.phase-two".to_string());
-    let request = run_memory_phase_two_model_request_test(&server, home, memories).await?;
+    let request = run_memory_phase_two_model_request_test(
+        &server,
+        home,
+        memories,
+        RepositoryMetadataUpdate::Set(UPDATED_CREDENTIAL_BEARING_ORIGIN),
+    )
+    .await?;
     let body = request.body_json();
 
     assert_eq!(
@@ -647,6 +771,7 @@ async fn run_memory_phase_one_model_request_test(
     server: &wiremock::MockServer,
     home: Arc<TempDir>,
     memories: MemoriesConfig,
+    repository_metadata_update: RepositoryMetadataUpdate,
 ) -> anyhow::Result<ResponsesRequest> {
     let test = build_test_codex_with_memories_config(server, Arc::clone(&home), memories).await?;
     let provider = Arc::new(MockMemoryModelProvider::new(
@@ -657,13 +782,26 @@ async fn run_memory_phase_one_model_request_test(
         .codex
         .state_db()
         .ok_or_else(|| anyhow::anyhow!("state db should be enabled for memory startup test"))?;
-    seed_stage1_candidate(
+    let thread_id = seed_stage1_candidate(
         db.as_ref(),
         home.path(),
         chrono::Utc::now() - chrono::Duration::hours(2),
         "startup-models",
     )
     .await?;
+    let git_origin_url = match repository_metadata_update {
+        RepositoryMetadataUpdate::Set(git_origin_url) => Some(git_origin_url),
+        RepositoryMetadataUpdate::Clear => None,
+    };
+    assert!(
+        db.update_thread_git_info(
+            thread_id,
+            /*git_sha*/ None,
+            /*git_branch*/ None,
+            /*git_origin_url*/ Some(git_origin_url),
+        )
+        .await?
+    );
     let response = mount_sse_once(
         server,
         sse(vec![
@@ -688,6 +826,7 @@ async fn run_memory_phase_two_model_request_test(
     server: &wiremock::MockServer,
     home: Arc<TempDir>,
     memories: MemoriesConfig,
+    repository_metadata_update: RepositoryMetadataUpdate,
 ) -> anyhow::Result<ResponsesRequest> {
     let test = build_test_codex_with_memories_config(server, home.clone(), memories).await?;
     let provider = Arc::new(MockMemoryModelProvider::new(
@@ -698,7 +837,7 @@ async fn run_memory_phase_two_model_request_test(
         .codex
         .state_db()
         .ok_or_else(|| anyhow::anyhow!("state db should be enabled for memory startup test"))?;
-    seed_stage1_output(
+    let thread_id = seed_stage1_output(
         db.as_ref(),
         home.path(),
         chrono::Utc::now(),
@@ -707,6 +846,19 @@ async fn run_memory_phase_two_model_request_test(
         "startup-models-phase-two",
     )
     .await?;
+    let git_origin_url = match repository_metadata_update {
+        RepositoryMetadataUpdate::Set(git_origin_url) => Some(git_origin_url),
+        RepositoryMetadataUpdate::Clear => None,
+    };
+    assert!(
+        db.update_thread_git_info(
+            thread_id,
+            /*git_sha*/ None,
+            /*git_branch*/ None,
+            /*git_origin_url*/ Some(git_origin_url),
+        )
+        .await?
+    );
 
     let response = mount_sse_once(
         server,
@@ -819,6 +971,29 @@ async fn memory_startup_context_with_provider(
 
 const MOCK_PROVIDER_PHASE_ONE_MODEL: &str = "mock.phase-one";
 const MOCK_PROVIDER_PHASE_TWO_MODEL: &str = "mock.phase-two";
+const CREDENTIAL_BEARING_ORIGIN: &str =
+    "https://contract-user:contract-token@github.com/OpenAI/Codex.git";
+const UPDATED_CREDENTIAL_BEARING_ORIGIN: &str =
+    "ssh://updated-user:updated-token@github.com/Electivus/electivus-codex.git";
+
+#[derive(Clone, Copy)]
+enum RepositoryMetadataUpdate {
+    Set(&'static str),
+    Clear,
+}
+
+fn assert_origin_credentials_absent(rendered: &str) {
+    for sensitive_value in [
+        CREDENTIAL_BEARING_ORIGIN,
+        UPDATED_CREDENTIAL_BEARING_ORIGIN,
+        "contract-user",
+        "contract-token",
+        "updated-user",
+        "updated-token",
+    ] {
+        assert!(!rendered.contains(sensitive_value));
+    }
+}
 
 #[derive(Debug)]
 struct MockMemoryModelProvider {
@@ -887,6 +1062,7 @@ async fn seed_stage1_output(
     metadata_builder.cwd = codex_home.join(format!("workspace-{rollout_slug}"));
     metadata_builder.model_provider = Some("test-provider".to_string());
     metadata_builder.git_branch = Some(format!("branch-{rollout_slug}"));
+    metadata_builder.git_origin_url = Some(CREDENTIAL_BEARING_ORIGIN.to_string());
     let metadata = metadata_builder.build("test-provider");
     db.upsert_thread(&metadata).await?;
 
@@ -959,6 +1135,7 @@ async fn seed_stage1_candidate(
     metadata_builder.cwd = rollout_cwd;
     metadata_builder.model_provider = Some("test-provider".to_string());
     metadata_builder.git_branch = Some(format!("branch-{rollout_slug}"));
+    metadata_builder.git_origin_url = Some(CREDENTIAL_BEARING_ORIGIN.to_string());
     let mut metadata = metadata_builder.build("test-provider");
     metadata.preview = Some("remember this startup test conversation".to_string());
     metadata.first_user_message = metadata.preview.clone();

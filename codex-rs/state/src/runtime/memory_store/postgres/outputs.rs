@@ -51,7 +51,8 @@ impl PostgresMemoryStore {
              output.rollout_summary, output.rollout_slug, output.generated_at, \
              COALESCE(thread.projection ->> 'rollout_path', '') AS rollout_path, \
              COALESCE(thread.projection ->> 'cwd', '') AS cwd, \
-             thread.projection #>> '{{git_info,branch}}' AS git_branch \
+             thread.projection #>> '{{git_info,branch}}' AS git_branch, \
+             thread.projection #>> '{{git_info,repository_url}}' AS git_origin_url \
              FROM {} AS output JOIN {} AS thread ON thread.thread_id = output.thread_id \
              WHERE (length(trim(output.raw_memory)) > 0 \
              OR length(trim(output.rollout_summary)) > 0) AND {enabled_thread} \
@@ -80,7 +81,8 @@ impl PostgresMemoryStore {
              output.raw_memory, output.rollout_summary, output.rollout_slug, \
              output.generated_at, COALESCE(thread.projection ->> 'rollout_path', '') \
              AS rollout_path, COALESCE(thread.projection ->> 'cwd', '') AS cwd, \
-             thread.projection #>> '{{git_info,branch}}' AS git_branch \
+             thread.projection #>> '{{git_info,branch}}' AS git_branch, \
+             thread.projection #>> '{{git_info,repository_url}}' AS git_origin_url \
              FROM {} AS output JOIN {} AS thread ON thread.thread_id = output.thread_id \
              CROSS JOIN db_clock WHERE (length(trim(output.raw_memory)) > 0 \
              OR length(trim(output.rollout_summary)) > 0) AND {enabled_thread} \
@@ -144,6 +146,7 @@ fn stage1_output_from_row(row: &PgRow) -> anyhow::Result<Stage1Output> {
         rollout_slug: row.try_get("rollout_slug")?,
         cwd: PathBuf::from(row.try_get::<String, _>("cwd")?),
         git_branch: row.try_get("git_branch")?,
+        git_origin_url: row.try_get("git_origin_url")?,
         generated_at: datetime_from_epoch_seconds(row.try_get("generated_at")?)?,
     })
 }
