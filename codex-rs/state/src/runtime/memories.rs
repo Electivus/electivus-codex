@@ -336,7 +336,8 @@ WHERE kind = ? AND job_key = ?
     ///
     /// Query behavior:
     /// - filters out rows where both `raw_memory` and `rollout_summary` are blank
-    /// - hydrates thread `cwd`, `rollout_path`, and `git_branch` from the state DB
+    /// - hydrates thread `cwd`, `rollout_path`, `git_branch`, and
+    ///   `git_origin_url` from the state DB
     /// - filters out missing or non-enabled threads
     /// - orders by `source_updated_at DESC, thread_id DESC`
     /// - returns the first `n` visible outputs
@@ -1470,6 +1471,7 @@ fn stage1_output_from_row_and_thread(
         rollout_slug: row.try_get("rollout_slug")?,
         cwd: thread.cwd,
         git_branch: thread.git_branch,
+        git_origin_url: thread.git_origin_url,
         generated_at,
     })
 }
