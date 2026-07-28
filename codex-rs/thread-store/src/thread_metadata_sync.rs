@@ -560,6 +560,7 @@ mod tests {
                         text: "first user text".to_string(),
                         text_elements: Vec::new(),
                     }])),
+                    started_at_ms: Some(0),
                     completed_at_ms: 0,
                 },
             ))])

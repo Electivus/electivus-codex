@@ -123,6 +123,7 @@ async fn postgres_contract_search_matches_across_replicas_and_is_atomic() -> Tes
                 text_elements: vec![],
             }],
         }),
+        started_at_ms: Some(0),
         completed_at_ms: 1,
     }));
     create_searchable_thread(

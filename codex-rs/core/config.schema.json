@@ -574,6 +574,9 @@
             "in_app_browser": {
               "type": "boolean"
             },
+            "in_app_updates": {
+              "type": "boolean"
+            },
             "item_ids": {
               "type": "boolean"
             },
@@ -5289,6 +5292,9 @@
           "type": "boolean"
         },
         "in_app_browser": {
+          "type": "boolean"
+        },
+        "in_app_updates": {
           "type": "boolean"
         },
         "item_ids": {

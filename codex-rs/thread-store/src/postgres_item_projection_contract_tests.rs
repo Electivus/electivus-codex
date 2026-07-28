@@ -430,6 +430,7 @@ fn projected_item_history(thread_id: ThreadId) -> Vec<RolloutItem> {
                 client_id: None,
                 content: Vec::new(),
             }),
+            started_at_ms: Some(0),
             completed_at_ms: i64::try_from(index + 1).expect("small fixture index") * 1_000,
         }))
     })

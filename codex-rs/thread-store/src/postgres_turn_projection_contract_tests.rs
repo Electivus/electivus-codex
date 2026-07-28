@@ -327,6 +327,7 @@ pub(super) fn completed_item(thread_id: ThreadId, turn_id: &str, item: TurnItem)
         thread_id,
         turn_id: turn_id.to_string(),
         item,
+        started_at_ms: Some(0),
         completed_at_ms: 1_000,
     }))
 }
