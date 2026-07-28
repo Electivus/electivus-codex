@@ -290,6 +290,14 @@ async fn init_state_db_for_app_server_target(
 ) -> std::io::Result<Option<StateDbHandle>> {
     match app_server_target {
         AppServerTarget::Embedded => state_db::try_init(config).await.map(Some).map_err(|err| {
+            if matches!(
+                &config.runtime_state_backend,
+                codex_state::RuntimeStateBackendConfig::Postgresql { .. }
+            ) {
+                return std::io::Error::other(format!(
+                    "failed to initialize PostgreSQL Runtime State Backend: {err:#}"
+                ));
+            }
             let database_path = codex_state::runtime_db_path_for_corruption_error(&err)
                 .unwrap_or_else(|| config.sqlite_config().state_db_path());
             std::io::Error::other(LocalStateDbStartupError::new(
@@ -713,7 +721,7 @@ async fn lookup_latest_session_target_with_app_server(
             .into_iter()
             .find_map(session_target_from_app_server_thread);
         if target.as_ref().is_some_and(|target| {
-            uses_remote_workspace || target.path.as_deref().is_some_and(std::path::Path::exists)
+            uses_remote_workspace || target.path.as_deref().is_none_or(std::path::Path::exists)
         }) {
             return Ok(target);
         }
@@ -3223,6 +3231,8 @@ mod tests {
         let sqlite =
             codex_state::SqliteConfig::new_for_testing(occupied_sqlite_home.as_path().abs());
         config.sqlite = sqlite.clone();
+        config.runtime_state_backend =
+            codex_state::RuntimeStateBackendConfig::Sqlite(sqlite.clone());
 
         let err =
             match init_state_db_for_app_server_target(&config, &AppServerTarget::Embedded).await {
@@ -3257,6 +3267,8 @@ mod tests {
         let sqlite = codex_state::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
         let logs_db_path = sqlite.logs_db_path();
         std::fs::write(&logs_db_path, "not a sqlite database")?;
+        config.runtime_state_backend =
+            codex_state::RuntimeStateBackendConfig::Sqlite(sqlite.clone());
         config.sqlite = sqlite;
 
         let err =

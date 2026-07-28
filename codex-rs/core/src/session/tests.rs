@@ -673,7 +673,7 @@ fn test_model_client_session() -> crate::client::ModelClientSession {
         /*auth_manager*/ None,
         AgentIdentityAuthPolicy::JwtOnly,
         thread_id,
-        ModelProviderInfo::create_openai_provider(/* base_url */ /*base_url*/ None),
+        ModelProviderInfo::create_openai_provider(/*base_url*/ None),
         codex_protocol::protocol::SessionSource::Exec,
         "test_originator".to_string(),
         /*model_verbosity*/ None,
@@ -1794,7 +1794,7 @@ async fn refresh_runtime_config_refreshes_hooks() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn reload_user_config_layer_updates_effective_tool_suggest_config() {
+async fn reload_user_config_layer_updates_effective_tool_execution_config() {
     let (session, _turn_context) = make_session_and_context().await;
     let codex_home = session.codex_home().await;
     std::fs::create_dir_all(&codex_home).expect("create codex home");
@@ -1806,6 +1806,11 @@ disabled_tools = [
   { type = "connector", id = " calendar " },
   { type = "plugin", id = "slack@openai-curated" },
 ]
+
+[tool_execution.yield]
+min_ms = 20_000
+default_ms = 40_000
+max_ms = 80_000
 "#,
     )
     .expect("write user config");
@@ -1819,6 +1824,13 @@ disabled_tools = [
             ToolSuggestDisabledTool::connector("calendar"),
             ToolSuggestDisabledTool::plugin("slack@openai-curated"),
         ]
+    );
+    assert_eq!(
+        config.tool_execution.yield_time(),
+        codex_config::ToolExecutionTimingRange::new(
+            /*min_ms*/ 20_000, /*default_ms*/ 40_000, /*max_ms*/ 80_000,
+        )
+        .expect("reloaded timing range should be valid")
     );
 }
 
@@ -1847,6 +1859,13 @@ disabled_tools = [
     let mut next_config = load_latest_config_for_session(&session).await;
     next_config.model = Some("gpt-5.4".to_string());
     next_config.notify = Some(vec!["echo".to_string()]);
+    next_config.tool_execution = codex_config::ToolExecutionPolicy::new(
+        codex_config::ToolExecutionTimingRange::new(
+            /*min_ms*/ 20_000, /*default_ms*/ 700_000, /*max_ms*/ 900_000,
+        )
+        .expect("refreshed timeout range should be valid"),
+        next_config.tool_execution.yield_time(),
+    );
 
     session.refresh_runtime_config(next_config).await;
 
@@ -1869,6 +1888,13 @@ disabled_tools = [
     assert_eq!(app.destructive_enabled, Some(false));
     assert_eq!(config.model, original.model);
     assert_eq!(config.notify, original.notify);
+    assert_eq!(
+        config.tool_execution.timeout(),
+        codex_config::ToolExecutionTimingRange::new(
+            /*min_ms*/ 20_000, /*default_ms*/ 700_000, /*max_ms*/ 900_000,
+        )
+        .expect("expected timeout range should be valid")
+    );
     assert_eq!(
         config.tool_suggest.disabled_tools,
         vec![
@@ -4498,8 +4524,8 @@ async fn open_thread_persistence(session: &mut Session) -> PathBuf {
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
             history_mode: Default::default(),
-            subagent_history_start_ordinal: None,
             history_base: None,
+            subagent_history_start_ordinal: None,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
@@ -5701,9 +5727,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let mcp_runtime = Arc::new(codex_mcp::McpRuntime::empty(config.prefix_mcp_tool_names()));
     let services = SessionServices {
         mcp_runtime,
-        unified_exec_manager: UnifiedExecProcessManager::new(
-            config.background_terminal_max_timeout,
-        ),
+        unified_exec_manager: UnifiedExecProcessManager::new(),
         elicitations: crate::elicitation::ElicitationService::new(),
         shell_zsh_path: None,
         main_execve_wrapper_exe: config.main_execve_wrapper_exe.clone(),
@@ -5769,10 +5793,9 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             /*attestation_provider*/ None,
             config.http_client_factory(),
         ),
-        code_mode_service: crate::tools::code_mode::CodeModeService::new(
-            Arc::new(codex_code_mode::InProcessCodeModeSessionProvider),
-            &config.features,
-        ),
+        code_mode_service: crate::tools::code_mode::CodeModeService::new(Arc::new(
+            codex_code_mode::InProcessCodeModeSessionProvider,
+        )),
         tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),
     };
@@ -7319,8 +7342,8 @@ async fn shutdown_complete_does_not_append_to_thread_store_after_shutdown() {
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
             history_mode: Default::default(),
-            subagent_history_start_ordinal: None,
             history_base: None,
+            subagent_history_start_ordinal: None,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
@@ -7398,8 +7421,8 @@ async fn submission_loop_channel_close_runs_full_thread_teardown() {
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
             history_mode: Default::default(),
-            subagent_history_start_ordinal: None,
             history_base: None,
+            subagent_history_start_ordinal: None,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
@@ -7874,9 +7897,7 @@ where
     let mcp_runtime = Arc::new(codex_mcp::McpRuntime::empty(config.prefix_mcp_tool_names()));
     let services = SessionServices {
         mcp_runtime,
-        unified_exec_manager: UnifiedExecProcessManager::new(
-            config.background_terminal_max_timeout,
-        ),
+        unified_exec_manager: UnifiedExecProcessManager::new(),
         elicitations: crate::elicitation::ElicitationService::new(),
         shell_zsh_path: None,
         main_execve_wrapper_exe: config.main_execve_wrapper_exe.clone(),
@@ -7942,10 +7963,9 @@ where
             /*attestation_provider*/ None,
             config.http_client_factory(),
         ),
-        code_mode_service: crate::tools::code_mode::CodeModeService::new(
-            Arc::new(codex_code_mode::InProcessCodeModeSessionProvider),
-            &config.features,
-        ),
+        code_mode_service: crate::tools::code_mode::CodeModeService::new(Arc::new(
+            codex_code_mode::InProcessCodeModeSessionProvider,
+        )),
         tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),
     };
@@ -9797,8 +9817,8 @@ async fn attach_in_memory_thread_store(
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
             history_mode: Default::default(),
-            subagent_history_start_ordinal: None,
             history_base: None,
+            subagent_history_start_ordinal: None,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
@@ -11299,7 +11319,7 @@ async fn rejects_escalated_permissions_when_policy_not_on_request() {
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
 
     let command_script = "echo hi";
-    let timeout_ms = 1000;
+    let timeout_ms = turn_context.config.tool_execution.timeout().default_ms();
     let sandbox_permissions = SandboxPermissions::RequireEscalated;
 
     let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));

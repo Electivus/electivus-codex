@@ -472,6 +472,7 @@
               "$ref": "#/definitions/FeatureToml_for_CodeModeConfigToml"
             },
             "code_mode_buffered_exec": {
+              "description": "Deprecated compatibility key retained as a no-op; the global tool execution yield default is authoritative.",
               "type": "boolean"
             },
             "code_mode_host": {
@@ -625,6 +626,9 @@
               "type": "boolean"
             },
             "plugins": {
+              "type": "boolean"
+            },
+            "postgresql_state": {
               "type": "boolean"
             },
             "prevent_idle_sleep": {
@@ -830,6 +834,9 @@
         "service_tier": {
           "description": "Optional explicit service tier request id for new turns (for example `default`, `priority`, or `flex`; legacy `fast` also works).",
           "type": "string"
+        },
+        "tool_execution": {
+          "$ref": "#/definitions/ToolExecutionToml"
         },
         "tools": {
           "$ref": "#/definitions/ToolsToml"
@@ -1567,6 +1574,14 @@
           "description": "Model used for memory consolidation.",
           "type": "string"
         },
+        "consolidation_model_reasoning_effort": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            }
+          ],
+          "description": "Reasoning effort used for memory consolidation."
+        },
         "dedicated_tools": {
           "description": "When `true`, expose dedicated memory tools through the extension tool surface.",
           "type": "boolean"
@@ -1578,6 +1593,14 @@
         "extract_model": {
           "description": "Model used for thread summarisation.",
           "type": "string"
+        },
+        "extract_model_reasoning_effort": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            }
+          ],
+          "description": "Reasoning effort used for thread summarisation."
         },
         "generate_memories": {
           "description": "When `false`, newly created threads are stored with `memory_mode = \"disabled\"` in the state DB.",
@@ -2550,6 +2573,63 @@
       },
       "type": "object"
     },
+    "PostgresqlStatePoolToml": {
+      "additionalProperties": false,
+      "description": "PostgreSQL Runtime State connection-pool settings.",
+      "properties": {
+        "acquire_timeout_ms": {
+          "default": 10000,
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "max_connections": {
+          "default": 10,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "statement_timeout_ms": {
+          "default": 30000,
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "PostgresqlStateToml": {
+      "additionalProperties": false,
+      "description": "PostgreSQL Runtime State Namespace configuration.",
+      "properties": {
+        "pool": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/PostgresqlStatePoolToml"
+            }
+          ],
+          "default": {
+            "acquire_timeout_ms": 10000,
+            "max_connections": 10,
+            "statement_timeout_ms": 30000
+          },
+          "description": "Connection-pool configuration."
+        },
+        "schema": {
+          "default": "codex",
+          "description": "PostgreSQL schema containing this Runtime State Namespace.",
+          "type": "string"
+        },
+        "url_env": {
+          "description": "Name of the environment variable containing the PostgreSQL connection URL.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url_env"
+      ],
+      "type": "object"
+    },
     "ProfileTui": {
       "additionalProperties": false,
       "description": "TUI settings supported inside a named profile.",
@@ -3056,6 +3136,45 @@
       },
       "type": "object"
     },
+    "StateToml": {
+      "description": "Runtime State Backend selection.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "backend": {
+              "enum": [
+                "sqlite"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "backend"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "backend": {
+              "enum": [
+                "postgresql"
+              ],
+              "type": "string"
+            },
+            "postgresql": {
+              "$ref": "#/definitions/PostgresqlStateToml"
+            }
+          },
+          "required": [
+            "backend",
+            "postgresql"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ThreadStoreToml": {
       "oneOf": [
         {
@@ -3107,6 +3226,54 @@
           "format": "int64",
           "minimum": 1.0,
           "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "ToolExecutionTimingRangeToml": {
+      "additionalProperties": false,
+      "description": "Partial user configuration for one execution timing range. Values must be positive, representable as host wait deadlines, and resolve to `min_ms <= default_ms <= max_ms`.",
+      "properties": {
+        "default_ms": {
+          "description": "Value used when the model omits the timing argument.",
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "max_ms": {
+          "description": "Largest model-requested value Codex permits.",
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "min_ms": {
+          "description": "Smallest model-requested value Codex permits.",
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "ToolExecutionToml": {
+      "additionalProperties": false,
+      "description": "Partial user configuration for model-controlled command execution timing.",
+      "properties": {
+        "timeout": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ToolExecutionTimingRangeToml"
+            }
+          ],
+          "description": "Hard command deadline range. Omitted fields use 10000 / 600000 / 3600000 ms."
+        },
+        "yield": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ToolExecutionTimingRangeToml"
+            }
+          ],
+          "description": "Observation yield range. Omitted fields use 10000 / 30000 / 300000 ms."
         }
       },
       "type": "object"
@@ -4878,7 +5045,7 @@
       "description": "Optional policy instructions for the guardian auto-reviewer."
     },
     "background_terminal_max_timeout": {
-      "description": "Maximum poll window for background terminal output (`write_stdin`), in milliseconds. Default: `300000` (5 minutes).",
+      "description": "Deprecated alias for `tool_execution.yield.max_ms`. Legacy values below the built-in yield default are raised to that default.",
       "format": "uint64",
       "minimum": 0.0,
       "type": "integer"
@@ -5025,6 +5192,7 @@
           "$ref": "#/definitions/FeatureToml_for_CodeModeConfigToml"
         },
         "code_mode_buffered_exec": {
+          "description": "Deprecated compatibility key retained as a no-op; the global tool execution yield default is authoritative.",
           "type": "boolean"
         },
         "code_mode_host": {
@@ -5178,6 +5346,9 @@
           "type": "boolean"
         },
         "plugins": {
+          "type": "boolean"
+        },
+        "postgresql_state": {
           "type": "boolean"
         },
         "prevent_idle_sleep": {
@@ -5705,9 +5876,25 @@
       ],
       "description": "Directory where Codex stores the SQLite state DB. Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`."
     },
+    "state": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/StateToml"
+        }
+      ],
+      "description": "Selects and configures the Runtime State Backend. SQLite is used when this section is omitted."
+    },
     "suppress_unstable_features_warning": {
       "description": "Suppress warnings about unstable (under development) features.",
       "type": "boolean"
+    },
+    "tool_execution": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ToolExecutionToml"
+        }
+      ],
+      "description": "Timing policy for model-controlled command execution."
     },
     "tool_output_token_limit": {
       "description": "Token budget applied when storing tool/function outputs in the context manager.",

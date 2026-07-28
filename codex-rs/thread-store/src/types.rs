@@ -16,6 +16,9 @@ use codex_protocol::protocol::GitInfo;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::SessionContextWindow;
+use codex_protocol::protocol::SessionMeta;
+use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode as MemoryMode;
@@ -106,6 +109,42 @@ pub struct CreateThreadParams {
     pub metadata: ThreadPersistenceMetadata,
 }
 
+pub(crate) fn initial_session_meta_item(
+    params: &CreateThreadParams,
+    timestamp: String,
+    cli_version: String,
+) -> RolloutItem {
+    RolloutItem::SessionMeta(SessionMetaLine {
+        meta: SessionMeta {
+            session_id: params.session_id,
+            id: params.thread_id,
+            forked_from_id: params.forked_from_id,
+            parent_thread_id: params.parent_thread_id,
+            timestamp,
+            cwd: params.metadata.cwd.clone().unwrap_or_default(),
+            originator: params.originator.clone(),
+            cli_version,
+            source: params.source.clone(),
+            thread_source: params.thread_source.clone(),
+            agent_nickname: params.source.get_nickname(),
+            agent_role: params.source.get_agent_role(),
+            agent_path: params.source.get_agent_path().map(Into::into),
+            model_provider: Some(params.metadata.model_provider.clone()),
+            base_instructions: Some(params.base_instructions.clone()),
+            dynamic_tools: (!params.dynamic_tools.is_empty()).then(|| params.dynamic_tools.clone()),
+            selected_capability_roots: params.selected_capability_roots.clone(),
+            memory_mode: matches!(params.metadata.memory_mode, MemoryMode::Disabled)
+                .then_some("disabled".to_string()),
+            history_mode: params.history_mode,
+            history_base: None,
+            subagent_history_start_ordinal: params.subagent_history_start_ordinal,
+            multi_agent_version: params.multi_agent_version,
+            context_window: Some(SessionContextWindow::new(params.initial_window_id.clone())),
+        },
+        git: None,
+    })
+}
+
 /// Parameters required to reopen persistence for an existing thread.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResumeThreadParams {
@@ -145,6 +184,58 @@ pub struct AppendThreadItemsParams {
     /// Store implementations are responsible for applying the shared rollout persistence policy
     /// before writing durable replay history or any implementation-owned projections.
     pub items: Vec<RolloutItem>,
+}
+
+/// Stable identity for one atomic Append Batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AppendBatchId(uuid::Uuid);
+
+impl Default for AppendBatchId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AppendBatchId {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::now_v7())
+    }
+
+    pub fn from_string(value: &str) -> Result<Self, uuid::Error> {
+        uuid::Uuid::parse_str(value).map(Self)
+    }
+}
+
+impl std::fmt::Display for AppendBatchId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
+/// One ordered, atomic append with an identity that can be reused after an ambiguous response.
+#[derive(Clone, Debug)]
+pub struct AppendThreadItemsBatch {
+    pub thread_id: ThreadId,
+    pub batch_id: AppendBatchId,
+    pub items: Vec<RolloutItem>,
+}
+
+impl AppendThreadItemsBatch {
+    pub fn new(thread_id: ThreadId, batch_id: AppendBatchId, items: Vec<RolloutItem>) -> Self {
+        Self {
+            thread_id,
+            batch_id,
+            items,
+        }
+    }
+}
+
+/// Durable position committed by an Append Batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppendBatchCommit {
+    pub first_ordinal: u64,
+    pub persisted_item_count: usize,
+    pub committed_stream_version: u64,
 }
 
 /// Parameters for loading persisted history for resume, fork, rollback, and memory jobs.
@@ -565,6 +656,7 @@ pub struct StoredThread {
     /// Thread archive timestamp, if archived.
     pub archived_at: Option<DateTime<Utc>>,
     /// Whether this thread has been pinned by the user.
+    #[serde(default)]
     pub is_pinned: bool,
     /// Working directory captured for the thread.
     pub cwd: PathBuf,

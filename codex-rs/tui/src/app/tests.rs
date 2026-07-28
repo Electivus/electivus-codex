@@ -2251,6 +2251,8 @@ fn update_memory_settings_updates_current_thread_memory_mode() -> Result<()> {
         let codex_home = tempdir()?;
         app.config.codex_home = codex_home.path().to_path_buf().abs();
         app.config.sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
+        app.config.runtime_state_backend =
+            codex_state::RuntimeStateBackendConfig::Sqlite(app.config.sqlite.clone());
         // Seed the previous setting so this test exercises the thread-mode update path.
         app.config.memories.generate_memories = true;
 

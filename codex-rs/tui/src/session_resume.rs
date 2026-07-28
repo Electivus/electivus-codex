@@ -1,8 +1,9 @@
 //! Resolve saved-session state needed before resuming or forking a thread.
 //!
 //! The app-server API owns normal thread lifecycle data. This module coordinates
-//! the TUI-specific cwd prompt and falls back to local rollout metadata only
-//! before the app server has resumed the selected thread.
+//! the TUI-specific cwd prompt. Legacy SQLite sessions may fall back to local
+//! rollout metadata before the app server has resumed the selected thread;
+//! PostgreSQL Runtime State remains canonical and never uses that fallback.
 
 use std::io;
 use std::path::Path;
@@ -90,11 +91,18 @@ pub(crate) async fn read_session_model(
     thread_id: ThreadId,
     path: Option<&Path>,
 ) -> Option<String> {
-    if let Some(state_db_ctx) = state_db_ctx
-        && let Ok(Some(metadata)) = state_db_ctx.get_thread(thread_id).await
-        && let Some(model) = metadata.model
-    {
-        return Some(model);
+    if let Some(state_db_ctx) = state_db_ctx {
+        let metadata = state_db_ctx
+            .get_thread_resume_metadata(thread_id)
+            .await
+            .ok()
+            .flatten();
+        if !state_db_ctx.uses_local_rollout_history() {
+            return metadata.and_then(|metadata| metadata.model);
+        }
+        if let Some(model) = metadata.and_then(|metadata| metadata.model) {
+            return Some(model);
+        }
     }
 
     let path = path?;
@@ -169,10 +177,18 @@ async fn read_session_cwd(
     thread_id: ThreadId,
     path: Option<&Path>,
 ) -> Option<PathBuf> {
-    if let Some(state_db_ctx) = state_db_ctx
-        && let Ok(Some(metadata)) = state_db_ctx.get_thread(thread_id).await
-    {
-        return Some(metadata.cwd);
+    if let Some(state_db_ctx) = state_db_ctx {
+        let metadata = state_db_ctx
+            .get_thread_resume_metadata(thread_id)
+            .await
+            .ok()
+            .flatten();
+        if !state_db_ctx.uses_local_rollout_history() {
+            return metadata.map(|metadata| metadata.cwd);
+        }
+        if let Some(metadata) = metadata {
+            return Some(metadata.cwd);
+        }
     }
 
     let path = path?;

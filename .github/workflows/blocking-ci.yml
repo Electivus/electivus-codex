@@ -2,10 +2,12 @@ name: blocking-ci
 
 # This is the single entrypoint for checks that block a PR merge. It also runs
 # after pushes to main so the same check family stays grouped in the Actions UI.
+# Manual dispatch supports a second non-retry run during Stability certification.
 on:
   pull_request: {}
   push:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   # Keep reusable workflow calls alphabetized. The `required` job below is the
@@ -28,6 +30,11 @@ jobs:
   codespell:
     name: Codespell
     uses: ./.github/workflows/codespell.yml
+    secrets: inherit
+
+  postgres-runtime-state-contracts:
+    name: PostgreSQL Runtime State contracts
+    uses: ./.github/workflows/postgres-runtime-state-contracts.yml
     secrets: inherit
 
   repo-checks:
@@ -55,6 +62,7 @@ jobs:
       - blob-size-policy
       - cargo-deny
       - codespell
+      - postgres-runtime-state-contracts
       - repo-checks
       - rust-ci
       - sdk

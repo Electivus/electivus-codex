@@ -9,30 +9,44 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolExecutor;
+use crate::tools::timing::TimingParameter;
+use crate::tools::timing::YieldTimingClass;
+use crate::tools::timing::adjustment_message;
+use crate::tools::timing::error_with_timing_adjustment;
+use crate::tools::timing::resolve_yield_timing;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 
-use super::DEFAULT_WAIT_YIELD_TIME_MS;
 use super::ExecContext;
 use super::WAIT_TOOL_NAME;
 use super::handle_runtime_response;
 use super::wait_spec::create_wait_tool;
 
-pub struct CodeModeWaitHandler;
+pub struct CodeModeWaitHandler {
+    yield_time: codex_config::ToolExecutionTimingRange,
+}
+
+impl CodeModeWaitHandler {
+    pub(crate) fn new(yield_time: codex_config::ToolExecutionTimingRange) -> Self {
+        Self { yield_time }
+    }
+}
+
+impl Default for CodeModeWaitHandler {
+    fn default() -> Self {
+        Self::new(codex_config::ToolExecutionPolicy::default().yield_time())
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct ExecWaitArgs {
     cell_id: String,
-    #[serde(default = "default_wait_yield_time_ms")]
-    yield_time_ms: u64,
+    #[serde(default)]
+    yield_time_ms: Option<u64>,
     #[serde(default)]
     max_tokens: Option<usize>,
     #[serde(default)]
     terminate: bool,
-}
-
-fn default_wait_yield_time_ms() -> u64 {
-    DEFAULT_WAIT_YIELD_TIME_MS
 }
 
 fn parse_arguments<T>(arguments: &str) -> Result<T, FunctionCallError>
@@ -50,7 +64,7 @@ impl ToolExecutor<ToolInvocation> for CodeModeWaitHandler {
     }
 
     fn spec(&self) -> ToolSpec {
-        create_wait_tool()
+        create_wait_tool(self.yield_time)
     }
 
     fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
@@ -79,23 +93,41 @@ impl CodeModeWaitHandler {
                 let exec = ExecContext { session, turn };
                 let started_at = std::time::Instant::now();
                 let cell_id = codex_code_mode::CellId::new(args.cell_id);
-                let wait_response = if args.terminate {
-                    exec.session
-                        .services
-                        .code_mode_service
-                        .terminate(cell_id)
-                        .await
+                let (wait_response, resolved_yield) = if args.terminate {
+                    (
+                        exec.session
+                            .services
+                            .code_mode_service
+                            .terminate(cell_id)
+                            .await,
+                        None,
+                    )
                 } else {
-                    exec.session
-                        .services
-                        .code_mode_service
-                        .wait(codex_code_mode::WaitRequest {
-                            cell_id,
-                            yield_time_ms: args.yield_time_ms,
-                        })
-                        .await
-                }
-                .map_err(FunctionCallError::RespondToModel)?;
+                    let resolved_yield = resolve_yield_timing(
+                        exec.turn.config.tool_execution,
+                        YieldTimingClass::Global,
+                        args.yield_time_ms,
+                    );
+                    (
+                        exec.session
+                            .services
+                            .code_mode_service
+                            .wait(codex_code_mode::WaitRequest {
+                                cell_id,
+                                yield_time_ms: resolved_yield.effective_ms,
+                            })
+                            .await,
+                        Some(resolved_yield),
+                    )
+                };
+                let adjust_error = |error: String| match resolved_yield {
+                    Some(timing) => {
+                        error_with_timing_adjustment(TimingParameter::Yield, timing, error)
+                    }
+                    None => error,
+                };
+                let wait_response = wait_response
+                    .map_err(|err| FunctionCallError::RespondToModel(adjust_error(err)))?;
                 if let codex_code_mode::WaitOutcome::LiveCell(response) = &wait_response
                     && !matches!(response, codex_code_mode::RuntimeResponse::Yielded { .. })
                 {
@@ -121,10 +153,20 @@ impl CodeModeWaitHandler {
                         .finish_cell_dispatch(runtime_cell_id);
                 }
                 exec.session.services.elicitations.wait_until_clear().await;
-                handle_runtime_response(&exec, wait_response.into(), args.max_tokens, started_at)
-                    .await
-                    .map(boxed_tool_output)
-                    .map_err(FunctionCallError::RespondToModel)
+                let mut output = handle_runtime_response(
+                    &exec,
+                    wait_response.into(),
+                    args.max_tokens,
+                    started_at,
+                )
+                .await
+                .map_err(|err| FunctionCallError::RespondToModel(adjust_error(err)))?;
+                if let Some(message) = resolved_yield
+                    .and_then(|timing| adjustment_message(TimingParameter::Yield, timing))
+                {
+                    output.prepend_text(message);
+                }
+                Ok(boxed_tool_output(output))
             }
             _ => Err(FunctionCallError::RespondToModel(format!(
                 "{WAIT_TOOL_NAME} expects JSON arguments"

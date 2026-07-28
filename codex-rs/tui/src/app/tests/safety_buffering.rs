@@ -175,6 +175,8 @@ stream_max_retries = 0
     )?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
+    app.config.runtime_state_backend =
+        codex_state::RuntimeStateBackendConfig::Sqlite(app.config.sqlite.clone());
     app.config.model = Some(CURRENT_MODEL.to_string());
     app.config.model_provider_id = MODEL_PROVIDER_ID.to_string();
     app.config.model_provider = ModelProviderInfo {
@@ -385,6 +387,8 @@ goals = true
     )?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
+    app.config.runtime_state_backend =
+        codex_state::RuntimeStateBackendConfig::Sqlite(app.config.sqlite.clone());
     app.config.model = Some(CURRENT_MODEL.to_string());
     app.config.model_provider_id = MODEL_PROVIDER_ID.to_string();
     app.config.model_provider = ModelProviderInfo {
@@ -462,10 +466,13 @@ goals = true
         .thread_goals()
         .account_thread_goal_usage(
             source_thread_id,
-            /*time_delta_seconds*/ 12,
-            /*token_delta*/ 50,
-            codex_state::GoalAccountingMode::ActiveOrStopped,
-            Some(source_goal_id.as_str()),
+            codex_state::GoalAccountingRequest {
+                event_id: "safety-buffering-source-usage",
+                time_delta_seconds: 12,
+                token_delta: 50,
+                mode: codex_state::GoalAccountingMode::ActiveOrStopped,
+                target: codex_state::GoalAccountingTarget::GoalId(source_goal_id.as_str()),
+            },
         )
         .await
         .expect("source goal usage should be recorded");
