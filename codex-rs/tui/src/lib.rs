@@ -162,6 +162,7 @@ pub(crate) mod public_widgets;
 mod render;
 mod resize_reflow_cap;
 mod resume_picker;
+mod resume_picker_scope;
 mod selection_list;
 mod service_tier_resolution;
 mod session_archive_commands;
@@ -2056,6 +2057,8 @@ mod tests {
     use codex_app_server_protocol::AskForApproval;
     use codex_app_server_protocol::ClientRequest;
     use codex_app_server_protocol::RequestId;
+    use codex_app_server_protocol::ThreadListParams;
+    use codex_app_server_protocol::ThreadListResponse;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
     use codex_config::config_toml::ProjectConfig;
@@ -3108,7 +3111,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embedded_app_server_supports_thread_start_rpc() -> color_eyre::Result<()> {
+    async fn embedded_app_server_supports_stable_and_experimental_picker_rpcs()
+    -> color_eyre::Result<()> {
         let temp_dir = TempDir::new()?;
         let config = build_config(&temp_dir).await?;
         let app_server = start_test_embedded_app_server(config).await?;
@@ -3123,6 +3127,31 @@ mod tests {
             .await
             .expect("thread/start should succeed");
         assert!(!response.thread.id.is_empty());
+
+        let _: ThreadListResponse = app_server
+            .request_typed(ClientRequest::ThreadList {
+                request_id: RequestId::Integer(2),
+                params: ThreadListParams {
+                    cursor: None,
+                    limit: Some(1),
+                    sort_key: None,
+                    sort_direction: None,
+                    model_providers: None,
+                    source_kinds: None,
+                    archived: Some(false),
+                    is_pinned: None,
+                    cwd: None,
+                    project_cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                        temp_dir.path(),
+                    )),
+                    use_state_db_only: false,
+                    search_term: None,
+                    parent_thread_id: None,
+                    ancestor_thread_id: None,
+                },
+            })
+            .await
+            .expect("thread/list.projectCwd should be enabled for the built-in TUI");
 
         app_server.shutdown().await?;
         Ok(())
