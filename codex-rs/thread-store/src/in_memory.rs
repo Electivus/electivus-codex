@@ -851,6 +851,11 @@ fn stored_thread_from_state(
         agent_nickname: metadata.and_then(|metadata| metadata.agent_nickname.clone().flatten()),
         agent_role: metadata.and_then(|metadata| metadata.agent_role.clone().flatten()),
         agent_path: metadata.and_then(|metadata| metadata.agent_path.clone().flatten()),
+        repository_identity: metadata
+            .and_then(|metadata| metadata.git_info.as_ref())
+            .and_then(|git_info| git_info.origin_url.as_ref())
+            .and_then(|origin_url| origin_url.as_deref())
+            .and_then(codex_git_utils::canonicalize_git_remote_url),
         git_info: metadata.and_then(git_info_from_patch),
         approval_mode: metadata
             .and_then(|metadata| metadata.approval_mode)

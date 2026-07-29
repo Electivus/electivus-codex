@@ -148,6 +148,10 @@ async fn postgres_contract_runtime_state_thread_import_is_visible_to_another_poo
     assert_eq!(imported.archived_at, Some(source.archived_at));
     assert_eq!(imported.preview, "migration needle");
     assert_eq!(
+        imported.repository_identity.as_deref(),
+        Some("example.test/acme/repo")
+    );
+    assert_eq!(
         imported.token_usage,
         Some(TokenUsage {
             total_tokens: 987,
@@ -683,7 +687,7 @@ pub(super) async fn migration_source(
     metadata.cli_version = "0.0.0".to_string();
     metadata.git_sha = Some("abc987".to_string());
     metadata.git_branch = Some("migration".to_string());
-    metadata.git_origin_url = Some("https://example.test/repo.git".to_string());
+    metadata.git_origin_url = Some("https://example.test/acme/repo.git".to_string());
     runtime.upsert_thread(&metadata).await?;
     let mut legacy = ThreadMetadataBuilder::new(
         legacy_id,

@@ -205,7 +205,9 @@ SELECT
     threads.is_pinned,
     threads.git_sha,
     threads.git_branch,
-    threads.git_origin_url
+    threads.git_origin_url,
+    threads.repository_identity,
+    threads.git_origin_url_is_explicit
 FROM threads
             "#,
         );
@@ -588,7 +590,9 @@ SELECT
     threads.is_pinned,
     threads.git_sha,
     threads.git_branch,
-    threads.git_origin_url
+    threads.git_origin_url,
+    threads.repository_identity,
+    threads.git_origin_url_is_explicit
 FROM threads
 WHERE threads.id = ? AND threads.memory_mode = 'enabled'
             "#,

@@ -294,6 +294,9 @@ fn thread_metadata_from_projection(
         ),
         None => (None, None, None),
     };
+    let repository_identity = git_origin_url
+        .as_deref()
+        .and_then(codex_git_utils::canonicalize_git_remote_url);
     let (title, name) = match projection.history_mode {
         ThreadHistoryMode::Legacy => (
             projection
@@ -335,5 +338,7 @@ fn thread_metadata_from_projection(
         git_sha,
         git_branch,
         git_origin_url,
+        repository_identity,
+        git_origin_url_is_explicit: false,
     })
 }

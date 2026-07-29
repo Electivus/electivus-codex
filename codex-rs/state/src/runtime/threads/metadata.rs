@@ -64,7 +64,9 @@ SELECT
     threads.is_pinned,
     threads.git_sha,
     threads.git_branch,
-    threads.git_origin_url
+    threads.git_origin_url,
+    threads.repository_identity,
+    threads.git_origin_url_is_explicit
 FROM threads
 WHERE threads.id = ?
             "#,
@@ -159,8 +161,9 @@ INSERT INTO threads (
     git_sha,
     git_branch,
     git_origin_url,
+    repository_identity,
     memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO NOTHING
             "#,
         )
@@ -206,6 +209,12 @@ ON CONFLICT(id) DO NOTHING
         .bind(metadata.git_sha.as_deref())
         .bind(metadata.git_branch.as_deref())
         .bind(metadata.git_origin_url.as_deref())
+        .bind(
+            metadata
+                .git_origin_url
+                .as_deref()
+                .and_then(codex_git_utils::canonicalize_git_remote_url),
+        )
         .bind("enabled")
         .execute(self.sqlite_pool()?)
         .await?;

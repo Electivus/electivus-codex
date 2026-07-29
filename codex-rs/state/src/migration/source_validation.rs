@@ -21,7 +21,7 @@ pub(super) async fn validate_database_schema(
     tables: &[String],
 ) -> anyhow::Result<()> {
     let (version, required_tables) = match label {
-        "state DB" => (45, STATE_TABLES),
+        "state DB" => (46, STATE_TABLES),
         "log DB" => (2, "_sqlx_migrations,logs"),
         "goals DB" => (3, GOALS_TABLES),
         "memories DB" => (1, "_sqlx_migrations,jobs,stage1_outputs"),

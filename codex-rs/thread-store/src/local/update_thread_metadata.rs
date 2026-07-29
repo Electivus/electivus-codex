@@ -393,6 +393,7 @@ async fn apply_metadata_update(
                 metadata.is_pinned = is_pinned;
             }
             if let Some(git_info) = patch.git_info {
+                let updates_origin = git_info.origin_url.is_some();
                 let existing_git_info = git_info_from_parts(
                     metadata.git_sha.clone(),
                     metadata.git_branch.clone(),
@@ -402,6 +403,12 @@ async fn apply_metadata_update(
                 metadata.git_sha = sha;
                 metadata.git_branch = branch;
                 metadata.git_origin_url = origin_url;
+                if updates_origin {
+                    metadata.repository_identity = metadata
+                        .git_origin_url
+                        .as_deref()
+                        .and_then(codex_git_utils::canonicalize_git_remote_url);
+                }
             }
             state_db
                 .upsert_thread(&metadata)

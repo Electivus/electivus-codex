@@ -3,6 +3,7 @@ use super::PostgresNamespaceAction;
 use super::PostgresRuntimeStatePool;
 use super::test_support::PostgresContractFixture;
 use super::test_support::test_database_url;
+use crate::migrations::tests::REPOSITORY_IDENTITY_CASES;
 use crate::runtime::LogStore;
 use crate::runtime::RemoteControlEnrollmentStore;
 use crate::runtime::backfill_contract_tests::run_backfill_coordination_contract;
@@ -107,6 +108,85 @@ async fn postgres_contract_runtime_reads_resume_metadata_and_deletes_integrally(
 
     runtime.close().await;
     pool.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_repository_identity_migration_preserves_projection_and_is_replica_visible()
+-> Result<()> {
+    let database_url = test_database_url()?;
+    let mut fixture = PostgresContractFixture::new(database_url, "repository_identity")?;
+    fixture.manage(PostgresNamespaceAction::Migrate).await?;
+    let pool = fixture.connect_pool().await?;
+    let threads = super::qualified_table(fixture.schema(), "threads");
+    let migrations = super::qualified_migration_table(fixture.schema());
+    for index in [
+        "threads_repository_identity_created_idx",
+        "threads_repository_identity_updated_idx",
+        "threads_repository_identity_recency_idx",
+    ] {
+        let index = super::qualified_table(fixture.schema(), index);
+        sqlx::query(AssertSqlSafe(format!("DROP INDEX {index}")))
+            .execute(&pool)
+            .await?;
+    }
+    sqlx::query(AssertSqlSafe(format!(
+        "ALTER TABLE {threads} DROP COLUMN repository_identity"
+    )))
+    .execute(&pool)
+    .await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "DELETE FROM {migrations} WHERE version = 21"
+    )))
+    .execute(&pool)
+    .await?;
+
+    let mut expected_rows = Vec::new();
+    for (index, &(origin, expected)) in REPOSITORY_IDENTITY_CASES.iter().enumerate() {
+        let thread_id =
+            ThreadId::from_string(&format!("00000000-0000-0000-0000-{:012}", index + 81))?;
+        let original_projection = serde_json::json!({
+            "thread_id": thread_id,
+            "preview": format!("canonicalization-case-{index}"),
+            "git_info": {
+                "repository_url": origin,
+            }
+        });
+        sqlx::query(AssertSqlSafe(format!(
+            "INSERT INTO {threads} (thread_id, projection, stream_version, fencing_token, writer_id, \
+             writer_lease_expires_at, created_at, updated_at, recency_at) \
+             VALUES ($1, $2, 0, 1, 'migration-contract', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, \
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )))
+        .bind(thread_id.to_string())
+        .bind(&original_projection)
+        .execute(&pool)
+        .await?;
+        let mut expected_projection = original_projection;
+        if let Some(repository_identity) = expected {
+            expected_projection["repository_identity"] =
+                serde_json::Value::String(repository_identity.to_string());
+        }
+        expected_rows.push((
+            thread_id.to_string(),
+            expected_projection,
+            expected.map(str::to_string),
+        ));
+    }
+    pool.close().await;
+
+    fixture.manage(PostgresNamespaceAction::Migrate).await?;
+    let replica = fixture.connect_pool().await?;
+    let rows: Vec<(String, serde_json::Value, Option<String>)> =
+        sqlx::query_as(AssertSqlSafe(format!(
+            "SELECT thread_id, projection, repository_identity FROM {threads} ORDER BY thread_id"
+        )))
+        .fetch_all(&replica)
+        .await?;
+    assert_eq!(rows, expected_rows);
+
+    replica.close().await;
     fixture.cleanup().await
 }
 

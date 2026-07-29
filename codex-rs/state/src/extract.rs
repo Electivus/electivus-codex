@@ -699,6 +699,8 @@ mod tests {
             git_sha: None,
             git_branch: None,
             git_origin_url: None,
+            repository_identity: None,
+            git_origin_url_is_explicit: false,
         }
     }
 

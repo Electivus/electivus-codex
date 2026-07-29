@@ -676,6 +676,9 @@ pub struct StoredThread {
     pub agent_path: Option<String>,
     /// Optional Git metadata captured for the thread.
     pub git_info: Option<GitInfo>,
+    /// Credential-free canonical identity derived from the observed Git origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_identity: Option<String>,
     /// Approval mode captured for the thread.
     pub approval_mode: AskForApproval,
     /// Canonical runtime permissions captured for the thread.

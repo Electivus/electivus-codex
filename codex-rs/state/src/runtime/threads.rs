@@ -34,6 +34,14 @@ mod tests {
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
 
+    async fn persisted_thread(runtime: &StateRuntime, thread_id: ThreadId) -> ThreadMetadata {
+        runtime
+            .get_thread(thread_id)
+            .await
+            .expect("thread should load")
+            .expect("thread should exist")
+    }
+
     #[tokio::test]
     async fn upsert_thread_keeps_creation_memory_mode_for_existing_rows() {
         let codex_home = unique_temp_dir();
@@ -1091,11 +1099,7 @@ mod tests {
             .await
             .expect("apply_rollout_items should succeed");
 
-        let persisted = runtime
-            .get_thread(thread_id)
-            .await
-            .expect("thread should load")
-            .expect("thread should exist");
+        let persisted = persisted_thread(&runtime, thread_id).await;
         assert_eq!(persisted.git_sha.as_deref(), Some("rollout-sha"));
         assert_eq!(persisted.git_branch.as_deref(), Some("sqlite-branch"));
         assert_eq!(
@@ -1135,16 +1139,68 @@ mod tests {
             .await
             .expect("rollout upsert should succeed");
 
+        let persisted = persisted_thread(&runtime, thread_id).await;
+        assert_eq!(
+            (
+                persisted.git_sha.as_deref(),
+                persisted.git_branch.as_deref(),
+                persisted.git_origin_url.as_deref(),
+                persisted.repository_identity.as_deref(),
+            ),
+            (
+                Some("sqlite-sha"),
+                Some("sqlite-branch"),
+                Some("git@example.com:openai/codex.git"),
+                Some("example.com/openai/codex"),
+            )
+        );
+
+        runtime
+            .update_thread_git_info(
+                thread_id,
+                /*git_sha*/ None,
+                /*git_branch*/ None,
+                Some(Some("https://example.com/not-a-repository.git")),
+            )
+            .await
+            .expect("invalid explicit origin update should succeed");
+        runtime
+            .upsert_thread(&rollout_metadata)
+            .await
+            .expect("stale rollout upsert should succeed");
+        let persisted = persisted_thread(&runtime, thread_id).await;
+        assert_eq!(
+            (
+                persisted.git_origin_url.as_deref(),
+                persisted.repository_identity.as_deref(),
+            ),
+            (Some("https://example.com/not-a-repository.git"), None)
+        );
+
+        runtime
+            .update_thread_git_info(
+                thread_id,
+                /*git_sha*/ None,
+                /*git_branch*/ None,
+                Some(None),
+            )
+            .await
+            .expect("explicit origin clear should succeed");
+        runtime
+            .upsert_thread(&rollout_metadata)
+            .await
+            .expect("stale rollout upsert should succeed");
         let persisted = runtime
             .get_thread(thread_id)
             .await
             .expect("thread should load")
             .expect("thread should exist");
-        assert_eq!(persisted.git_sha.as_deref(), Some("sqlite-sha"));
-        assert_eq!(persisted.git_branch.as_deref(), Some("sqlite-branch"));
         assert_eq!(
-            persisted.git_origin_url.as_deref(),
-            Some("git@example.com:openai/codex.git")
+            (
+                persisted.git_origin_url.as_deref(),
+                persisted.repository_identity.as_deref(),
+            ),
+            (None, None)
         );
     }
 

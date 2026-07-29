@@ -9,6 +9,46 @@ use super::STATE_MIGRATOR;
 use super::THREAD_HISTORY_MIGRATOR;
 use super::repair_legacy_state_migration_versions;
 
+pub(crate) const REPOSITORY_IDENTITY_CASES: &[(&str, Option<&str>)] = &[
+    (
+        "git@github.com:OpenAI/Codex.git",
+        Some("github.com/openai/codex"),
+    ),
+    (
+        "https://user@token@github.com/OpenAI/Codex.git",
+        Some("github.com/openai/codex"),
+    ),
+    (
+        " https://token@GitHub.com /OpenAI/Codex.git ",
+        Some("github.com/openai/codex"),
+    ),
+    (
+        "\t\nhttps://github.com/OpenAI/Codex.git\r\n",
+        Some("github.com/openai/codex"),
+    ),
+    (
+        "\u{2003}https://github.com/OpenAI/Codex.git\u{3000}",
+        Some("github.com/openai/codex"),
+    ),
+    (
+        "ssh://git@github.com:22/OpenAI/Codex.git",
+        Some("github.com/openai/codex"),
+    ),
+    (
+        "ssh://git@ghe.example.test:2222/Org/Repo.git",
+        Some("ghe.example.test:2222/Org/Repo"),
+    ),
+    (
+        "https://github.com/Örg/RÉpo.git",
+        Some("github.com/Örg/rÉpo"),
+    ),
+    (
+        "https://github.com/OpenAI/Codex.git?ref=main",
+        Some("github.com/openai/codex"),
+    ),
+    ("https://example.test/repo.git", None),
+];
+
 fn migrator_through(version: i64) -> Migrator {
     Migrator {
         migrations: Cow::Owned(
@@ -24,6 +64,17 @@ fn migrator_through(version: i64) -> Migrator {
         table_name: STATE_MIGRATOR.table_name.clone(),
         create_schemas: STATE_MIGRATOR.create_schemas.clone(),
         no_tx: STATE_MIGRATOR.no_tx,
+    }
+}
+
+#[test]
+fn repository_identity_corpus_matches_rust_canonicalizer() {
+    for &(origin, expected) in REPOSITORY_IDENTITY_CASES {
+        assert_eq!(
+            codex_git_utils::canonicalize_git_remote_url(origin).as_deref(),
+            expected,
+            "origin: {origin:?}"
+        );
     }
 }
 
@@ -373,6 +424,74 @@ INSERT INTO threads (
         .expect("old-binary row should load");
     assert_eq!(seeded.get::<i64, _>("recency_at"), 1_700_000_300);
     assert_eq!(seeded.get::<i64, _>("recency_at_ms"), 1_700_000_300_456);
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn repository_identity_migration_backfills_valid_origins_without_changing_metadata() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = sqlite
+        .open_read_write_pool(&sqlite.state_db_path())
+        .await
+        .expect("sqlite database should open");
+    migrator_through(/*version*/ 45)
+        .run(&pool)
+        .await
+        .expect("pre-identity migrations should apply");
+
+    for (index, &(origin, _)) in REPOSITORY_IDENTITY_CASES.iter().enumerate() {
+        let id = format!("00000000-0000-0000-0000-{:012}", index + 71);
+        let title = format!("canonicalization-case-{index}");
+        sqlx::query(
+            r#"
+INSERT INTO threads (
+    id, rollout_path, created_at, updated_at, created_at_ms, updated_at_ms, source,
+    model_provider, cwd, title, sandbox_policy, approval_mode, git_origin_url
+) VALUES (?, ?, 1700000000, 1700000100, 1700000000000, 1700000100000, 'cli',
+          'openai', '/tmp/project', ?, 'read-only', 'on-request', ?)
+            "#,
+        )
+        .bind(&id)
+        .bind(format!("/tmp/{id}.jsonl"))
+        .bind(&title)
+        .bind(origin)
+        .execute(&pool)
+        .await
+        .expect("historical thread should insert");
+    }
+
+    STATE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("repository identity migration should apply");
+
+    let rows = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+        "SELECT id, title, git_origin_url, repository_identity FROM threads ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("migrated threads should load");
+    let expected_rows = REPOSITORY_IDENTITY_CASES
+        .iter()
+        .enumerate()
+        .map(|(index, &(origin, expected))| {
+            (
+                format!("00000000-0000-0000-0000-{:012}", index + 71),
+                format!("canonicalization-case-{index}"),
+                origin.to_string(),
+                expected.map(str::to_string),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rows, expected_rows);
 
     pool.close().await;
 }
