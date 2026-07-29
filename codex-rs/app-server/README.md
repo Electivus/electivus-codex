@@ -395,6 +395,12 @@ Like `thread/resume`, experimental clients can pass `excludeTurns: true` to `thr
 - `archived` — when `true`, list archived threads only. When `false` or `null`, list non-archived threads (default).
 - `isPinned` — when provided, return only threads whose persisted pin state matches the requested value; omit it to include both pinned and unpinned threads.
 - `cwd` — restrict results to threads whose session cwd exactly matches this path, or one of these paths when an array is provided. Relative paths are resolved against the app-server process cwd before matching.
+- `projectCwd` — experimental; discover threads whose Recorded Working Directory
+  exactly matches this checkout or whose non-null canonical origin Repository
+  Identity matches it. The server resolves `remote.origin.url` in its default
+  execution environment. If path conversion, environment access, Git, or
+  canonicalization fails, the request safely falls back to exact Recorded Working
+  Directory matching. `projectCwd` and `cwd` are mutually exclusive.
 - `useStateDbOnly` — when `true`, return from the state DB without scanning JSONL rollouts to repair metadata. Omit or pass `false` to preserve the default scan-and-repair behavior.
 - `searchTerm` — restrict results to threads whose extracted title contains this substring (case-sensitive).
 - Responses include `nextCursor` to continue in the same direction and `backwardsCursor` to pass as `cursor` when reversing `sortDirection`.
@@ -420,6 +426,17 @@ Example:
 ```
 
 When `nextCursor` is `null`, you’ve reached the final page.
+
+To list every thread for a checkout and its canonical origin, initialize with
+`capabilities.experimentalApi: true` and send:
+
+```json
+{ "method": "thread/list", "id": 21, "params": {
+    "projectCwd": "/Users/me/project",
+    "limit": 25,
+    "sortKey": "recency_at"
+} }
+```
 
 ### Example: List descendant threads
 

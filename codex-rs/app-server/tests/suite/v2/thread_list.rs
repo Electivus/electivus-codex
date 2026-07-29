@@ -11,13 +11,17 @@ use app_test_support::set_fake_rollout_cwd;
 use app_test_support::test_absolute_path;
 use chrono::DateTime;
 use chrono::Utc;
+use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::GitInfo as ApiGitInfo;
+use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::JSONRPCError;
+use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadListCwdFilter;
+use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
 use codex_app_server_protocol::ThreadSearchResponse;
 use codex_app_server_protocol::ThreadSortKey;
@@ -29,6 +33,11 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput;
 use codex_core::ARCHIVED_SESSIONS_SUBDIR;
+use codex_exec_server::CreateDirectoryOptions;
+use codex_exec_server::ExecOutputStream;
+use codex_exec_server::ExecParams;
+use codex_exec_server::ExecProcessEvent;
+use codex_exec_server::ProcessId;
 use codex_git_utils::GitSha;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::GitInfo as CoreGitInfo;
@@ -37,9 +46,11 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_utils_absolute_path::test_support::PathExt;
 use codex_utils_path_uri::LegacyAppPathString;
+use codex_utils_path_uri::PathUri;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::fs;
 use std::fs::FileTimes;
 use std::fs::OpenOptions;
@@ -102,9 +113,58 @@ async fn list_threads_with_sort(
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         },
     })
     .await
+}
+
+async fn run_in_auto_env(
+    mcp: &TestAppServer,
+    cwd: PathUri,
+    argv: impl IntoIterator<Item = impl Into<String>>,
+) -> Result<()> {
+    let started = mcp
+        .auto_env()?
+        .environment()
+        .get_exec_backend()
+        .start(ExecParams {
+            process_id: ProcessId::from(Uuid::new_v4().to_string()),
+            argv: argv.into_iter().map(Into::into).collect(),
+            cwd,
+            env_policy: None,
+            env: HashMap::new(),
+            tty: false,
+            pipe_stdin: false,
+            arg0: None,
+            sandbox: None,
+            enforce_managed_network: false,
+            managed_network: None,
+            network_proxy: None,
+        })
+        .await?;
+    let mut events = started.process.subscribe_events();
+    let mut exit_code = None;
+    let mut stderr = Vec::new();
+    loop {
+        match events.recv().await? {
+            ExecProcessEvent::Output(output) if output.stream == ExecOutputStream::Stderr => {
+                stderr.extend_from_slice(&output.chunk.0);
+            }
+            ExecProcessEvent::Output(_) => {}
+            ExecProcessEvent::Exited {
+                exit_code: code, ..
+            } => exit_code = Some(code),
+            ExecProcessEvent::Closed { .. } => break,
+            ExecProcessEvent::Failed(message) => anyhow::bail!("{message}"),
+        }
+    }
+    anyhow::ensure!(
+        exit_code == Some(0),
+        "target command failed with {exit_code:?}: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    Ok(())
 }
 
 enum ThreadListRelation {
@@ -140,6 +200,7 @@ async fn list_threads_for_relation(
             search_term: None,
             parent_thread_id,
             ancestor_thread_id,
+            project_cwd: None,
         },
     })
     .await
@@ -581,6 +642,7 @@ async fn thread_list_respects_cwd_filters() -> Result<()> {
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let ThreadListResponse {
@@ -603,6 +665,396 @@ async fn thread_list_respects_cwd_filters() -> Result<()> {
         LegacyAppPathString::from_path(&first_target_cwd)
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_list_project_cwd_matches_checkout_or_repository_with_stable_pagination()
+-> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_minimal_config(codex_home.path())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
+    let environment_cwd = mcp.auto_env()?.selection().cwd.clone();
+    let exact_cwd = environment_cwd.join("exact-checkout")?;
+    let repository_cwd = environment_cwd.join("repository-checkout")?;
+    let unrelated_cwd = environment_cwd.join("unrelated-checkout")?;
+    let fallback_cwd = environment_cwd.join("not-a-repository")?;
+
+    run_in_auto_env(
+        &mcp,
+        environment_cwd.clone(),
+        ["git", "init", "exact-checkout"],
+    )
+    .await?;
+    run_in_auto_env(
+        &mcp,
+        environment_cwd.clone(),
+        [
+            "git",
+            "-C",
+            "exact-checkout",
+            "config",
+            "url.https://example.com/acme/.insteadOf",
+            "project:",
+        ],
+    )
+    .await?;
+    run_in_auto_env(
+        &mcp,
+        environment_cwd.clone(),
+        [
+            "git",
+            "-C",
+            "exact-checkout",
+            "remote",
+            "add",
+            "origin",
+            "project:project.git",
+        ],
+    )
+    .await?;
+
+    let exact_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-02T11-00-00",
+        "2025-01-02T11:00:00Z",
+        "exact checkout",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    set_fake_rollout_cwd(
+        &rollout_path(codex_home.path(), "2025-01-02T11-00-00", &exact_id),
+        &exact_cwd.to_path_buf(),
+    )?;
+    let repository_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-02T12-00-00",
+        "2025-01-02T12:00:00Z",
+        "same repository",
+        Some("mock_provider"),
+        Some(CoreGitInfo {
+            commit_hash: None,
+            branch: None,
+            repository_url: Some("git@example.com:acme/project.git".to_string()),
+        }),
+    )?;
+    set_fake_rollout_cwd(
+        &rollout_path(codex_home.path(), "2025-01-02T12-00-00", &repository_id),
+        &repository_cwd.to_path_buf(),
+    )?;
+    let unrelated_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-02T14-00-00",
+        "2025-01-02T14:00:00Z",
+        "unrelated repository",
+        Some("mock_provider"),
+        Some(CoreGitInfo {
+            commit_hash: None,
+            branch: None,
+            repository_url: Some("https://example.com/acme/other.git".to_string()),
+        }),
+    )?;
+    set_fake_rollout_cwd(
+        &rollout_path(codex_home.path(), "2025-01-02T14-00-00", &unrelated_id),
+        &unrelated_cwd.to_path_buf(),
+    )?;
+    let null_identity_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-02T13-00-00",
+        "2025-01-02T13:00:00Z",
+        "missing repository identity",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    set_fake_rollout_cwd(
+        &rollout_path(codex_home.path(), "2025-01-02T13-00-00", &null_identity_id),
+        &repository_cwd.to_path_buf(),
+    )?;
+    let fallback_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-02T10-00-00",
+        "2025-01-02T10:00:00Z",
+        "exact fallback",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    set_fake_rollout_cwd(
+        &rollout_path(codex_home.path(), "2025-01-02T10-00-00", &fallback_id),
+        &fallback_cwd.to_path_buf(),
+    )?;
+
+    mcp.initialize().await?;
+    let first_page: ThreadListResponse = mcp
+        .request(|request_id| ClientRequest::ThreadList {
+            request_id,
+            params: ThreadListParams {
+                cursor: None,
+                limit: Some(1),
+                sort_key: Some(ThreadSortKey::CreatedAt),
+                sort_direction: Some(SortDirection::Desc),
+                model_providers: Some(vec!["mock_provider".to_string()]),
+                source_kinds: None,
+                archived: None,
+                is_pinned: None,
+                cwd: None,
+                project_cwd: Some(exact_cwd.clone().into()),
+                use_state_db_only: true,
+                search_term: None,
+                parent_thread_id: None,
+                ancestor_thread_id: None,
+            },
+        })
+        .await?;
+    let second_page: ThreadListResponse = mcp
+        .request(|request_id| ClientRequest::ThreadList {
+            request_id,
+            params: ThreadListParams {
+                cursor: first_page.next_cursor.clone(),
+                limit: Some(1),
+                sort_key: Some(ThreadSortKey::CreatedAt),
+                sort_direction: Some(SortDirection::Desc),
+                model_providers: Some(vec!["mock_provider".to_string()]),
+                source_kinds: None,
+                archived: None,
+                is_pinned: None,
+                cwd: None,
+                project_cwd: Some(exact_cwd.clone().into()),
+                use_state_db_only: true,
+                search_term: None,
+                parent_thread_id: None,
+                ancestor_thread_id: None,
+            },
+        })
+        .await?;
+    assert_eq!(
+        [
+            first_page.data[0].id.as_str(),
+            second_page.data[0].id.as_str()
+        ],
+        [repository_id.as_str(), exact_id.as_str()]
+    );
+    assert_eq!(second_page.next_cursor, None);
+    assert!(
+        first_page
+            .data
+            .iter()
+            .chain(&second_page.data)
+            .all(|thread| thread.id != unrelated_id && thread.id != null_identity_id)
+    );
+
+    let fallback: ThreadListResponse = mcp
+        .request(|request_id| ClientRequest::ThreadList {
+            request_id,
+            params: ThreadListParams {
+                cursor: None,
+                limit: Some(10),
+                sort_key: None,
+                sort_direction: None,
+                model_providers: Some(vec!["mock_provider".to_string()]),
+                source_kinds: None,
+                archived: None,
+                is_pinned: None,
+                cwd: None,
+                project_cwd: Some(fallback_cwd.into()),
+                use_state_db_only: true,
+                search_term: None,
+                parent_thread_id: None,
+                ancestor_thread_id: None,
+            },
+        })
+        .await?;
+    assert_eq!(
+        fallback
+            .data
+            .iter()
+            .map(|thread| thread.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![fallback_id.as_str()]
+    );
+
+    let request_id = mcp
+        .send_thread_list_request(ThreadListParams {
+            cursor: None,
+            limit: Some(10),
+            sort_key: None,
+            sort_direction: None,
+            model_providers: None,
+            source_kinds: None,
+            archived: None,
+            is_pinned: None,
+            cwd: Some(ThreadListCwdFilter::One(
+                exact_cwd.to_path_buf().to_string_lossy().into_owned(),
+            )),
+            project_cwd: Some(exact_cwd.into()),
+            use_state_db_only: false,
+            search_term: None,
+            parent_thread_id: None,
+            ancestor_thread_id: None,
+        })
+        .await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(
+        error.error.code,
+        codex_app_server::INVALID_PARAMS_ERROR_CODE
+    );
+    assert_eq!(
+        error.error.message,
+        "cwd and projectCwd are mutually exclusive thread/list filters"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_list_project_cwd_ignores_configured_origin_outside_repository() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_minimal_config(codex_home.path())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .with_env_overrides(&[
+            ("GIT_CONFIG_COUNT", Some("1")),
+            ("GIT_CONFIG_KEY_0", Some("remote.origin.url")),
+            (
+                "GIT_CONFIG_VALUE_0",
+                Some("https://example.com/acme/configured.git"),
+            ),
+        ])
+        .build()
+        .await?;
+    let non_repository_cwd = mcp.auto_env()?.selection().cwd.join("non-repository")?;
+    mcp.auto_env()?
+        .environment()
+        .get_filesystem()
+        .create_directory(
+            &non_repository_cwd,
+            CreateDirectoryOptions { recursive: true },
+            /*sandbox*/ None,
+        )
+        .await?;
+
+    let exact_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-02T11-00-00",
+        "2025-01-02T11:00:00Z",
+        "exact non-repository cwd",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    set_fake_rollout_cwd(
+        &rollout_path(codex_home.path(), "2025-01-02T11-00-00", &exact_id),
+        &non_repository_cwd.to_path_buf(),
+    )?;
+    let configured_origin_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-02T12-00-00",
+        "2025-01-02T12:00:00Z",
+        "configured origin should not leak",
+        Some("mock_provider"),
+        Some(CoreGitInfo {
+            commit_hash: None,
+            branch: None,
+            repository_url: Some("https://example.com/acme/configured.git".to_string()),
+        }),
+    )?;
+
+    mcp.initialize().await?;
+    let response: ThreadListResponse = mcp
+        .request(|request_id| ClientRequest::ThreadList {
+            request_id,
+            params: ThreadListParams {
+                cursor: None,
+                limit: Some(10),
+                sort_key: None,
+                sort_direction: None,
+                model_providers: Some(vec!["mock_provider".to_string()]),
+                source_kinds: None,
+                archived: None,
+                is_pinned: None,
+                cwd: None,
+                project_cwd: Some(non_repository_cwd.into()),
+                use_state_db_only: true,
+                search_term: None,
+                parent_thread_id: None,
+                ancestor_thread_id: None,
+            },
+        })
+        .await?;
+
+    assert_eq!(
+        response
+            .data
+            .iter()
+            .map(|thread| thread.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![exact_id.as_str()]
+    );
+    assert!(
+        response
+            .data
+            .iter()
+            .all(|thread| thread.id != configured_origin_id)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_list_project_cwd_requires_experimental_api_capability() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_minimal_config(codex_home.path())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
+    let init = mcp
+        .initialize_with_capabilities(
+            ClientInfo {
+                name: "thread-list-project-cwd-test".to_string(),
+                title: None,
+                version: "0.1.0".to_string(),
+            },
+            Some(InitializeCapabilities {
+                experimental_api: false,
+                ..Default::default()
+            }),
+        )
+        .await?;
+    assert!(matches!(init, JSONRPCMessage::Response(_)));
+
+    let project_cwd = mcp.auto_env()?.selection().cwd.clone().into();
+    let request_id = mcp
+        .send_thread_list_request(ThreadListParams {
+            cursor: None,
+            limit: Some(10),
+            sort_key: None,
+            sort_direction: None,
+            model_providers: None,
+            source_kinds: None,
+            archived: None,
+            is_pinned: None,
+            cwd: None,
+            project_cwd: Some(project_cwd),
+            use_state_db_only: false,
+            search_term: None,
+            parent_thread_id: None,
+            ancestor_thread_id: None,
+        })
+        .await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, -32600);
+    assert_eq!(
+        error.error.message,
+        "thread/list.projectCwd requires experimentalApi capability"
+    );
     Ok(())
 }
 
@@ -696,6 +1148,7 @@ sqlite = true
             search_term: Some("needle".to_string()),
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let ThreadListResponse {
@@ -899,6 +1352,7 @@ sqlite = true
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let repaired_response: ThreadListResponse =
@@ -936,6 +1390,7 @@ sqlite = true
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let state_db_only_response: ThreadListResponse =
@@ -964,6 +1419,7 @@ sqlite = true
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let scanned_response: ThreadListResponse =
@@ -1146,6 +1602,7 @@ async fn thread_list_relation_filters_reject_invalid_requests() -> Result<()> {
             search_term: None,
             parent_thread_id: Some("not-a-thread-id".to_string()),
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let error = timeout(
@@ -1171,6 +1628,7 @@ async fn thread_list_relation_filters_reject_invalid_requests() -> Result<()> {
             search_term: None,
             parent_thread_id: Some(thread_id.clone()),
             ancestor_thread_id: Some(thread_id),
+            project_cwd: None,
         })
         .await?;
     let error = timeout(
@@ -1966,6 +2424,7 @@ async fn thread_list_backwards_cursor_can_seed_forward_delta_sync() -> Result<()
                 search_term: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
+                project_cwd: None,
             })
             .await?;
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??
@@ -2006,6 +2465,7 @@ async fn thread_list_backwards_cursor_can_seed_forward_delta_sync() -> Result<()
                 search_term: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
+                project_cwd: None,
             })
             .await?;
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??
@@ -2242,6 +2702,7 @@ async fn thread_list_invalid_cursor_returns_error() -> Result<()> {
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let error: JSONRPCError = timeout(

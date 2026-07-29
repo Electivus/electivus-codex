@@ -184,6 +184,7 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
                 search_term: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
+                project_cwd: None,
             },
         })
         .await?

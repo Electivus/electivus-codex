@@ -130,6 +130,7 @@ async fn thread_metadata_update_pins_and_unpins_with_filtered_recency_pagination
         search_term: None,
         parent_thread_id: None,
         ancestor_thread_id: None,
+        project_cwd: None,
     };
     let request_id = mcp.send_thread_list_request(list_params.clone()).await?;
     let response = timeout(

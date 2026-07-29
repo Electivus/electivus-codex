@@ -1986,12 +1986,27 @@ impl ThreadRequestProcessor {
             archived,
             is_pinned,
             cwd,
+            project_cwd,
             use_state_db_only,
             search_term,
             parent_thread_id,
             ancestor_thread_id,
         } = params;
-        let location_filter = exact_thread_location_filter(cwd)?;
+        if cwd.is_some() && project_cwd.is_some() {
+            return Err(invalid_params(
+                "cwd and projectCwd are mutually exclusive thread/list filters",
+            ));
+        }
+        let location_filter = match project_cwd {
+            Some(project_cwd) => {
+                super::project_session_scope::resolve_project_location_filter(
+                    &self.thread_manager.environment_manager(),
+                    project_cwd,
+                )
+                .await
+            }
+            None => exact_thread_location_filter(cwd)?,
+        };
         let relation_filter = match (parent_thread_id, ancestor_thread_id) {
             (Some(_), Some(_)) => {
                 return Err(invalid_request(

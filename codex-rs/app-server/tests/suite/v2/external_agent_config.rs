@@ -420,6 +420,7 @@ source = {:?}
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let response: ThreadListResponse =
@@ -1692,6 +1693,7 @@ async fn external_agent_config_import_creates_session_rollouts() -> Result<()> {
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let response: ThreadListResponse =
@@ -1879,6 +1881,7 @@ required = true
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let response: ThreadListResponse =
@@ -1963,6 +1966,7 @@ async fn external_agent_config_import_accepts_detected_session_payload_after_res
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let response: ThreadListResponse =
@@ -2044,6 +2048,7 @@ async fn external_agent_config_import_skips_already_imported_session_versions() 
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let response: ThreadListResponse =
@@ -2171,6 +2176,7 @@ async fn external_agent_config_import_returns_before_background_session_import_f
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let response: ThreadListResponse =
@@ -2286,6 +2292,7 @@ async fn external_agent_config_import_compacts_huge_session_before_first_follow_
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let response: ThreadListResponse =

@@ -264,6 +264,7 @@ async fn paginated_stored_thread_routes_projected_turns_and_rejects_legacy_histo
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let ThreadListResponse { data, .. } =
@@ -965,6 +966,7 @@ async fn thread_list_includes_store_thread_without_rollout_path() -> Result<()> 
                 search_term: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
+                project_cwd: None,
             },
         })
         .await?
@@ -1344,6 +1346,7 @@ async fn paginated_thread_name_set_is_reflected_in_read_list_and_metadata_resume
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let list_resp: JSONRPCResponse = timeout(

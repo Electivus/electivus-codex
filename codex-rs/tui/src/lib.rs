@@ -645,6 +645,7 @@ async fn lookup_session_target_by_name_with_app_server(
                 cwd: None,
                 use_state_db_only: false,
                 search_term: Some(name.to_string()),
+                project_cwd: None,
             })
             .await?;
         if let Some(thread) = response
@@ -758,6 +759,7 @@ fn latest_session_lookup_params(
         parent_thread_id: None,
         ancestor_thread_id: None,
         cwd: cwd_filter.map(|cwd| ThreadListCwdFilter::One(cwd.to_string_lossy().to_string())),
+        project_cwd: None,
         use_state_db_only: match lookup_mode {
             LatestSessionLookupMode::StateDbOnly => true,
             LatestSessionLookupMode::ScanAndRepair => false,
