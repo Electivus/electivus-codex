@@ -101,6 +101,7 @@ use codex_utils_absolute_path::canonicalize_existing_preserving_symlinks;
 use codex_utils_cli::SharedCliOptions;
 use codex_utils_oss::ensure_oss_provider_ready;
 use codex_utils_oss::get_default_model_for_oss_provider;
+use codex_utils_path_uri::LegacyAppPathString;
 use event_processor_with_human_output::EventProcessorWithHumanOutput;
 pub use event_processor_with_jsonl_output::CodexStatus;
 pub use event_processor_with_jsonl_output::CollectedThreadEvents;
@@ -1450,7 +1451,10 @@ enum ResumeCwdSource {
     CanonicalProjection,
 }
 
-async fn latest_thread_cwd(thread: &AppServerThread, source: ResumeCwdSource) -> PathBuf {
+async fn latest_thread_cwd(
+    thread: &AppServerThread,
+    source: ResumeCwdSource,
+) -> LegacyAppPathString {
     if let ResumeCwdSource::LocalRollout = source
         && let Some(path) = thread.path.as_deref()
         && let Ok(text) = tokio::fs::read_to_string(path).await
@@ -1464,15 +1468,19 @@ async fn latest_thread_cwd(thread: &AppServerThread, source: ResumeCwdSource) ->
                 continue;
             };
             if let RolloutItem::TurnContext(item) = rollout_line.item {
-                return item.cwd.into_path_buf();
+                return LegacyAppPathString::from_abs_path(&item.cwd);
             }
         }
     }
-    thread.cwd.to_path_buf()
+    thread.cwd.clone()
 }
 
-fn cwds_match(current_cwd: &Path, session_cwd: &Path) -> bool {
-    path_utils::paths_match_after_normalization(current_cwd, session_cwd)
+fn cwds_match(current_cwd: &Path, recorded_working_directory: &LegacyAppPathString) -> bool {
+    recorded_working_directory
+        .to_inferred_abs_path()
+        .is_some_and(|session_cwd| {
+            path_utils::paths_match_after_normalization(current_cwd, session_cwd.as_path())
+        })
 }
 
 async fn resolve_resume_thread_id(
@@ -1518,7 +1526,7 @@ async fn resolve_resume_thread_id(
             .map_err(anyhow::Error::msg)?;
             for thread in response.data {
                 let latest_cwd = latest_thread_cwd(&thread, cwd_source).await;
-                if args.all || cwds_match(config.cwd.as_path(), latest_cwd.as_path()) {
+                if args.all || cwds_match(config.cwd.as_path(), &latest_cwd) {
                     return Ok(Some(thread.id));
                 }
             }
@@ -1554,7 +1562,11 @@ async fn resolve_resume_thread_id(
         if let Some((_, session_meta)) =
             find_thread_meta_by_name_str(&config.codex_home, session_id, Some(state_db.as_ref()))
                 .await?
-            && (args.all || cwds_match(config.cwd.as_path(), &session_meta.meta.cwd))
+            && (args.all
+                || cwds_match(
+                    config.cwd.as_path(),
+                    &LegacyAppPathString::from_path(&session_meta.meta.cwd),
+                ))
         {
             return Ok(Some(session_meta.meta.id.to_string()));
         }
@@ -1591,7 +1603,7 @@ async fn resolve_resume_thread_id(
                 continue;
             }
             let latest_cwd = latest_thread_cwd(&thread, cwd_source).await;
-            if args.all || cwds_match(config.cwd.as_path(), latest_cwd.as_path()) {
+            if args.all || cwds_match(config.cwd.as_path(), &latest_cwd) {
                 return Ok(Some(thread.id));
             }
         }

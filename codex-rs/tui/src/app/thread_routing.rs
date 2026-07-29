@@ -1087,8 +1087,14 @@ impl App {
         session.thread_id = thread_id;
         session.thread_name = notification.thread.name.clone();
         session.model_provider_id = notification.thread.model_provider.clone();
-        session
-            .set_cwd_retargeting_implicit_runtime_workspace_root(notification.thread.cwd.clone());
+        let Some(cwd) = notification.thread.cwd.to_inferred_abs_path() else {
+            tracing::warn!(
+                recorded_working_directory = notification.thread.cwd.as_str(),
+                "ignoring thread/started notification with a foreign or unusable active cwd"
+            );
+            return None;
+        };
+        session.set_cwd_retargeting_implicit_runtime_workspace_root(cwd);
         let rollout_path = notification.thread.path.clone();
         if let Some(model) =
             read_session_model(self.state_db.as_deref(), thread_id, rollout_path.as_deref()).await

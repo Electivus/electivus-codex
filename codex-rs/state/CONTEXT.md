@@ -48,6 +48,18 @@ _Avoid_: Turn, transport attempt
 A query-oriented view derived from Canonical Thread History for metadata, turn, item, search, or pagination reads. It can be rebuilt and is never the source used to establish historical truth.
 _Avoid_: Canonical history, rollout
 
+**Repository Identity**:
+A credential-free canonical identity derived from a thread's Git origin and shared by equivalent supported remote URL forms.
+_Avoid_: Repository remote, origin URL, repository path
+
+**Project Session Scope**:
+The branch-independent thread-discovery boundary for the current project: the same Repository Identity or the exact working directory, preserving sessions when Git identity is unavailable.
+_Avoid_: Cwd filter, repository filter
+
+**Recorded Working Directory**:
+The source-native working directory persisted for a thread. It remains valid discovery and display metadata across Runtime Replicas even when its path convention is not executable on the current host.
+_Avoid_: Local cwd, normalized cwd, portable path
+
 **Memory Artifact**:
 A versioned piece of consolidated memory content, identified by its path within a Runtime State Namespace. A filesystem copy is a disposable materialization, not the authoritative artifact.
 _Avoid_: Memory file, local memory

@@ -7,6 +7,7 @@ use app_test_support::create_fake_rollout_with_source;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence;
 use app_test_support::rollout_path;
+use app_test_support::set_fake_rollout_cwd;
 use app_test_support::test_absolute_path;
 use chrono::DateTime;
 use chrono::Utc;
@@ -31,12 +32,11 @@ use codex_core::ARCHIVED_SESSIONS_SUBDIR;
 use codex_git_utils::GitSha;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::GitInfo as CoreGitInfo;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionSource as CoreSessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_utils_absolute_path::test_support::PathExt;
+use codex_utils_path_uri::LegacyAppPathString;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use std::cmp::Reverse;
@@ -193,26 +193,6 @@ fn set_rollout_mtime(path: &Path, updated_at_rfc3339: &str) -> Result<()> {
         .append(true)
         .open(path)?
         .set_times(times)?;
-    Ok(())
-}
-
-fn set_rollout_cwd(path: &Path, cwd: &Path) -> Result<()> {
-    let content = fs::read_to_string(path)?;
-    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
-    let first_line = lines
-        .first_mut()
-        .ok_or_else(|| anyhow::anyhow!("rollout at {} is empty", path.display()))?;
-    let mut rollout_line: RolloutLine = serde_json::from_str(first_line)?;
-    let RolloutItem::SessionMeta(mut session_meta_line) = rollout_line.item else {
-        return Err(anyhow::anyhow!(
-            "rollout at {} does not start with session metadata",
-            path.display()
-        ));
-    };
-    session_meta_line.meta.cwd = cwd.to_path_buf();
-    rollout_line.item = RolloutItem::SessionMeta(session_meta_line);
-    *first_line = serde_json::to_string(&rollout_line)?;
-    fs::write(path, lines.join("\n") + "\n")?;
     Ok(())
 }
 
@@ -388,7 +368,10 @@ async fn thread_list_pagination_next_cursor_none_on_last_page() -> Result<()> {
         assert_eq!(thread.model_provider, "mock_provider");
         assert!(thread.created_at > 0);
         assert_eq!(thread.updated_at, thread.created_at);
-        assert_eq!(thread.cwd, test_absolute_path("/"));
+        assert_eq!(
+            thread.cwd,
+            LegacyAppPathString::from_abs_path(&test_absolute_path("/"))
+        );
         assert_eq!(thread.cli_version, "0.0.0");
         assert_eq!(thread.source, SessionSource::Cli);
         assert_eq!(thread.git_info, None);
@@ -416,13 +399,61 @@ async fn thread_list_pagination_next_cursor_none_on_last_page() -> Result<()> {
         assert_eq!(thread.model_provider, "mock_provider");
         assert!(thread.created_at > 0);
         assert_eq!(thread.updated_at, thread.created_at);
-        assert_eq!(thread.cwd, test_absolute_path("/"));
+        assert_eq!(
+            thread.cwd,
+            LegacyAppPathString::from_abs_path(&test_absolute_path("/"))
+        );
         assert_eq!(thread.cli_version, "0.0.0");
         assert_eq!(thread.source, SessionSource::Cli);
         assert_eq!(thread.git_info, None);
         assert_eq!(thread.status, ThreadStatus::NotLoaded);
     }
     assert_eq!(cursor2, None, "expected nextCursor to be null on last page");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_list_preserves_foreign_recorded_working_directory() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_minimal_config(codex_home.path())?;
+    let thread_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-02T12-00-00",
+        "2025-01-02T12:00:00Z",
+        "Foreign working directory",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    #[cfg(not(windows))]
+    let recorded_working_directory = r"C:\Users\alice\project";
+    #[cfg(windows)]
+    let recorded_working_directory = "/home/alice/project";
+    set_fake_rollout_cwd(
+        &rollout_path(codex_home.path(), "2025-01-02T12-00-00", &thread_id),
+        Path::new(recorded_working_directory),
+    )?;
+
+    let mut mcp = init_mcp(codex_home.path()).await?;
+    let response = list_threads(
+        &mut mcp,
+        /*cursor*/ None,
+        Some(10),
+        Some(vec!["mock_provider".to_string()]),
+        /*source_kinds*/ None,
+        /*archived*/ None,
+    )
+    .await?;
+
+    let thread = response
+        .data
+        .into_iter()
+        .find(|thread| thread.id == thread_id)
+        .expect("foreign-path thread should be listed");
+    assert_eq!(
+        thread.cwd,
+        LegacyAppPathString::from_string(recorded_working_directory)
+    );
 
     Ok(())
 }
@@ -472,7 +503,10 @@ async fn thread_list_respects_provider_filter() -> Result<()> {
     let expected_ts = chrono::DateTime::parse_from_rfc3339("2025-01-02T11:00:00Z")?.timestamp();
     assert_eq!(thread.created_at, expected_ts);
     assert_eq!(thread.updated_at, expected_ts);
-    assert_eq!(thread.cwd, test_absolute_path("/"));
+    assert_eq!(
+        thread.cwd,
+        LegacyAppPathString::from_abs_path(&test_absolute_path("/"))
+    );
     assert_eq!(thread.cli_version, "0.0.0");
     assert_eq!(thread.source, SessionSource::Cli);
     assert_eq!(thread.git_info, None);
@@ -514,11 +548,11 @@ async fn thread_list_respects_cwd_filters() -> Result<()> {
     let second_target_cwd = codex_home.path().join("second-target-cwd");
     fs::create_dir_all(&first_target_cwd)?;
     fs::create_dir_all(&second_target_cwd)?;
-    set_rollout_cwd(
+    set_fake_rollout_cwd(
         rollout_path(codex_home.path(), "2025-01-02T10-00-00", &first_filtered_id).as_path(),
         &first_target_cwd,
     )?;
-    set_rollout_cwd(
+    set_fake_rollout_cwd(
         rollout_path(
             codex_home.path(),
             "2025-01-02T12-00-00",
@@ -560,8 +594,14 @@ async fn thread_list_respects_cwd_filters() -> Result<()> {
         vec![second_filtered_id.as_str(), first_filtered_id.as_str()]
     );
     assert!(!filtered_ids.contains(&unfiltered_id.as_str()));
-    assert_eq!(data[0].cwd.as_path(), second_target_cwd.as_path());
-    assert_eq!(data[1].cwd.as_path(), first_target_cwd.as_path());
+    assert_eq!(
+        data[0].cwd,
+        LegacyAppPathString::from_path(&second_target_cwd)
+    );
+    assert_eq!(
+        data[1].cwd,
+        LegacyAppPathString::from_path(&first_target_cwd)
+    );
 
     Ok(())
 }
@@ -1584,7 +1624,10 @@ async fn thread_list_includes_git_info() -> Result<()> {
     };
     assert_eq!(thread.git_info, Some(expected_git));
     assert_eq!(thread.source, SessionSource::Cli);
-    assert_eq!(thread.cwd, test_absolute_path("/"));
+    assert_eq!(
+        thread.cwd,
+        LegacyAppPathString::from_abs_path(&test_absolute_path("/"))
+    );
     assert_eq!(thread.cli_version, "0.0.0");
 
     Ok(())

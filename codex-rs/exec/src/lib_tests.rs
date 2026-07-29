@@ -368,7 +368,7 @@ async fn latest_thread_cwd_uses_the_selected_history_authority() {
     )
     .expect("write conflicting rollout");
     let mut thread = sample_thread_start_response().thread;
-    thread.cwd = canonical_cwd.clone().abs();
+    thread.cwd = canonical_cwd.clone().abs().into();
     thread.path = Some(rollout_path);
 
     assert_eq!(
@@ -376,8 +376,24 @@ async fn latest_thread_cwd_uses_the_selected_history_authority() {
             latest_thread_cwd(&thread, ResumeCwdSource::LocalRollout).await,
             latest_thread_cwd(&thread, ResumeCwdSource::CanonicalProjection).await,
         ),
-        (conflicting_cwd, canonical_cwd)
+        (
+            LegacyAppPathString::from_path(&conflicting_cwd),
+            LegacyAppPathString::from_path(&canonical_cwd),
+        )
     );
+}
+
+#[test]
+fn foreign_recorded_working_directory_does_not_match_native_cwd() {
+    #[cfg(not(windows))]
+    let foreign_cwd = r"C:\Users\alice\project";
+    #[cfg(windows)]
+    let foreign_cwd = "/home/alice/project";
+
+    assert!(!cwds_match(
+        std::env::current_dir().expect("current cwd").as_path(),
+        &LegacyAppPathString::from_string(foreign_cwd),
+    ));
 }
 
 #[test]
@@ -398,7 +414,7 @@ fn turn_items_for_thread_returns_matching_turn_items() {
         recency_at: Some(0),
         status: codex_app_server_protocol::ThreadStatus::Idle,
         path: None,
-        cwd: test_path_buf("/tmp/project").abs(),
+        cwd: test_path_buf("/tmp/project").abs().into(),
         cli_version: "0.0.0-test".to_string(),
         source: codex_app_server_protocol::SessionSource::Exec,
         can_accept_direct_input: None,
@@ -866,7 +882,7 @@ fn sample_thread_start_response() -> ThreadStartResponse {
             recency_at: Some(0),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: Some(PathBuf::from("/tmp/rollout.jsonl")),
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Cli,
             can_accept_direct_input: None,

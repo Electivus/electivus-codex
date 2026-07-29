@@ -780,7 +780,9 @@ async fn load_transcript_preview(
         .thread_read(thread_id, /*include_turns*/ true)
         .await
         .map_err(std::io::Error::other)?;
-    let cwd = thread.cwd.as_path();
+    // The markdown parser treats this as lexical display context only; it must never be used for
+    // host filesystem access.
+    let cwd = PathBuf::from(thread.cwd.render_for_ui());
     let inline_visualization_context = codex_home.and_then(|codex_home| {
         ThreadId::from_string(&thread.id)
             .ok()
@@ -805,7 +807,7 @@ async fn load_transcript_preview(
                     .join(" "),
             }),
             ThreadItem::AgentMessage { text, .. } => {
-                let visible_markdown = parse_assistant_markdown(text, cwd).visible_markdown;
+                let visible_markdown = parse_assistant_markdown(text, &cwd).visible_markdown;
                 let rewritten = crate::inline_visualization::rewrite_inline_visualizations(
                     &visible_markdown,
                     inline_visualization_context.as_ref(),
@@ -1828,7 +1830,7 @@ fn row_from_app_server_thread(thread: Thread) -> Option<Row> {
             .map(|dt| dt.with_timezone(&Utc)),
         updated_at: chrono::DateTime::from_timestamp(thread.updated_at, 0)
             .map(|dt| dt.with_timezone(&Utc)),
-        cwd: Some(thread.cwd.to_path_buf()),
+        cwd: Some(PathBuf::from(thread.cwd.render_for_ui())),
         git_branch: thread.git_info.and_then(|git_info| git_info.branch),
     })
 }
@@ -5750,6 +5752,10 @@ session_picker_view = "dense"
     #[test]
     fn app_server_row_keeps_pathless_threads() {
         let thread_id = ThreadId::new();
+        #[cfg(not(windows))]
+        let recorded_working_directory = r"C:\Users\alice\project";
+        #[cfg(windows)]
+        let recorded_working_directory = "/home/alice/project";
         let thread = Thread {
             id: thread_id.to_string(),
             extra: None,
@@ -5766,7 +5772,7 @@ session_picker_view = "dense"
             recency_at: Some(2),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: None,
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: codex_utils_path_uri::LegacyAppPathString::from_string(recorded_working_directory),
             cli_version: String::from("0.0.0"),
             source: codex_app_server_protocol::SessionSource::Cli,
             can_accept_direct_input: None,
@@ -5783,6 +5789,7 @@ session_picker_view = "dense"
         assert_eq!(row.path, None);
         assert_eq!(row.thread_id, Some(thread_id));
         assert_eq!(row.thread_name, Some(String::from("Named thread")));
+        assert_eq!(row.cwd, Some(PathBuf::from(recorded_working_directory)));
     }
 
     #[test]
@@ -5790,6 +5797,14 @@ session_picker_view = "dense"
         use crate::thread_transcript::thread_to_transcript_cells;
 
         let thread_id = ThreadId::new();
+        #[cfg(not(windows))]
+        let (recorded_working_directory, linked_file) = (
+            r"C:\Users\alice\project",
+            "C:/Users/alice/project/src/main.rs",
+        );
+        #[cfg(windows)]
+        let (recorded_working_directory, linked_file) =
+            ("/home/alice/project", "/home/alice/project/src/main.rs");
         let thread = Thread {
             id: thread_id.to_string(),
             extra: None,
@@ -5806,7 +5821,7 @@ session_picker_view = "dense"
             recency_at: Some(2),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: None,
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: codex_utils_path_uri::LegacyAppPathString::from_string(recorded_working_directory),
             cli_version: String::from("0.0.0"),
             source: codex_app_server_protocol::SessionSource::Cli,
             can_accept_direct_input: None,
@@ -5829,7 +5844,7 @@ session_picker_view = "dense"
                     },
                     ThreadItem::AgentMessage {
                         id: String::from("agent-1"),
-                        text: String::from("hello from assistant"),
+                        text: format!("hello from assistant [file]({linked_file})"),
                         phase: None,
                         memory_citation: None,
                     },
@@ -5859,6 +5874,7 @@ session_picker_view = "dense"
 
         assert!(rendered.contains("hello from user"));
         assert!(rendered.contains("hello from assistant"));
+        assert!(rendered.contains("src/main.rs"));
         assert!(rendered.contains("Proposed Plan"));
         assert!(rendered.contains("Do the thing"));
     }
@@ -5884,7 +5900,7 @@ session_picker_view = "dense"
             recency_at: Some(2),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: None,
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
             cli_version: String::from("0.0.0"),
             source: codex_app_server_protocol::SessionSource::Cli,
             can_accept_direct_input: None,
@@ -5955,7 +5971,7 @@ session_picker_view = "dense"
             recency_at: Some(2),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: None,
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
             cli_version: String::from("0.0.0"),
             source: codex_app_server_protocol::SessionSource::Cli,
             can_accept_direct_input: None,

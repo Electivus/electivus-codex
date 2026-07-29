@@ -535,6 +535,7 @@ mod marketplace_processor;
 mod mcp_processor;
 mod plugins;
 mod process_exec_processor;
+mod recorded_working_directory;
 mod remote_control_processor;
 mod search;
 mod thread_fork_goal;

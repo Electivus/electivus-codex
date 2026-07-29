@@ -1,3 +1,4 @@
+use super::recorded_working_directory::execution_cwd_from_recorded_working_directory;
 use super::thread_fork_goal::inherit_thread_goal_snapshot;
 use super::turn_processor::can_accept_direct_input;
 use super::*;
@@ -9,6 +10,7 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_utils_path_uri::LegacyAppPathString;
 
 const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 const THREAD_LIST_MAX_LIMIT: usize = 100;
@@ -3124,7 +3126,9 @@ impl ThreadRequestProcessor {
         let needs_paginated_projection =
             paginated_resume && (include_turns || initial_turns_page.is_some());
 
-        let history_cwd = thread_history.session_cwd();
+        let history_cwd = thread_history
+            .session_cwd()
+            .and_then(|cwd| execution_cwd_from_recorded_working_directory(&cwd, "thread/resume"));
         let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
@@ -4075,7 +4079,8 @@ impl ThreadRequestProcessor {
                     })?,
             )
         };
-        let history_cwd = Some(source_thread.cwd.clone());
+        let history_cwd =
+            execution_cwd_from_recorded_working_directory(&source_thread.cwd, "thread/fork");
 
         // Persist Windows sandbox mode.
         let mut cli_overrides = cli_overrides.unwrap_or_default();
@@ -5048,7 +5053,7 @@ fn set_thread_name_from_title(thread: &mut Thread, title: String) {
 pub(crate) fn thread_from_stored_thread(
     thread: StoredThread,
     fallback_provider: &str,
-    fallback_cwd: &AbsolutePathBuf,
+    _fallback_cwd: &AbsolutePathBuf,
 ) -> (Thread, Option<codex_thread_store::StoredThreadHistory>) {
     let path = thread.rollout_path;
     let git_info = thread.git_info.map(|info| ApiGitInfo {
@@ -5056,13 +5061,7 @@ pub(crate) fn thread_from_stored_thread(
         branch: info.branch,
         origin_url: info.repository_url,
     });
-    let cwd = AbsolutePathBuf::relative_to_current_dir(path_utils::normalize_for_native_workdir(
-        thread.cwd,
-    ))
-    .unwrap_or_else(|err| {
-        warn!("failed to normalize thread cwd while reading stored thread: {err}");
-        fallback_cwd.clone()
-    });
+    let cwd = LegacyAppPathString::from_path(&thread.cwd);
     let source = with_thread_spawn_agent_metadata(
         thread.source,
         thread.agent_nickname.clone(),
@@ -5298,7 +5297,7 @@ fn build_thread_from_snapshot(
         recency_at: Some(now),
         status: ThreadStatus::NotLoaded,
         path,
-        cwd: config_snapshot.cwd().clone(),
+        cwd: LegacyAppPathString::from_abs_path(config_snapshot.cwd()),
         cli_version: env!("CARGO_PKG_VERSION").to_string(),
         agent_nickname: config_snapshot.session_source.get_nickname(),
         agent_role: config_snapshot.session_source.get_agent_role(),
