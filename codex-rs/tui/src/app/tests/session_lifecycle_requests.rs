@@ -166,6 +166,8 @@ fn fresh_session_applies_requested_name() -> Result<()> {
                 let codex_home = tempdir()?;
                 app.config.codex_home = codex_home.path().to_path_buf().abs();
                 app.config.sqlite = SqliteConfig::new_for_testing(codex_home.path().abs());
+                app.config.runtime_state_backend =
+                    codex_state::RuntimeStateBackendConfig::Sqlite(app.config.sqlite.clone());
                 let (mut app_server, requests, proxy) =
                     start_recording_app_server(&app.config, /*blocked_thread_list*/ None).await?;
                 let mut tui = crate::tui::test_support::make_test_tui()?;
@@ -223,6 +225,8 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                 app.config.codex_home = codex_home.path().to_path_buf().abs();
                 app.config.sqlite =
                     codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
+                app.config.runtime_state_backend =
+                    codex_state::RuntimeStateBackendConfig::Sqlite(app.config.sqlite.clone());
                 let root_timestamp = "2026-01-01T00-00-00";
                 let root_thread_id = ThreadId::from_string(
                     &create_fake_rollout(
