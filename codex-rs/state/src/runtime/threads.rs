@@ -773,6 +773,10 @@ mod tests {
             metadata.created_at =
                 DateTime::<Utc>::from_timestamp(created_at, 0).expect("valid timestamp");
             metadata.updated_at = metadata.created_at;
+            if thread_id == first_child_id {
+                metadata.preview = None;
+                metadata.first_user_message = None;
+            }
             runtime
                 .upsert_thread(&metadata)
                 .await
@@ -844,6 +848,12 @@ mod tests {
             sort_direction: SortDirection::Desc,
             search_term: None,
         };
+        let global_page = runtime
+            .list_threads(/*page_size*/ 10, filters(None))
+            .await
+            .expect("global thread list should succeed");
+        let mut global_ids = global_page.items.iter().map(|item| item.id);
+        assert!(!global_ids.any(|id| id == first_child_id));
         let first_page = runtime
             .list_threads_by_parent(/*page_size*/ 1, parent_id, filters(None))
             .await

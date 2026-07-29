@@ -107,6 +107,8 @@ pub fn build_paginated_turns_from_rollout_items(items: &[RolloutItem]) -> Vec<Tu
 pub struct ThreadHistoryItemChange {
     pub turn_id: String,
     pub item: ThreadItem,
+    pub started_at_ms: Option<i64>,
+    pub completed_at_ms: Option<i64>,
 }
 
 /// Lightweight turn metadata snapshot for projectors that track turn status without
@@ -1478,9 +1480,13 @@ impl ThreadHistoryBuilder {
 
     fn record_changed_item(&mut self, turn_id: String, item: ThreadItem) {
         if let Some(change_set) = self.active_change_set.as_mut() {
-            change_set
-                .changed_items
-                .push(ThreadHistoryItemChange { turn_id, item });
+            change_set.changed_items.push(ThreadHistoryItemChange {
+                turn_id,
+                item,
+                // Legacy events used by ThreadHistoryBuilder don't have timestamps
+                started_at_ms: None,
+                completed_at_ms: None,
+            });
         }
     }
 
@@ -4481,6 +4487,8 @@ mod tests {
                             text_elements: Vec::new(),
                         }],
                     },
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 }],
                 changed_turns: vec![ThreadHistoryTurnChange {
                     turn_id: "rollout-0".into(),
@@ -4529,6 +4537,8 @@ mod tests {
                         }),
                         results: None,
                     }),
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 }],
                 changed_turns: Vec::new(),
                 removed_turn_ids: Vec::new(),
@@ -4560,6 +4570,8 @@ mod tests {
                         summary: vec!["summary".into()],
                         content: vec!["raw content".into()],
                     },
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 }],
                 changed_turns: Vec::new(),
                 removed_turn_ids: Vec::new(),
@@ -4666,6 +4678,8 @@ mod tests {
                         }),
                         results: None,
                     }),
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 }],
                 changed_turns: vec![ThreadHistoryTurnChange {
                     turn_id: "rollout-0".into(),

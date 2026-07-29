@@ -4,6 +4,7 @@ use super::postgres;
 use super::query::OrderByIndex;
 use super::query::ThreadFilterOptions;
 use super::query::push_thread_filters;
+use super::query::push_thread_filters_with_preview;
 use super::query::push_thread_order_and_limit;
 use super::query::push_thread_select_columns;
 use super::*;
@@ -249,7 +250,12 @@ WITH RECURSIVE subtree(child_thread_id, parent_thread_id) AS (
     };
     let include_thread_id_tiebreaker =
         relation_filter.is_some() || filters.sort_key == SortKey::RecencyAt;
-    push_thread_filters(builder, filters, include_thread_id_tiebreaker);
+    push_thread_filters_with_preview(
+        builder,
+        filters,
+        include_thread_id_tiebreaker,
+        /*include_empty_preview*/ relation_filter.is_some(),
+    );
     match relation_filter {
         Some(crate::ThreadRelationFilter::DirectChildrenOf(parent_thread_id)) => {
             builder.push(" AND listed_edge.parent_thread_id = ");

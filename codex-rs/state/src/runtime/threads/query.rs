@@ -57,6 +57,20 @@ pub(in crate::runtime) fn push_thread_filters<'a>(
     options: ThreadFilterOptions<'a>,
     include_thread_id_tiebreaker: bool,
 ) {
+    push_thread_filters_with_preview(
+        builder,
+        options,
+        include_thread_id_tiebreaker,
+        /*include_empty_preview*/ false,
+    );
+}
+
+pub(super) fn push_thread_filters_with_preview<'a>(
+    builder: &mut QueryBuilder<Sqlite>,
+    options: ThreadFilterOptions<'a>,
+    include_thread_id_tiebreaker: bool,
+    include_empty_preview: bool,
+) {
     let ThreadFilterOptions {
         archived_only,
         allowed_sources,
@@ -74,7 +88,9 @@ pub(in crate::runtime) fn push_thread_filters<'a>(
     } else {
         builder.push(" AND threads.archived = 0");
     }
-    builder.push(" AND threads.preview <> ''");
+    if !include_empty_preview {
+        builder.push(" AND threads.preview <> ''");
+    }
     if let Some(is_pinned) = is_pinned {
         builder.push(" AND threads.is_pinned = ");
         builder.push_bind(is_pinned);
