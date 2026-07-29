@@ -167,7 +167,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 is_pinned: None,
                 archived: false,
                 search_term: None,
@@ -195,7 +195,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 is_pinned: None,
                 archived: false,
                 search_term: None,
@@ -223,7 +223,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 is_pinned: Some(true),
                 archived: false,
                 search_term: None,
@@ -718,6 +718,21 @@ impl ThreadStore for InMemoryThreadStore {
     fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
         Box::pin(async move {
             let mut page = InMemoryThreadStore::list_threads(self).await?;
+            match &params.location_filter {
+                crate::ThreadLocationFilter::Unrestricted => {}
+                crate::ThreadLocationFilter::ExactCwds(cwds) => {
+                    page.items.retain(|thread| cwds.contains(&thread.cwd));
+                }
+                crate::ThreadLocationFilter::ProjectSessionScope {
+                    cwd,
+                    repository_identity,
+                } => {
+                    page.items.retain(|thread| {
+                        thread.cwd == *cwd
+                            || thread.repository_identity.as_ref() == Some(repository_identity)
+                    });
+                }
+            }
             match params.relation_filter {
                 Some(ThreadRelationFilter::DirectChildrenOf(parent_thread_id)) => {
                     page.items

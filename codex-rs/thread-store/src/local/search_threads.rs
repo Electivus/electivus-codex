@@ -92,7 +92,7 @@ pub(super) async fn search_threads(
         sort_direction: params.sort_direction,
         allowed_sources: params.allowed_sources.clone(),
         model_providers: None,
-        cwd_filters: None,
+        location_filter: crate::ThreadLocationFilter::Unrestricted,
         is_pinned: None,
         archived: params.archived,
         search_term: None,

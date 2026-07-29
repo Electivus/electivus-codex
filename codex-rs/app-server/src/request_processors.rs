@@ -483,6 +483,7 @@ use codex_thread_store::StoredThread;
 use codex_thread_store::StoredTurn;
 use codex_thread_store::StoredTurnItemsView;
 use codex_thread_store::StoredTurnStatus;
+use codex_thread_store::ThreadLocationFilter as StoreThreadLocationFilter;
 use codex_thread_store::ThreadMetadataPatch as StoreThreadMetadataPatch;
 use codex_thread_store::ThreadRelationFilter as StoreThreadRelationFilter;
 use codex_thread_store::ThreadSortKey as StoreThreadSortKey;

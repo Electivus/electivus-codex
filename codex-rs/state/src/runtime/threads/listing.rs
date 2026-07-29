@@ -58,6 +58,7 @@ impl StateRuntime {
                 allowed_sources,
                 model_providers,
                 cwd_filters: None,
+                repository_identity: None,
                 is_pinned: None,
                 anchor: None,
                 sort_key: crate::SortKey::UpdatedAt,
@@ -129,6 +130,8 @@ impl StateRuntime {
         relation_filter: Option<crate::ThreadRelationFilter>,
     ) -> anyhow::Result<crate::ThreadsPage> {
         let limit = page_size.saturating_add(1);
+        let include_thread_id_tiebreaker =
+            should_include_thread_id_tiebreaker(filters, relation_filter);
 
         let mut builder = QueryBuilder::<Sqlite>::new("");
         push_list_threads_query(&mut builder, filters, relation_filter, limit);
@@ -152,7 +155,7 @@ impl StateRuntime {
                 parent_thread_ids.remove(&overflow_item.id);
             }
             items.last().and_then(|item| {
-                anchor_from_item(item, filters.sort_key, relation_filter.is_some())
+                anchor_from_item(item, filters.sort_key, include_thread_id_tiebreaker)
             })
         } else {
             None
@@ -183,6 +186,7 @@ impl StateRuntime {
                 allowed_sources,
                 model_providers,
                 cwd_filters: None,
+                repository_identity: None,
                 is_pinned: None,
                 anchor,
                 sort_key,
@@ -249,7 +253,7 @@ WITH RECURSIVE subtree(child_thread_id, parent_thread_id) AS (
         None => builder.push(" FROM threads"),
     };
     let include_thread_id_tiebreaker =
-        relation_filter.is_some() || filters.sort_key == SortKey::RecencyAt;
+        should_include_thread_id_tiebreaker(filters, relation_filter);
     push_thread_filters_with_preview(
         builder,
         filters,
@@ -267,16 +271,23 @@ WITH RECURSIVE subtree(child_thread_id, parent_thread_id) AS (
         }
         None => {}
     }
-    let order_by_index = match (relation_filter, filters.cwd_filters) {
+    let order_by_index = match (
+        relation_filter,
+        filters.cwd_filters,
+        filters.repository_identity,
+    ) {
         // Relationship listings are expected to be much smaller than the global thread table.
         // Prefer the spawn-edge index and sort the matching subtree instead of scanning the
         // timestamp index until enough related threads happen to be found.
-        (Some(_), _) => OrderByIndex::Disabled,
+        (Some(_), _, _) => OrderByIndex::Disabled,
+        // Project Session Scope uses an OR across cwd and repository identity. Prefer the
+        // selective location indexes and sort the matched set.
+        (None, _, Some(_)) => OrderByIndex::Disabled,
         // Multi-cwd listing is supported but at the time of writing has no current use in
         // production. Preserve its query plan so the global timestamp index does not regress cwd
         // filtering into a scan.
-        (None, Some(cwd_filters)) if cwd_filters.len() > 1 => OrderByIndex::Disabled,
-        (None, Some(_) | None) => OrderByIndex::Enabled,
+        (None, Some(cwd_filters), None) if cwd_filters.len() > 1 => OrderByIndex::Disabled,
+        (None, Some(_) | None, None) => OrderByIndex::Enabled,
     };
     push_thread_order_and_limit(
         builder,
@@ -286,4 +297,13 @@ WITH RECURSIVE subtree(child_thread_id, parent_thread_id) AS (
         include_thread_id_tiebreaker,
         limit,
     );
+}
+
+fn should_include_thread_id_tiebreaker(
+    filters: ThreadFilterOptions<'_>,
+    relation_filter: Option<crate::ThreadRelationFilter>,
+) -> bool {
+    relation_filter.is_some()
+        || filters.sort_key == SortKey::RecencyAt
+        || filters.repository_identity.is_some()
 }

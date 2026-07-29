@@ -490,6 +490,7 @@ mod thread_processor_behavior_tests {
             agent_role: None,
             agent_path: None,
             git_info: None,
+            repository_identity: None,
             approval_mode: AskForApproval::OnRequest,
             permission_profile: PermissionProfile::read_only(),
             token_usage: None,

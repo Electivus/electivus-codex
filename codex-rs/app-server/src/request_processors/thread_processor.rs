@@ -23,7 +23,7 @@ struct ThreadListFilters {
     source_kinds: Option<Vec<ThreadSourceKind>>,
     archived: bool,
     is_pinned: Option<bool>,
-    cwd_filters: Option<Vec<PathBuf>>,
+    location_filter: StoreThreadLocationFilter,
     search_term: Option<String>,
     use_state_db_only: bool,
     relation_filter: Option<StoreThreadRelationFilter>,
@@ -212,6 +212,15 @@ fn normalize_thread_list_cwd_filters(
     }
 
     Ok(Some(normalized_cwds))
+}
+
+fn exact_thread_location_filter(
+    cwd: Option<ThreadListCwdFilter>,
+) -> Result<StoreThreadLocationFilter, JSONRPCErrorError> {
+    Ok(match normalize_thread_list_cwd_filters(cwd)? {
+        Some(cwds) => StoreThreadLocationFilter::ExactCwds(cwds),
+        None => StoreThreadLocationFilter::Unrestricted,
+    })
 }
 
 fn has_model_resume_override(
@@ -1982,7 +1991,7 @@ impl ThreadRequestProcessor {
             parent_thread_id,
             ancestor_thread_id,
         } = params;
-        let cwd_filters = normalize_thread_list_cwd_filters(cwd)?;
+        let location_filter = exact_thread_location_filter(cwd)?;
         let relation_filter = match (parent_thread_id, ancestor_thread_id) {
             (Some(_), Some(_)) => {
                 return Err(invalid_request(
@@ -2021,7 +2030,7 @@ impl ThreadRequestProcessor {
                     source_kinds,
                     archived: archived.unwrap_or(false),
                     is_pinned,
-                    cwd_filters,
+                    location_filter,
                     search_term,
                     use_state_db_only,
                     relation_filter,
@@ -4451,7 +4460,7 @@ impl ThreadRequestProcessor {
             source_kinds,
             archived,
             is_pinned,
-            cwd_filters,
+            location_filter,
             search_term,
             use_state_db_only,
             relation_filter,
@@ -4496,7 +4505,7 @@ impl ThreadRequestProcessor {
                     sort_direction: store_sort_direction,
                     allowed_sources: allowed_sources.to_vec(),
                     model_providers: model_provider_filter.clone(),
-                    cwd_filters: cwd_filters.clone(),
+                    location_filter: location_filter.clone(),
                     archived,
                     is_pinned,
                     search_term: search_term.clone(),
@@ -4516,11 +4525,21 @@ impl ThreadRequestProcessor {
                 if source_kind_filter
                     .as_ref()
                     .is_none_or(|filter| source_kind_matches(&source, filter))
-                    && cwd_filters.as_ref().is_none_or(|expected_cwds| {
-                        expected_cwds.iter().any(|expected_cwd| {
-                            path_utils::paths_match_after_normalization(&it.cwd, expected_cwd)
-                        })
-                    })
+                    && match &location_filter {
+                        StoreThreadLocationFilter::Unrestricted => true,
+                        StoreThreadLocationFilter::ExactCwds(expected_cwds) => {
+                            expected_cwds.iter().any(|expected_cwd| {
+                                path_utils::paths_match_after_normalization(&it.cwd, expected_cwd)
+                            })
+                        }
+                        StoreThreadLocationFilter::ProjectSessionScope {
+                            cwd,
+                            repository_identity,
+                        } => {
+                            path_utils::paths_match_after_normalization(&it.cwd, cwd)
+                                || it.repository_identity.as_ref() == Some(repository_identity)
+                        }
+                    }
                 {
                     filtered.push(it);
                     if filtered.len() >= remaining {

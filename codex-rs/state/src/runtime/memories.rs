@@ -218,6 +218,7 @@ FROM threads
                 allowed_sources,
                 model_providers: None,
                 cwd_filters: None,
+                repository_identity: None,
                 is_pinned: None,
                 anchor: None,
                 sort_key: SortKey::UpdatedAt,
