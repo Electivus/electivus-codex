@@ -76,6 +76,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout::StateDbHandle;
 use codex_state::log_db::LogDbLayer;
+use codex_thread_store::ThreadStore;
 use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tokio::sync::broadcast;
@@ -220,7 +221,20 @@ pub(crate) struct MessageProcessorArgs {
 impl MessageProcessor {
     /// Create a new `MessageProcessor`, retaining a handle to the outgoing
     /// `Sender` so handlers can enqueue messages to be written to stdout.
-    pub(crate) fn new(args: MessageProcessorArgs) -> Self {
+    pub(crate) fn new(args: MessageProcessorArgs) -> anyhow::Result<Self> {
+        let thread_store =
+            codex_core::thread_store_from_config(args.config.as_ref(), args.state_db.clone())?;
+        Ok(Self::new_inner(args, thread_store))
+    }
+
+    pub(crate) fn new_with_thread_store(
+        args: MessageProcessorArgs,
+        thread_store: Arc<dyn ThreadStore>,
+    ) -> Self {
+        Self::new_inner(args, thread_store)
+    }
+
+    fn new_inner(args: MessageProcessorArgs, thread_store: Arc<dyn ThreadStore>) -> Self {
         let MessageProcessorArgs {
             outgoing,
             analytics_events_client,
@@ -244,7 +258,6 @@ impl MessageProcessor {
         // The thread store is intentionally process-scoped. Config reloads can
         // affect per-thread behavior, but they must not move newly started,
         // resumed, or forked threads to a different persistence backend/root.
-        let thread_store = codex_core::thread_store_from_config(config.as_ref(), state_db.clone());
         let environment_manager_for_requests = Arc::clone(&environment_manager);
         let environment_manager_for_extensions = Arc::clone(&environment_manager);
         let restriction_product = session_source.restriction_product();

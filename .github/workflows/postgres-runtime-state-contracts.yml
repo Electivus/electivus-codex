@@ -1,0 +1,163 @@
+name: PostgreSQL Runtime State contracts
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  postgres-contracts:
+    name: PostgreSQL 18 Runtime State contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_INCREMENTAL: "0"
+      CODEX_TEST_POSTGRES_URL: postgresql://codex:codex-test@localhost:5432/codex_runtime_state_test
+      SCCACHE_CACHE_SIZE: 2G
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: codex_runtime_state_test
+          POSTGRES_PASSWORD: codex-test
+          POSTGRES_USER: codex
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U codex -d codex_runtime_state_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Compute lockfile hash
+        id: lockhash
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "hash=$(sha256sum Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "toolchain_hash=$(sha256sum rust-toolchain.toml | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cargo home cache
+        id: cache_cargo_home_restore
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
+          restore-keys: |
+            cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-
+
+      - name: Install sccache
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: sccache
+          version: 0.7.5
+
+      - name: Configure sccache backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${ACTIONS_CACHE_URL:-}" && -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+            echo "Using sccache GitHub backend"
+          else
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_DIR=${CI_BUILD_ROOT}/sccache" >> "$GITHUB_ENV"
+            echo "Using sccache local disk + actions/cache fallback"
+          fi
+
+      - name: Enable sccache wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          wrapper="$(command -v sccache)"
+          echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+
+      - name: Restore sccache cache (fallback)
+        if: ${{ env.SCCACHE_GHA_ENABLED != 'true' }}
+        id: cache_sccache_restore
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-
+            sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-
+
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: nextest
+      - name: Verify contracts without procedural extensions
+        run: |
+          psql "$CODEX_TEST_POSTGRES_URL" --set ON_ERROR_STOP=1 \
+            --command 'DROP EXTENSION plpgsql'
+          psql "$CODEX_TEST_POSTGRES_URL" --tuples-only --no-align \
+            --command 'SELECT COUNT(*) FROM pg_extension' | grep -Fx 0
+      - name: Run PostgreSQL Runtime State contracts
+        run: |
+          just test -p codex-state --run-ignored ignored-only -E 'test(/postgres_contract_/)'
+          just test -p codex-thread-store --run-ignored ignored-only -E 'test(/postgres_contract_/)'
+          just test -p codex-app-server --run-ignored ignored-only -E 'test(/postgres_contract_/)'
+          just test -p codex-app-server-transport --run-ignored ignored-only -E 'test(/postgres_contract_/)'
+          just test -p codex-memories-write --run-ignored ignored-only -E 'test(/postgres_contract_/)'
+          just test -p codex-cli --run-ignored ignored-only -E 'test(/state_(migrate|initialize)_process_/)'
+
+      - name: Verify contracts installed no extensions
+        if: always() && !cancelled()
+        run: |
+          psql "$CODEX_TEST_POSTGRES_URL" --tuples-only --no-align \
+            --command 'SELECT COUNT(*) FROM pg_extension' | grep -Fx 0
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
+      - name: Save cargo home cache
+        if: always() && !cancelled() && steps.cache_cargo_home_restore.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
+
+      - name: Save sccache cache (fallback)
+        if: always() && !cancelled() && env.SCCACHE_GHA_ENABLED != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
+
+      - name: sccache stats
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats || true
+
+      - name: sccache summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### sccache stats — PostgreSQL Runtime State contracts"
+            echo
+            echo '```'
+            sccache --show-stats || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -548,7 +548,19 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         arg0_paths.codex_self_exe.clone(),
         arg0_paths.codex_linux_sandbox_exe.clone(),
     )?;
-    let state_db = codex_core::init_state_db(&config).await;
+    let state_db = if config.runtime_state_backend.is_postgresql() {
+        Some(
+            codex_core::try_init_state_db(&config)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed to initialize PostgreSQL Runtime State Backend: {error:#}"
+                    )
+                })?,
+        )
+    } else {
+        codex_core::init_state_db(&config).await
+    };
     let environment_manager = if run_loader_overrides.ignore_user_config {
         EnvironmentManager::from_env(Some(local_runtime_paths), config.http_client_factory())
             .await?
@@ -1432,30 +1444,31 @@ fn all_thread_source_kinds() -> Vec<ThreadSourceKind> {
     ]
 }
 
-async fn latest_thread_cwd(thread: &AppServerThread) -> PathBuf {
-    if let Some(path) = thread.path.as_deref()
-        && let Some(cwd) = parse_latest_turn_context_cwd(path).await
-    {
-        return cwd;
-    }
-    thread.cwd.to_path_buf()
+#[derive(Clone, Copy)]
+enum ResumeCwdSource {
+    LocalRollout,
+    CanonicalProjection,
 }
 
-async fn parse_latest_turn_context_cwd(path: &Path) -> Option<PathBuf> {
-    let text = tokio::fs::read_to_string(path).await.ok()?;
-    for line in text.lines().rev() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(trimmed) else {
-            continue;
-        };
-        if let RolloutItem::TurnContext(item) = rollout_line.item {
-            return Some(item.cwd.into_path_buf());
+async fn latest_thread_cwd(thread: &AppServerThread, source: ResumeCwdSource) -> PathBuf {
+    if let ResumeCwdSource::LocalRollout = source
+        && let Some(path) = thread.path.as_deref()
+        && let Ok(text) = tokio::fs::read_to_string(path).await
+    {
+        for line in text.lines().rev() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(trimmed) else {
+                continue;
+            };
+            if let RolloutItem::TurnContext(item) = rollout_line.item {
+                return item.cwd.into_path_buf();
+            }
         }
     }
-    None
+    thread.cwd.to_path_buf()
 }
 
 fn cwds_match(current_cwd: &Path, session_cwd: &Path) -> bool {
@@ -1469,6 +1482,12 @@ async fn resolve_resume_thread_id(
     args: &crate::cli::ResumeArgs,
 ) -> anyhow::Result<Option<String>> {
     let model_providers = resume_lookup_model_providers(config, args);
+    let cwd_source = match state_db {
+        Some(runtime) if !runtime.uses_local_rollout_history() => {
+            ResumeCwdSource::CanonicalProjection
+        }
+        Some(_) | None => ResumeCwdSource::LocalRollout,
+    };
 
     if args.last {
         let mut cursor = None;
@@ -1498,7 +1517,7 @@ async fn resolve_resume_thread_id(
             .await
             .map_err(anyhow::Error::msg)?;
             for thread in response.data {
-                let latest_cwd = latest_thread_cwd(&thread).await;
+                let latest_cwd = latest_thread_cwd(&thread, cwd_source).await;
                 if args.all || cwds_match(config.cwd.as_path(), latest_cwd.as_path()) {
                     return Ok(Some(thread.id));
                 }
@@ -1516,7 +1535,9 @@ async fn resolve_resume_thread_id(
     if Uuid::parse_str(session_id).is_ok() {
         return Ok(Some(session_id.to_string()));
     }
-    if let Some(state_db) = state_db {
+    if let Some(state_db) = state_db
+        && state_db.uses_local_rollout_history()
+    {
         let cwd = (!args.all).then_some(config.cwd.as_path());
         let resolved = state_db
             .find_thread_by_exact_title(
@@ -1569,7 +1590,7 @@ async fn resolve_resume_thread_id(
             if thread.name.as_deref() != Some(session_id) {
                 continue;
             }
-            let latest_cwd = latest_thread_cwd(&thread).await;
+            let latest_cwd = latest_thread_cwd(&thread, cwd_source).await;
             if args.all || cwds_match(config.cwd.as_path(), latest_cwd.as_path()) {
                 return Ok(Some(thread.id));
             }

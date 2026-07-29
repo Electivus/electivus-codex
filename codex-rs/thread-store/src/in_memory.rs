@@ -11,11 +11,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::SessionContextWindow;
-use codex_protocol::protocol::SessionMeta;
-use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::ThreadHistoryMode;
-use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::persisted_rollout_items;
 
 use crate::AppendThreadItemsParams;
@@ -39,6 +35,7 @@ use crate::ThreadStoreFuture;
 use crate::ThreadStoreResult;
 use crate::UpdateThreadMetadataParams;
 use crate::error::reject_paginated_history_mode;
+use crate::types::initial_session_meta_item;
 
 static IN_MEMORY_THREAD_STORES: OnceLock<Mutex<HashMap<String, Arc<InMemoryThreadStore>>>> =
     OnceLock::new();
@@ -59,6 +56,7 @@ mod tests {
     use crate::ThreadSortKey;
     use codex_protocol::models::BaseInstructions;
     use codex_protocol::protocol::SessionSource;
+    use codex_protocol::protocol::ThreadMemoryMode;
 
     #[tokio::test]
     async fn default_turn_pagination_methods_return_unsupported() {
@@ -471,39 +469,15 @@ impl InMemoryThreadStore {
         reject_paginated_history_mode(params.history_mode)?;
         let mut state = self.state.lock().await;
         state.calls.create_thread += 1;
-        let session_meta = SessionMeta {
-            session_id: params.session_id,
-            id: params.thread_id,
-            forked_from_id: params.forked_from_id,
-            parent_thread_id: params.parent_thread_id,
-            cwd: params.metadata.cwd.clone().unwrap_or_default(),
-            agent_nickname: params.source.get_nickname(),
-            agent_role: params.source.get_agent_role(),
-            agent_path: params.source.get_agent_path().map(Into::into),
-            originator: params.originator.clone(),
-            source: params.source.clone(),
-            thread_source: params.thread_source.clone(),
-            model_provider: Some(params.metadata.model_provider.clone()),
-            base_instructions: Some(params.base_instructions.clone()),
-            dynamic_tools: (!params.dynamic_tools.is_empty()).then(|| params.dynamic_tools.clone()),
-            selected_capability_roots: params.selected_capability_roots.clone(),
-            memory_mode: matches!(params.metadata.memory_mode, ThreadMemoryMode::Disabled)
-                .then_some("disabled".to_string()),
-            history_mode: params.history_mode,
-            history_base: params.history_base,
-            subagent_history_start_ordinal: params.subagent_history_start_ordinal,
-            multi_agent_version: params.multi_agent_version,
-            context_window: Some(SessionContextWindow::new(params.initial_window_id.clone())),
-            ..SessionMeta::default()
-        };
         state
             .histories
             .entry(params.thread_id)
             .or_default()
-            .push(RolloutItem::SessionMeta(SessionMetaLine {
-                meta: session_meta,
-                git: None,
-            }));
+            .push(initial_session_meta_item(
+                &params,
+                String::new(),
+                String::new(),
+            ));
         state.created_threads.insert(params.thread_id, params);
         Ok(())
     }

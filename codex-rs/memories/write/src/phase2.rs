@@ -159,6 +159,7 @@ pub async fn run(
             &claim,
             new_watermark,
             &raw_memories,
+            &root,
             "succeeded_no_workspace_changes",
         )
         .await;
@@ -294,13 +295,28 @@ mod job {
         claim: &Claim,
         completion_watermark: i64,
         selected_outputs: &[codex_state::Stage1Output],
+        memory_root: &Path,
         reason: &'static str,
     ) -> bool {
-        context.counter(MEMORY_PHASE_TWO_JOBS, /*inc*/ 1, &[("status", reason)]);
-        db.memories()
-            .mark_global_phase2_job_succeeded(&claim.token, completion_watermark, selected_outputs)
-            .await
-            .unwrap_or(false)
+        match crate::phase2_completion::complete_phase2(
+            db.memories(),
+            &claim.token,
+            completion_watermark,
+            selected_outputs,
+            memory_root,
+        )
+        .await
+        {
+            Ok(completed) => {
+                context.counter(MEMORY_PHASE_TWO_JOBS, /*inc*/ 1, &[("status", reason)]);
+                completed
+            }
+            Err(err) => {
+                tracing::error!("failed publishing memory consolidation artifacts: {err}");
+                failed(context, db, claim, "failed_publish_artifacts").await;
+                false
+            }
+        }
     }
 }
 
@@ -361,7 +377,13 @@ mod agent {
                 .clone()
                 .unwrap_or_else(|| provider.memory_consolidation_preferred_model().to_string()),
         );
-        agent_config.model_reasoning_effort = Some(crate::stage_two::REASONING_EFFORT);
+        agent_config.model_reasoning_effort = Some(
+            config
+                .memories
+                .consolidation_model_reasoning_effort
+                .clone()
+                .unwrap_or(crate::stage_two::REASONING_EFFORT),
+        );
 
         Some(agent_config)
     }
@@ -457,6 +479,7 @@ mod agent {
                         &claim,
                         new_watermark,
                         &selected_outputs,
+                        &memory_root,
                         "succeeded",
                     )
                     .await

@@ -1316,17 +1316,25 @@ async fn code_mode_only_exposes_code_executor_and_hides_nested_tools() {
 }
 
 #[tokio::test]
-async fn code_mode_buffered_exec_updates_exec_description() {
-    let plan = probe(|turn| {
+async fn code_mode_buffered_exec_is_a_no_op() {
+    let plain = probe(|turn| {
+        set_features(turn, &[Feature::CodeMode]);
+    })
+    .await;
+    let flagged = probe(|turn| {
         set_features(turn, &[Feature::CodeMode, Feature::CodeModeBufferedExec]);
     })
     .await;
 
-    let ToolSpec::Freeform(exec) = plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME) else {
+    let ToolSpec::Freeform(plain_exec) = plain.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME)
+    else {
         panic!("expected code mode exec tool");
     };
-    assert!(exec.description.contains("Defaults to 30000 ms."));
-    assert!(!exec.description.contains("Defaults to 10000 ms."));
+    let ToolSpec::Freeform(flagged_exec) = flagged.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME)
+    else {
+        panic!("expected code mode exec tool");
+    };
+    assert_eq!(flagged_exec.description, plain_exec.description);
 }
 
 #[tokio::test]

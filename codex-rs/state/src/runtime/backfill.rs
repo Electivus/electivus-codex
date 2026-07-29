@@ -1,6 +1,207 @@
-use super::*;
+use super::StateRuntime;
+use crate::BackfillState;
+use crate::BackfillStatus;
+use chrono::Utc;
+use sqlx::PgPool;
+use sqlx::SqlitePool;
+use std::sync::Arc;
+use std::time::Duration;
+
+mod postgres;
+mod sqlite;
+
+use self::postgres::PostgresBackfillCoordinator;
+use self::sqlite::SqliteBackfillCoordinator;
+
+macro_rules! dispatch_backend {
+    ($backend:expr, $method:ident($($argument:expr),* $(,)?)) => {
+        match $backend {
+            BackfillCoordinatorBackend::Postgres(coordinator) => coordinator.$method($($argument),*).await,
+            BackfillCoordinatorBackend::Sqlite(coordinator) => coordinator.$method($($argument),*).await,
+        }
+    };
+}
+
+/// Lease returned to the replica that owns rollout metadata backfill.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackfillLease {
+    owner_id: String,
+    pub(crate) fencing_token: i64,
+}
+
+/// Result of attempting to claim the singleton rollout metadata backfill.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BackfillClaimOutcome {
+    Claimed {
+        lease: BackfillLease,
+        state: BackfillState,
+    },
+    Busy(BackfillState),
+    Complete(BackfillState),
+}
+
+/// Result of a mutation protected by a backfill lease.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackfillLeaseUpdate {
+    Applied,
+    Rejected,
+}
+
+/// Storage-neutral coordinator for the singleton rollout metadata backfill.
+///
+/// Implementations coordinate across independent processes. Callers must retain the returned
+/// lease because every mutation is fenced by both its owner ID and monotonically increasing token.
+#[derive(Clone)]
+pub struct BackfillCoordinator {
+    backend: BackfillCoordinatorBackend,
+}
+
+#[derive(Clone)]
+enum BackfillCoordinatorBackend {
+    Postgres(PostgresBackfillCoordinator),
+    Sqlite(SqliteBackfillCoordinator),
+}
+
+impl BackfillCoordinator {
+    pub(crate) fn from_sqlite(pool: Arc<SqlitePool>) -> Self {
+        Self {
+            backend: BackfillCoordinatorBackend::Sqlite(SqliteBackfillCoordinator::new(pool)),
+        }
+    }
+
+    pub(crate) fn from_postgres(pool: PgPool, schema: String) -> Self {
+        Self {
+            backend: BackfillCoordinatorBackend::Postgres(PostgresBackfillCoordinator::new(
+                pool, schema,
+            )),
+        }
+    }
+
+    pub async fn state(&self) -> anyhow::Result<BackfillState> {
+        let result = dispatch_backend!(&self.backend, state());
+        result.map_err(|_| backfill_coordination_error("read backfill state"))
+    }
+
+    pub async fn try_claim(
+        &self,
+        owner_id: &str,
+        lease_duration: Duration,
+    ) -> anyhow::Result<BackfillClaimOutcome> {
+        if owner_id.is_empty() {
+            anyhow::bail!("backfill owner ID must not be empty");
+        }
+        let lease_millis = lease_millis(lease_duration)?;
+        let result = dispatch_backend!(&self.backend, try_claim(owner_id, lease_millis));
+        result.map_err(|_| backfill_coordination_error("claim backfill"))
+    }
+
+    pub async fn heartbeat(
+        &self,
+        lease: &BackfillLease,
+        lease_duration: Duration,
+    ) -> anyhow::Result<BackfillLeaseUpdate> {
+        self.update_lease(
+            "heartbeat backfill",
+            lease,
+            lease_duration,
+            /*watermark*/ None,
+        )
+        .await
+    }
+
+    pub async fn checkpoint(
+        &self,
+        lease: &BackfillLease,
+        watermark: &str,
+        lease_duration: Duration,
+    ) -> anyhow::Result<BackfillLeaseUpdate> {
+        self.update_lease(
+            "checkpoint backfill",
+            lease,
+            lease_duration,
+            Some(watermark),
+        )
+        .await
+    }
+
+    async fn update_lease(
+        &self,
+        operation: &'static str,
+        lease: &BackfillLease,
+        lease_duration: Duration,
+        watermark: Option<&str>,
+    ) -> anyhow::Result<BackfillLeaseUpdate> {
+        let lease_millis = lease_millis(lease_duration)?;
+        let result = dispatch_backend!(&self.backend, update_lease(lease, lease_millis, watermark));
+        result
+            .map(BackfillLeaseUpdate::from)
+            .map_err(|_| backfill_coordination_error(operation))
+    }
+
+    pub async fn release(&self, lease: &BackfillLease) -> anyhow::Result<BackfillLeaseUpdate> {
+        self.finish(
+            "release backfill",
+            lease,
+            BackfillStatus::Pending,
+            /*last_watermark*/ None,
+        )
+        .await
+    }
+
+    pub async fn complete(
+        &self,
+        lease: &BackfillLease,
+        last_watermark: Option<&str>,
+    ) -> anyhow::Result<BackfillLeaseUpdate> {
+        self.finish(
+            "complete backfill",
+            lease,
+            BackfillStatus::Complete,
+            last_watermark,
+        )
+        .await
+    }
+
+    async fn finish(
+        &self,
+        operation: &'static str,
+        lease: &BackfillLease,
+        status: BackfillStatus,
+        last_watermark: Option<&str>,
+    ) -> anyhow::Result<BackfillLeaseUpdate> {
+        let result = dispatch_backend!(&self.backend, finish_lease(lease, status, last_watermark));
+        result
+            .map(BackfillLeaseUpdate::from)
+            .map_err(|_| backfill_coordination_error(operation))
+    }
+}
+
+impl From<bool> for BackfillLeaseUpdate {
+    fn from(applied: bool) -> Self {
+        if applied {
+            Self::Applied
+        } else {
+            Self::Rejected
+        }
+    }
+}
+
+fn lease_millis(duration: Duration) -> anyhow::Result<i64> {
+    i64::try_from(duration.as_millis())
+        .map_err(|_| anyhow::anyhow!("backfill lease duration exceeds supported range"))
+}
+
+fn backfill_coordination_error(operation: &'static str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Runtime State could not complete the `{operation}` operation; verify backfill coordination persistence health, then retry"
+    )
+}
 
 impl StateRuntime {
+    pub fn backfill_coordinator(&self) -> BackfillCoordinator {
+        self.backfill.clone()
+    }
+
     pub async fn get_backfill_state(&self) -> anyhow::Result<crate::BackfillState> {
         self.ensure_backfill_state_row().await?;
         let row = sqlx::query(
@@ -10,7 +211,7 @@ FROM backfill_state
 WHERE id = 1
             "#,
         )
-        .fetch_one(self.pool.as_ref())
+        .fetch_one(self.sqlite_pool()?)
         .await?;
         crate::BackfillState::try_from_row(&row)
     }
@@ -38,7 +239,7 @@ WHERE id = 1
         .bind(crate::BackfillStatus::Complete.as_str())
         .bind(crate::BackfillStatus::Running.as_str())
         .bind(lease_cutoff)
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         Ok(result.rows_affected() == 1)
     }
@@ -55,7 +256,7 @@ WHERE id = 1
         )
         .bind(crate::BackfillStatus::Running.as_str())
         .bind(Utc::now().timestamp())
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         Ok(())
     }
@@ -73,7 +274,7 @@ WHERE id = 1
         .bind(crate::BackfillStatus::Running.as_str())
         .bind(watermark)
         .bind(Utc::now().timestamp())
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         Ok(())
     }
@@ -97,20 +298,20 @@ WHERE id = 1
         .bind(last_watermark)
         .bind(now)
         .bind(now)
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         Ok(())
     }
 
     async fn ensure_backfill_state_row(&self) -> anyhow::Result<()> {
-        ensure_backfill_state_row_in_pool(self.pool.as_ref()).await
+        super::ensure_backfill_state_row_in_pool(self.sqlite_pool()?).await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::unique_temp_dir;
     use super::StateRuntime;
-    use super::test_support::unique_temp_dir;
     use chrono::Utc;
     use codex_utils_absolute_path::test_support::PathExt;
     use pretty_assertions::assert_eq;
@@ -212,7 +413,7 @@ mod tests {
         .await
         .expect("initialize runtime");
         sqlx::query("DELETE FROM backfill_state WHERE id = 1")
-            .execute(runtime.pool.as_ref())
+            .execute(runtime.sqlite_pool().expect("SQLite runtime"))
             .await
             .expect("delete backfill state row");
 
@@ -223,7 +424,7 @@ mod tests {
         assert_eq!(state, crate::BackfillState::default());
         let row_count =
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM backfill_state WHERE id = 1")
-                .fetch_one(runtime.pool.as_ref())
+                .fetch_one(runtime.sqlite_pool().expect("SQLite runtime"))
                 .await
                 .expect("count repaired backfill state rows");
         assert_eq!(row_count, 1);
@@ -263,7 +464,7 @@ WHERE id = 1
         )
         .bind(crate::BackfillStatus::Running.as_str())
         .bind(stale_updated_at)
-        .execute(runtime.pool.as_ref())
+        .execute(runtime.sqlite_pool().expect("SQLite runtime"))
         .await
         .expect("force stale backfill lease");
 

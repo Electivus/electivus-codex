@@ -3194,6 +3194,9 @@ async fn resume_thread_subagent_restores_stored_metadata() {
     assert_eq!(resumed_agent_path, Some(agent_path));
     assert_eq!(resumed_nickname, Some(original_nickname));
     assert_eq!(resumed_role, Some("explorer".to_string()));
+    let store_calls = thread_store.calls().await;
+    assert_eq!(store_calls.load_latest_model_context, 1);
+    assert_eq!(store_calls.read_thread_with_history, 0);
 
     let _ = harness
         .control

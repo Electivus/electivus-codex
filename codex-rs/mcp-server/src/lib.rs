@@ -93,7 +93,19 @@ pub async fn run_main(
     })?;
     codex_core::otel_init::record_process_start(otel.as_ref(), OTEL_SERVICE_NAME);
     codex_core::otel_init::install_sqlite_telemetry(otel.as_ref(), OTEL_SERVICE_NAME);
-    let state_db = codex_core::init_state_db(&config).await;
+    let state_db = if config.runtime_state_backend.is_postgresql() {
+        Some(
+            codex_core::try_init_state_db(&config)
+                .await
+                .map_err(|error| {
+                    std::io::Error::other(format!(
+                        "failed to initialize PostgreSQL Runtime State Backend: {error:#}"
+                    ))
+                })?,
+        )
+    } else {
+        codex_core::init_state_db(&config).await
+    };
     let environment_manager = Arc::new(
         EnvironmentManager::from_codex_home(
             config.codex_home.clone(),
@@ -158,7 +170,8 @@ pub async fn run_main(
             state_db,
             installation_id,
         )
-        .await;
+        .await
+        .map_err(std::io::Error::other)?;
         async move {
             while let Some(msg) = incoming_rx.recv().await {
                 match msg {

@@ -982,13 +982,41 @@ impl RolloutRecorder {
     pub async fn load_rollout_items(
         path: &Path,
     ) -> std::io::Result<(Vec<RolloutItem>, Option<ThreadId>, usize)> {
+        let (lines, thread_id, parse_errors) = Self::load_rollout_lines(path).await?;
+        Ok((
+            lines.into_iter().map(|line| line.item).collect(),
+            thread_id,
+            parse_errors,
+        ))
+    }
+
+    /// Loads complete canonical rollout records through the same compatibility parser used by
+    /// resume, preserving each record's timestamp and optional persisted ordinal.
+    pub async fn load_rollout_lines(
+        path: &Path,
+    ) -> std::io::Result<(Vec<RolloutLine>, Option<ThreadId>, usize)> {
+        let (lines, thread_id, parse_errors, _) =
+            Self::load_rollout_lines_bounded(path, u64::MAX).await?;
+        Ok((lines, thread_id, parse_errors))
+    }
+
+    /// Loads complete rollout records while bounding uncompressed source retained by migration.
+    pub async fn load_rollout_lines_bounded(
+        path: &Path,
+        maximum_source_bytes: u64,
+    ) -> std::io::Result<(Vec<RolloutLine>, Option<ThreadId>, usize, u64)> {
         trace!("Resuming rollout from {path:?}");
-        let mut items: Vec<RolloutItem> = Vec::new();
+        let mut lines = Vec::new();
         let mut thread_id: Option<ThreadId> = None;
         let mut parse_errors = 0usize;
+        let mut source_bytes = 0_u64;
         let mut reader = compression::open_rollout_line_reader(path).await?;
         let mut saw_non_empty_line = false;
-        while let Some(line) = reader.next_line().await? {
+        while let Some((line, line_bytes)) = reader
+            .next_line_bounded(maximum_source_bytes.saturating_sub(source_bytes))
+            .await?
+        {
+            source_bytes = source_bytes.saturating_add(line_bytes);
             if line.trim().is_empty() {
                 continue;
             }
@@ -1021,15 +1049,14 @@ impl RolloutRecorder {
                 }
             };
 
-            let item = rollout_line.item;
             // Use the FIRST SessionMeta encountered in the file as the canonical
             // thread id and main session information. Keep all items intact.
             if thread_id.is_none()
-                && let RolloutItem::SessionMeta(session_meta_line) = &item
+                && let RolloutItem::SessionMeta(session_meta_line) = &rollout_line.item
             {
                 thread_id = Some(session_meta_line.meta.id);
             }
-            items.push(item);
+            lines.push(rollout_line);
         }
         if !saw_non_empty_line {
             return Err(IoError::other("empty session file"));
@@ -1037,11 +1064,11 @@ impl RolloutRecorder {
 
         tracing::debug!(
             "Resumed rollout with {} items, thread ID: {:?}, parse errors: {}",
-            items.len(),
+            lines.len(),
             thread_id,
             parse_errors,
         );
-        Ok((items, thread_id, parse_errors))
+        Ok((lines, thread_id, parse_errors, source_bytes))
     }
 
     pub async fn get_rollout_history(path: &Path) -> std::io::Result<InitialHistory> {
@@ -1977,7 +2004,7 @@ fn thread_item_from_state_metadata(
         agent_role: item.agent_role,
         model_provider: Some(item.model_provider),
         cli_version: Some(item.cli_version),
-        created_at: Some(item.created_at.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        created_at: Some(item.created_at.to_rfc3339_opts(SecondsFormat::Millis, true)),
         updated_at: Some(item.updated_at.to_rfc3339_opts(SecondsFormat::Millis, true)),
         recency_at: Some(item.recency_at.to_rfc3339_opts(SecondsFormat::Millis, true)),
     }
