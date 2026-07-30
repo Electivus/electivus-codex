@@ -1075,12 +1075,12 @@ async fn append_rollout_item_to_path_assigns_next_paginated_ordinal() -> std::io
 }
 
 #[tokio::test]
-async fn list_threads_db_disabled_does_not_skip_paginated_items() -> std::io::Result<()> {
+async fn list_threads_db_disabled_does_not_skip_created_at_ties() -> std::io::Result<()> {
     let home = TempDir::new().expect("temp dir");
     let config = test_config(home.path());
 
-    let newest = write_session_file(home.path(), "2025-01-03T12-00-00", Uuid::from_u128(9001))?;
-    let middle = write_session_file(home.path(), "2025-01-02T12-00-00", Uuid::from_u128(9002))?;
+    let newest = write_session_file(home.path(), "2025-01-03T12-00-00", Uuid::from_u128(9002))?;
+    let middle = write_session_file(home.path(), "2025-01-03T12-00-00", Uuid::from_u128(9001))?;
     let _oldest = write_session_file(home.path(), "2025-01-01T12-00-00", Uuid::from_u128(9003))?;
 
     let default_provider = config.model_provider_id.clone();

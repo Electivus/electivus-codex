@@ -301,7 +301,7 @@ impl ThreadMetadata {
         if existing.git_branch.is_some() {
             self.git_branch = existing.git_branch.clone();
         }
-        if existing.git_origin_url.is_some() || existing.git_origin_url_is_explicit {
+        if existing.git_origin_url_is_explicit {
             self.git_origin_url = existing.git_origin_url.clone();
             self.repository_identity = existing.repository_identity.clone();
             self.git_origin_url_is_explicit = existing.git_origin_url_is_explicit;
@@ -738,6 +738,56 @@ mod tests {
         reconciled.git_origin_url = Some("rollout-origin".to_string());
         let existing = expected_thread_metadata(/*reasoning_effort*/ None);
         let expected = reconciled.clone();
+
+        reconciled.prefer_existing_git_info(&existing);
+
+        assert_eq!(reconciled, expected);
+    }
+
+    #[test]
+    fn legacy_reconcile_replaces_non_explicit_stale_origin() {
+        let mut reconciled = expected_thread_metadata(/*reasoning_effort*/ None);
+        reconciled.git_origin_url = Some("https://example.com/acme/current.git".to_string());
+        reconciled.repository_identity = Some("example.com/acme/current".to_string());
+        let mut existing = reconciled.clone();
+        existing.git_origin_url = Some("https://example.com/acme/stale.git".to_string());
+        existing.repository_identity = Some("example.com/acme/stale".to_string());
+        let expected = reconciled.clone();
+
+        reconciled.prefer_existing_git_info(&existing);
+
+        assert_eq!(reconciled, expected);
+    }
+
+    #[test]
+    fn legacy_reconcile_preserves_explicit_reclassified_origin() {
+        let mut reconciled = expected_thread_metadata(/*reasoning_effort*/ None);
+        reconciled.git_origin_url = Some("https://example.com/acme/rollout.git".to_string());
+        reconciled.repository_identity = Some("example.com/acme/rollout".to_string());
+        let mut existing = reconciled.clone();
+        existing.git_origin_url = Some("https://example.com/acme/reclassified.git".to_string());
+        existing.repository_identity = Some("example.com/acme/reclassified".to_string());
+        existing.git_origin_url_is_explicit = true;
+        let mut expected = reconciled.clone();
+        expected.git_origin_url = existing.git_origin_url.clone();
+        expected.repository_identity = existing.repository_identity.clone();
+        expected.git_origin_url_is_explicit = true;
+
+        reconciled.prefer_existing_git_info(&existing);
+
+        assert_eq!(reconciled, expected);
+    }
+
+    #[test]
+    fn paginated_reconcile_preserves_non_explicit_sqlite_origin() {
+        let mut reconciled = expected_thread_metadata(/*reasoning_effort*/ None);
+        reconciled.history_mode = ThreadHistoryMode::Paginated;
+        reconciled.git_origin_url = Some("https://example.com/acme/rollout.git".to_string());
+        reconciled.repository_identity = Some("example.com/acme/rollout".to_string());
+        let mut existing = reconciled.clone();
+        existing.git_origin_url = Some("https://example.com/acme/sqlite.git".to_string());
+        existing.repository_identity = Some("example.com/acme/sqlite".to_string());
+        let expected = existing.clone();
 
         reconciled.prefer_existing_git_info(&existing);
 

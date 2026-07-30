@@ -100,16 +100,27 @@ pub(super) async fn list_rollout_threads(
     sort_key: codex_rollout::ThreadSortKey,
     sort_direction: codex_rollout::SortDirection,
 ) -> ThreadStoreResult<codex_rollout::ThreadsPage> {
+    if matches!(
+        params.location_filter,
+        ThreadLocationFilter::ProjectSessionScope { .. }
+    ) {
+        return super::project_scope_repair::list_threads(
+            state_db,
+            config,
+            default_model_provider_id,
+            params,
+            cursor,
+            sort_key,
+            sort_direction,
+        )
+        .await;
+    }
     let (cwd_filters, repository_identity) = match &params.location_filter {
         ThreadLocationFilter::Unrestricted => (None, None),
         ThreadLocationFilter::ExactCwds(cwds) => (Some(cwds.as_slice()), None),
-        ThreadLocationFilter::ProjectSessionScope {
-            cwd,
-            repository_identity,
-        } => (
-            Some(std::slice::from_ref(cwd)),
-            Some(repository_identity.as_str()),
-        ),
+        ThreadLocationFilter::ProjectSessionScope { .. } => {
+            unreachable!("project scope dispatched before local listing")
+        }
     };
     if params.relation_filter.is_some()
         || params.is_pinned.is_some()

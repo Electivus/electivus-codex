@@ -48,9 +48,9 @@ WHERE id = ?
         let updated_at = self.allocate_thread_updated_at(metadata.updated_at)?;
         let insert_recency_at = self.allocate_thread_recency_at(metadata.recency_at)?;
         let preview = metadata_preview(metadata);
-        // Backfill/reconcile callers merge existing git info before upserting, but that
-        // read/modify/write is not atomic. Preserve non-null SQLite git fields here so
-        // an explicit metadata update cannot be lost if a stale rollout upsert lands later.
+        // Backfill/reconcile callers merge existing Git info before upserting, but that
+        // read/modify/write is not atomic. Explicit updates and paginated metadata are
+        // SQLite-owned; observed Legacy origin metadata may be refreshed from the rollout.
         sqlx::query(
             r#"
 INSERT INTO threads (
@@ -120,15 +120,13 @@ ON CONFLICT(id) DO UPDATE SET
     git_branch = COALESCE(threads.git_branch, excluded.git_branch),
     git_origin_url = CASE
         WHEN threads.git_origin_url_is_explicit = 1
-            OR threads.git_origin_url IS NOT NULL
-            OR threads.repository_identity IS NOT NULL
+            OR threads.history_mode = 'paginated'
         THEN threads.git_origin_url
         ELSE excluded.git_origin_url
     END,
     repository_identity = CASE
         WHEN threads.git_origin_url_is_explicit = 1
-            OR threads.git_origin_url IS NOT NULL
-            OR threads.repository_identity IS NOT NULL
+            OR threads.history_mode = 'paginated'
         THEN threads.repository_identity
         ELSE excluded.repository_identity
     END
