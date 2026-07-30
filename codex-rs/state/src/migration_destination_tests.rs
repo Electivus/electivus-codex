@@ -66,7 +66,7 @@ async fn postgres_contract_preflight_rejects_incompatible_version_without_writes
     let pool = destination.connect_pool().await?;
     let migrations = qualified_table(destination.schema(), "_codex_runtime_state_migrations");
     sqlx::query(AssertSqlSafe(format!(
-        "DELETE FROM {migrations} WHERE version = 20"
+        "DELETE FROM {migrations} WHERE version = 21"
     )))
     .execute(&pool)
     .await?;
@@ -82,7 +82,7 @@ async fn postgres_contract_preflight_rejects_incompatible_version_without_writes
     .expect_err("outdated destination must be rejected");
 
     let rendered = format!("{error:?} {error:#}");
-    assert!(rendered.contains("current version 20"), "{rendered}");
+    assert!(rendered.contains("current version 21"), "{rendered}");
     assert!(!rendered.contains(&database_url));
     assert_eq!(test_support::snapshot_source(&source)?, source_before);
     assert_eq!(
@@ -91,7 +91,7 @@ async fn postgres_contract_preflight_rejects_incompatible_version_without_writes
     );
     let pool = destination.connect_pool().await?;
     sqlx::query(AssertSqlSafe(format!(
-        "INSERT INTO {migrations} (version) VALUES (20)"
+        "INSERT INTO {migrations} (version) VALUES (21)"
     )))
     .execute(&pool)
     .await?;
