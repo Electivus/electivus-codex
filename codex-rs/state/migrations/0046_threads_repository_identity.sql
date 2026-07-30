@@ -158,21 +158,60 @@ SET repository_identity = (
             END,
             supported
         FROM final_path
+    ),
+    candidate(identity) AS (
+        SELECT
+            CASE
+                WHEN supported = 1
+                    AND host <> ''
+                    AND instr(path, '/') > 0
+                    AND owner NOT IN ('', '.', '..')
+                    AND repo NOT IN ('', '.', '..')
+                    THEN host || '/' || CASE
+                        WHEN host = 'github.com' THEN lower(path)
+                        ELSE path
+                    END
+                ELSE NULL
+            END
+        FROM components
+    ),
+    identity_characters(identity, position, codepoint) AS (
+        SELECT
+            identity,
+            1,
+            unicode(substr(identity, 1, 1))
+        FROM candidate
+        WHERE identity IS NOT NULL
+            AND length(CAST(identity AS BLOB)) <= 1024
+
+        UNION ALL
+
+        SELECT
+            identity,
+            position + 1,
+            unicode(substr(identity, position + 1, 1))
+        FROM identity_characters
+        WHERE position < length(identity)
     )
-    SELECT
-        CASE
-            WHEN supported = 1
-                AND host <> ''
-                AND instr(path, '/') > 0
-                AND owner NOT IN ('', '.', '..')
-                AND repo NOT IN ('', '.', '..')
-                THEN host || '/' || CASE
-                    WHEN host = 'github.com' THEN lower(path)
-                    ELSE path
-                END
-            ELSE NULL
-        END
-    FROM components
+    SELECT identity
+    FROM candidate
+    WHERE identity IS NOT NULL
+        -- Repository Identity participates in composite PostgreSQL B-tree indexes too. A 1 KiB
+        -- UTF-8 cap leaves conservative headroom for the remaining variable-width index columns.
+        AND length(CAST(identity AS BLOB)) <= 1024
+        AND instr(identity, char(0)) = 0
+        AND NOT EXISTS (
+            SELECT 1
+            FROM identity_characters
+            WHERE codepoint BETWEEN 0 AND 32
+                OR codepoint BETWEEN 127 AND 160
+                OR codepoint IN (
+                    5760,
+                    8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199,
+                    8200, 8201, 8202,
+                    8232, 8233, 8239, 8287, 12288
+                )
+        )
 )
 WHERE git_origin_url IS NOT NULL;
 

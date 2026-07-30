@@ -9,45 +9,69 @@ use super::STATE_MIGRATOR;
 use super::THREAD_HISTORY_MIGRATOR;
 use super::repair_legacy_state_migration_versions;
 
-pub(crate) const REPOSITORY_IDENTITY_CASES: &[(&str, Option<&str>)] = &[
-    (
-        "git@github.com:OpenAI/Codex.git",
-        Some("github.com/openai/codex"),
-    ),
-    (
-        "https://user@token@github.com/OpenAI/Codex.git",
-        Some("github.com/openai/codex"),
-    ),
-    (
-        " https://token@GitHub.com /OpenAI/Codex.git ",
-        Some("github.com/openai/codex"),
-    ),
-    (
-        "\t\nhttps://github.com/OpenAI/Codex.git\r\n",
-        Some("github.com/openai/codex"),
-    ),
-    (
-        "\u{2003}https://github.com/OpenAI/Codex.git\u{3000}",
-        Some("github.com/openai/codex"),
-    ),
-    (
-        "ssh://git@github.com:22/OpenAI/Codex.git",
-        Some("github.com/openai/codex"),
-    ),
-    (
-        "ssh://git@ghe.example.test:2222/Org/Repo.git",
-        Some("ghe.example.test:2222/Org/Repo"),
-    ),
-    (
-        "https://github.com/Örg/RÉpo.git",
-        Some("github.com/Örg/rÉpo"),
-    ),
-    (
-        "https://github.com/OpenAI/Codex.git?ref=main",
-        Some("github.com/openai/codex"),
-    ),
-    ("https://example.test/repo.git", None),
-];
+pub(crate) fn repository_identity_cases() -> Vec<(String, Option<String>)> {
+    let boundary_repo = "r".repeat(1009);
+    let boundary_origin = format!("https://example.test/o/{boundary_repo}");
+    let boundary_identity = format!("example.test/o/{boundary_repo}");
+    assert_eq!(boundary_identity.len(), 1024);
+    let utf8_boundary_repo = format!("{}r", "é".repeat(504));
+    let utf8_boundary_origin = format!("https://example.test/o/{utf8_boundary_repo}");
+    let utf8_boundary_identity = format!("example.test/o/{utf8_boundary_repo}");
+    assert_eq!(utf8_boundary_identity.len(), 1024);
+
+    vec![
+        (
+            "git@github.com:OpenAI/Codex.git".to_string(),
+            Some("github.com/openai/codex".to_string()),
+        ),
+        (
+            "https://user@token@github.com/OpenAI/Codex.git".to_string(),
+            Some("github.com/openai/codex".to_string()),
+        ),
+        (
+            " https://token@GitHub.com /OpenAI/Codex.git ".to_string(),
+            Some("github.com/openai/codex".to_string()),
+        ),
+        (
+            "\t\nhttps://github.com/OpenAI/Codex.git\r\n".to_string(),
+            Some("github.com/openai/codex".to_string()),
+        ),
+        (
+            "\u{2003}https://github.com/OpenAI/Codex.git\u{3000}".to_string(),
+            Some("github.com/openai/codex".to_string()),
+        ),
+        (
+            "ssh://git@github.com:22/OpenAI/Codex.git".to_string(),
+            Some("github.com/openai/codex".to_string()),
+        ),
+        (
+            "ssh://git@ghe.example.test:2222/Org/Repo.git".to_string(),
+            Some("ghe.example.test:2222/Org/Repo".to_string()),
+        ),
+        (
+            "https://github.com/Örg/RÉpo.git".to_string(),
+            Some("github.com/Örg/rÉpo".to_string()),
+        ),
+        (
+            "https://github.com/OpenAI/Codex.git?ref=main".to_string(),
+            Some("github.com/openai/codex".to_string()),
+        ),
+        (
+            "https://ghe.example.test/Org/Repo://Mirror.git".to_string(),
+            Some("ghe.example.test/Org/Repo:/Mirror".to_string()),
+        ),
+        (boundary_origin.clone(), Some(boundary_identity)),
+        (format!("{boundary_origin}r"), None),
+        (utf8_boundary_origin.clone(), Some(utf8_boundary_identity)),
+        (format!("{utf8_boundary_origin}r"), None),
+        ("https://example.test/acme/repo\ninjected".to_string(), None),
+        (
+            "https://example.test/acme/repo\u{2003}injected".to_string(),
+            None,
+        ),
+        ("https://example.test/repo.git".to_string(), None),
+    ]
+}
 
 fn migrator_through(version: i64) -> Migrator {
     Migrator {
@@ -69,9 +93,9 @@ fn migrator_through(version: i64) -> Migrator {
 
 #[test]
 fn repository_identity_corpus_matches_rust_canonicalizer() {
-    for &(origin, expected) in REPOSITORY_IDENTITY_CASES {
+    for (origin, expected) in repository_identity_cases() {
         assert_eq!(
-            codex_git_utils::canonicalize_git_remote_url(origin).as_deref(),
+            codex_git_utils::canonicalize_git_remote_url(&origin),
             expected,
             "origin: {origin:?}"
         );
@@ -447,7 +471,8 @@ async fn repository_identity_migration_backfills_valid_origins_without_changing_
         .await
         .expect("pre-identity migrations should apply");
 
-    for (index, &(origin, _)) in REPOSITORY_IDENTITY_CASES.iter().enumerate() {
+    let cases = repository_identity_cases();
+    for (index, (origin, _)) in cases.iter().enumerate() {
         let id = format!("00000000-0000-0000-0000-{:012}", index + 71);
         let title = format!("canonicalization-case-{index}");
         sqlx::query(
@@ -479,15 +504,15 @@ INSERT INTO threads (
     .fetch_all(&pool)
     .await
     .expect("migrated threads should load");
-    let expected_rows = REPOSITORY_IDENTITY_CASES
+    let expected_rows = cases
         .iter()
         .enumerate()
-        .map(|(index, &(origin, expected))| {
+        .map(|(index, (origin, expected))| {
             (
                 format!("00000000-0000-0000-0000-{:012}", index + 71),
                 format!("canonicalization-case-{index}"),
-                origin.to_string(),
-                expected.map(str::to_string),
+                origin.clone(),
+                expected.clone(),
             )
         })
         .collect::<Vec<_>>();

@@ -1087,14 +1087,15 @@ impl App {
         session.thread_id = thread_id;
         session.thread_name = notification.thread.name.clone();
         session.model_provider_id = notification.thread.model_provider.clone();
-        let Some(cwd) = notification.thread.cwd.to_inferred_abs_path() else {
+        if let Some(cwd) = notification.thread.cwd.to_inferred_abs_path() {
+            session.set_cwd_retargeting_implicit_runtime_workspace_root(cwd);
+        } else {
             tracing::warn!(
                 recorded_working_directory = notification.thread.cwd.as_str(),
-                "ignoring thread/started notification with a foreign or unusable active cwd"
+                execution_cwd = %session.cwd.display(),
+                "retaining the known execution cwd because thread/started carries a foreign or unusable Recorded Working Directory"
             );
-            return None;
-        };
-        session.set_cwd_retargeting_implicit_runtime_workspace_root(cwd);
+        }
         let rollout_path = notification.thread.path.clone();
         if let Some(model) =
             read_session_model(self.state_db.as_deref(), thread_id, rollout_path.as_deref()).await

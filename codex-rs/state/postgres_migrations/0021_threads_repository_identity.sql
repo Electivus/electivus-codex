@@ -19,6 +19,9 @@ DECLARE
     host TEXT;
     default_port TEXT;
     components TEXT[];
+    identity TEXT;
+    character_index INTEGER;
+    character_code INTEGER;
 BEGIN
     IF value = '' THEN
         RETURN NULL;
@@ -35,7 +38,11 @@ BEGIN
             WHEN 'https' THEN '443'
             WHEN 'ssh' THEN '22'
         END;
-        rest := regexp_replace(split_part(value, '://', 2), '[?#].*$', '');
+        rest := regexp_replace(
+            substr(value, strpos(value, '://') + 3),
+            '[?#].*$',
+            ''
+        );
         IF strpos(rest, '/') = 0 THEN
             RETURN NULL;
         END IF;
@@ -78,7 +85,29 @@ BEGIN
     IF host = 'github.com' THEN
         path := translate(path, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz');
     END IF;
-    RETURN host || '/' || path;
+    identity := host || '/' || path;
+    -- Repository Identity participates in composite B-tree indexes. A 1 KiB UTF-8 cap leaves
+    -- conservative headroom for the remaining variable-width index columns.
+    IF octet_length(identity) > 1024 THEN
+        RETURN NULL;
+    END IF;
+
+    FOR character_index IN 1..char_length(identity) LOOP
+        character_code := ascii(substr(identity, character_index, 1));
+        IF character_code BETWEEN 0 AND 32
+            OR character_code BETWEEN 127 AND 160
+            OR character_code IN (
+                5760,
+                8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199,
+                8200, 8201, 8202,
+                8232, 8233, 8239, 8287, 12288
+            )
+        THEN
+            RETURN NULL;
+        END IF;
+    END LOOP;
+
+    RETURN identity;
 END;
 $$;
 

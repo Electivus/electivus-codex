@@ -3,7 +3,7 @@ use super::PostgresNamespaceAction;
 use super::PostgresRuntimeStatePool;
 use super::test_support::PostgresContractFixture;
 use super::test_support::test_database_url;
-use crate::migrations::tests::REPOSITORY_IDENTITY_CASES;
+use crate::migrations::tests::repository_identity_cases;
 use crate::runtime::LogStore;
 use crate::runtime::RemoteControlEnrollmentStore;
 use crate::runtime::backfill_contract_tests::run_backfill_coordination_contract;
@@ -143,7 +143,7 @@ async fn postgres_contract_repository_identity_migration_preserves_projection_an
     .await?;
 
     let mut expected_rows = Vec::new();
-    for (index, &(origin, expected)) in REPOSITORY_IDENTITY_CASES.iter().enumerate() {
+    for (index, (origin, expected)) in repository_identity_cases().iter().enumerate() {
         let thread_id =
             ThreadId::from_string(&format!("00000000-0000-0000-0000-{:012}", index + 81))?;
         let original_projection = serde_json::json!({
@@ -168,11 +168,7 @@ async fn postgres_contract_repository_identity_migration_preserves_projection_an
             expected_projection["repository_identity"] =
                 serde_json::Value::String(repository_identity.to_string());
         }
-        expected_rows.push((
-            thread_id.to_string(),
-            expected_projection,
-            expected.map(str::to_string),
-        ));
+        expected_rows.push((thread_id.to_string(), expected_projection, expected.clone()));
     }
     pool.close().await;
 

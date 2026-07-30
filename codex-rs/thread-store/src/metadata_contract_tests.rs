@@ -259,6 +259,62 @@ async fn assert_metadata_contract(
             "history": null,
         })
     );
+    let boundary_repo = "r".repeat(1009);
+    let boundary_origin = format!("https://example.test/o/{boundary_repo}");
+    let boundary_identity = format!("example.test/o/{boundary_repo}");
+    assert_eq!(boundary_identity.len(), 1024);
+    let boundary_git = update_metadata(
+        store,
+        thread_id,
+        ThreadMetadataPatch {
+            git_info: Some(GitInfoPatch {
+                origin_url: Some(Some(boundary_origin.clone())),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        /*include_archived*/ false,
+    )
+    .await?;
+    assert_eq!(
+        (
+            boundary_git
+                .git_info
+                .as_ref()
+                .and_then(|info| info.repository_url.as_deref()),
+            boundary_git.repository_identity.as_deref(),
+        ),
+        (
+            Some(boundary_origin.as_str()),
+            Some(boundary_identity.as_str()),
+        )
+    );
+
+    let oversized_origin = format!("{boundary_origin}r");
+    let oversized_git = update_metadata(
+        store,
+        thread_id,
+        ThreadMetadataPatch {
+            git_info: Some(GitInfoPatch {
+                origin_url: Some(Some(oversized_origin.clone())),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        /*include_archived*/ false,
+    )
+    .await?;
+    assert_eq!(
+        (
+            oversized_git
+                .git_info
+                .as_ref()
+                .and_then(|info| info.repository_url.as_deref()),
+            oversized_git.repository_identity.as_deref(),
+        ),
+        (Some(oversized_origin.as_str()), None)
+    );
+
     let invalid_origin = update_metadata(
         store,
         thread_id,

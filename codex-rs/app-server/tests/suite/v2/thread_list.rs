@@ -1004,6 +1004,168 @@ async fn thread_list_project_cwd_ignores_configured_origin_outside_repository() 
 }
 
 #[tokio::test]
+async fn thread_list_project_cwd_fallback_preserves_foreign_native_spelling() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_minimal_config(codex_home.path())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
+    let recorded_cwd = Path::new("C:/repo");
+    let exact_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-02T11-00-00",
+        "2025-01-02T11:00:00Z",
+        "foreign exact fallback",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    set_fake_rollout_cwd(
+        &rollout_path(codex_home.path(), "2025-01-02T11-00-00", &exact_id),
+        recorded_cwd,
+    )?;
+
+    mcp.initialize().await?;
+    let response: ThreadListResponse = mcp
+        .request(|request_id| ClientRequest::ThreadList {
+            request_id,
+            params: ThreadListParams {
+                cursor: None,
+                limit: Some(10),
+                sort_key: None,
+                sort_direction: None,
+                model_providers: Some(vec!["mock_provider".to_string()]),
+                source_kinds: None,
+                archived: None,
+                is_pinned: None,
+                cwd: None,
+                project_cwd: Some(LegacyAppPathString::from_string(
+                    recorded_cwd.to_string_lossy(),
+                )),
+                use_state_db_only: true,
+                search_term: None,
+                parent_thread_id: None,
+                ancestor_thread_id: None,
+            },
+        })
+        .await?;
+
+    assert_eq!(
+        response
+            .data
+            .iter()
+            .map(|thread| thread.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![exact_id.as_str()]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_list_project_cwd_oversized_origin_falls_back_to_exact_cwd() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_minimal_config(codex_home.path())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
+    let environment_cwd = mcp.auto_env()?.selection().cwd.clone();
+    let exact_cwd = environment_cwd.join("oversized-origin")?;
+    let other_cwd = environment_cwd.join("other-checkout")?;
+    let oversized_origin = format!(
+        "https://{}@example.com/acme/project.git",
+        "credential".repeat(256)
+    );
+
+    run_in_auto_env(
+        &mcp,
+        environment_cwd.clone(),
+        ["git", "init", "oversized-origin"],
+    )
+    .await?;
+    run_in_auto_env(
+        &mcp,
+        environment_cwd,
+        vec![
+            "git".to_string(),
+            "-C".to_string(),
+            "oversized-origin".to_string(),
+            "remote".to_string(),
+            "add".to_string(),
+            "origin".to_string(),
+            oversized_origin.clone(),
+        ],
+    )
+    .await?;
+
+    let exact_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-02T11-00-00",
+        "2025-01-02T11:00:00Z",
+        "oversized origin exact cwd",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    set_fake_rollout_cwd(
+        &rollout_path(codex_home.path(), "2025-01-02T11-00-00", &exact_id),
+        &exact_cwd.to_path_buf(),
+    )?;
+    let same_oversized_identity_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-02T12-00-00",
+        "2025-01-02T12:00:00Z",
+        "oversized origin different cwd",
+        Some("mock_provider"),
+        Some(CoreGitInfo {
+            commit_hash: None,
+            branch: None,
+            repository_url: Some("https://example.com/acme/project.git".to_string()),
+        }),
+    )?;
+    set_fake_rollout_cwd(
+        &rollout_path(
+            codex_home.path(),
+            "2025-01-02T12-00-00",
+            &same_oversized_identity_id,
+        ),
+        &other_cwd.to_path_buf(),
+    )?;
+
+    mcp.initialize().await?;
+    let response: ThreadListResponse = mcp
+        .request(|request_id| ClientRequest::ThreadList {
+            request_id,
+            params: ThreadListParams {
+                cursor: None,
+                limit: Some(10),
+                sort_key: None,
+                sort_direction: None,
+                model_providers: Some(vec!["mock_provider".to_string()]),
+                source_kinds: None,
+                archived: None,
+                is_pinned: None,
+                cwd: None,
+                project_cwd: Some(exact_cwd.into()),
+                use_state_db_only: true,
+                search_term: None,
+                parent_thread_id: None,
+                ancestor_thread_id: None,
+            },
+        })
+        .await?;
+
+    assert_eq!(
+        response
+            .data
+            .iter()
+            .map(|thread| thread.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![exact_id.as_str()]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_list_project_cwd_requires_experimental_api_capability() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_minimal_config(codex_home.path())?;
