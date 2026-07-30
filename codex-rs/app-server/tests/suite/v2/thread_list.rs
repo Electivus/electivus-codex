@@ -48,6 +48,7 @@ use codex_utils_absolute_path::test_support::PathExt;
 use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 use core_test_support::responses;
+use core_test_support::skip_if_wine_exec;
 use pretty_assertions::assert_eq;
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -671,6 +672,11 @@ async fn thread_list_respects_cwd_filters() -> Result<()> {
 #[tokio::test]
 async fn thread_list_project_cwd_matches_checkout_or_repository_with_stable_pagination()
 -> Result<()> {
+    skip_if_wine_exec!(
+        Ok(()),
+        "requires Git, which is not installed in the Wine-exec environment"
+    );
+
     let codex_home = TempDir::new()?;
     create_minimal_config(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
@@ -1063,6 +1069,11 @@ async fn thread_list_project_cwd_fallback_preserves_foreign_native_spelling() ->
 
 #[tokio::test]
 async fn thread_list_project_cwd_oversized_origin_falls_back_to_exact_cwd() -> Result<()> {
+    skip_if_wine_exec!(
+        Ok(()),
+        "requires Git, which is not installed in the Wine-exec environment"
+    );
+
     let codex_home = TempDir::new()?;
     create_minimal_config(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
