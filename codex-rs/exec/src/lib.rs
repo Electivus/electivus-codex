@@ -57,7 +57,6 @@ use codex_config::ConfigLoadError;
 use codex_config::ConfigLoadOptions;
 use codex_config::LoaderOverrides;
 use codex_config::format_config_error_with_source;
-use codex_core::StateDbHandle;
 use codex_core::check_execpolicy_for_warnings;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
@@ -69,9 +68,7 @@ use codex_core::config::resolve_bootstrap_auth_keyring_backend_kind;
 use codex_core::config::resolve_bootstrap_auth_route_config;
 use codex_core::config::resolve_oss_provider;
 use codex_core::config::resolve_profile_v2_config_path;
-use codex_core::find_thread_meta_by_name_str;
 use codex_core::format_exec_policy_error_with_source;
-use codex_core::path_utils;
 use codex_feedback::CodexFeedback;
 use codex_git_utils::get_git_repo_root;
 use codex_login::AuthConfig;
@@ -91,8 +88,6 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
@@ -204,7 +199,6 @@ impl RequestIdSequencer {
 
 struct ExecRunArgs {
     in_process_start_args: InProcessClientStartArgs,
-    state_db: Option<StateDbHandle>,
     command: Option<ExecCommand>,
     config: Config,
     resume_approvals_reviewer_override: Option<codex_app_server_protocol::ApprovalsReviewer>,
@@ -596,7 +590,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     };
     run_exec_session(ExecRunArgs {
         in_process_start_args,
-        state_db,
         command,
         config,
         resume_approvals_reviewer_override,
@@ -694,7 +687,6 @@ async fn load_bootstrap_config_or_exit(
 async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let ExecRunArgs {
         in_process_start_args,
-        state_db,
         command,
         config,
         resume_approvals_reviewer_override,
@@ -822,9 +814,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let (primary_thread_id, fallback_session_configured) = if let Some(ExecCommand::Resume(args)) =
         command.as_ref()
     {
-        if let Some(thread_id) =
-            resolve_resume_thread_id(&client, &config, state_db.as_ref(), args).await?
-        {
+        if let Some(thread_id) = resolve_resume_thread_id(&client, &config, args).await? {
             let response: ThreadResumeResponse = send_request_with_response(
                 &client,
                 ClientRequest::ThreadResume {
@@ -1445,97 +1435,41 @@ fn all_thread_source_kinds() -> Vec<ThreadSourceKind> {
     ]
 }
 
-#[derive(Clone, Copy)]
-enum ResumeCwdSource {
-    LocalRollout,
-    CanonicalProjection,
-}
-
-async fn latest_thread_cwd(
-    thread: &AppServerThread,
-    source: ResumeCwdSource,
-) -> LegacyAppPathString {
-    if let ResumeCwdSource::LocalRollout = source
-        && let Some(path) = thread.path.as_deref()
-        && let Ok(text) = tokio::fs::read_to_string(path).await
-    {
-        for line in text.lines().rev() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(trimmed) else {
-                continue;
-            };
-            if let RolloutItem::TurnContext(item) = rollout_line.item {
-                return LegacyAppPathString::from_abs_path(&item.cwd);
-            }
-        }
-    }
-    thread.cwd.clone()
-}
-
-fn cwds_match(current_cwd: &Path, recorded_working_directory: &LegacyAppPathString) -> bool {
-    recorded_working_directory
-        .to_inferred_abs_path()
-        .is_some_and(|session_cwd| {
-            path_utils::paths_match_after_normalization(current_cwd, session_cwd.as_path())
-        })
-}
-
 async fn resolve_resume_thread_id(
     client: &InProcessAppServerClient,
     config: &Config,
-    state_db: Option<&StateDbHandle>,
     args: &crate::cli::ResumeArgs,
 ) -> anyhow::Result<Option<String>> {
     let model_providers = resume_lookup_model_providers(config, args);
-    let cwd_source = match state_db {
-        Some(runtime) if !runtime.uses_local_rollout_history() => {
-            ResumeCwdSource::CanonicalProjection
-        }
-        Some(_) | None => ResumeCwdSource::LocalRollout,
-    };
+    let project_cwd = (!args.all).then(|| LegacyAppPathString::from_abs_path(&config.cwd));
 
     if args.last {
-        let mut cursor = None;
-        loop {
-            let response: ThreadListResponse = send_request_with_response(
-                client,
-                ClientRequest::ThreadList {
-                    request_id: RequestId::Integer(0),
-                    params: ThreadListParams {
-                        cursor,
-                        limit: Some(100),
-                        sort_key: Some(ThreadSortKey::UpdatedAt),
-                        sort_direction: None,
-                        model_providers: model_providers.clone(),
-                        source_kinds: Some(all_thread_source_kinds()),
-                        archived: Some(false),
-                        is_pinned: None,
-                        parent_thread_id: None,
-                        ancestor_thread_id: None,
-                        cwd: None,
-                        use_state_db_only: false,
-                        search_term: None,
-                        project_cwd: None,
-                    },
+        let response: ThreadListResponse = send_request_with_response(
+            client,
+            ClientRequest::ThreadList {
+                request_id: RequestId::Integer(0),
+                params: ThreadListParams {
+                    cursor: None,
+                    limit: Some(1),
+                    sort_key: Some(ThreadSortKey::UpdatedAt),
+                    sort_direction: None,
+                    model_providers,
+                    source_kinds: Some(all_thread_source_kinds()),
+                    archived: Some(false),
+                    is_pinned: None,
+                    parent_thread_id: None,
+                    ancestor_thread_id: None,
+                    cwd: None,
+                    use_state_db_only: false,
+                    search_term: None,
+                    project_cwd,
                 },
-                "thread/list",
-            )
-            .await
-            .map_err(anyhow::Error::msg)?;
-            for thread in response.data {
-                let latest_cwd = latest_thread_cwd(&thread, cwd_source).await;
-                if args.all || cwds_match(config.cwd.as_path(), &latest_cwd) {
-                    return Ok(Some(thread.id));
-                }
-            }
-            let Some(next_cursor) = response.next_cursor else {
-                return Ok(None);
-            };
-            cursor = Some(next_cursor);
-        }
+            },
+            "thread/list",
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        return Ok(response.data.into_iter().next().map(|thread| thread.id));
     }
 
     let Some(session_id) = args.session_id.as_deref() else {
@@ -1543,34 +1477,6 @@ async fn resolve_resume_thread_id(
     };
     if Uuid::parse_str(session_id).is_ok() {
         return Ok(Some(session_id.to_string()));
-    }
-    if let Some(state_db) = state_db
-        && state_db.uses_local_rollout_history()
-    {
-        let cwd = (!args.all).then_some(config.cwd.as_path());
-        let resolved = state_db
-            .find_thread_by_exact_title(
-                session_id,
-                &[],
-                /*model_providers*/ None,
-                /*archived_only*/ false,
-                cwd,
-            )
-            .await?;
-        if let Some(thread) = resolved {
-            return Ok(Some(thread.id.to_string()));
-        }
-        if let Some((_, session_meta)) =
-            find_thread_meta_by_name_str(&config.codex_home, session_id, Some(state_db.as_ref()))
-                .await?
-            && (args.all
-                || cwds_match(
-                    config.cwd.as_path(),
-                    &LegacyAppPathString::from_path(&session_meta.meta.cwd),
-                ))
-        {
-            return Ok(Some(session_meta.meta.id.to_string()));
-        }
     }
 
     let mut cursor = None;
@@ -1593,7 +1499,7 @@ async fn resolve_resume_thread_id(
                     cwd: None,
                     use_state_db_only: false,
                     search_term: Some(session_id.to_string()),
-                    project_cwd: None,
+                    project_cwd: project_cwd.clone(),
                 },
             },
             "thread/list",
@@ -1601,11 +1507,7 @@ async fn resolve_resume_thread_id(
         .await
         .map_err(anyhow::Error::msg)?;
         for thread in response.data {
-            if thread.name.as_deref() != Some(session_id) {
-                continue;
-            }
-            let latest_cwd = latest_thread_cwd(&thread, cwd_source).await;
-            if args.all || cwds_match(config.cwd.as_path(), &latest_cwd) {
+            if thread.name.as_deref() == Some(session_id) {
                 return Ok(Some(thread.id));
             }
         }
