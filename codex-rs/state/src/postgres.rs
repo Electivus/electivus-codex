@@ -614,5 +614,5 @@ mod memory_generation_contract_tests;
 mod memory_reset_contract_tests;
 
 #[cfg(test)]
-#[path = "postgres_no_extensions_contract_tests.rs"]
-mod no_extensions_contract_tests;
+#[path = "postgres_migration_cleanup_contract_tests.rs"]
+mod migration_cleanup_contract_tests;
