@@ -82,6 +82,7 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
                 search_term: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
+                project_cwd: None,
             },
         },
     )
@@ -491,6 +492,7 @@ plugins = false
                 search_term: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
+                project_cwd: None,
             },
         },
     )

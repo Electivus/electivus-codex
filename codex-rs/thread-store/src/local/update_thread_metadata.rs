@@ -393,6 +393,7 @@ async fn apply_metadata_update(
                 metadata.is_pinned = is_pinned;
             }
             if let Some(git_info) = patch.git_info {
+                let updates_origin = git_info.origin_url.is_some();
                 let existing_git_info = git_info_from_parts(
                     metadata.git_sha.clone(),
                     metadata.git_branch.clone(),
@@ -402,6 +403,12 @@ async fn apply_metadata_update(
                 metadata.git_sha = sha;
                 metadata.git_branch = branch;
                 metadata.git_origin_url = origin_url;
+                if updates_origin {
+                    metadata.repository_identity = metadata
+                        .git_origin_url
+                        .as_deref()
+                        .and_then(codex_git_utils::canonicalize_git_remote_url);
+                }
             }
             state_db
                 .upsert_thread(&metadata)
@@ -937,7 +944,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 is_pinned: Some(true),
                 archived: false,
                 search_term: None,
@@ -2077,7 +2084,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: Some(Vec::new()),
-                cwd_filters: Some(vec![workspace]),
+                location_filter: crate::ThreadLocationFilter::ExactCwds(vec![workspace]),
                 is_pinned: None,
                 archived: false,
                 search_term: None,

@@ -21,6 +21,7 @@ use crate::LocalThreadStore;
 use crate::LocalThreadStoreConfig;
 use crate::PostgresThreadStore;
 use crate::SortDirection;
+use crate::ThreadLocationFilter;
 use crate::ThreadMetadataPatch;
 use crate::ThreadPersistenceMetadata;
 use crate::ThreadRelationFilter;
@@ -103,7 +104,7 @@ async fn postgres_contract_list_threads_matches_public_store_contract()
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_contract_list_threads_keeps_tied_cursor_stable_across_replicas()
+async fn postgres_contract_project_list_keeps_tied_cursor_stable_across_replicas()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("list_threads_replicas")?;
     fixture.migrate().await?;
@@ -111,6 +112,10 @@ async fn postgres_contract_list_threads_keeps_tied_cursor_stable_across_replicas
     let reader_pool = fixture.connect_pool().await?;
     let writer = PostgresThreadStore::new(writer_pool.clone(), fixture.schema.clone());
     let reader = PostgresThreadStore::new(reader_pool.clone(), fixture.schema.clone());
+    let project_filter = ThreadLocationFilter::ProjectSessionScope {
+        cwd: Path::new("/list-replica").to_path_buf(),
+        repository_identity: "example.com/acme/replica".to_string(),
+    };
     let lower_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f311")?;
     let higher_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f312")?;
     for thread_id in [lower_id, higher_id] {
@@ -137,14 +142,14 @@ async fn postgres_contract_list_threads_keeps_tied_cursor_stable_across_replicas
         ThreadSortKey::UpdatedAt,
         ThreadSortKey::RecencyAt,
     ] {
-        let first = reader
-            .list_threads(list_params(
-                /*page_size*/ 1,
-                /*cursor*/ None,
-                sort_key,
-                SortDirection::Desc,
-            ))
-            .await?;
+        let mut params = list_params(
+            /*page_size*/ 1,
+            /*cursor*/ None,
+            sort_key,
+            SortDirection::Desc,
+        );
+        params.location_filter = project_filter.clone();
+        let first = reader.list_threads(params).await?;
         assert_eq!(thread_ids_from_page(&first), vec![higher_id]);
         cursors.push((
             sort_key,
@@ -156,7 +161,7 @@ async fn postgres_contract_list_threads_keeps_tied_cursor_stable_across_replicas
         &writer,
         ListedThread {
             thread_id: newer_id,
-            cwd: Path::new("/list-replica"),
+            cwd: Path::new("/list-replica-unrelated"),
             timestamp: "2040-01-02T00:00:00Z",
             source: SessionSource::Cli,
             model_provider: "replica-provider",
@@ -169,14 +174,14 @@ async fn postgres_contract_list_threads_keeps_tied_cursor_stable_across_replicas
     )
     .await?;
     for (sort_key, cursor) in cursors {
-        let second = reader
-            .list_threads(list_params(
-                /*page_size*/ 1,
-                Some(cursor),
-                sort_key,
-                SortDirection::Desc,
-            ))
-            .await?;
+        let mut params = list_params(
+            /*page_size*/ 1,
+            Some(cursor),
+            sort_key,
+            SortDirection::Desc,
+        );
+        params.location_filter = project_filter.clone();
+        let second = reader.list_threads(params).await?;
         assert_eq!(thread_ids_from_page(&second), vec![lower_id]);
         assert_eq!(second.next_cursor, None);
     }
@@ -312,13 +317,13 @@ async fn assert_list_threads_contract(
     );
     combined.allowed_sources = vec![SessionSource::Cli];
     combined.model_providers = Some(vec!["provider-a".to_string()]);
-    combined.cwd_filters = Some(vec![cwd.join("a")]);
+    combined.location_filter = ThreadLocationFilter::ExactCwds(vec![cwd.join("a")]);
     combined.search_term = Some("needle".to_string());
     assert_eq!(
         thread_ids_from_page(&store.list_threads(combined.clone()).await?),
         vec![thread_ids[1], thread_ids[0]]
     );
-    combined.cwd_filters = Some(Vec::new());
+    combined.location_filter = ThreadLocationFilter::ExactCwds(Vec::new());
     assert!(store.list_threads(combined).await?.items.is_empty());
 
     let pinned = store
@@ -378,9 +383,9 @@ async fn assert_list_threads_contract(
     unmatched.model_providers = Some(vec!["missing-provider".to_string()]);
     assert_empty_page(store, unmatched.clone()).await?;
     unmatched.model_providers = Some(Vec::new());
-    unmatched.cwd_filters = Some(vec![cwd.join("b")]);
+    unmatched.location_filter = ThreadLocationFilter::ExactCwds(vec![cwd.join("b")]);
     assert_empty_page(store, unmatched.clone()).await?;
-    unmatched.cwd_filters = None;
+    unmatched.location_filter = ThreadLocationFilter::Unrestricted;
     unmatched.search_term = Some("filtered out".to_string());
     assert_empty_page(store, unmatched).await?;
 
@@ -420,7 +425,250 @@ async fn assert_list_threads_contract(
         invalid_cursor,
         Err(ThreadStoreError::InvalidRequest { .. })
     ));
+
+    assert_project_session_scope_contract(store, cwd).await?;
     Ok(())
+}
+
+async fn assert_project_session_scope_contract(
+    store: &dyn ThreadStore,
+    cwd: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let exact_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f401")?;
+    let same_repository_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f402")?;
+    let unrelated_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f403")?;
+    let null_identity_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f404")?;
+    let archived_same_repository_id =
+        ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f405")?;
+    let project_cwd = cwd.join("project");
+    let other_cwd = cwd.join("other-checkout");
+    for (thread_id, thread_cwd, timestamp, source, parent_thread_id, preview) in [
+        (
+            exact_id,
+            project_cwd.as_path(),
+            "2040-01-01T00:00:00Z",
+            SessionSource::Cli,
+            None,
+            "project needle exact",
+        ),
+        (
+            same_repository_id,
+            other_cwd.as_path(),
+            "2040-01-02T00:00:00Z",
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: exact_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            }),
+            Some(exact_id),
+            "project needle related",
+        ),
+        (
+            unrelated_id,
+            other_cwd.as_path(),
+            "2040-01-03T00:00:00Z",
+            SessionSource::Cli,
+            None,
+            "project needle unrelated",
+        ),
+        (
+            null_identity_id,
+            other_cwd.as_path(),
+            "2040-01-04T00:00:00Z",
+            SessionSource::Cli,
+            None,
+            "project needle null",
+        ),
+        (
+            archived_same_repository_id,
+            other_cwd.as_path(),
+            "2040-01-05T00:00:00Z",
+            SessionSource::Cli,
+            None,
+            "project needle archived",
+        ),
+    ] {
+        create_listed_thread(
+            store,
+            ListedThread {
+                thread_id,
+                cwd: thread_cwd,
+                timestamp,
+                source,
+                model_provider: "project-provider",
+                parent_thread_id,
+                preview,
+                name: None,
+                history_mode: ThreadHistoryMode::Legacy,
+                items: Vec::new(),
+            },
+        )
+        .await?;
+    }
+    for (thread_id, origin_url) in [
+        (same_repository_id, "ssh://git@example.com/acme/project.git"),
+        (
+            archived_same_repository_id,
+            "https://example.com/acme/project.git",
+        ),
+        (unrelated_id, "https://example.com/acme/unrelated.git"),
+    ] {
+        set_repository_origin(store, thread_id, origin_url).await?;
+    }
+    for (thread_id, timestamp) in [
+        (exact_id, "2040-01-01T00:00:00Z"),
+        (same_repository_id, "2040-01-01T00:00:00Z"),
+    ] {
+        let timestamp = DateTime::parse_from_rfc3339(timestamp)?.with_timezone(&Utc);
+        store
+            .update_thread_metadata(UpdateThreadMetadataParams {
+                thread_id,
+                patch: ThreadMetadataPatch {
+                    created_at: Some(timestamp),
+                    updated_at: Some(timestamp),
+                    advance_recency_at: Some(timestamp),
+                    ..Default::default()
+                },
+                include_archived: false,
+            })
+            .await?;
+    }
+    store
+        .archive_thread(ArchiveThreadParams {
+            thread_id: archived_same_repository_id,
+        })
+        .await?;
+    assert_eq!(
+        store
+            .read_thread(crate::ReadThreadParams {
+                thread_id: exact_id,
+                include_archived: false,
+                include_history: false,
+            })
+            .await?
+            .cwd,
+        project_cwd
+    );
+
+    let project_filter = ThreadLocationFilter::ProjectSessionScope {
+        cwd: project_cwd.clone(),
+        repository_identity: "example.com/acme/project".to_string(),
+    };
+    for (sort_key, sort_direction, expected) in [
+        (
+            ThreadSortKey::CreatedAt,
+            SortDirection::Asc,
+            vec![exact_id, same_repository_id],
+        ),
+        (
+            ThreadSortKey::CreatedAt,
+            SortDirection::Desc,
+            vec![same_repository_id, exact_id],
+        ),
+        (
+            ThreadSortKey::UpdatedAt,
+            SortDirection::Asc,
+            vec![exact_id, same_repository_id],
+        ),
+        (
+            ThreadSortKey::UpdatedAt,
+            SortDirection::Desc,
+            vec![same_repository_id, exact_id],
+        ),
+        (
+            ThreadSortKey::RecencyAt,
+            SortDirection::Asc,
+            vec![exact_id, same_repository_id],
+        ),
+        (
+            ThreadSortKey::RecencyAt,
+            SortDirection::Desc,
+            vec![same_repository_id, exact_id],
+        ),
+    ] {
+        let mut first_params =
+            project_list_params(sort_key, sort_direction, project_filter.clone());
+        first_params.page_size = 1;
+        let first = store.list_threads(first_params).await?;
+        let mut second_params =
+            project_list_params(sort_key, sort_direction, project_filter.clone());
+        second_params.page_size = 1;
+        second_params.cursor = first.next_cursor.clone();
+        let second = store.list_threads(second_params).await?;
+        assert_eq!(
+            [thread_ids_from_page(&first), thread_ids_from_page(&second)].concat(),
+            expected
+        );
+    }
+
+    let mut exact = project_list_params(
+        ThreadSortKey::CreatedAt,
+        SortDirection::Desc,
+        ThreadLocationFilter::ExactCwds(vec![project_cwd]),
+    );
+    assert_eq!(
+        thread_ids_from_page(&store.list_threads(exact.clone()).await?),
+        vec![exact_id]
+    );
+    exact.location_filter = project_filter.clone();
+    exact.search_term = Some("needle".to_string());
+    assert_eq!(
+        thread_ids_from_page(&store.list_threads(exact.clone()).await?),
+        vec![same_repository_id, exact_id]
+    );
+    exact.allowed_sources = vec![SessionSource::Cli];
+    assert_eq!(
+        thread_ids_from_page(&store.list_threads(exact.clone()).await?),
+        vec![exact_id]
+    );
+
+    store
+        .update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id: exact_id,
+            patch: ThreadMetadataPatch {
+                is_pinned: Some(true),
+                ..Default::default()
+            },
+            include_archived: false,
+        })
+        .await?;
+    exact.allowed_sources.clear();
+    exact.is_pinned = Some(true);
+    assert_eq!(
+        thread_ids_from_page(&store.list_threads(exact.clone()).await?),
+        vec![exact_id]
+    );
+    exact.is_pinned = None;
+    exact.relation_filter = Some(ThreadRelationFilter::DirectChildrenOf(exact_id));
+    assert_eq!(
+        thread_ids_from_page(&store.list_threads(exact.clone()).await?),
+        vec![same_repository_id]
+    );
+    exact.relation_filter = None;
+    exact.archived = true;
+    assert_eq!(
+        thread_ids_from_page(&store.list_threads(exact).await?),
+        vec![archived_same_repository_id]
+    );
+    Ok(())
+}
+
+fn project_list_params(
+    sort_key: ThreadSortKey,
+    sort_direction: SortDirection,
+    location_filter: ThreadLocationFilter,
+) -> ListThreadsParams {
+    let mut params = list_params(
+        /*page_size*/ 10,
+        /*cursor*/ None,
+        sort_key,
+        sort_direction,
+    );
+    params.location_filter = location_filter;
+    params.model_providers = Some(vec!["project-provider".to_string()]);
+    params
 }
 
 async fn assert_relation_filters(
@@ -571,6 +819,8 @@ pub(super) async fn create_listed_thread(
                 updated_at: Some(timestamp),
                 advance_recency_at: Some(timestamp),
                 source: Some(source),
+                cwd: Some(cwd.to_path_buf()),
+                model_provider: Some(model_provider.to_string()),
                 ..Default::default()
             },
             include_archived: false,
@@ -606,6 +856,27 @@ async fn update_listing_metadata(
     Ok(())
 }
 
+async fn set_repository_origin(
+    store: &dyn ThreadStore,
+    thread_id: ThreadId,
+    origin_url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    store
+        .update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id,
+            patch: ThreadMetadataPatch {
+                git_info: Some(crate::GitInfoPatch {
+                    origin_url: Some(Some(origin_url.to_string())),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            include_archived: false,
+        })
+        .await?;
+    Ok(())
+}
+
 fn list_params(
     page_size: usize,
     cursor: Option<String>,
@@ -619,7 +890,7 @@ fn list_params(
         sort_direction,
         allowed_sources: Vec::new(),
         model_providers: Some(Vec::new()),
-        cwd_filters: None,
+        location_filter: crate::ThreadLocationFilter::Unrestricted,
         is_pinned: None,
         archived: false,
         search_term: None,

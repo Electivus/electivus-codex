@@ -34,6 +34,14 @@ mod tests {
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
 
+    async fn persisted_thread(runtime: &StateRuntime, thread_id: ThreadId) -> ThreadMetadata {
+        runtime
+            .get_thread(thread_id)
+            .await
+            .expect("thread should load")
+            .expect("thread should exist")
+    }
+
     #[tokio::test]
     async fn upsert_thread_keeps_creation_memory_mode_for_existing_rows() {
         let codex_home = unique_temp_dir();
@@ -209,6 +217,7 @@ mod tests {
             allowed_sources: &[],
             model_providers: None,
             cwd_filters: None,
+            repository_identity: None,
             is_pinned: Some(is_pinned),
             anchor,
             sort_key: SortKey::RecencyAt,
@@ -499,6 +508,7 @@ mod tests {
                     allowed_sources: &[],
                     model_providers: Some(&model_providers),
                     cwd_filters: None,
+                    repository_identity: None,
                     is_pinned: None,
                     anchor: Some(&anchor),
                     sort_key: SortKey::UpdatedAt,
@@ -528,6 +538,7 @@ mod tests {
                     allowed_sources: &[],
                     model_providers: Some(&model_providers),
                     cwd_filters: None,
+                    repository_identity: None,
                     is_pinned: None,
                     anchor: page.next_anchor.as_ref(),
                     sort_key: SortKey::UpdatedAt,
@@ -585,6 +596,7 @@ mod tests {
                     allowed_sources: &[],
                     model_providers: None,
                     cwd_filters: Some(cwd_filters.as_slice()),
+                    repository_identity: None,
                     is_pinned: None,
                     anchor: None,
                     sort_key: SortKey::UpdatedAt,
@@ -618,6 +630,7 @@ mod tests {
                     allowed_sources: &[],
                     model_providers: None,
                     cwd_filters: Some(cwd_filters.as_slice()),
+                    repository_identity: None,
                     is_pinned: None,
                     anchor: first_page.next_anchor.as_ref(),
                     sort_key: SortKey::UpdatedAt,
@@ -644,6 +657,7 @@ mod tests {
                     allowed_sources: &[],
                     model_providers: None,
                     cwd_filters: Some(&[]),
+                    repository_identity: None,
                     is_pinned: None,
                     anchor: None,
                     sort_key: SortKey::UpdatedAt,
@@ -712,6 +726,7 @@ mod tests {
                         allowed_sources: &[],
                         model_providers: Some(&model_providers),
                         cwd_filters,
+                        repository_identity: None,
                         is_pinned: None,
                         anchor,
                         sort_key,
@@ -813,6 +828,7 @@ mod tests {
                 allowed_sources: &[],
                 model_providers: None,
                 cwd_filters: None,
+                repository_identity: None,
                 is_pinned: None,
                 anchor: None,
                 sort_key: SortKey::CreatedAt,
@@ -842,6 +858,7 @@ mod tests {
             allowed_sources: &[],
             model_providers: None,
             cwd_filters: None,
+            repository_identity: None,
             is_pinned: None,
             anchor,
             sort_key: SortKey::CreatedAt,
@@ -1091,11 +1108,7 @@ mod tests {
             .await
             .expect("apply_rollout_items should succeed");
 
-        let persisted = runtime
-            .get_thread(thread_id)
-            .await
-            .expect("thread should load")
-            .expect("thread should exist");
+        let persisted = persisted_thread(&runtime, thread_id).await;
         assert_eq!(persisted.git_sha.as_deref(), Some("rollout-sha"));
         assert_eq!(persisted.git_branch.as_deref(), Some("sqlite-branch"));
         assert_eq!(
@@ -1105,7 +1118,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upsert_thread_preserves_existing_git_fields_atomically() {
+    async fn upsert_thread_refreshes_non_explicit_legacy_origin_and_preserves_explicit_origin() {
         let codex_home = unique_temp_dir();
         let runtime = StateRuntime::init(
             crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
@@ -1128,23 +1141,116 @@ mod tests {
         let mut rollout_metadata = metadata.clone();
         rollout_metadata.git_sha = Some("rollout-sha".to_string());
         rollout_metadata.git_branch = Some("rollout-branch".to_string());
-        rollout_metadata.git_origin_url = Some("https://example.com/repo.git".to_string());
+        rollout_metadata.git_origin_url = Some("https://example.com/acme/repo.git".to_string());
+        rollout_metadata.repository_identity = Some("example.com/acme/repo".to_string());
 
         runtime
             .upsert_thread(&rollout_metadata)
             .await
             .expect("rollout upsert should succeed");
 
+        let persisted = persisted_thread(&runtime, thread_id).await;
+        assert_eq!(
+            (
+                persisted.git_sha.as_deref(),
+                persisted.git_branch.as_deref(),
+                persisted.git_origin_url.as_deref(),
+                persisted.repository_identity.as_deref(),
+            ),
+            (
+                Some("sqlite-sha"),
+                Some("sqlite-branch"),
+                Some("https://example.com/acme/repo.git"),
+                Some("example.com/acme/repo"),
+            )
+        );
+
+        runtime
+            .update_thread_git_info(
+                thread_id,
+                /*git_sha*/ None,
+                /*git_branch*/ None,
+                Some(Some("https://example.com/not-a-repository.git")),
+            )
+            .await
+            .expect("invalid explicit origin update should succeed");
+        runtime
+            .upsert_thread(&rollout_metadata)
+            .await
+            .expect("stale rollout upsert should succeed");
+        let persisted = persisted_thread(&runtime, thread_id).await;
+        assert_eq!(
+            (
+                persisted.git_origin_url.as_deref(),
+                persisted.repository_identity.as_deref(),
+            ),
+            (Some("https://example.com/not-a-repository.git"), None)
+        );
+
+        runtime
+            .update_thread_git_info(
+                thread_id,
+                /*git_sha*/ None,
+                /*git_branch*/ None,
+                Some(None),
+            )
+            .await
+            .expect("explicit origin clear should succeed");
+        runtime
+            .upsert_thread(&rollout_metadata)
+            .await
+            .expect("stale rollout upsert should succeed");
         let persisted = runtime
             .get_thread(thread_id)
             .await
             .expect("thread should load")
             .expect("thread should exist");
-        assert_eq!(persisted.git_sha.as_deref(), Some("sqlite-sha"));
-        assert_eq!(persisted.git_branch.as_deref(), Some("sqlite-branch"));
         assert_eq!(
-            persisted.git_origin_url.as_deref(),
-            Some("git@example.com:openai/codex.git")
+            (
+                persisted.git_origin_url.as_deref(),
+                persisted.repository_identity.as_deref(),
+            ),
+            (None, None)
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_thread_preserves_non_explicit_paginated_origin() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
+        let thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-00000000045a").expect("valid thread id");
+        let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
+        metadata.history_mode = ThreadHistoryMode::Paginated;
+        metadata.git_origin_url = Some("https://example.com/acme/sqlite.git".to_string());
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("initial upsert should succeed");
+
+        let mut rollout_metadata = metadata;
+        rollout_metadata.git_origin_url =
+            Some("https://example.com/acme/stale-rollout.git".to_string());
+        runtime
+            .upsert_thread(&rollout_metadata)
+            .await
+            .expect("stale rollout upsert should succeed");
+
+        let persisted = persisted_thread(&runtime, thread_id).await;
+        assert_eq!(
+            (
+                persisted.git_origin_url.as_deref(),
+                persisted.repository_identity.as_deref(),
+            ),
+            (
+                Some("https://example.com/acme/sqlite.git"),
+                Some("example.com/acme/sqlite"),
+            )
         );
     }
 
@@ -1526,6 +1632,7 @@ mod tests {
                     allowed_sources: &[],
                     model_providers: None,
                     cwd_filters: None,
+                    repository_identity: None,
                     is_pinned: None,
                     anchor: None,
                     sort_key: SortKey::RecencyAt,
@@ -1559,6 +1666,7 @@ mod tests {
                     allowed_sources: &[],
                     model_providers: None,
                     cwd_filters: None,
+                    repository_identity: None,
                     is_pinned: None,
                     anchor: first_page.next_anchor.as_ref(),
                     sort_key: SortKey::RecencyAt,
@@ -1592,6 +1700,7 @@ mod tests {
                     allowed_sources: &[],
                     model_providers: None,
                     cwd_filters: None,
+                    repository_identity: None,
                     is_pinned: None,
                     anchor: second_page.next_anchor.as_ref(),
                     sort_key: SortKey::RecencyAt,

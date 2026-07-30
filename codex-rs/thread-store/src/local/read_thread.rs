@@ -129,6 +129,7 @@ pub(super) async fn read_thread_by_rollout_path(
         } else {
             thread.recency_at = metadata.recency_at;
             thread.is_pinned = metadata.is_pinned;
+            let fallback_repository_identity = thread.repository_identity.take();
             let (fallback_sha, fallback_branch, fallback_origin_url) = match thread.git_info.take()
             {
                 Some(info) => (
@@ -138,11 +139,20 @@ pub(super) async fn read_thread_by_rollout_path(
                 ),
                 None => (None, None, None),
             };
+            let (origin_url, repository_identity) = match (
+                metadata.git_origin_url_is_explicit(),
+                metadata.git_origin_url,
+            ) {
+                (true, origin_url) => (origin_url, metadata.repository_identity),
+                (false, Some(origin_url)) => (Some(origin_url), metadata.repository_identity),
+                (false, None) => (fallback_origin_url, fallback_repository_identity),
+            };
             thread.git_info = git_info_from_parts(
                 metadata.git_sha.or(fallback_sha),
                 metadata.git_branch.or(fallback_branch),
-                metadata.git_origin_url.or(fallback_origin_url),
+                origin_url,
             );
+            thread.repository_identity = repository_identity;
         }
     }
     reject_paginated_history(&thread, include_history)?;
@@ -388,6 +398,7 @@ pub(super) async fn stored_thread_from_sqlite_metadata(
         agent_nickname: metadata.agent_nickname,
         agent_role: metadata.agent_role,
         agent_path: metadata.agent_path,
+        repository_identity: metadata.repository_identity,
         git_info: git_info_from_parts(
             metadata.git_sha,
             metadata.git_branch,
@@ -493,6 +504,11 @@ fn stored_thread_from_meta_line(
         agent_nickname: meta_line.meta.agent_nickname,
         agent_role: meta_line.meta.agent_role,
         agent_path: meta_line.meta.agent_path,
+        repository_identity: meta_line
+            .git
+            .as_ref()
+            .and_then(|git| git.repository_url.as_deref())
+            .and_then(codex_git_utils::canonicalize_git_remote_url),
         git_info: meta_line.git,
         approval_mode: AskForApproval::OnRequest,
         permission_profile: PermissionProfile::read_only(),
@@ -634,6 +650,7 @@ mod tests {
         );
         builder.model_provider = Some(config.default_model_provider_id.clone());
         builder.git_branch = Some("sqlite-branch".to_string());
+        builder.git_origin_url = Some("ssh://git@ghe.example.test:2222/Org/Repo.git".to_string());
         let recency_at = chrono::DateTime::parse_from_rfc3339("2026-01-03T12:00:00Z")
             .expect("timestamp should parse")
             .with_timezone(&Utc);
@@ -650,7 +667,7 @@ mod tests {
 
         let thread = store
             .read_thread_by_rollout_path(
-                active_path,
+                active_path.clone(),
                 /*include_archived*/ false,
                 /*include_history*/ false,
             )
@@ -667,7 +684,38 @@ mod tests {
         );
         assert_eq!(
             git_info.repository_url.as_deref(),
-            Some("https://example.com/repo.git")
+            Some("ssh://git@ghe.example.test:2222/Org/Repo.git")
+        );
+        assert_eq!(
+            thread.repository_identity.as_deref(),
+            Some("ghe.example.test:2222/Org/Repo")
+        );
+
+        runtime
+            .update_thread_git_info(
+                thread_id,
+                /*git_sha*/ None,
+                /*git_branch*/ None,
+                Some(None),
+            )
+            .await
+            .expect("explicit origin clear should succeed");
+        let cleared = store
+            .read_thread_by_rollout_path(
+                active_path,
+                /*include_archived*/ false,
+                /*include_history*/ false,
+            )
+            .await
+            .expect("read thread after explicit origin clear");
+        assert_eq!(
+            (
+                cleared
+                    .git_info
+                    .and_then(|git_info| git_info.repository_url),
+                cleared.repository_identity,
+            ),
+            (None, None)
         );
     }
 

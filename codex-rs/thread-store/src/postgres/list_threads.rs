@@ -14,6 +14,7 @@ use super::serialization_error;
 use crate::ListThreadsParams;
 use crate::SortDirection;
 use crate::StoredThread;
+use crate::ThreadLocationFilter;
 use crate::ThreadPage;
 use crate::ThreadRelationFilter;
 use crate::ThreadSortKey;
@@ -105,11 +106,11 @@ pub(super) async fn list_threads(
         }
         separated.push_unseparated(")");
     }
-    match params.cwd_filters.as_deref() {
-        Some([]) => {
+    match &params.location_filter {
+        ThreadLocationFilter::ExactCwds(cwd_filters) if cwd_filters.is_empty() => {
             query.push(" AND FALSE");
         }
-        Some(cwd_filters) => {
+        ThreadLocationFilter::ExactCwds(cwd_filters) => {
             query.push(" AND threads.projection ->> 'cwd' IN (");
             let mut separated = query.separated(", ");
             for cwd in cwd_filters {
@@ -117,7 +118,17 @@ pub(super) async fn list_threads(
             }
             separated.push_unseparated(")");
         }
-        None => {}
+        ThreadLocationFilter::ProjectSessionScope {
+            cwd,
+            repository_identity,
+        } => {
+            query.push(" AND (threads.projection ->> 'cwd' = ");
+            query.push_bind(cwd.display().to_string());
+            query.push(" OR threads.repository_identity = ");
+            query.push_bind(repository_identity);
+            query.push(")");
+        }
+        ThreadLocationFilter::Unrestricted => {}
     }
     if let Some(is_pinned) = params.is_pinned {
         query.push(" AND threads.is_pinned = ");

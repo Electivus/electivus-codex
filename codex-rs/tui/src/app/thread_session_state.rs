@@ -78,6 +78,14 @@ impl App {
     ) -> ThreadSessionState {
         let permission_profile = self.current_permission_profile();
         let active_permission_profile = self.current_active_permission_profile();
+        let thread_cwd = thread.cwd.to_inferred_abs_path().unwrap_or_else(|| {
+            tracing::warn!(
+                recorded_working_directory = thread.cwd.as_str(),
+                current_cwd = %self.config.cwd.display(),
+                "using current cwd for session state because the Recorded Working Directory is foreign or unusable"
+            );
+            self.config.cwd.clone()
+        });
         let mut session = if let Some(mut session) = self.primary_session_configured.clone() {
             if session.thread_id != thread_id {
                 // `thread/read` does not include thread settings, so do not carry
@@ -101,7 +109,7 @@ impl App {
                 approvals_reviewer: self.config.approvals_reviewer,
                 permission_profile: permission_profile.clone(),
                 active_permission_profile: active_permission_profile.clone(),
-                cwd: thread.cwd.clone(),
+                cwd: thread_cwd.clone(),
                 runtime_workspace_roots: self.config.workspace_roots.clone(),
                 instruction_source_paths: Vec::new(),
                 reasoning_effort: self.chat_widget.current_reasoning_effort(),
@@ -115,7 +123,7 @@ impl App {
         session.thread_id = thread_id;
         session.thread_name = thread.name.clone();
         session.model_provider_id = thread.model_provider.clone();
-        session.set_cwd_retargeting_implicit_runtime_workspace_root(thread.cwd.clone());
+        session.set_cwd_retargeting_implicit_runtime_workspace_root(thread_cwd);
         session.permission_profile = permission_profile;
         session.active_permission_profile = active_permission_profile;
         session.instruction_source_paths = Vec::new();
@@ -425,7 +433,7 @@ mod tests {
             recency_at: Some(2),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: None,
-            cwd: test_path_buf("/tmp/read").abs(),
+            cwd: test_path_buf("/tmp/read").abs().into(),
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Unknown,
             can_accept_direct_input: None,

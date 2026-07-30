@@ -46,7 +46,6 @@ use super::list::ThreadSortKey;
 use super::list::ThreadsPage;
 use super::list::get_threads;
 use super::list::get_threads_in_root;
-use super::list::parse_cursor;
 use super::list::parse_timestamp_uuid_from_filename;
 use super::metadata;
 use super::ordinal::RolloutOrdinalState;
@@ -470,6 +469,7 @@ impl RolloutRecorder {
                 allowed_sources,
                 model_providers,
                 cwd_filters,
+                /*repository_identity*/ None,
                 /*relation_filter*/ None,
                 archived,
                 /*is_pinned*/ None,
@@ -580,6 +580,7 @@ impl RolloutRecorder {
             allowed_sources,
             model_providers,
             cwd_filters,
+            /*repository_identity*/ None,
             /*relation_filter*/ None,
             archived,
             /*is_pinned*/ None,
@@ -610,6 +611,7 @@ impl RolloutRecorder {
                     allowed_sources,
                     model_providers,
                     cwd_filters,
+                    /*repository_identity*/ None,
                     /*relation_filter*/ None,
                     archived,
                     /*is_pinned*/ None,
@@ -651,6 +653,7 @@ impl RolloutRecorder {
                         allowed_sources,
                         model_providers,
                         cwd_filters,
+                        /*repository_identity*/ None,
                         /*relation_filter*/ None,
                         archived,
                         /*is_pinned*/ None,
@@ -731,6 +734,7 @@ impl RolloutRecorder {
                     allowed_sources,
                     model_providers,
                     cwd_filter.as_ref().map(std::slice::from_ref),
+                    /*repository_identity*/ None,
                     /*relation_filter*/ None,
                     /*archived*/ false,
                     /*is_pinned*/ None,
@@ -1163,20 +1167,10 @@ fn truncate_fs_page(
         return page;
     }
     page.items.truncate(page_size);
-    page.next_cursor = page.items.last().and_then(|item| {
-        let file_name = item.path.file_name()?.to_str()?;
-        let (created_at, _id) = parse_timestamp_uuid_from_filename(file_name)?;
-        let cursor_token = match sort_key {
-            ThreadSortKey::CreatedAt => created_at.format(&Rfc3339).ok()?,
-            ThreadSortKey::UpdatedAt => item.updated_at.as_deref()?.to_string(),
-            ThreadSortKey::RecencyAt => item
-                .recency_at
-                .as_deref()
-                .or(item.updated_at.as_deref())?
-                .to_string(),
-        };
-        parse_cursor(cursor_token.as_str())
-    });
+    page.next_cursor = page
+        .items
+        .last()
+        .and_then(|item| cursor_from_thread_item(item, sort_key));
     page
 }
 
@@ -1476,9 +1470,7 @@ async fn list_threads_from_files_asc(
         );
         all_items.retain(|item| {
             thread_item_sort_key(item, sort_key).is_some_and(|key| match anchor.1 {
-                Some(anchor_id) if sort_key == ThreadSortKey::RecencyAt => {
-                    key > (anchor.0, anchor_id)
-                }
+                Some(anchor_id) => key > (anchor.0, anchor_id),
                 _ => key.0 > anchor.0,
             })
         });
@@ -1553,13 +1545,10 @@ fn thread_item_sort_key(
 
 fn cursor_from_thread_item(item: &ThreadItem, sort_key: ThreadSortKey) -> Option<Cursor> {
     let (timestamp, id) = thread_item_sort_key(item, sort_key)?;
-    match sort_key {
-        ThreadSortKey::RecencyAt => Some(Cursor::with_thread_id(
-            timestamp,
-            ThreadId::from_string(&id.to_string()).ok()?,
-        )),
-        ThreadSortKey::CreatedAt | ThreadSortKey::UpdatedAt => Some(Cursor::new(timestamp)),
-    }
+    Some(Cursor::with_thread_id(
+        timestamp,
+        ThreadId::from_string(&id.to_string()).ok()?,
+    ))
 }
 
 struct LogFileInfo {

@@ -10,6 +10,7 @@ use super::helpers::set_thread_name;
 use super::helpers::stored_thread_from_rollout_item_with_metadata;
 use crate::ListThreadsParams;
 use crate::SortDirection;
+use crate::ThreadLocationFilter;
 use crate::ThreadPage;
 use crate::ThreadRelationFilter;
 use crate::ThreadSortKey;
@@ -99,7 +100,32 @@ pub(super) async fn list_rollout_threads(
     sort_key: codex_rollout::ThreadSortKey,
     sort_direction: codex_rollout::SortDirection,
 ) -> ThreadStoreResult<codex_rollout::ThreadsPage> {
-    if params.relation_filter.is_some() || params.is_pinned.is_some() {
+    if matches!(
+        params.location_filter,
+        ThreadLocationFilter::ProjectSessionScope { .. }
+    ) {
+        return super::project_scope_repair::list_threads(
+            state_db,
+            config,
+            default_model_provider_id,
+            params,
+            cursor,
+            sort_key,
+            sort_direction,
+        )
+        .await;
+    }
+    let (cwd_filters, repository_identity) = match &params.location_filter {
+        ThreadLocationFilter::Unrestricted => (None, None),
+        ThreadLocationFilter::ExactCwds(cwds) => (Some(cwds.as_slice()), None),
+        ThreadLocationFilter::ProjectSessionScope { .. } => {
+            unreachable!("project scope dispatched before local listing")
+        }
+    };
+    if params.relation_filter.is_some()
+        || params.is_pinned.is_some()
+        || repository_identity.is_some()
+    {
         let relation_filter = params
             .relation_filter
             .map(|relation_filter| match relation_filter {
@@ -119,7 +145,8 @@ pub(super) async fn list_rollout_threads(
             sort_direction,
             params.allowed_sources.as_slice(),
             params.model_providers.as_deref(),
-            params.cwd_filters.as_deref(),
+            cwd_filters,
+            repository_identity,
             relation_filter,
             params.archived,
             params.is_pinned,
@@ -142,7 +169,7 @@ pub(super) async fn list_rollout_threads(
             sort_direction,
             params.allowed_sources.as_slice(),
             params.model_providers.as_deref(),
-            params.cwd_filters.as_deref(),
+            cwd_filters,
             default_model_provider_id,
             params.search_term.as_deref(),
         )
@@ -157,7 +184,7 @@ pub(super) async fn list_rollout_threads(
             sort_direction,
             params.allowed_sources.as_slice(),
             params.model_providers.as_deref(),
-            params.cwd_filters.as_deref(),
+            cwd_filters,
             default_model_provider_id,
             params.search_term.as_deref(),
         )
@@ -172,7 +199,7 @@ pub(super) async fn list_rollout_threads(
             sort_direction,
             params.allowed_sources.as_slice(),
             params.model_providers.as_deref(),
-            params.cwd_filters.as_deref(),
+            cwd_filters,
             default_model_provider_id,
             params.search_term.as_deref(),
         )
@@ -187,7 +214,7 @@ pub(super) async fn list_rollout_threads(
             sort_direction,
             params.allowed_sources.as_slice(),
             params.model_providers.as_deref(),
-            params.cwd_filters.as_deref(),
+            cwd_filters,
             default_model_provider_id,
             params.search_term.as_deref(),
         )
@@ -241,7 +268,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 is_pinned: None,
                 archived: false,
                 search_term: None,
@@ -302,7 +329,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 is_pinned: None,
                 archived: false,
                 search_term: Some("needle".to_string()),
@@ -375,7 +402,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 is_pinned: None,
                 archived: false,
                 search_term: Some("canonical".to_string()),
@@ -412,7 +439,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 is_pinned: None,
                 archived: false,
                 search_term: None,
@@ -429,7 +456,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 is_pinned: None,
                 archived: true,
                 search_term: None,
@@ -482,7 +509,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: vec![SessionSource::Cli],
                 model_providers: Some(vec!["test-provider".to_string()]),
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 is_pinned: None,
                 archived: false,
                 search_term: None,
@@ -520,7 +547,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 is_pinned: None,
                 archived: false,
                 search_term: None,

@@ -372,6 +372,22 @@ pub enum ThreadRelationFilter {
     DescendantsOf(ThreadId),
 }
 
+/// Working-directory and repository boundary used to filter thread listings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThreadLocationFilter {
+    /// Return threads from every recorded working directory and repository.
+    Unrestricted,
+    /// Return threads whose Recorded Working Directory exactly matches one of these paths.
+    ExactCwds(Vec<PathBuf>),
+    /// Return threads in the Project Session Scope identified by this checkout.
+    ProjectSessionScope {
+        /// Native working directory supplied by the caller.
+        cwd: PathBuf,
+        /// Credential-free canonical Repository Identity resolved by the server.
+        repository_identity: String,
+    },
+}
+
 /// Parameters for listing threads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListThreadsParams {
@@ -388,9 +404,8 @@ pub struct ListThreadsParams {
     /// Optional model provider filter. `None` means implementation default, while an empty vector
     /// means all providers.
     pub model_providers: Option<Vec<String>>,
-    /// Optional cwd filters. `None` means all working directories, while an empty vector matches no
-    /// threads.
-    pub cwd_filters: Option<Vec<PathBuf>>,
+    /// Location boundary for the listing.
+    pub location_filter: ThreadLocationFilter,
     /// Optional persisted pin-state filter.
     pub is_pinned: Option<bool>,
     /// Whether archived threads should be listed instead of active threads.
@@ -676,6 +691,9 @@ pub struct StoredThread {
     pub agent_path: Option<String>,
     /// Optional Git metadata captured for the thread.
     pub git_info: Option<GitInfo>,
+    /// Credential-free canonical identity derived from the observed Git origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_identity: Option<String>,
     /// Approval mode captured for the thread.
     pub approval_mode: AskForApproval,
     /// Canonical runtime permissions captured for the thread.

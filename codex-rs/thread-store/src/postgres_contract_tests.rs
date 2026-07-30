@@ -75,7 +75,7 @@ async fn postgres_contract_metadata_updates_and_repairs_from_canonical_history()
                 git_info: Some(GitInfoPatch {
                     sha: Some(Some("abc123".to_string())),
                     branch: Some(Some("main".to_string())),
-                    origin_url: Some(Some("https://example.com/codex.git".to_string())),
+                    origin_url: Some(Some("ssh://git@example.com/acme/codex.git".to_string())),
                 }),
                 memory_mode: Some(ThreadMemoryMode::Disabled),
                 ..Default::default()
@@ -93,6 +93,10 @@ async fn postgres_contract_metadata_updates_and_repairs_from_canonical_history()
     assert_eq!(
         serde_json::to_value(&from_replica)?,
         serde_json::to_value(&updated)?
+    );
+    assert_eq!(
+        from_replica.repository_identity.as_deref(),
+        Some("example.com/acme/codex")
     );
     assert_eq!(
         from_replica.name.as_deref(),
@@ -121,7 +125,7 @@ async fn postgres_contract_metadata_updates_and_repairs_from_canonical_history()
         serde_json::json!({
             "commit_hash": "abc123",
             "branch": "main",
-            "repository_url": "https://example.com/codex.git",
+            "repository_url": "ssh://git@example.com/acme/codex.git",
         })
     );
 
@@ -143,7 +147,7 @@ async fn postgres_contract_metadata_updates_and_repairs_from_canonical_history()
         serde_json::json!({
             "commit_hash": "abc123",
             "branch": "feature/postgres",
-            "repository_url": "https://example.com/codex.git",
+            "repository_url": "ssh://git@example.com/acme/codex.git",
         })
     );
     let cleared = writer

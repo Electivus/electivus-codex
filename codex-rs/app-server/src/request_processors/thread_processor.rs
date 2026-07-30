@@ -1,3 +1,4 @@
+use super::recorded_working_directory::execution_cwd_from_recorded_working_directory;
 use super::thread_fork_goal::inherit_thread_goal_snapshot;
 use super::turn_processor::can_accept_direct_input;
 use super::*;
@@ -9,6 +10,7 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_utils_path_uri::LegacyAppPathString;
 
 const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 const THREAD_LIST_MAX_LIMIT: usize = 100;
@@ -21,7 +23,7 @@ struct ThreadListFilters {
     source_kinds: Option<Vec<ThreadSourceKind>>,
     archived: bool,
     is_pinned: Option<bool>,
-    cwd_filters: Option<Vec<PathBuf>>,
+    location_filter: StoreThreadLocationFilter,
     search_term: Option<String>,
     use_state_db_only: bool,
     relation_filter: Option<StoreThreadRelationFilter>,
@@ -210,6 +212,15 @@ fn normalize_thread_list_cwd_filters(
     }
 
     Ok(Some(normalized_cwds))
+}
+
+fn exact_thread_location_filter(
+    cwd: Option<ThreadListCwdFilter>,
+) -> Result<StoreThreadLocationFilter, JSONRPCErrorError> {
+    Ok(match normalize_thread_list_cwd_filters(cwd)? {
+        Some(cwds) => StoreThreadLocationFilter::ExactCwds(cwds),
+        None => StoreThreadLocationFilter::Unrestricted,
+    })
 }
 
 fn has_model_resume_override(
@@ -1975,12 +1986,27 @@ impl ThreadRequestProcessor {
             archived,
             is_pinned,
             cwd,
+            project_cwd,
             use_state_db_only,
             search_term,
             parent_thread_id,
             ancestor_thread_id,
         } = params;
-        let cwd_filters = normalize_thread_list_cwd_filters(cwd)?;
+        if cwd.is_some() && project_cwd.is_some() {
+            return Err(invalid_params(
+                "cwd and projectCwd are mutually exclusive thread/list filters",
+            ));
+        }
+        let location_filter = match project_cwd {
+            Some(project_cwd) => {
+                super::project_session_scope::resolve_project_location_filter(
+                    &self.thread_manager.environment_manager(),
+                    project_cwd,
+                )
+                .await
+            }
+            None => exact_thread_location_filter(cwd)?,
+        };
         let relation_filter = match (parent_thread_id, ancestor_thread_id) {
             (Some(_), Some(_)) => {
                 return Err(invalid_request(
@@ -2019,7 +2045,7 @@ impl ThreadRequestProcessor {
                     source_kinds,
                     archived: archived.unwrap_or(false),
                     is_pinned,
-                    cwd_filters,
+                    location_filter,
                     search_term,
                     use_state_db_only,
                     relation_filter,
@@ -3124,7 +3150,9 @@ impl ThreadRequestProcessor {
         let needs_paginated_projection =
             paginated_resume && (include_turns || initial_turns_page.is_some());
 
-        let history_cwd = thread_history.session_cwd();
+        let history_cwd = thread_history
+            .session_cwd()
+            .and_then(|cwd| execution_cwd_from_recorded_working_directory(&cwd, "thread/resume"));
         let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
@@ -4075,7 +4103,8 @@ impl ThreadRequestProcessor {
                     })?,
             )
         };
-        let history_cwd = Some(source_thread.cwd.clone());
+        let history_cwd =
+            execution_cwd_from_recorded_working_directory(&source_thread.cwd, "thread/fork");
 
         // Persist Windows sandbox mode.
         let mut cli_overrides = cli_overrides.unwrap_or_default();
@@ -4446,7 +4475,7 @@ impl ThreadRequestProcessor {
             source_kinds,
             archived,
             is_pinned,
-            cwd_filters,
+            location_filter,
             search_term,
             use_state_db_only,
             relation_filter,
@@ -4491,7 +4520,7 @@ impl ThreadRequestProcessor {
                     sort_direction: store_sort_direction,
                     allowed_sources: allowed_sources.to_vec(),
                     model_providers: model_provider_filter.clone(),
-                    cwd_filters: cwd_filters.clone(),
+                    location_filter: location_filter.clone(),
                     archived,
                     is_pinned,
                     search_term: search_term.clone(),
@@ -4511,11 +4540,21 @@ impl ThreadRequestProcessor {
                 if source_kind_filter
                     .as_ref()
                     .is_none_or(|filter| source_kind_matches(&source, filter))
-                    && cwd_filters.as_ref().is_none_or(|expected_cwds| {
-                        expected_cwds.iter().any(|expected_cwd| {
-                            path_utils::paths_match_after_normalization(&it.cwd, expected_cwd)
-                        })
-                    })
+                    && match &location_filter {
+                        StoreThreadLocationFilter::Unrestricted => true,
+                        StoreThreadLocationFilter::ExactCwds(expected_cwds) => {
+                            expected_cwds.iter().any(|expected_cwd| {
+                                path_utils::paths_match_after_normalization(&it.cwd, expected_cwd)
+                            })
+                        }
+                        StoreThreadLocationFilter::ProjectSessionScope {
+                            cwd,
+                            repository_identity,
+                        } => {
+                            path_utils::paths_match_after_normalization(&it.cwd, cwd)
+                                || it.repository_identity.as_ref() == Some(repository_identity)
+                        }
+                    }
                 {
                     filtered.push(it);
                     if filtered.len() >= remaining {
@@ -5048,7 +5087,7 @@ fn set_thread_name_from_title(thread: &mut Thread, title: String) {
 pub(crate) fn thread_from_stored_thread(
     thread: StoredThread,
     fallback_provider: &str,
-    fallback_cwd: &AbsolutePathBuf,
+    _fallback_cwd: &AbsolutePathBuf,
 ) -> (Thread, Option<codex_thread_store::StoredThreadHistory>) {
     let path = thread.rollout_path;
     let git_info = thread.git_info.map(|info| ApiGitInfo {
@@ -5056,13 +5095,7 @@ pub(crate) fn thread_from_stored_thread(
         branch: info.branch,
         origin_url: info.repository_url,
     });
-    let cwd = AbsolutePathBuf::relative_to_current_dir(path_utils::normalize_for_native_workdir(
-        thread.cwd,
-    ))
-    .unwrap_or_else(|err| {
-        warn!("failed to normalize thread cwd while reading stored thread: {err}");
-        fallback_cwd.clone()
-    });
+    let cwd = LegacyAppPathString::from_path(&thread.cwd);
     let source = with_thread_spawn_agent_metadata(
         thread.source,
         thread.agent_nickname.clone(),
@@ -5298,7 +5331,7 @@ fn build_thread_from_snapshot(
         recency_at: Some(now),
         status: ThreadStatus::NotLoaded,
         path,
-        cwd: config_snapshot.cwd().clone(),
+        cwd: LegacyAppPathString::from_abs_path(config_snapshot.cwd()),
         cli_version: env!("CARGO_PKG_VERSION").to_string(),
         agent_nickname: config_snapshot.session_source.get_nickname(),
         agent_role: config_snapshot.session_source.get_agent_role(),

@@ -6,6 +6,7 @@ use chrono::Utc;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SandboxPolicy;
@@ -186,14 +187,14 @@ async fn assert_metadata_contract(
     .await?;
     assert_eq!(cleared_name.name, None);
 
-    let git_and_memory = update_metadata(
+    update_metadata(
         store,
         thread_id,
         ThreadMetadataPatch {
             git_info: Some(GitInfoPatch {
                 sha: Some(Some("contract-sha".to_string())),
                 branch: Some(Some("main".to_string())),
-                origin_url: Some(Some("https://example.com/contract.git".to_string())),
+                origin_url: Some(Some("https://example.com/acme/contract.git".to_string())),
             }),
             memory_mode: Some(ThreadMemoryMode::Disabled),
             ..Default::default()
@@ -201,14 +202,6 @@ async fn assert_metadata_contract(
         /*include_archived*/ false,
     )
     .await?;
-    assert_eq!(
-        serde_json::to_value(git_and_memory.git_info)?,
-        serde_json::json!({
-            "commit_hash": "contract-sha",
-            "branch": "main",
-            "repository_url": "https://example.com/contract.git",
-        })
-    );
     assert_eq!(
         latest_memory_mode(store, thread_id, /*include_archived*/ false).await?,
         "disabled"
@@ -228,11 +221,150 @@ async fn assert_metadata_contract(
     )
     .await?;
     assert_eq!(
-        serde_json::to_value(partial_git.git_info)?,
+        normalized_complete_snapshot(&partial_git),
         serde_json::json!({
-            "commit_hash": "contract-sha",
-            "branch": "feature/contract",
-            "repository_url": "https://example.com/contract.git",
+            "thread_id": thread_id,
+            "extra_config": null,
+            "rollout_path": null,
+            "forked_from_id": null,
+            "parent_thread_id": null,
+            "preview": "Contract preview",
+            "name": null,
+            "model_provider": "metadata-contract-provider",
+            "model": null,
+            "reasoning_effort": null,
+            "created_at": "<timestamp>",
+            "updated_at": "<timestamp>",
+            "recency_at": "<timestamp>",
+            "archived_at": null,
+            "is_pinned": false,
+            "cwd": cwd,
+            "cli_version": env!("CARGO_PKG_VERSION"),
+            "source": SessionSource::Exec,
+            "history_mode": ThreadHistoryMode::Legacy,
+            "thread_source": null,
+            "agent_nickname": null,
+            "agent_role": null,
+            "agent_path": null,
+            "git_info": {
+                "commit_hash": "contract-sha",
+                "branch": "feature/contract",
+                "repository_url": "https://example.com/acme/contract.git",
+            },
+            "repository_identity": "example.com/acme/contract",
+            "approval_mode": AskForApproval::OnRequest,
+            "permission_profile": PermissionProfile::read_only(),
+            "token_usage": null,
+            "first_user_message": "<backend-owned>",
+            "history": null,
+        })
+    );
+    let boundary_repo = "r".repeat(1009);
+    let boundary_origin = format!("https://example.test/o/{boundary_repo}");
+    let boundary_identity = format!("example.test/o/{boundary_repo}");
+    assert_eq!(boundary_identity.len(), 1024);
+    let boundary_git = update_metadata(
+        store,
+        thread_id,
+        ThreadMetadataPatch {
+            git_info: Some(GitInfoPatch {
+                origin_url: Some(Some(boundary_origin.clone())),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        /*include_archived*/ false,
+    )
+    .await?;
+    assert_eq!(
+        (
+            boundary_git
+                .git_info
+                .as_ref()
+                .and_then(|info| info.repository_url.as_deref()),
+            boundary_git.repository_identity.as_deref(),
+        ),
+        (
+            Some(boundary_origin.as_str()),
+            Some(boundary_identity.as_str()),
+        )
+    );
+
+    let oversized_origin = format!("{boundary_origin}r");
+    let oversized_git = update_metadata(
+        store,
+        thread_id,
+        ThreadMetadataPatch {
+            git_info: Some(GitInfoPatch {
+                origin_url: Some(Some(oversized_origin.clone())),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        /*include_archived*/ false,
+    )
+    .await?;
+    assert_eq!(
+        (
+            oversized_git
+                .git_info
+                .as_ref()
+                .and_then(|info| info.repository_url.as_deref()),
+            oversized_git.repository_identity.as_deref(),
+        ),
+        (Some(oversized_origin.as_str()), None)
+    );
+
+    let invalid_origin = update_metadata(
+        store,
+        thread_id,
+        ThreadMetadataPatch {
+            git_info: Some(GitInfoPatch {
+                origin_url: Some(Some("https://example.com/not-a-repository.git".to_string())),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        /*include_archived*/ false,
+    )
+    .await?;
+    assert_eq!(
+        normalized_complete_snapshot(&invalid_origin),
+        serde_json::json!({
+            "thread_id": thread_id,
+            "extra_config": null,
+            "rollout_path": null,
+            "forked_from_id": null,
+            "parent_thread_id": null,
+            "preview": "Contract preview",
+            "name": null,
+            "model_provider": "metadata-contract-provider",
+            "model": null,
+            "reasoning_effort": null,
+            "created_at": "<timestamp>",
+            "updated_at": "<timestamp>",
+            "recency_at": "<timestamp>",
+            "archived_at": null,
+            "is_pinned": false,
+            "cwd": cwd,
+            "cli_version": env!("CARGO_PKG_VERSION"),
+            "source": SessionSource::Exec,
+            "history_mode": ThreadHistoryMode::Legacy,
+            "thread_source": null,
+            "agent_nickname": null,
+            "agent_role": null,
+            "agent_path": null,
+            "git_info": {
+                "commit_hash": "contract-sha",
+                "branch": "feature/contract",
+                "repository_url": "https://example.com/not-a-repository.git",
+            },
+            "repository_identity": null,
+            "approval_mode": AskForApproval::OnRequest,
+            "permission_profile": PermissionProfile::read_only(),
+            "token_usage": null,
+            "first_user_message": "<backend-owned>",
+            "history": null,
         })
     );
     let cleared_git = update_metadata(
@@ -251,6 +383,7 @@ async fn assert_metadata_contract(
     )
     .await?;
     assert!(cleared_git.git_info.is_none());
+    assert_eq!(cleared_git.repository_identity, None);
     assert_eq!(
         latest_memory_mode(store, thread_id, /*include_archived*/ false).await?,
         "enabled"
@@ -329,6 +462,21 @@ async fn assert_metadata_contract(
     .await?;
     assert_eq!(cleared.name, None);
     Ok(())
+}
+
+fn normalized_complete_snapshot(thread: &crate::StoredThread) -> serde_json::Value {
+    let mut snapshot = serde_json::to_value(thread).expect("StoredThread should serialize");
+    snapshot["rollout_path"] = serde_json::Value::Null;
+    for field in ["created_at", "updated_at", "recency_at"] {
+        snapshot[field] = serde_json::Value::String("<timestamp>".to_string());
+    }
+    snapshot["first_user_message"] = serde_json::Value::String("<backend-owned>".to_string());
+    snapshot
+        .as_object_mut()
+        .expect("StoredThread should serialize as an object")
+        .entry("repository_identity")
+        .or_insert(serde_json::Value::Null);
+    snapshot
 }
 
 async fn update_metadata(

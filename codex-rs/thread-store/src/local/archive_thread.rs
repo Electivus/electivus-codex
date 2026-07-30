@@ -240,7 +240,7 @@ mod tests {
                 sort_direction: crate::SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 is_pinned: None,
                 archived: true,
                 search_term: None,

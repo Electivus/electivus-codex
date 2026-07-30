@@ -100,12 +100,6 @@ jobs:
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
           tool: nextest
-      - name: Verify contracts without procedural extensions
-        run: |
-          psql "$CODEX_TEST_POSTGRES_URL" --set ON_ERROR_STOP=1 \
-            --command 'DROP EXTENSION plpgsql'
-          psql "$CODEX_TEST_POSTGRES_URL" --tuples-only --no-align \
-            --command 'SELECT COUNT(*) FROM pg_extension' | grep -Fx 0
       - name: Run PostgreSQL Runtime State contracts
         run: |
           just test -p codex-state --run-ignored ignored-only -E 'test(/postgres_contract_/)'
@@ -114,12 +108,6 @@ jobs:
           just test -p codex-app-server-transport --run-ignored ignored-only -E 'test(/postgres_contract_/)'
           just test -p codex-memories-write --run-ignored ignored-only -E 'test(/postgres_contract_/)'
           just test -p codex-cli --run-ignored ignored-only -E 'test(/state_(migrate|initialize)_process_/)'
-
-      - name: Verify contracts installed no extensions
-        if: always() && !cancelled()
-        run: |
-          psql "$CODEX_TEST_POSTGRES_URL" --tuples-only --no-align \
-            --command 'SELECT COUNT(*) FROM pg_extension' | grep -Fx 0
 
       - name: Check for a clean worktree
         if: always() && !cancelled()

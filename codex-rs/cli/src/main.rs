@@ -324,7 +324,7 @@ struct ResumeCommand {
     #[arg(long = "last", default_value_t = false)]
     last: bool,
 
-    /// Show all sessions (disables cwd filtering and shows CWD column).
+    /// Show all sessions (bypasses Project Session Scope and shows CWD column).
     #[arg(long = "all", default_value_t = false)]
     all: bool,
 
@@ -377,7 +377,7 @@ struct DeleteCommand {
 
 #[derive(Debug, Parser)]
 struct ForkCommand {
-    /// Conversation/session id (UUID). When provided, forks this session.
+    /// Session id (UUID) or session name. UUIDs take precedence if it parses.
     /// If omitted, use --last to pick the most recent recorded session.
     #[arg(value_name = "SESSION_ID")]
     session_id: Option<String>,
@@ -386,7 +386,7 @@ struct ForkCommand {
     #[arg(long = "last", default_value_t = false)]
     last: bool,
 
-    /// Show all sessions (disables cwd filtering and shows CWD column).
+    /// Show all sessions (bypasses Project Session Scope and shows CWD column).
     #[arg(long = "all", default_value_t = false)]
     all: bool,
 

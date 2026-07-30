@@ -6,6 +6,7 @@ mod list_threads;
 mod live_writer;
 mod model_context;
 mod paginated_fork;
+mod project_scope_repair;
 mod read_thread;
 // This lands before the reader PRs that consume the shared lineage resolver.
 #[allow(dead_code)]

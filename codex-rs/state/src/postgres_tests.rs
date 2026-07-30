@@ -85,6 +85,7 @@ fn migration_history_requires_a_contiguous_sequence_starting_at_one() {
 #[test]
 fn schema_versions_outside_the_compatibility_range_are_actionable() {
     let schema = "isolated_namespace";
+    let newer_version = MAXIMUM_COMPATIBLE_SCHEMA_VERSION + 1;
 
     assert_eq!(
         ensure_compatible_schema_version(schema, /*version*/ 0)
@@ -93,10 +94,12 @@ fn schema_versions_outside_the_compatibility_range_are_actionable() {
         "PostgreSQL schema `isolated_namespace` is at version 0, older than the minimum supported version 1; run a compatible Codex schema migration command"
     );
     assert_eq!(
-        ensure_compatible_schema_version(schema, /*version*/ 21)
+        ensure_compatible_schema_version(schema, newer_version)
             .expect_err("newer schema should be rejected")
             .to_string(),
-        "PostgreSQL schema `isolated_namespace` is at version 21, newer than the maximum supported version 20; upgrade Codex before using this namespace"
+        format!(
+            "PostgreSQL schema `isolated_namespace` is at version {newer_version}, newer than the maximum supported version {MAXIMUM_COMPATIBLE_SCHEMA_VERSION}; upgrade Codex before using this namespace"
+        )
     );
 }
 

@@ -186,6 +186,7 @@ async fn lookup_session_by_exact_name(
                     cwd: None,
                     use_state_db_only: false,
                     search_term: search_term.map(str::to_string),
+                    project_cwd: None,
                 })
                 .await
                 .wrap_err("failed to list sessions while resolving session name")?;

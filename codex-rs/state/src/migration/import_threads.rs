@@ -252,8 +252,8 @@ async fn write_thread(
     sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO {threads} (thread_id, projection, stream_version, history_projection_version, \
          history_projection_start_ordinal, fencing_token, writer_id, writer_lease_expires_at, \
-         created_at, updated_at, recency_at, archived_at) \
-         VALUES ($1, $2, $3, NULL, $4, 1, 'runtime-state-migration', '-infinity', $5, $6, $7, $8)"
+         created_at, updated_at, recency_at, archived_at, repository_identity) \
+         VALUES ($1, $2, $3, NULL, $4, 1, 'runtime-state-migration', '-infinity', $5, $6, $7, $8, $9)"
     )))
     .bind(metadata.id.to_string())
     .bind(projection)
@@ -263,6 +263,12 @@ async fn write_thread(
     .bind(metadata.updated_at)
     .bind(metadata.recency_at)
     .bind(metadata.archived_at)
+    .bind(
+        metadata
+            .git_origin_url
+            .as_deref()
+            .and_then(codex_git_utils::canonicalize_git_remote_url),
+    )
     .execute(&mut *connection)
     .await
     .map_err(|error| map_sql_error(schema, "import thread metadata", error))?;
@@ -306,6 +312,10 @@ pub(super) fn thread_projection(
             "repository_url": metadata.git_origin_url,
         })
     });
+    let repository_identity = metadata
+        .git_origin_url
+        .as_deref()
+        .and_then(codex_git_utils::canonicalize_git_remote_url);
     let source = serde_json::from_str(&metadata.source)
         .unwrap_or_else(|_| Value::String(metadata.source.clone()));
     let approval_mode = serde_json::from_str(&metadata.approval_mode)
@@ -341,6 +351,7 @@ pub(super) fn thread_projection(
         "agent_role": metadata.agent_role,
         "agent_path": metadata.agent_path,
         "git_info": git_info,
+        "repository_identity": repository_identity,
         "approval_mode": approval_mode,
         "permission_profile": permission_profile,
         "token_usage": (metadata.tokens_used != 0).then(|| json!({

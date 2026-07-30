@@ -798,7 +798,8 @@ async fn test_pagination_cursor() {
         .join(format!("rollout-2025-03-04T09-00-00-{u4}.jsonl"));
     let updated_page1: Vec<Option<String>> =
         page1.items.iter().map(|i| i.updated_at.clone()).collect();
-    let expected_cursor1: Cursor = serde_json::from_str("\"2025-03-04T09-00-00\"").unwrap();
+    let expected_cursor1: Cursor =
+        serde_json::from_str(&format!("\"2025-03-04T09-00-00|{u4}\"")).unwrap();
     let expected_page1 = ThreadsPage {
         items: vec![
             ThreadItem {
@@ -876,7 +877,8 @@ async fn test_pagination_cursor() {
         .join(format!("rollout-2025-03-02T09-00-00-{u2}.jsonl"));
     let updated_page2: Vec<Option<String>> =
         page2.items.iter().map(|i| i.updated_at.clone()).collect();
-    let expected_cursor2: Cursor = serde_json::from_str("\"2025-03-02T09-00-00\"").unwrap();
+    let expected_cursor2: Cursor =
+        serde_json::from_str(&format!("\"2025-03-02T09-00-00|{u2}\"")).unwrap();
     let expected_page2 = ThreadsPage {
         items: vec![
             ThreadItem {
@@ -1003,6 +1005,42 @@ async fn test_list_threads_scans_past_head_for_user_event() {
 
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].thread_id, Some(thread_id_from_uuid(uuid)));
+}
+
+#[tokio::test]
+async fn test_list_threads_omits_rollout_with_oversized_head_line() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+    let uuid = Uuid::from_u128(101);
+    let ts = "2025-05-01T10-30-00";
+    write_session_file(
+        home,
+        ts,
+        uuid,
+        /*num_records*/ 0,
+        Some(SessionSource::Cli),
+    )
+    .unwrap();
+    let path = home.join(format!("sessions/2025/05/01/rollout-{ts}-{uuid}.jsonl"));
+    let valid_rollout = fs::read_to_string(&path).unwrap();
+    let oversized_head = "x".repeat(2 * 1024 * 1024);
+    fs::write(&path, format!("{oversized_head}\n{valid_rollout}")).unwrap();
+
+    let page = get_threads(
+        home,
+        /*page_size*/ 10,
+        /*cursor*/ None,
+        ThreadSortKey::CreatedAt,
+        NO_SOURCE_FILTER,
+        /*model_providers*/ None,
+        /*cwd_filters*/ None,
+        TEST_PROVIDER,
+    )
+    .await
+    .unwrap();
+
+    assert!(page.items.is_empty());
+    assert_eq!(page.num_scanned_files, 1);
 }
 
 #[tokio::test]
@@ -1426,7 +1464,7 @@ async fn test_updated_at_uses_file_mtime() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_timestamp_only_cursor_skips_same_second_filesystem_ties() {
+async fn test_created_at_cursor_uses_thread_id_to_paginate_filesystem_ties() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
 
@@ -1488,7 +1526,7 @@ async fn test_timestamp_only_cursor_skips_same_second_filesystem_ties() {
         .join(format!("rollout-2025-07-01T00-00-00-{u2}.jsonl"));
     let updated_page1: Vec<Option<String>> =
         page1.items.iter().map(|i| i.updated_at.clone()).collect();
-    let expected_cursor1: Cursor = serde_json::from_str(&format!("\"{ts}\"")).unwrap();
+    let expected_cursor1: Cursor = serde_json::from_str(&format!("\"{ts}|{u2}\"")).unwrap();
     let expected_page1 = ThreadsPage {
         items: vec![
             ThreadItem {
@@ -1552,15 +1590,126 @@ async fn test_timestamp_only_cursor_skips_same_second_filesystem_ties() {
     )
     .await
     .unwrap();
-    // The filesystem fallback only has second-precision timestamps in filenames. The primary
-    // SQLite-backed listing uses unique millisecond timestamps and does not have this tie.
     let expected_page2 = ThreadsPage {
-        items: Vec::new(),
+        items: vec![ThreadItem {
+            path: home
+                .join("sessions")
+                .join("2025")
+                .join("07")
+                .join("01")
+                .join(format!("rollout-2025-07-01T00-00-00-{u1}.jsonl")),
+            thread_id: Some(thread_id_from_uuid(u1)),
+            first_user_message: Some("Hello from user".to_string()),
+            preview: Some("Hello from user".to_string()),
+            is_pinned: false,
+            cwd: Some(Path::new(".").to_path_buf()),
+            git_branch: None,
+            git_sha: None,
+            git_origin_url: None,
+            source: Some(SessionSource::VSCode),
+            history_mode: Default::default(),
+            parent_thread_id: None,
+            agent_nickname: None,
+            agent_role: None,
+            model_provider: Some(TEST_PROVIDER.to_string()),
+            cli_version: Some("test_version".to_string()),
+            created_at: Some(ts.to_string()),
+            recency_at: page2.items.first().and_then(|item| item.updated_at.clone()),
+            updated_at: page2.items.first().and_then(|item| item.updated_at.clone()),
+        }],
         next_cursor: None,
         num_scanned_files: 3,
         reached_scan_cap: false,
     };
     assert_eq!(page2, expected_page2);
+    let legacy_page = get_threads(
+        home,
+        /*page_size*/ 10,
+        Some(&Cursor::new(expected_cursor1.timestamp())),
+        ThreadSortKey::CreatedAt,
+        INTERACTIVE_SESSION_SOURCES.as_slice(),
+        Some(provider_filter.as_slice()),
+        /*cwd_filters*/ None,
+        TEST_PROVIDER,
+    )
+    .await
+    .unwrap();
+    assert!(legacy_page.items.is_empty());
+}
+
+#[tokio::test]
+async fn test_updated_at_cursor_uses_thread_id_to_paginate_filesystem_ties() -> Result<()> {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+    let timestamp = "2025-07-01T00-00-00";
+    let uuids = [Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3)];
+    let updated_at = OffsetDateTime::parse(
+        "2025-07-02T00:00:00Z",
+        &time::format_description::well_known::Rfc3339,
+    )?;
+
+    for uuid in uuids {
+        write_session_file(
+            home,
+            timestamp,
+            uuid,
+            /*num_records*/ 0,
+            Some(SessionSource::VSCode),
+        )?;
+        let path = home
+            .join("sessions/2025/07/01")
+            .join(format!("rollout-{timestamp}-{uuid}.jsonl"));
+        let file = std::fs::OpenOptions::new().write(true).open(path)?;
+        file.set_times(FileTimes::new().set_modified(updated_at.into()))?;
+    }
+
+    let provider_filter = provider_vec(&[TEST_PROVIDER]);
+    let page1 = get_threads(
+        home,
+        /*page_size*/ 2,
+        /*cursor*/ None,
+        ThreadSortKey::UpdatedAt,
+        INTERACTIVE_SESSION_SOURCES.as_slice(),
+        Some(provider_filter.as_slice()),
+        /*cwd_filters*/ None,
+        TEST_PROVIDER,
+    )
+    .await?;
+    assert_eq!(
+        page1
+            .items
+            .iter()
+            .filter_map(|item| item.thread_id)
+            .collect::<Vec<_>>(),
+        vec![thread_id_from_uuid(uuids[2]), thread_id_from_uuid(uuids[1])]
+    );
+    assert_eq!(
+        page1.next_cursor.as_ref().and_then(Cursor::thread_id),
+        Some(thread_id_from_uuid(uuids[1]))
+    );
+
+    let page2 = get_threads(
+        home,
+        /*page_size*/ 2,
+        page1.next_cursor.as_ref(),
+        ThreadSortKey::UpdatedAt,
+        INTERACTIVE_SESSION_SOURCES.as_slice(),
+        Some(provider_filter.as_slice()),
+        /*cwd_filters*/ None,
+        TEST_PROVIDER,
+    )
+    .await?;
+    assert_eq!(
+        page2
+            .items
+            .iter()
+            .filter_map(|item| item.thread_id)
+            .collect::<Vec<_>>(),
+        vec![thread_id_from_uuid(uuids[0])]
+    );
+    assert_eq!(page2.next_cursor, None);
+
+    Ok(())
 }
 
 #[tokio::test]

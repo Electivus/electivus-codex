@@ -14,6 +14,7 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
+use std::io::Write;
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -81,6 +82,7 @@ async fn list_threads_db_rejects_mismatched_sqlite_config_without_cleanup() -> a
         &[],
         /*model_providers*/ None,
         /*cwd_filters*/ None,
+        /*repository_identity*/ None,
         /*relation_filter*/ None,
         /*archived*/ false,
         /*is_pinned*/ None,
@@ -208,6 +210,89 @@ async fn reconcile_rollout_preserves_existing_explicit_title() -> anyhow::Result
         .expect("thread should exist");
     assert_eq!(persisted.title, "math");
     assert_eq!(persisted.first_user_message.as_deref(), Some("Hey"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn checked_reconcile_reports_decoded_source_bytes_after_persisting() -> anyhow::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let thread_id = ThreadId::new();
+    let rollout_path =
+        write_rollout_with_user_message(home.path(), thread_id, "Hey", ThreadHistoryMode::Legacy)?;
+    let source_bytes = std::fs::metadata(&rollout_path)?.len();
+    let runtime = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(home.path().abs()),
+        "test-provider".to_string(),
+    )
+    .await?;
+
+    let consumed_source_bytes = reconcile_rollout_checked(
+        runtime.as_ref(),
+        rollout_path.as_path(),
+        "test-provider",
+        /*archived_only*/ Some(false),
+        /*maximum_source_bytes*/ source_bytes,
+    )
+    .await?;
+
+    assert_eq!(consumed_source_bytes, source_bytes);
+    assert!(runtime.get_thread(thread_id).await?.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn checked_reconcile_propagates_source_budget_and_parse_failures() -> anyhow::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let runtime = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(home.path().abs()),
+        "test-provider".to_string(),
+    )
+    .await?;
+
+    let oversized_id = ThreadId::new();
+    let oversized_path = write_rollout_with_user_message(
+        home.path(),
+        oversized_id,
+        "oversized",
+        ThreadHistoryMode::Legacy,
+    )?;
+    let source_bytes = std::fs::metadata(&oversized_path)?.len();
+    let oversized = reconcile_rollout_checked(
+        runtime.as_ref(),
+        &oversized_path,
+        "test-provider",
+        Some(false),
+        source_bytes - 1,
+    )
+    .await
+    .expect_err("source budget should be enforced");
+    assert!(oversized.to_string().contains("decoded-byte budget"));
+    assert!(runtime.get_thread(oversized_id).await?.is_none());
+
+    let invalid_id = ThreadId::new();
+    let invalid_path = write_rollout_with_user_message(
+        home.path(),
+        invalid_id,
+        "valid",
+        ThreadHistoryMode::Legacy,
+    )?;
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&invalid_path)?,
+        "not-json"
+    )?;
+    let invalid = reconcile_rollout_checked(
+        runtime.as_ref(),
+        &invalid_path,
+        "test-provider",
+        Some(false),
+        u64::MAX,
+    )
+    .await
+    .expect_err("parse failure should be propagated");
+    assert!(invalid.to_string().contains("invalid record"));
+    assert!(runtime.get_thread(invalid_id).await?.is_none());
     Ok(())
 }
 

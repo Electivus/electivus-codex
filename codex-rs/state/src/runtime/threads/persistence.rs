@@ -11,13 +11,17 @@ impl StateRuntime {
         git_branch: Option<Option<&str>>,
         git_origin_url: Option<Option<&str>>,
     ) -> anyhow::Result<bool> {
+        let repository_identity = git_origin_url
+            .map(|origin_url| origin_url.and_then(codex_git_utils::canonicalize_git_remote_url));
         let result = sqlx::query(
             r#"
 UPDATE threads
 SET
     git_sha = CASE WHEN ? THEN ? ELSE git_sha END,
     git_branch = CASE WHEN ? THEN ? ELSE git_branch END,
-    git_origin_url = CASE WHEN ? THEN ? ELSE git_origin_url END
+    git_origin_url = CASE WHEN ? THEN ? ELSE git_origin_url END,
+    repository_identity = CASE WHEN ? THEN ? ELSE repository_identity END,
+    git_origin_url_is_explicit = CASE WHEN ? THEN 1 ELSE git_origin_url_is_explicit END
 WHERE id = ?
             "#,
         )
@@ -27,6 +31,9 @@ WHERE id = ?
         .bind(git_branch.flatten())
         .bind(git_origin_url.is_some())
         .bind(git_origin_url.flatten())
+        .bind(repository_identity.is_some())
+        .bind(repository_identity.flatten())
+        .bind(git_origin_url.is_some())
         .bind(thread_id.to_string())
         .execute(self.sqlite_pool()?)
         .await?;
@@ -41,9 +48,9 @@ WHERE id = ?
         let updated_at = self.allocate_thread_updated_at(metadata.updated_at)?;
         let insert_recency_at = self.allocate_thread_recency_at(metadata.recency_at)?;
         let preview = metadata_preview(metadata);
-        // Backfill/reconcile callers merge existing git info before upserting, but that
-        // read/modify/write is not atomic. Preserve non-null SQLite git fields here so
-        // an explicit metadata update cannot be lost if a stale rollout upsert lands later.
+        // Backfill/reconcile callers merge existing Git info before upserting, but that
+        // read/modify/write is not atomic. Explicit updates and paginated metadata are
+        // SQLite-owned; observed Legacy origin metadata may be refreshed from the rollout.
         sqlx::query(
             r#"
 INSERT INTO threads (
@@ -79,8 +86,9 @@ INSERT INTO threads (
     git_sha,
     git_branch,
     git_origin_url,
+    repository_identity,
     memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     rollout_path = excluded.rollout_path,
     created_at = excluded.created_at,
@@ -110,7 +118,18 @@ ON CONFLICT(id) DO UPDATE SET
     archived_at = excluded.archived_at,
     git_sha = COALESCE(threads.git_sha, excluded.git_sha),
     git_branch = COALESCE(threads.git_branch, excluded.git_branch),
-    git_origin_url = COALESCE(threads.git_origin_url, excluded.git_origin_url)
+    git_origin_url = CASE
+        WHEN threads.git_origin_url_is_explicit = 1
+            OR threads.history_mode = 'paginated'
+        THEN threads.git_origin_url
+        ELSE excluded.git_origin_url
+    END,
+    repository_identity = CASE
+        WHEN threads.git_origin_url_is_explicit = 1
+            OR threads.history_mode = 'paginated'
+        THEN threads.repository_identity
+        ELSE excluded.repository_identity
+    END
             "#,
         )
         .bind(metadata.id.to_string())
@@ -155,6 +174,12 @@ ON CONFLICT(id) DO UPDATE SET
         .bind(metadata.git_sha.as_deref())
         .bind(metadata.git_branch.as_deref())
         .bind(metadata.git_origin_url.as_deref())
+        .bind(
+            metadata
+                .git_origin_url
+                .as_deref()
+                .and_then(codex_git_utils::canonicalize_git_remote_url),
+        )
         .bind(creation_memory_mode.unwrap_or("enabled"))
         .execute(self.sqlite_pool()?)
         .await?;

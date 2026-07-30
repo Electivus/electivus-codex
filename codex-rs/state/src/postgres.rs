@@ -23,7 +23,7 @@ pub use initialize::initialize_postgres_runtime_state;
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
 const MINIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
-pub(crate) const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 20;
+pub(crate) const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 21;
 const BASELINE_SCHEMA_VERSION: i64 = 1;
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
@@ -120,6 +120,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         20,
         include_str!("../postgres_migrations/0020_threads_is_pinned.sql"),
         "track pinned threads",
+    ),
+    (
+        21,
+        include_str!("../postgres_migrations/0021_threads_repository_identity.sql"),
+        "materialize thread repository identity",
     ),
 ];
 
@@ -609,5 +614,5 @@ mod memory_generation_contract_tests;
 mod memory_reset_contract_tests;
 
 #[cfg(test)]
-#[path = "postgres_no_extensions_contract_tests.rs"]
-mod no_extensions_contract_tests;
+#[path = "postgres_migration_cleanup_contract_tests.rs"]
+mod migration_cleanup_contract_tests;

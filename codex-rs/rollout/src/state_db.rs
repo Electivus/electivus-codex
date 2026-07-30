@@ -11,7 +11,6 @@ use chrono::Utc;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
-use codex_protocol::protocol::ThreadHistoryMode;
 pub use codex_state::LogEntry;
 use codex_state::RuntimeStateBackendConfig;
 use codex_state::SqliteConfig;
@@ -25,6 +24,11 @@ use std::time::Duration;
 use std::time::Instant;
 use tracing::info;
 use tracing::warn;
+
+mod reconcile;
+
+pub use reconcile::reconcile_rollout;
+pub use reconcile::reconcile_rollout_checked;
 
 /// Core-facing handle to the selected state runtime.
 pub type StateDbHandle = Arc<codex_state::StateRuntime>;
@@ -424,6 +428,7 @@ pub async fn list_threads_db(
     allowed_sources: &[SessionSource],
     model_providers: Option<&[String]>,
     cwd_filters: Option<&[PathBuf]>,
+    repository_identity: Option<&str>,
     relation_filter: Option<codex_state::ThreadRelationFilter>,
     archived: bool,
     is_pinned: Option<bool>,
@@ -472,6 +477,7 @@ pub async fn list_threads_db(
             allowed_sources: allowed_sources.as_slice(),
             model_providers: model_providers.as_deref(),
             cwd_filters: normalized_cwd_filters.as_deref(),
+            repository_identity,
             anchor: anchor.as_ref(),
             sort_key: state_sort_key,
             sort_direction: state_sort_direction,
@@ -499,6 +505,7 @@ pub async fn list_threads_db(
             allowed_sources: allowed_sources.as_slice(),
             model_providers: model_providers.as_deref(),
             cwd_filters: normalized_cwd_filters.as_deref(),
+            repository_identity,
             anchor: anchor.as_ref(),
             sort_key: state_sort_key,
             sort_direction: state_sort_direction,
@@ -574,84 +581,6 @@ pub async fn mark_thread_memory_mode_polluted(
         .await
     {
         warn!("memories db mark_thread_memory_mode_polluted failed during {stage}: {err}");
-    }
-}
-
-/// Reconcile rollout items into SQLite, falling back to scanning the rollout file.
-pub async fn reconcile_rollout(
-    context: Option<&codex_state::StateRuntime>,
-    rollout_path: &Path,
-    default_provider: &str,
-    builder: Option<&ThreadMetadataBuilder>,
-    items: &[RolloutItem],
-    archived_only: Option<bool>,
-    new_thread_memory_mode: Option<&str>,
-) {
-    let Some(ctx) = context else {
-        return;
-    };
-    if builder.is_some() || !items.is_empty() {
-        apply_rollout_items(
-            Some(ctx),
-            rollout_path,
-            default_provider,
-            builder,
-            items,
-            "reconcile_rollout",
-            new_thread_memory_mode,
-            /*updated_at_override*/ None,
-        )
-        .await;
-        return;
-    }
-    let outcome =
-        match metadata::extract_metadata_from_rollout(rollout_path, default_provider).await {
-            Ok(outcome) => outcome,
-            Err(err) => {
-                warn!(
-                    "state db reconcile_rollout extraction failed {}: {err}",
-                    rollout_path.display()
-                );
-                return;
-            }
-        };
-    let mut metadata = outcome.metadata;
-    let memory_mode = outcome.memory_mode.unwrap_or_else(|| "enabled".to_string());
-    metadata.cwd = normalize_cwd_for_state_db(&metadata.cwd);
-    let existing_metadata = ctx.get_thread(metadata.id).await.ok().flatten();
-    // Paginated metadata updates are SQLite-only. Use the rollout mode to seed a
-    // missing row, then keep the value from SQLite.
-    let restore_memory_mode_from_rollout =
-        existing_metadata.is_none() || matches!(metadata.history_mode, ThreadHistoryMode::Legacy);
-    if let Some(existing_metadata) = existing_metadata.as_ref() {
-        metadata.prefer_existing_git_info(existing_metadata);
-        metadata.prefer_existing_explicit_title(existing_metadata);
-    }
-    match archived_only {
-        Some(true) if metadata.archived_at.is_none() => {
-            metadata.archived_at = Some(metadata.updated_at);
-        }
-        Some(false) => {
-            metadata.archived_at = None;
-        }
-        Some(true) | None => {}
-    }
-    if let Err(err) = ctx.upsert_thread(&metadata).await {
-        warn!(
-            "state db reconcile_rollout upsert failed {}: {err}",
-            rollout_path.display()
-        );
-        return;
-    }
-    if restore_memory_mode_from_rollout
-        && let Err(err) = ctx
-            .set_thread_memory_mode(metadata.id, memory_mode.as_str())
-            .await
-    {
-        warn!(
-            "state db reconcile_rollout memory_mode update failed {}: {err}",
-            rollout_path.display()
-        );
     }
 }
 

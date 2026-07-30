@@ -147,8 +147,8 @@ pub(super) async fn update_thread_metadata(
              WHEN history_projection_version = stream_version THEN $2 \
              ELSE history_projection_version \
          END, \
-         stream_version = $2, created_at = $3, updated_at = $4, recency_at = $5, is_pinned = $6 \
-         WHERE thread_id = $7",
+         stream_version = $2, created_at = $3, updated_at = $4, recency_at = $5, is_pinned = $6, \
+         repository_identity = $7 WHERE thread_id = $8",
         store.tables.threads
     )))
     .bind(projection_json)
@@ -157,6 +157,7 @@ pub(super) async fn update_thread_metadata(
     .bind(projection.updated_at)
     .bind(projection.recency_at)
     .bind(projection.is_pinned)
+    .bind(projection.repository_identity.as_deref())
     .bind(params.thread_id.to_string())
     .execute(transaction.as_mut())
     .await
@@ -242,6 +243,11 @@ fn rebuild_projection(
         agent_nickname: session_meta.meta.agent_nickname.clone(),
         agent_role: session_meta.meta.agent_role.clone(),
         agent_path: session_meta.meta.agent_path.clone(),
+        repository_identity: session_meta
+            .git
+            .as_ref()
+            .and_then(|git| git.repository_url.as_deref())
+            .and_then(codex_git_utils::canonicalize_git_remote_url),
         git_info: normalized_git_info(session_meta.git),
         approval_mode: AskForApproval::OnRequest,
         permission_profile: PermissionProfile::read_only(),
@@ -377,6 +383,13 @@ pub(super) fn apply_metadata_patch(thread: &mut StoredThread, patch: &ThreadMeta
     if let Some(git_info) = patch.git_info.as_ref() {
         thread.git_info =
             normalized_git_info(apply_git_info_patch(thread.git_info.take(), git_info));
+        if git_info.origin_url.is_some() {
+            thread.repository_identity = thread
+                .git_info
+                .as_ref()
+                .and_then(|info| info.repository_url.as_deref())
+                .and_then(codex_git_utils::canonicalize_git_remote_url);
+        }
     }
 }
 

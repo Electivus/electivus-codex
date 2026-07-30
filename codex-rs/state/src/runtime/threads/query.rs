@@ -34,7 +34,9 @@ SELECT
     threads.is_pinned,
     threads.git_sha,
     threads.git_branch,
-    threads.git_origin_url
+    threads.git_origin_url,
+    threads.repository_identity,
+    threads.git_origin_url_is_explicit
 "#,
     );
 }
@@ -45,6 +47,7 @@ pub struct ThreadFilterOptions<'a> {
     pub allowed_sources: &'a [String],
     pub model_providers: Option<&'a [String]>,
     pub cwd_filters: Option<&'a [PathBuf]>,
+    pub repository_identity: Option<&'a str>,
     pub is_pinned: Option<bool>,
     pub anchor: Option<&'a crate::Anchor>,
     pub sort_key: SortKey,
@@ -76,6 +79,7 @@ pub(super) fn push_thread_filters_with_preview<'a>(
         allowed_sources,
         model_providers,
         cwd_filters,
+        repository_identity,
         is_pinned,
         anchor,
         sort_key,
@@ -113,11 +117,25 @@ pub(super) fn push_thread_filters_with_preview<'a>(
         }
         separated.push_unseparated(")");
     }
-    match cwd_filters {
-        Some([]) => {
+    match (cwd_filters, repository_identity) {
+        (Some([]), None) => {
             builder.push(" AND 1 = 0");
         }
-        Some(cwd_filters) => {
+        (Some(cwd_filters), Some(repository_identity)) => {
+            builder.push(" AND (threads.cwd IN (");
+            let mut separated = builder.separated(", ");
+            for cwd in cwd_filters {
+                separated.push_bind(cwd.display().to_string());
+            }
+            separated.push_unseparated(") OR threads.repository_identity = ");
+            builder.push_bind(repository_identity);
+            builder.push(")");
+        }
+        (None, Some(repository_identity)) => {
+            builder.push(" AND threads.repository_identity = ");
+            builder.push_bind(repository_identity);
+        }
+        (Some(cwd_filters), None) => {
             builder.push(" AND threads.cwd IN (");
             let mut separated = builder.separated(", ");
             for cwd in cwd_filters {
@@ -125,7 +143,7 @@ pub(super) fn push_thread_filters_with_preview<'a>(
             }
             separated.push_unseparated(")");
         }
-        None => {}
+        (None, None) => {}
     }
     if let Some(search_term) = search_term {
         builder.push(" AND (instr(COALESCE(threads.name, ''), ");

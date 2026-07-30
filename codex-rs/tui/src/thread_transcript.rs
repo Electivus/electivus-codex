@@ -50,7 +50,9 @@ pub(crate) fn thread_to_transcript_cells(
     raw_reasoning_visibility: RawReasoningVisibility,
     codex_home: Option<&std::path::Path>,
 ) -> TranscriptCells {
-    let cwd = thread.cwd;
+    // Transcript rendering uses this only for lexical path display. Keeping the source-native
+    // spelling avoids rebinding foreign links to the host filesystem.
+    let cwd = std::path::PathBuf::from(thread.cwd.render_for_ui());
     let inline_visualization_context = codex_home.and_then(|codex_home| {
         ThreadId::from_string(&thread.id)
             .ok()

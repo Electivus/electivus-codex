@@ -414,6 +414,7 @@ async fn list_threads(
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     read_response(app_server, request_id).await

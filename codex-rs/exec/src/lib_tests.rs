@@ -3,8 +3,6 @@ use codex_otel::set_parent_from_w3c_trace_context;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_utils_absolute_path::test_support::PathBufExt;
 use codex_utils_absolute_path::test_support::test_path_buf;
 use opentelemetry::trace::TraceContextExt;
@@ -327,59 +325,6 @@ async fn resume_lookup_model_providers_filters_only_last_lookup() {
     assert_eq!(resume_lookup_model_providers(&config, &named_args), None);
 }
 
-#[tokio::test]
-async fn latest_thread_cwd_uses_the_selected_history_authority() {
-    let rollout_dir = tempdir().expect("create rollout directory");
-    let rollout_path = rollout_dir.path().join("rollout.jsonl");
-    let canonical_cwd = rollout_dir.path().join("canonical");
-    let conflicting_cwd = rollout_dir.path().join("stale-rollout");
-    let line = RolloutLine {
-        timestamp: "2026-07-23T00:00:00Z".to_string(),
-        ordinal: Some(1),
-        item: RolloutItem::TurnContext(codex_protocol::protocol::TurnContextItem {
-            turn_id: Some("stale-turn".to_string()),
-            cwd: conflicting_cwd.abs(),
-            workspace_roots: None,
-            current_date: None,
-            timezone: None,
-            approval_policy: codex_protocol::protocol::AskForApproval::Never,
-            approvals_reviewer: None,
-            sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
-            permission_profile: None,
-            network: None,
-            file_system_sandbox_policy: None,
-            model: "stale-model".to_string(),
-            comp_hash: None,
-            personality: None,
-            collaboration_mode: None,
-            multi_agent_version: None,
-            multi_agent_mode: None,
-            realtime_active: None,
-            effort: None,
-            summary: codex_protocol::config_types::ReasoningSummary::Auto,
-        }),
-    };
-    std::fs::write(
-        &rollout_path,
-        format!(
-            "{}\n",
-            serde_json::to_string(&line).expect("serialize rollout")
-        ),
-    )
-    .expect("write conflicting rollout");
-    let mut thread = sample_thread_start_response().thread;
-    thread.cwd = canonical_cwd.clone().abs();
-    thread.path = Some(rollout_path);
-
-    assert_eq!(
-        (
-            latest_thread_cwd(&thread, ResumeCwdSource::LocalRollout).await,
-            latest_thread_cwd(&thread, ResumeCwdSource::CanonicalProjection).await,
-        ),
-        (conflicting_cwd, canonical_cwd)
-    );
-}
-
 #[test]
 fn turn_items_for_thread_returns_matching_turn_items() {
     let thread = AppServerThread {
@@ -398,7 +343,7 @@ fn turn_items_for_thread_returns_matching_turn_items() {
         recency_at: Some(0),
         status: codex_app_server_protocol::ThreadStatus::Idle,
         path: None,
-        cwd: test_path_buf("/tmp/project").abs(),
+        cwd: test_path_buf("/tmp/project").abs().into(),
         cli_version: "0.0.0-test".to_string(),
         source: codex_app_server_protocol::SessionSource::Exec,
         can_accept_direct_input: None,
@@ -866,7 +811,7 @@ fn sample_thread_start_response() -> ThreadStartResponse {
             recency_at: Some(0),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: Some(PathBuf::from("/tmp/rollout.jsonl")),
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Cli,
             can_accept_direct_input: None,
