@@ -31,9 +31,11 @@ signal matters but does not justify adding latency to every pull request.
 _Avoid_: Optional platform, unsupported platform
 
 **Linux support boundary**:
-The current fork-validation scope: native Linux x64 in the merge gate, with Linux x64, Linux ARM64,
-GNU, musl, and specialized Linux build variants in extended validation. macOS and Windows remain
-product platforms but are deferred from fork validation until sustainable runners are certified.
+The current fork-validation scope: native Linux x64 in the merge gate, plus a Release portability
+check and Change-triggered validation for relevant V8 changes. Linux ARM64 tests, remaining GNU/musl
+build variants, and other specialized Linux paths stay in extended validation. macOS and Windows
+remain product platforms but are deferred from fork validation until sustainable runners are
+certified.
 _Avoid_: Codex platform support, permanent platform removal
 
 **Validation workflow**:
@@ -60,14 +62,25 @@ _Avoid_: Free tier, OpenAI infrastructure, optional accelerator
 Native Linux x64 tests whose success is required by the current merge gate.
 _Avoid_: Cross-compile check, build-only signal, smoke test
 
+**Release portability check**:
+A required x64 musl release-profile compilation and lint signal that protects the static Linux
+release path without treating musl as an Essential platform test lane.
+_Avoid_: Essential validation, musl platform support, release test
+
+**Change-triggered validation**:
+A required merge-gate check whose expensive matrix runs only when a repository-owned detector marks
+the affected surface; unrelated changes complete through a bounded metadata-only path.
+_Avoid_: Optional check, informational check, path-filtered workflow
+
 **Merge feedback budget**:
-The target elapsed time from a pull-request head update to completion of the merge gate, initially
-45 minutes at the 95th percentile.
+The target elapsed time from a pull-request head update to completion of the full Merge gate path:
+120 minutes at the 95th percentile, reviewed after the first 20 eligible runs.
 _Avoid_: Job timeout, average job duration
 
 **Quarantined check**:
 A demonstrably intermittent validation temporarily removed from the merge gate with tracking,
-justification, and a deadline for restoration.
+justification, continued execution in Extended validation, and a restoration deadline no later
+than seven days after quarantine begins.
 _Avoid_: Ignored failure, permanent skip, continue-on-error
 
 **Coordinated baseline pin**:
