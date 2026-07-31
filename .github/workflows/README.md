@@ -33,6 +33,17 @@ remain the fallback.
 - `postgres-runtime-state-contracts.yml` provisions PostgreSQL 18 on Linux and
   runs the real-database Runtime State Namespace contract suite.
 - `sdk.yml` runs Python and TypeScript SDK validation on `ubuntu-24.04`.
+- `blocking-ci.yml` always runs the repository-owned Deep Linux eligibility
+  classifier. The job succeeds with bounded `eligible` and `reason` outputs
+  and a summary whether the change is eligible or explicitly irrelevant;
+  comparison or classifier uncertainty defaults to eligible. `CI required`
+  requires this decision alongside every existing child workflow.
+- Only root `README.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, and
+  `SECURITY.md`; `docs/**`; and GitHub community metadata under
+  `.github/CODEOWNERS`, `.github/ISSUE_TEMPLATE/**`,
+  `.github/pull_request_template.md`, and `.github/PULL_REQUEST_TEMPLATE/**`
+  are explicitly irrelevant to Deep Linux. All other paths, including unknown
+  paths, are eligible.
 
 ## Extended Validation
 
