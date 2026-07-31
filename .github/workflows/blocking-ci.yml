@@ -76,7 +76,7 @@ jobs:
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
 
           eligible=true
           reason="classifier did not run; Deep Linux remains eligible"
