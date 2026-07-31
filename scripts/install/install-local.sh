@@ -472,6 +472,10 @@ build_local_package() {
 
   step "Building local Codex debug package"
   rm -rf "$package_dir"
+  # Keep fast dev builds while matching release behavior for recoverable
+  # session-history invariants.
+  CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false
+  export CARGO_PROFILE_DEV_DEBUG_ASSERTIONS
   if [ -n "${CODEX_LOCAL_RG:-}" ]; then
     if [ ! -x "$CODEX_LOCAL_RG" ]; then
       echo "CODEX_LOCAL_RG must point to an executable rg." >&2
@@ -532,6 +536,46 @@ verify_visible_command() {
   "$BIN_PATH" --version >/dev/null
 }
 
+prune_old_releases() {
+  active_release="$1"
+
+  "$python_bin" - "$RELEASES_DIR" "$active_release" <<'PY'
+from pathlib import Path
+import shutil
+import sys
+
+
+releases_dir = Path(sys.argv[1]).resolve()
+active_release = Path(sys.argv[2]).resolve()
+if active_release.parent != releases_dir or not active_release.is_dir():
+    raise SystemExit(f"refusing to prune around invalid active release: {active_release}")
+
+previous_releases = sorted(
+    (
+        path
+        for path in releases_dir.iterdir()
+        if path != active_release
+        and not path.name.startswith(".")
+        and path.is_dir()
+        and not path.is_symlink()
+    ),
+    key=lambda path: (
+        (
+            (1, parts[-2], path.name)
+            if len(parts := path.name.rsplit("-", 2)) == 3
+            and len(parts[-2]) == 14
+            and parts[-2].isdigit()
+            else (0, f"{path.stat().st_mtime_ns:020d}", path.name)
+        )
+    ),
+    reverse=True,
+)
+for old_release in previous_releases[2:]:
+    shutil.rmtree(old_release)
+    print(f"Removed old standalone release: {old_release.name}")
+PY
+}
+
 parse_args "$@"
 
 if is_windows_uname; then
@@ -580,6 +624,7 @@ update_current_link "$release_dir"
 update_visible_command
 add_to_path
 verify_visible_command
+prune_old_releases "$release_dir"
 release_install_lock
 printf 'Activated local release: %s\n' "$release_name"
 print_launch_instructions
