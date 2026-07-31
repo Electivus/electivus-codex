@@ -33,9 +33,9 @@ _Avoid_: Optional platform, unsupported platform
 **Linux support boundary**:
 The current fork-validation scope: native Linux x64 in the merge gate, plus a Release portability
 check and Change-triggered validation for relevant V8 changes. Linux ARM64 tests, remaining GNU/musl
-build variants, and other specialized Linux paths stay in extended validation. macOS and Windows
-remain product platforms but are deferred from fork validation until sustainable runners are
-certified.
+build variants, and other specialized Linux paths stay in extended validation, while macOS and
+Windows remain product platforms but are deferred from fork validation until sustainable runners
+are certified.
 _Avoid_: Codex platform support, permanent platform removal
 
 **Validation workflow**:
