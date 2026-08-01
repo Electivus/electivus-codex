@@ -55,7 +55,15 @@ def validate_topology(
     consumer, result = (_job(platform, name) for name in ("postgres-contracts", "result"))
     x64, arm64 = (_job(full, name) for name in ("tests_linux_x64", "tests_linux_arm64"))
     pg_gate = _job(blocking, "postgres-runtime-state-contracts")
+    cargo_gate = _job(blocking, "deep-linux-cargo")
+    cargo_result = _job(blocking, "deep-linux-cargo-result")
     required = _job(blocking, "required")
+    lint = _job(full, "lint_build")
+    full_results = _job(full, "results")
+    full_only_results = (
+        "argument_comment_lint_package", "argument_comment_lint_prebuilt",
+        "general", "cargo_shear", "tests_linux_arm64",
+    )
     archive_upload = _step(archive, "Upload nextest archive")
     helper_upload = _step(archive, "Upload runtime test helpers")
     shard_archive = _step(shard, "Download nextest archive")
@@ -77,7 +85,15 @@ def validate_topology(
         ("PostgreSQL service and concurrency", postgres.count("      postgres:\n") == 1 and postgres.count("image: postgres:18") == 1 and pg_run.count("--test-threads 4") == 1),
         ("exact JUnit cardinality", '--expected-testcases "${{ steps.inventory.outputs.expected_total }}"' in postgres and "JUNIT_OUTCOME: ${{ steps.archive_junit.outcome }}" in postgres and "TEST_STATUS: ${{ steps.archive_test.outputs.status }}" in postgres),
         ("platform result fail closed", "needs: [shard, postgres-contracts]" in result and 'if [[ "${{ needs.shard.result }}" != "success" ]]; then' in result and 'if [[ "${{ inputs.postgres_contracts }}" == "true" && "${{ needs.postgres-contracts.result }}" != "success" ]]; then' in result and result.count("exit 1") == 2),
-        ("standalone Merge gate", re.search(r"artifact_id:\n\s+required: false\n\s+default: \"\"", postgres) is not None and "if: ${{ inputs.artifact_id == '' }}" in standalone and standalone.count("just test -p ") == 6 and "uses: ./.github/workflows/postgres-runtime-state-contracts.yml" in pg_gate and "- postgres-runtime-state-contracts" in required and "check_ci_results.py" in required),
+        ("standalone fallback remains callable", re.search(r"artifact_id:\n\s+required: false\n\s+default: \"\"", postgres) is not None and "if: ${{ inputs.artifact_id == '' }}" in standalone and standalone.count("just test -p ") == 6),
+        ("validation scope fails safe", re.search(r"validation_scope:\n\s+description: .*\n\s+required: false\n\s+default: full\n\s+type: string", full) is not None and "inputs.validation_scope == 'merge-gate'" in lint and "inputs.validation_scope != 'merge-gate'" in full),
+        ("merge-gate lint matrix", lint.count('inputs.validation_scope == \'merge-gate\'') == 1 and lint.count('"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"dev"') == 2 and "cargo clippy --workspace --target ${{ matrix.target }} --tests --profile ${{ matrix.profile }} --timings -- -D warnings" in lint),
+        ("full Extended matrix", all(fragment in lint for fragment in ('"target":"x86_64-unknown-linux-musl","profile":"dev"', '"target":"aarch64-unknown-linux-musl","profile":"dev"', '"target":"aarch64-unknown-linux-gnu","profile":"dev"', '"target":"x86_64-unknown-linux-musl","profile":"release"', '"target":"aarch64-unknown-linux-musl","profile":"release"'))),
+        ("merge-gate schedules only x64", all("if: ${{ inputs.validation_scope != 'merge-gate' }}" in _job(full, name) for name in ("general", "cargo_shear", "argument_comment_lint_package", "argument_comment_lint_prebuilt", "tests_linux_arm64")) and "inputs.validation_scope != 'merge-gate'" not in x64 and "inputs.validation_scope != 'merge-gate'" not in lint),
+        ("scope-aware full result", "VALIDATION_SCOPE: ${{ inputs.validation_scope }}" in full_results and "needs.lint_build.result }}' == 'success'" in full_results and "needs.tests_linux_x64.result }}' == 'success'" in full_results and "if [[ \"$VALIDATION_SCOPE\" != 'merge-gate' ]]" in full_results and all(f"needs.{name}.result }}}}' == 'success'" in full_results for name in full_only_results)),
+        ("eligible Cargo promotion", not pg_gate and "needs: deep-linux-eligibility" in cargo_gate and "needs.deep-linux-eligibility.result == 'success'" in cargo_gate and "needs.deep-linux-eligibility.outputs.eligible == 'true'" in cargo_gate and "uses: ./.github/workflows/rust-ci-full.yml" in cargo_gate and "validation_scope: merge-gate" in cargo_gate),
+        ("bounded Cargo result", "needs: [deep-linux-eligibility, deep-linux-cargo]" in cargo_result and "if: ${{ always() }}" in cargo_result and "timeout-minutes: 10" in cargo_result and "CARGO_RESULT: ${{ needs.deep-linux-cargo.result }}" in cargo_result and "ELIGIBILITY_RESULT: ${{ needs.deep-linux-eligibility.result }}" in cargo_result and "ELIGIBLE: ${{ needs.deep-linux-eligibility.outputs.eligible }}" in cargo_result and "set -euo pipefail" in cargo_result and "deep_linux_cargo_result.py | tee -a \"$GITHUB_STEP_SUMMARY\"" in cargo_result),
+        ("required aggregate promotion", "- deep-linux-eligibility" in required and "- deep-linux-cargo-result" in required and "- deep-linux-cargo\n" not in required and "- postgres-runtime-state-contracts" not in required and "check_ci_results.py" in required),
         ("repository check", "python3 .github/scripts/check_postgres_archive_topology.py" in repo_checks),
     )
     return [f"PostgreSQL archive topology drift: {label}" for label, valid in checks if not valid]

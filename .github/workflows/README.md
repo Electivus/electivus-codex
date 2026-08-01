@@ -30,14 +30,17 @@ remain the fallback.
   - `cargo shear`
   - `argument-comment-lint` on Linux
   - `tools/argument-comment-lint` package tests when the lint or its workflow wiring changes
-- `postgres-runtime-state-contracts.yml` preserves the standalone PostgreSQL 18
-  Runtime State Namespace contract path currently used by the Merge gate.
 - `sdk.yml` runs Python and TypeScript SDK validation on `ubuntu-24.04`.
 - `blocking-ci.yml` always runs the repository-owned Deep Linux eligibility
   classifier. The job succeeds with bounded `eligible` and `reason` outputs
   and a summary whether the change is eligible or explicitly irrelevant;
   comparison or classifier uncertainty defaults to eligible. `CI required`
-  requires this decision alongside every existing child workflow.
+  requires this decision alongside every existing child workflow. Eligible
+  changes call `rust-ci-full.yml` with the `merge-gate` scope: one native x64
+  full-workspace Cargo clippy lane and the x64 nextest archive's four ordinary
+  shards plus PostgreSQL consumer. Irrelevant changes skip that Cargo call;
+  a bounded result job accepts only the exact eligible/success or
+  irrelevant/skipped pair and fails closed on every other conclusion.
 - Only root `README.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, and
   `SECURITY.md`; `docs/**`; and GitHub community metadata under
   `.github/CODEOWNERS`, `.github/ISSUE_TEMPLATE/**`,
@@ -50,7 +53,7 @@ remain the fallback.
 - `postmerge-ci.yml` calls the full Rust and V8 suites after pushes to `main`.
   Both suites can also be dispatched against a non-default branch for Stability
   certification or a single diagnostic retry.
-- `rust-ci-full.yml` retains Linux x64 and ARM64 Cargo `clippy`, nextest,
+- `rust-ci-full.yml` defaults to the complete Linux x64 and ARM64 Cargo `clippy`, nextest,
   GNU/musl, release-profile, and argument-comment-lint coverage. Native Linux
   x64 builds one archive and matching runtime-helper artifact identity for four
   ordinary partitioned consumers plus one PostgreSQL 18 consumer. The fifth
@@ -79,8 +82,8 @@ testcase failures; and the retry elements `flakyFailure`, `flakyError`, `rerunFa
 without XML namespaces. A retry-assisted pass therefore stays red while logs and JUnit artifacts are uploaded.
 The PostgreSQL archive consumer uses the same checker and explicit outcome composition as the four ordinary
 consumers, and additionally requires exactly 109 executed JUnit testcases. Producer Cargo timings and all five
-consumers' JUnit durations and failure diagnostics remain available as artifacts and job logs. The standalone
-Merge-gate workflow remains independent until promotion is handled by #86.
+consumers' JUnit durations and failure diagnostics remain available as artifacts and job logs. The former
+standalone PostgreSQL Merge-gate job is retired because eligible changes now reuse this x64 Cargo archive path.
 
 `rust-test-policy.toml` inventories tracked Rust test ignores by source path, following test function, and normalized
 attribute or condition. New, changed, duplicate, stale, or unclassified occurrences fail repository checks. Review
