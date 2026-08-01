@@ -8,92 +8,77 @@ import sys
 from check_rust_test_policy import _workflow_jobs
 
 
-WORKFLOWS = tuple(
-    f".github/workflows/{name}"
-    for name in ("rust-ci-full-nextest-platform.yml", "postgres-runtime-state-contracts.yml", "rust-ci-full.yml", "repo-checks.yml")
+NAMES = (
+    "rust-ci-full-nextest-platform.yml", "postgres-runtime-state-contracts.yml",
+    "rust-ci-full.yml", "repo-checks.yml", "blocking-ci.yml",
 )
-def _job(workflow: str, name: str) -> str:
-    match = re.search(rf"(?m)^  {re.escape(name)}:\s*$", workflow)
+WORKFLOWS = tuple(f".github/workflows/{name}" for name in NAMES)
+
+
+def _block(text: str, start: str, following: str) -> str:
+    match = re.search(start, text, re.MULTILINE)
     if match is None:
         return ""
-    following = re.search(r"(?m)^  [A-Za-z_][A-Za-z0-9_-]*:\s*$", workflow[match.end() :])
-    end = match.end() + following.start() if following else len(workflow)
-    return workflow[match.start() : end]
+    after = re.search(following, text[match.end() :], re.MULTILINE)
+    end = match.end() + after.start() if after else len(text)
+    return text[match.start() : end]
+
+
+def _job(workflow: str, name: str) -> str:
+    return _block(
+        workflow,
+        rf"^  {re.escape(name)}:\s*$",
+        r"^  [A-Za-z_][A-Za-z0-9_-]*:\s*$",
+    )
+
+
+def _step(job: str, name: str) -> str:
+    return _block(
+        job,
+        rf"^      - name: {re.escape(name)}\s*$",
+        r"^      - (?:name:|uses:)",
+    )
+
+
+def _artifact(step: str, action: str, name: str, path: str) -> bool:
+    return f"uses: actions/{action}-artifact@" in step and f"          name: {name}" in step and f"          path: {path}" in step
+
+
+def _identity(block: str) -> bool:
+    return "NEXTEST_ARCHIVE_FILE: nextest-${{ inputs.artifact_id }}.tar.zst" in block and "TEST_HELPERS_ARTIFACT: nextest-test-helpers-${{ inputs.artifact_id }}" in block
 
 
 def validate_topology(
-    platform: str, postgres: str, full: str, repo_checks: str
+    platform: str, postgres: str, full: str, repo_checks: str, blocking: str
 ) -> list[str]:
-    archive = _job(platform, "archive")
-    shard = _job(platform, "shard")
-    consumer = _job(platform, "postgres-contracts")
-    result = _job(platform, "result")
-    x64 = _job(full, "tests_linux_x64")
-    arm64 = _job(full, "tests_linux_arm64")
+    archive, shard = (_job(platform, name) for name in ("archive", "shard"))
+    consumer, result = (_job(platform, name) for name in ("postgres-contracts", "result"))
+    x64, arm64 = (_job(full, name) for name in ("tests_linux_x64", "tests_linux_arm64"))
+    pg_gate = _job(blocking, "postgres-runtime-state-contracts")
+    required = _job(blocking, "required")
+    archive_upload = _step(archive, "Upload nextest archive")
+    helper_upload = _step(archive, "Upload runtime test helpers")
+    shard_archive = _step(shard, "Download nextest archive")
+    shard_helper = _step(shard, "Download runtime test helpers")
+    ordinary_run = _step(shard, "tests")
+    pg_archive = _step(_job(postgres, "postgres-contracts"), "Download nextest archive")
+    pg_helper = _step(_job(postgres, "postgres-contracts"), "Download runtime test helpers")
+    pg_run = _step(_job(postgres, "postgres-contracts"), "Run PostgreSQL contracts from nextest archive")
+    standalone = _step(_job(postgres, "postgres-contracts"), "Run PostgreSQL Runtime State contracts")
     checks = (
-        (
-            "single archive producer",
-            platform.count("cargo nextest archive") == 1
-            and "cargo nextest archive" in archive
-            and "cargo nextest archive" not in postgres,
-        ),
-        (
-            "four partitions",
-            re.search(r"shard:\s*\[1,\s*2,\s*3,\s*4\]", shard) is not None
-            and '--partition "hash:${{ matrix.shard }}/4"' in shard
-            and "--run-ignored" not in shard,
-        ),
-        (
-            "x64 fifth consumer",
-            "postgres_contracts: true" in x64
-            and "postgres_contracts: true" not in arm64,
-        ),
-        (
-            "shared archive dependency and identity",
-            "needs: archive" in consumer
-            and "uses: ./.github/workflows/postgres-runtime-state-contracts.yml" in consumer
-            and "artifact_id: ${{ inputs.artifact_id }}" in consumer
-            and "nextest-archive-${{ inputs.artifact_id }}" in platform
-            and postgres.count("nextest-archive-${{ inputs.artifact_id }}") == 1
-            and "nextest-test-helpers-${{ inputs.artifact_id }}" in postgres,
-        ),
-        (
-            "no archive-consumer compilation",
-            re.search(r"cargo\s+(?:build|test|nextest\s+archive)", postgres) is None,
-        ),
-        (
-            "one PostgreSQL 18 service",
-            postgres.count("      postgres:\n") == 1
-            and postgres.count("image: postgres:18") == 1,
-        ),
-        (
-            "PostgreSQL concurrency four",
-            postgres.count("--test-threads 4") == 1,
-        ),
-        (
-            "exact JUnit cardinality",
-            "--expected-testcases \"${{ steps.inventory.outputs.expected_total }}\""
-            in postgres
-            and "JUNIT_OUTCOME: ${{ steps.archive_junit.outcome }}" in postgres
-            and "TEST_STATUS: ${{ steps.archive_test.outputs.status }}" in postgres,
-        ),
-        (
-            "platform result fail closed",
-            "needs: [shard, postgres-contracts]" in result
-            and "needs.postgres-contracts.result" in result,
-        ),
-        (
-            "standalone Merge gate",
-            re.search(r"artifact_id:\n\s+required: false\n\s+default: \"\"", postgres)
-            is not None
-            and postgres.count("just test -p ") == 6
-            and re.search(r"Run PostgreSQL Runtime State contracts\n\s+if: \$\{\{ inputs.artifact_id == '' \}\}", postgres) is not None,
-        ),
-        (
-            "repository check",
-            "python3 .github/scripts/check_postgres_archive_topology.py"
-            in repo_checks,
-        ),
+        ("single archive producer", platform.count("cargo nextest archive") == 1 and "cargo nextest archive" in archive and "cargo nextest archive" not in postgres),
+        ("archive producer artifact", _identity(archive) and _artifact(archive_upload, "upload", "nextest-archive-${{ inputs.artifact_id }}", "${{ runner.temp }}/nextest-archive/${{ env.NEXTEST_ARCHIVE_FILE }}") and _artifact(helper_upload, "upload", "${{ env.TEST_HELPERS_ARTIFACT }}", "${{ runner.temp }}/${{ env.TEST_HELPERS_ARTIFACT }}/*")),
+        ("ordinary shard artifacts", _identity(shard) and _artifact(shard_archive, "download", "nextest-archive-${{ inputs.artifact_id }}", "${{ runner.temp }}/nextest-archive") and _artifact(shard_helper, "download", "${{ env.TEST_HELPERS_ARTIFACT }}", "${{ runner.temp }}/${{ env.TEST_HELPERS_ARTIFACT }}")),
+        ("ordinary shard selection", re.search(r"shard:\s*\[1,\s*2,\s*3,\s*4\]", shard) is not None and '--partition "hash:${{ matrix.shard }}/4"' in ordinary_run and not re.search(r"(?:^|\s)-E(?:\s|$)", ordinary_run) and "--run-ignored" not in ordinary_run),
+        ("x64 fifth consumer", "postgres_contracts: true" in x64 and "postgres_contracts: true" not in arm64),
+        ("shared archive dependency and identity", "needs: archive" in consumer and "uses: ./.github/workflows/postgres-runtime-state-contracts.yml" in consumer and "artifact_id: ${{ inputs.artifact_id }}" in consumer),
+        ("PostgreSQL artifacts", _identity(_job(postgres, "postgres-contracts")) and _artifact(pg_archive, "download", "nextest-archive-${{ inputs.artifact_id }}", "${{ runner.temp }}/nextest-archive") and _artifact(pg_helper, "download", "${{ env.TEST_HELPERS_ARTIFACT }}", "${{ runner.temp }}/${{ env.TEST_HELPERS_ARTIFACT }}")),
+        ("PostgreSQL archive execution", "cargo nextest run" in pg_run and '--archive-file "${archive_file}"' in pg_run and "just test" not in pg_run and not re.search(r"cargo\s+(?:build|test|nextest\s+archive)", postgres)),
+        ("PostgreSQL service and concurrency", postgres.count("      postgres:\n") == 1 and postgres.count("image: postgres:18") == 1 and pg_run.count("--test-threads 4") == 1),
+        ("exact JUnit cardinality", '--expected-testcases "${{ steps.inventory.outputs.expected_total }}"' in postgres and "JUNIT_OUTCOME: ${{ steps.archive_junit.outcome }}" in postgres and "TEST_STATUS: ${{ steps.archive_test.outputs.status }}" in postgres),
+        ("platform result fail closed", "needs: [shard, postgres-contracts]" in result and '"${{ inputs.postgres_contracts }}" == "true"' in result and '"${{ needs.postgres-contracts.result }}" != "success"' in result and "exit 1" in result),
+        ("standalone Merge gate", re.search(r"artifact_id:\n\s+required: false\n\s+default: \"\"", postgres) is not None and "if: ${{ inputs.artifact_id == '' }}" in standalone and standalone.count("just test -p ") == 6 and "uses: ./.github/workflows/postgres-runtime-state-contracts.yml" in pg_gate and "- postgres-runtime-state-contracts" in required and "check_ci_results.py" in required),
+        ("repository check", "python3 .github/scripts/check_postgres_archive_topology.py" in repo_checks),
     )
     return [f"PostgreSQL archive topology drift: {label}" for label, valid in checks if not valid]
 
@@ -103,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     repo = parser.parse_args(argv).repo.resolve()
     issues: list[str] = []
-    for name in ("rust-ci-full-nextest-platform.yml", "postgres-runtime-state-contracts.yml"):
+    for name in (NAMES[0], NAMES[1], NAMES[4]):
         _, workflow_issues = _workflow_jobs(repo, name)
         issues.extend(workflow_issues)
     try:
