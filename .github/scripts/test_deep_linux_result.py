@@ -23,32 +23,31 @@ class DeepLinuxResultTests(unittest.TestCase):
 
     def test_all_other_conclusions_fail_closed_for_each_caller(self) -> None:
         cases = (
-            ("failure", "true", "skipped"),
-            ("cancelled", "true", "skipped"),
-            ("skipped", "true", "skipped"),
-            ("unknown", "true", "skipped"),
-            ("", "true", "skipped"),
-            ("success", "", "skipped"),
-            ("success", "TRUE", "success"),
-            ("success", "unknown", "success"),
-            ("success", "true", "failure"),
-            ("success", "true", "cancelled"),
-            ("success", "true", "skipped"),
-            ("success", "true", ""),
-            ("success", "true", "unknown"),
-            ("success", "false", "success"),
-            ("success", "false", "failure"),
-            ("success", "false", "cancelled"),
-            ("success", "false", ""),
-            ("success", "false", "unknown"),
+            ("failure", "true", "skipped", "eligibility job ended with failure"),
+            ("cancelled", "true", "skipped", "eligibility job ended with cancelled"),
+            ("skipped", "true", "skipped", "eligibility job ended with skipped"),
+            ("unknown", "true", "skipped", "eligibility job ended with unknown"),
+            ("", "true", "skipped", "eligibility job ended with missing"),
+            ("success", "", "skipped", "eligibility output is malformed"),
+            ("success", "TRUE", "success", "eligibility output is malformed"),
+            ("success", "unknown", "success", "eligibility output is malformed"),
+            ("success", "true", "failure", "eligible=true requires {label} success, found failure"),
+            ("success", "true", "cancelled", "eligible=true requires {label} success, found cancelled"),
+            ("success", "true", "skipped", "eligible=true requires {label} success, found skipped"),
+            ("success", "true", "", "eligible=true requires {label} success, found missing"),
+            ("success", "true", "unknown", "eligible=true requires {label} success, found unknown"),
+            ("success", "false", "success", "eligible=false requires {label} skipped, found success"),
+            ("success", "false", "failure", "eligible=false requires {label} skipped, found failure"),
+            ("success", "false", "cancelled", "eligible=false requires {label} skipped, found cancelled"),
+            ("success", "false", "", "eligible=false requires {label} skipped, found missing"),
+            ("success", "false", "unknown", "eligible=false requires {label} skipped, found unknown"),
         )
         for label in ("Deep Linux Cargo", "Deep Linux Bazel release"):
-            for eligibility, eligible, validation in cases:
+            for eligibility, eligible, validation, message in cases:
                 with self.subTest(label=label, state=(eligibility, eligible, validation)):
-                    self.assertFalse(
-                        result.evaluate(
-                            eligibility, eligible, validation, label
-                        ).passed
+                    self.assertEqual(
+                        result.Decision(False, message.format(label=label)),
+                        result.evaluate(eligibility, eligible, validation, label),
                     )
 
     def test_missing_or_malformed_labels_fail_closed(self) -> None:
