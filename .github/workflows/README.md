@@ -66,20 +66,14 @@ remain the fallback.
 
 ## Test Signal Integrity
 
-Every full-Rust nextest shard treats its JUnit XML as a required result, including
-when the nextest command fails. `check_nextest_junit.py` fails closed on a missing,
-malformed, or wrong-root report; nonzero failure/error counts; testcase failures;
-and the Jenkins/nextest retry elements `flakyFailure`, `flakyError`,
-`rerunFailure`, and `rerunError` (with or without XML namespaces). Thus a
-retry-assisted pass remains red while the diagnostic log and JUnit artifact are
-uploaded on both success and failure. Specialized archive consumers should reuse
-this checker rather than reimplement retry interpretation.
+Every full-Rust nextest shard treats its JUnit XML as a required result, including when the nextest command fails.
+`check_nextest_junit.py` fails closed on missing, malformed, or wrong-root reports; nonzero failure/error counts;
+testcase failures; and the retry elements `flakyFailure`, `flakyError`, `rerunFailure`, and `rerunError`, with or
+without XML namespaces. A retry-assisted pass therefore stays red while logs and JUnit artifacts are uploaded.
 
-`rust-test-policy.toml` is the exact inventory of tracked Rust test ignores. Each
-identity contains the source path, following test function, and normalized ignore
-attribute/condition. A new, changed, duplicate, stale, or unclassified occurrence
-fails repository checks. Update the exact identity alongside an intentional source
-change; do not add a path-, module-, or category-wide exemption.
+`rust-test-policy.toml` inventories tracked Rust test ignores by source path, following test function, and normalized
+attribute or condition. New, changed, duplicate, stale, or unclassified occurrences fail repository checks. Review
+and assign every exact identity with its source change; names and reason text never classify it automatically.
 
 The allowed ignore categories have these narrow boundaries:
 
@@ -94,14 +88,10 @@ The allowed ignore categories have these narrow boundaries:
 | `pending-behavior-change`  | Only two inherited compaction follow-up expectations.        |
 | `temporary-certification`  | Only the two #89 tests named in `rust-test-policy.toml`.     |
 
-`quarantined-checks.toml` starts empty. An active `[[quarantines]]` record requires
-an exact `check_identity`, narrow `scope`, concrete `evidence`, substantive
-`justification`, an existing `.github/workflows` filename in `extended_workflow`, an
-actual top-level job id from that file in `extended_job`, an exact GitHub issue or
-pull-request `tracking` URL, and TOML `start_date`/`expiry_date` values. Identities
-must be unique, wildcard or blanket scopes are rejected, and expiry must be on or
-after the start, at most seven days later, and not elapsed. Quarantine is temporary
-relocation, never `continue-on-error`, a permanent skip, or stopped Extended validation.
+`quarantined-checks.toml` starts empty. Each record needs an exact `check_identity`, narrow `scope`, evidence,
+justification, an existing workflow and top-level job, an exact GitHub issue or pull-request URL, and TOML dates.
+Identities must be unique; wildcard or blanket scopes fail. Expiry must be on or after the start, no more than seven
+days later, and not elapsed. Quarantine is temporary relocation, never a silent pass or stopped validation.
 
 ## Rule Of Thumb
 

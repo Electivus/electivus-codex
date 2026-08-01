@@ -20,13 +20,6 @@ class NextestJunitTests(unittest.TestCase):
             result = policy.main([str(report)])
         return result, output.getvalue()
 
-    def test_retry_free_success_is_accepted(self) -> None:
-        result, _ = self.run_xml(
-            '<testsuites tests="1" failures="0" errors="0"><testsuite name="suite" '
-            'failures="0" errors="0"><testcase name="passed" /></testsuite></testsuites>'
-        )
-        self.assertEqual(0, result)
-
     def test_every_retry_element_is_rejected_by_local_name_and_identity(self) -> None:
         for element in policy.RETRY_ELEMENTS:
             with self.subTest(element=element):
@@ -38,27 +31,24 @@ class NextestJunitTests(unittest.TestCase):
                 self.assertEqual(1, result)
                 self.assertIn(f"crate::module::recovered: retry evidence <{element}>", output)
 
-    def test_failure_elements_and_aggregate_counts_are_rejected(self) -> None:
+    def test_success_and_invalid_report_shapes(self) -> None:
         cases = (
+            ('<testsuites failures="0"><testsuite><testcase name="passed" /></testsuite></testsuites>', 0, ""),
             (
                 '<testsuites failures="1" errors="0"><testsuite><testcase name="failed">'
                 '<failure message="assertion failed" /></testcase></testsuite></testsuites>',
+                1,
                 "assertion failed",
             ),
-            ('<testsuites failures="0" errors="1"><testsuite /></testsuites>', "errors=1"),
+            ('<testsuites failures="0" errors="1"><testsuite /></testsuites>', 1, "errors=1"),
+            ("<testsuites>", 1, "valid JUnit"),
+            ("<report />", 1, "testsuites"),
         )
-        for xml, expected in cases:
-            with self.subTest(expected=expected):
+        for xml, expected_result, expected_output in cases:
+            with self.subTest(expected=expected_output):
                 result, output = self.run_xml(xml)
-                self.assertEqual(1, result)
-                self.assertIn(expected, output)
-
-    def test_malformed_and_wrong_root_reports_are_rejected(self) -> None:
-        for xml, expected in (("<testsuites>", "valid JUnit"), ("<report />", "testsuites")):
-            with self.subTest(xml=xml):
-                result, output = self.run_xml(xml)
-                self.assertEqual(1, result)
-                self.assertIn(expected, output)
+                self.assertEqual(expected_result, result)
+                self.assertIn(expected_output, output)
 
     def test_missing_and_non_file_reports_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

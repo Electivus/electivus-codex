@@ -12,21 +12,13 @@ import sys
 import tomllib
 
 
-ALLOWED_CATEGORIES = frozenset(
-    "helper-process live-external-api manual-smoke out-of-boundary-platform "
-    "pending-behavior-change schema-generation specialized-environment temporary-certification".split()
-)
-TEMPORARY_CERTIFICATION_TESTS = (
-    "injected_user_input_triggers_follow_up_request_with_deltas",
-    "review_start_exec_approval_item_id_matches_command_execution_item",
-)
+ALLOWED_CATEGORIES = frozenset("helper-process live-external-api manual-smoke out-of-boundary-platform pending-behavior-change schema-generation specialized-environment temporary-certification".split())
+TEMPORARY_CERTIFICATION_TESTS = ("injected_user_input_triggers_follow_up_request_with_deltas", "review_start_exec_approval_item_id_matches_command_execution_item")
 GITHUB_TRACKING_RE = re.compile(r"https://github\.com/[^/]+/[^/]+/(?:issues|pull)/[1-9][0-9]*$")
 RAW_STRING_RE = re.compile(r'(?:b|c)?r(#{0,255})"')
 FUNCTION_RE = re.compile(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)")
 ATTRIBUTE_START_RE = re.compile(r"#\s*\[")
 JOB_RE = re.compile(r"  ([A-Za-z_][A-Za-z0-9_-]*):\s*(?:#.*)?$")
-HELPER_REASON_MARKERS = ("child process", "helper process", "spawned by")
-HELPER_WITHOUT_REASON = "from_absolute_path_with_removed_current_dir_child"
 
 
 @dataclass(frozen=True, order=True)
@@ -50,22 +42,17 @@ def _raw_string_end(text: str, start: int) -> int | None:
 def _quoted_end(text: str, start: int, quote: str) -> int:
     cursor = start + 1
     while cursor < len(text):
-        if text[cursor] == "\\":
-            cursor += 2
-        elif text[cursor] == quote:
+        if text[cursor] == quote:
             return cursor + 1
-        else:
-            cursor += 1
+        cursor += 2 if text[cursor] == "\\" else 1
     return len(text)
 
 def _block_comment_end(text: str, start: int) -> int:
     depth, cursor = 1, start + 2
     while cursor < len(text) and depth:
-        if text.startswith("/*", cursor):
-            depth += 1
-            cursor += 2
-        elif text.startswith("*/", cursor):
-            depth -= 1
+        marker = text[cursor : cursor + 2]
+        if marker in {"/*", "*/"}:
+            depth += 1 if marker == "/*" else -1
             cursor += 2
         else:
             cursor += 1
@@ -105,11 +92,10 @@ def rust_lexemes(text: str) -> list[tuple[str, int, int]]:
     return lexemes
 
 def _code_mask(text: str) -> str:
-    masked = list(text)
-    for kind, start, end in rust_lexemes(text):
-        if kind != "code":
-            masked[start:end] = " " * (end - start)
-    return "".join(masked)
+    return "".join(
+        text[start:end] if kind == "code" else " " * (end - start)
+        for kind, start, end in rust_lexemes(text)
+    )
 
 def _normalize_meta(meta: str) -> str:
     return "".join(
@@ -190,9 +176,7 @@ def inventory_ignores(repo: Path) -> list[IgnoreOccurrence]:
         capture_output=True,
     )
     occurrences: list[IgnoreOccurrence] = []
-    for relative_path in sorted(result.stdout.decode().split("\0")):
-        if not relative_path:
-            continue
+    for relative_path in filter(None, sorted(result.stdout.decode().split("\0"))):
         text = (repo / relative_path).read_text(encoding="utf-8")
         if "ignore" in text:
             occurrences.extend(inventory_file(relative_path, text))
@@ -206,12 +190,6 @@ def load_toml(path: Path) -> tuple[dict[str, object] | None, list[str]]:
             return tomllib.load(source), []
     except (OSError, tomllib.TOMLDecodeError) as error:
         return None, [f"cannot read valid TOML from {path}: {error}"]
-
-
-def _is_helper_process(occurrence: IgnoreOccurrence) -> bool:
-    return occurrence.test == HELPER_WITHOUT_REASON or any(
-        marker in occurrence.attribute.casefold() for marker in HELPER_REASON_MARKERS
-    )
 
 
 def validate_ignore_policy(
@@ -234,11 +212,6 @@ def validate_ignore_policy(
         if occurrence is None:
             issues.append(f"stale Rust ignore classification: {identity}")
             continue
-        helper = _is_helper_process(occurrence)
-        if category == "helper-process" and not helper:
-            issues.append(f"{identity}: helper-process requires a subprocess entry point")
-        if category == "specialized-environment" and helper:
-            issues.append(f"{identity}: subprocess entry point must use helper-process")
         if category == "temporary-certification":
             if occurrence.test not in TEMPORARY_CERTIFICATION_TESTS:
                 issues.append(f"{identity}: only the two #89 tests may be temporary")
@@ -260,6 +233,34 @@ def _required_string(
     return value.strip()
 
 
+def _yaml_flow_state(
+    line: str, stack: list[str], quote: str | None
+) -> tuple[list[str], str | None] | None:
+    cursor = 0
+    while cursor < len(line):
+        character = line[cursor]
+        if quote == '"' and character == "\\":
+            cursor += 2
+            continue
+        if quote:
+            if character == quote:
+                if quote == "'" and line[cursor + 1 : cursor + 2] == "'":
+                    cursor += 1
+                else:
+                    quote = None
+        elif character in "'\"":
+            quote = character
+        elif character == "#" and (cursor == 0 or line[cursor - 1].isspace()):
+            break
+        elif character in "[{":
+            stack.append(character)
+        elif character in "]}":
+            if not stack or (stack.pop(), character) not in {("[", "]"), ("{", "}")}:
+                return None
+        cursor += 1
+    return stack, quote
+
+
 def _workflow_jobs(repo: Path, name: str) -> tuple[set[str], list[str]]:
     relative = Path(name)
     if relative.name != name or relative.suffix not in {".yml", ".yaml"}:
@@ -274,23 +275,52 @@ def _workflow_jobs(repo: Path, name: str) -> tuple[set[str], list[str]]:
     jobs_markers = [index for index, line in enumerate(lines) if re.fullmatch(r"jobs:\s*(?:#.*)?", line)]
     if len(jobs_markers) != 1:
         return set(), [f"malformed extended workflow {name}: expected one top-level jobs mapping"]
-    jobs: set[str] = set()
+    jobs: dict[str, bool] = {}
+    current_job = scalar_indent = None
+    flow_stack: list[str] = []
+    quote: str | None = None
     for line in lines[jobs_markers[0] + 1 :]:
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         indent = len(line) - len(line.lstrip(" "))
-        if "\t" in line[: len(line) - len(line.lstrip())] or indent in {1, 3}:
-            return set(), [f"malformed extended workflow {name}: invalid job indentation"]
+        if scalar_indent is not None and indent > scalar_indent:
+            continue
+        scalar_indent = None
+        if "\t" in line or indent % 2:
+            return set(), [f"malformed extended workflow {name}: tabs or invalid indentation"]
         if indent == 0:
             break
         if indent == 2:
+            if flow_stack or quote:
+                return set(), [f"malformed extended workflow {name}: unbalanced flow or quote"]
             match = JOB_RE.fullmatch(line)
             if match is None:
-                return set(), [f"malformed extended workflow {name}: invalid job mapping"]
-            jobs.add(match.group(1))
+                return set(), [f"malformed extended workflow {name}: job must be a mapping"]
+            current_job = match.group(1)
+            if current_job in jobs:
+                return set(), [f"malformed extended workflow {name}: duplicate job id {current_job}"]
+            jobs[current_job] = False
+            continue
+        state = _yaml_flow_state(line, flow_stack, quote)
+        if current_job is None or indent < 4 or state is None:
+            return set(), [f"malformed extended workflow {name}: invalid job block"]
+        flow_stack, quote = state
+        if re.search(r":\s*[|>][-+]?\s*(?:#.*)?$", line):
+            scalar_indent = indent
+        if indent == 4:
+            key, separator, value = line.strip().partition(":")
+            if not separator:
+                return set(), [f"malformed extended workflow {name}: job property must be a mapping"]
+            concrete = value.strip() not in {"", "''", '\"\"', "null", "~"}
+            if key in {"runs-on", "uses"} and concrete and not value.lstrip().startswith("#"):
+                jobs[current_job] = True
     if not jobs:
         return set(), [f"malformed extended workflow {name}: jobs mapping is empty"]
-    return jobs, []
+    if flow_stack or quote:
+        return set(), [f"malformed extended workflow {name}: unbalanced flow or quote"]
+    if missing := [job for job, runnable in jobs.items() if not runnable]:
+        return set(), [f"malformed extended workflow {name}: jobs lack runs-on or uses: {', '.join(sorted(missing))}"]
+    return set(jobs), []
 
 
 def validate_quarantines(
@@ -299,8 +329,7 @@ def validate_quarantines(
     records = policy.get("quarantines", [])
     if not isinstance(records, list):
         return ["quarantine manifest must contain an array of records"]
-    issues: list[str] = []
-    identities: set[str] = set()
+    issues, identities = [], set()
     workflow_cache: dict[str, tuple[set[str], list[str]]] = {}
     for index, record in enumerate(records, 1):
         label = f"quarantine record {index}"
@@ -338,8 +367,8 @@ def validate_quarantines(
                 issues.append(f"{label} extended_job does not exist in {workflow}: {job}")
         start = record.get("start_date")
         expiry = record.get("expiry_date")
-        valid_start = isinstance(start, dt.date) and not isinstance(start, dt.datetime)
-        valid_expiry = isinstance(expiry, dt.date) and not isinstance(expiry, dt.datetime)
+        valid_start = type(start) is dt.date
+        valid_expiry = type(expiry) is dt.date
         if not valid_start:
             issues.append(f"{label} requires TOML date start_date")
         if not valid_expiry:
@@ -383,14 +412,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             issues.extend(validate_quarantines(quarantines, args.today or dt.date.today(), repo))
     if issues:
-        print("Rust test signal policy failed:", file=sys.stderr)
-        for issue in issues:
-            print(f"- {issue}", file=sys.stderr)
+        print("Rust test signal policy failed:\n" + "\n".join(f"- {issue}" for issue in issues), file=sys.stderr)
         return 1
-    print(
-        f"Rust test signal policy passed: {len(occurrences)} ignore occurrences; "
-        f"{len(quarantines.get('quarantines', []))} active quarantines"
-    )
+    quarantine_count = len(quarantines.get("quarantines", []))
+    print(f"Rust test signal policy passed: {len(occurrences)} ignore occurrences; {quarantine_count} active quarantines")
     return 0
 
 

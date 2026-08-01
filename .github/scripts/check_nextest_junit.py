@@ -22,8 +22,7 @@ def inspect_report(report: Path) -> list[str]:
         root = ET.parse(report).getroot()
     except (OSError, ET.ParseError) as error:
         return [f"cannot read a valid JUnit report at {report}: {error}"]
-    root_name = _local_name(root.tag)
-    if root_name != "testsuites":
+    if (root_name := _local_name(root.tag)) != "testsuites":
         return [f"JUnit root must be <testsuites>, found <{root_name}>"]
 
     issues: list[str] = []
@@ -32,16 +31,14 @@ def inspect_report(report: Path) -> list[str]:
         if element_name in {"testsuites", "testsuite"}:
             identity = element.get("name", "root testsuites")
             for count_name in ("failures", "errors"):
-                raw_count = element.get(count_name)
-                if raw_count is None:
-                    continue
+                raw_count = element.get(count_name, "0")
                 try:
                     count = int(raw_count)
-                except ValueError:
+                except (TypeError, ValueError):
                     issues.append(f"{identity}: invalid aggregate {count_name}={raw_count!r}")
-                else:
-                    if count:
-                        issues.append(f"{identity}: aggregate {count_name}={count}")
+                    continue
+                if count:
+                    issues.append(f"{identity}: aggregate {count_name}={count}")
         if element_name != "testcase":
             continue
         classname = element.get("classname", "").strip()
@@ -53,10 +50,7 @@ def inspect_report(report: Path) -> list[str]:
                 continue
             kind = "retry" if child_name in RETRY_ELEMENTS else "failure"
             detail = child.get("message", "").strip()
-            issues.append(
-                f"{identity}: {kind} evidence <{child_name}>"
-                + (f": {detail}" if detail else "")
-            )
+            issues.append(f"{identity}: {kind} evidence <{child_name}>" + (f": {detail}" if detail else ""))
     return issues
 
 
@@ -65,13 +59,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("report", type=Path, help="required nextest JUnit XML")
     report = parser.parse_args(argv).report
     issues = inspect_report(report)
-    if not issues:
-        print(f"nextest JUnit policy passed: {report}")
-        return 0
-    print("nextest JUnit policy failed:", file=sys.stderr)
-    for issue in issues:
-        print(f"- {issue}", file=sys.stderr)
-    return 1
+    if issues:
+        print("nextest JUnit policy failed:\n" + "\n".join(f"- {issue}" for issue in issues), file=sys.stderr)
+        return 1
+    print(f"nextest JUnit policy passed: {report}")
+    return 0
 
 
 if __name__ == "__main__":
