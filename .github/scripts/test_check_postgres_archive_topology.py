@@ -9,6 +9,41 @@ def replace_last(source: str, old: str, new: str) -> str:
     return before + new + after if found else source
 
 
+def replace_in_step(
+    source: str, job_name: str, step_name: str, old: str, new: str
+) -> str:
+    job = topology._job(source, job_name)
+    step = topology._step(job, step_name)
+    changed = step.replace(old, new, 1)
+    if changed == step:
+        raise AssertionError(f"{old!r} not found in {step_name} step")
+    return source.replace(step, changed, 1)
+
+
+def replace_in_nextest_installer(
+    source: str, job_name: str, old: str, new: str
+) -> str:
+    job = topology._job(source, job_name)
+    step = topology._nextest_installers(job)[0]
+    changed = step.replace(old, new, 1)
+    if changed == step:
+        raise AssertionError(f"{old!r} not found in {job_name} Nextest installer")
+    return source.replace(job, job.replace(step, changed, 1), 1)
+
+
+def append_installer(
+    source: str, job_name: str, installer: str, *, step_name: str | None = None
+) -> str:
+    job = topology._job(source, job_name)
+    anchor = (
+        topology._step(job, step_name)
+        if step_name
+        else topology._nextest_installers(job)[0]
+    )
+    changed = job.replace(anchor, f"{anchor}{installer}", 1)
+    return source.replace(job, changed, 1)
+
+
 class PostgresArchiveTopologyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -27,7 +62,100 @@ class PostgresArchiveTopologyTests(unittest.TestCase):
 
     def test_mutable_topology_invariants_fail_closed(self) -> None:
         platform, postgres, full, repo_checks, blocking, planner, result_helper = self.sources
+        action = topology.NEXTEST_INSTALL_ACTION
+        tool = topology.NEXTEST_TOOL
+        additional_installer = (
+            "      - name: Install additional Nextest\n"
+            f"        uses: {action}\n"
+            "        with:\n"
+            f"          tool: {tool}\n\n"
+        )
+        additional_archive_installer = additional_installer.replace(
+            "        uses:", "        if: ${{ inputs.artifact_id != '' }}\n        uses:"
+        )
         cases = (
+            (
+                "archive producer nextest pin",
+                0,
+                replace_in_nextest_installer(
+                    platform,
+                    "archive",
+                    action,
+                    f"taiki-e/install-action@wrong # uses: {action}",
+                ),
+            ),
+            (
+                "ordinary shard nextest pin",
+                0,
+                replace_in_nextest_installer(
+                    platform,
+                    "shard",
+                    action,
+                    f"taiki-e/install-action@wrong # uses: {action}",
+                ),
+            ),
+            (
+                "PostgreSQL archive consumer nextest pin",
+                1,
+                replace_in_step(
+                    postgres,
+                    "postgres-contracts",
+                    "Install pinned nextest for archive consumption",
+                    action,
+                    f"taiki-e/install-action@wrong # uses: {action}",
+                ),
+            ),
+            (
+                "archive producer nextest pin",
+                0,
+                replace_in_nextest_installer(
+                    platform,
+                    "archive",
+                    tool,
+                    f"nextest@0.9.104 #          tool: {tool}",
+                ),
+            ),
+            (
+                "ordinary shard nextest pin",
+                0,
+                replace_in_nextest_installer(
+                    platform,
+                    "shard",
+                    tool,
+                    f"nextest@0.9.104 #          tool: {tool}",
+                ),
+            ),
+            (
+                "PostgreSQL archive consumer nextest pin",
+                1,
+                replace_in_step(
+                    postgres,
+                    "postgres-contracts",
+                    "Install pinned nextest for archive consumption",
+                    tool,
+                    f"nextest@0.9.104 #          tool: {tool}",
+                ),
+            ),
+            (
+                "archive producer nextest pin",
+                0,
+                append_installer(platform, "archive", additional_installer),
+            ),
+            (
+                "ordinary shard nextest pin",
+                0,
+                append_installer(platform, "shard", additional_installer),
+            ),
+            (
+                "PostgreSQL archive consumer nextest pin",
+                1,
+                append_installer(
+                    postgres,
+                    "postgres-contracts",
+                    additional_archive_installer,
+                    step_name="Install pinned nextest for archive consumption",
+                ),
+            ),
             ("archive producer nextest pin", 0, platform.replace("tool: nextest@0.9.103", "tool: nextest", 1)),
             ("ordinary shard nextest pin", 0, replace_last(platform, "tool: nextest@0.9.103", "tool: nextest")),
             ("PostgreSQL archive consumer nextest pin", 1, postgres.replace("tool: nextest@0.9.103", "tool: nextest\n          version: 0.9.103")),

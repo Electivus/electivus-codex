@@ -102,23 +102,57 @@ def _checkout(job: str) -> str:
     )
 
 
-def _nextest_installer(block: str) -> str:
-    for match in re.finditer(r"^      - (?:name:|uses:)", block, re.MULTILINE):
-        step = _block(
-            block[match.start() :],
-            r"^      - (?:name:|uses:)",
-            r"^      - (?:name:|uses:)",
-        )
-        if re.search(r"^          tool: nextest(?:@|\s*$)", step, re.MULTILINE):
-            return step
-    return ""
+def _step_value(step: str, field: str) -> str | None:
+    prefixes = (
+        rf"^(?:      - {re.escape(field)}:|        {re.escape(field)}:)"
+        if field == "uses"
+        else rf"^          {re.escape(field)}:"
+    )
+    match = re.search(
+        rf"{prefixes}\s*(?P<value>[^#\s]+)\s*(?:#.*)?$", step, re.MULTILINE
+    )
+    return match.group("value") if match else None
 
 
-def _pinned_nextest(installer: str) -> bool:
+def _steps(block: str) -> tuple[str, ...]:
+    starts = tuple(
+        match.start()
+        for match in re.finditer(r"^      - (?:name:|uses:)", block, re.MULTILINE)
+    )
+    return tuple(
+        block[start : starts[index + 1] if index + 1 < len(starts) else len(block)]
+        for index, start in enumerate(starts)
+    )
+
+
+def _nextest_installers(block: str) -> tuple[str, ...]:
+    installers = []
+    for step in _steps(block):
+        tool = _step_value(step, "tool")
+        if tool is not None and (tool == "nextest" or tool.startswith("nextest@")):
+            installers.append(step)
+    return tuple(installers)
+
+
+def _archive_mode(installer: str) -> bool:
     return (
-        f"uses: {NEXTEST_INSTALL_ACTION}" in installer
-        and installer.count(f"          tool: {NEXTEST_TOOL}") == 1
-        and re.search(r"^          tool: nextest\s*$", installer, re.MULTILINE) is None
+        re.search(
+            r"^        if:\s*\$\{\{\s*inputs\.artifact_id\s*!=\s*''\s*\}\}"
+            r"\s*(?:#.*)?$",
+            installer,
+            re.MULTILINE,
+        )
+        is not None
+    )
+
+
+def _pinned_nextest(installers: tuple[str, ...]) -> bool:
+    if len(installers) != 1:
+        return False
+    installer = installers[0]
+    return (
+        _step_value(installer, "uses") == NEXTEST_INSTALL_ACTION
+        and _step_value(installer, "tool") == NEXTEST_TOOL
         and re.search(r"^          version:", installer, re.MULTILINE) is None
     )
 
@@ -160,9 +194,13 @@ def validate_topology(
     shard_junit = _step(shard, "Inspect nextest JUnit signal")
     shard_junit_upload = _step(shard, "Upload nextest JUnit report")
     postgres_job = _job(postgres, "postgres-contracts")
-    archive_nextest = _nextest_installer(archive)
-    shard_nextest = _nextest_installer(shard)
-    postgres_nextest = _step(postgres_job, "Install pinned nextest for archive consumption")
+    archive_nextest = _nextest_installers(archive)
+    shard_nextest = _nextest_installers(shard)
+    postgres_nextest = tuple(
+        installer
+        for installer in _nextest_installers(postgres_job)
+        if _archive_mode(installer)
+    )
     inventory = _step(postgres_job, "Validate PostgreSQL contract inventory")
     pg_archive = _step(postgres_job, "Download nextest archive")
     pg_helper = _step(postgres_job, "Download runtime test helpers")
