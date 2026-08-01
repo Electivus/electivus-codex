@@ -143,5 +143,5 @@ jobs:
         with:
           name: test-certification-${{ matrix.test_id }}-${{ env.CANDIDATE_SHA }}
           path: ${{ env.EVIDENCE_DIR }}
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 90

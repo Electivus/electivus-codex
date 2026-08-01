@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 
 from check_nextest_junit import inspect_report
@@ -37,6 +38,21 @@ def command_for(test: TestDefinition) -> str:
     )
 
 
+def inspect_certification_report(report: Path, test: TestDefinition) -> tuple[list[str], int]:
+    issues = inspect_report(report, expected_testcases=1, reject_skipped=True)
+    try:
+        testcases = [element for element in ET.parse(report).getroot().iter() if element.tag.rsplit("}", 1)[-1] == "testcase"]
+    except (OSError, ET.ParseError):
+        return issues, -1
+    if len(testcases) == 1:
+        testcase = testcases[0]
+        actual = (testcase.get("classname", "").strip(), testcase.get("name", "").strip())
+        expected = (f"{test.package}::all", test.identity)
+        if actual != expected:
+            issues.append(f"expected testcase {expected[0]}::{expected[1]}, found {actual[0]}::{actual[1]}")
+    return issues, len(testcases)
+
+
 def new_manifest(
     *, candidate_sha: str, checked_out_sha: str, test_id: str, workflow_ref: str,
     run_id: str, run_attempt: int, runner_os: str, runner_arch: str,
@@ -55,51 +71,32 @@ def new_manifest(
         raise ValueError("certification requires a Linux X64 runner")
     test = TESTS[test_id]
     return {
-        "schemaVersion": 1,
-        "candidateSha": candidate_sha,
-        "workflowIdentity": WORKFLOW_IDENTITY,
-        "workflowRef": workflow_ref,
-        "runId": run_id,
-        "runAttempt": run_attempt,
+        "schemaVersion": 1, "candidateSha": candidate_sha, "workflowIdentity": WORKFLOW_IDENTITY,
+        "workflowRef": workflow_ref, "runId": run_id, "runAttempt": run_attempt,
         "runUrl": f"https://github.com/Electivus/electivus-codex/actions/runs/{run_id}",
         "commitUrl": f"https://github.com/Electivus/electivus-codex/commit/{candidate_sha}",
-        "testId": test_id,
-        "runner": "ubuntu-24.04",
-        "runnerOs": runner_os,
-        "runnerArch": runner_arch,
-        "target": "x86_64-unknown-linux-gnu",
-        "package": test.package,
-        "testBinary": "all",
-        "testIdentity": test.identity,
-        "executions": [],
+        "testId": test_id, "runner": "ubuntu-24.04", "runnerOs": runner_os, "runnerArch": runner_arch,
+        "target": "x86_64-unknown-linux-gnu", "package": test.package, "testBinary": "all",
+        "testIdentity": test.identity, "executions": [],
     }
 
 
 def record_execution(
     manifest: dict[str, object], report: Path, order: int, exit_code: int
 ) -> list[str]:
-    junit_issues = inspect_report(report, expected_testcases=1, reject_skipped=True)
-    try:
-        testcase_count = sum(
-            element.tag.rsplit("}", 1)[-1] == "testcase"
-            for element in ET.parse(report).getroot().iter()
-        )
-        junit_hash = hashlib.sha256(report.read_bytes()).hexdigest()
-    except (OSError, ET.ParseError):
-        testcase_count, junit_hash = -1, ""
     test_id = manifest.get("testId")
     test = TESTS.get(test_id) if isinstance(test_id, str) else None
+    junit_issues, testcase_count = inspect_certification_report(report, test) if test else (["testId must identify one exact #89 test"], -1)
+    try:
+        junit_hash = hashlib.sha256(report.read_bytes()).hexdigest()
+    except OSError:
+        junit_hash = ""
     command = command_for(test) if test is not None else ""
     execution = {
-        "order": order,
-        "command": command,
-        "commandResult": "success" if exit_code == 0 else "failure",
-        "exitCode": exit_code,
-        "junitVerdict": "pass" if not junit_issues else "fail",
-        "retryFree": not any("retry evidence" in issue for issue in junit_issues),
-        "testcaseCount": testcase_count,
-        "junitPath": f"junit/{order:02}.xml",
-        "junitSha256": junit_hash,
+        "order": order, "command": command,
+        "commandResult": "success" if exit_code == 0 else "failure", "exitCode": exit_code,
+        "junitVerdict": "pass" if not junit_issues else "fail", "retryFree": not any("retry evidence" in issue for issue in junit_issues),
+        "testcaseCount": testcase_count, "junitPath": f"junit/{order:02}.xml", "junitSha256": junit_hash,
     }
     executions = manifest.setdefault("executions", [])
     if not isinstance(executions, list):
@@ -140,13 +137,9 @@ def verify_manifest(manifest: dict[str, object], expected_sha: str) -> list[str]
         issues.append("testId must identify one exact #89 test")
     else:
         expected = {
-            "runner": "ubuntu-24.04",
-            "runnerOs": "Linux",
-            "runnerArch": "X64",
-            "target": "x86_64-unknown-linux-gnu",
-            "package": definition.package,
-            "testBinary": "all",
-            "testIdentity": definition.identity,
+            "runner": "ubuntu-24.04", "runnerOs": "Linux", "runnerArch": "X64",
+            "target": "x86_64-unknown-linux-gnu", "package": definition.package,
+            "testBinary": "all", "testIdentity": definition.identity,
         }
         for field, value in expected.items():
             if manifest.get(field) != value:
@@ -163,13 +156,8 @@ def verify_manifest(manifest: dict[str, object], expected_sha: str) -> list[str]
             issues.append(f"execution {order} must be an object")
             continue
         expected = {
-            "order": order,
-            "command": command,
-            "commandResult": "success",
-            "exitCode": 0,
-            "junitVerdict": "pass",
-            "retryFree": True,
-            "testcaseCount": 1,
+            "order": order, "command": command, "commandResult": "success", "exitCode": 0,
+            "junitVerdict": "pass", "retryFree": True, "testcaseCount": 1,
             "junitPath": f"junit/{order:02}.xml",
         }
         for field, value in expected.items():
@@ -184,19 +172,33 @@ def verify_manifest(manifest: dict[str, object], expected_sha: str) -> list[str]
 def verify_retained_reports(manifest: dict[str, object], directory: Path) -> list[str]:
     executions = manifest.get("executions")
     entries = executions if isinstance(executions, list) else []
+    test_id = manifest.get("testId")
+    test = TESTS.get(test_id) if isinstance(test_id, str) else None
     issues: list[str] = []
     for order in range(1, 21):
         report = directory / "junit" / f"{order:02}.xml"
-        issues.extend(
-            f"execution {order}: {issue}"
-            for issue in inspect_report(report, expected_testcases=1, reject_skipped=True)
-        )
+        report_issues = inspect_certification_report(report, test)[0] if test else inspect_report(report, expected_testcases=1, reject_skipped=True)
+        issues.extend(f"execution {order}: {issue}" for issue in report_issues)
         entry = entries[order - 1] if order <= len(entries) and isinstance(entries[order - 1], dict) else {}
         if report.is_file():
             actual_hash = hashlib.sha256(report.read_bytes()).hexdigest()
             if entry.get("junitSha256") != actual_hash:
                 issues.append(f"execution {order}: JUnit SHA-256 does not match retained file")
     return issues
+
+
+def _write_manifest(path: Path, manifest: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False) as output:
+            temporary = Path(output.name)
+            json.dump(manifest, output, indent=2)
+            output.write("\n")
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _read_manifest(path: Path) -> dict[str, object]:
@@ -211,19 +213,14 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init")
     init.add_argument("manifest", type=Path)
-    init.add_argument("--candidate-sha", required=True)
-    init.add_argument("--checked-out-sha", required=True)
-    init.add_argument("--test-id", required=True)
-    init.add_argument("--workflow-ref", required=True)
-    init.add_argument("--run-id", required=True)
+    for flag in ("candidate-sha", "checked-out-sha", "test-id", "workflow-ref", "run-id", "runner-os", "runner-arch"):
+        init.add_argument(f"--{flag}", required=True)
     init.add_argument("--run-attempt", required=True, type=int)
-    init.add_argument("--runner-os", required=True)
-    init.add_argument("--runner-arch", required=True)
     record = commands.add_parser("record")
     record.add_argument("manifest", type=Path)
     record.add_argument("report", type=Path)
-    record.add_argument("--order", required=True, type=int)
-    record.add_argument("--exit-code", required=True, type=int)
+    for flag in ("order", "exit-code"):
+        record.add_argument(f"--{flag}", required=True, type=int)
     verify = commands.add_parser("verify")
     verify.add_argument("manifest", type=Path)
     verify.add_argument("--expected-sha", required=True)
@@ -240,13 +237,12 @@ def main(argv: list[str] | None = None) -> int:
                 runner_os=args.runner_os,
                 runner_arch=args.runner_arch,
             )
-            args.manifest.parent.mkdir(parents=True, exist_ok=True)
-            args.manifest.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+            _write_manifest(args.manifest, manifest)
             return 0
         manifest = _read_manifest(args.manifest)
         if args.command == "record":
             issues = record_execution(manifest, args.report, args.order, args.exit_code)
-            args.manifest.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+            _write_manifest(args.manifest, manifest)
             if issues:
                 print("Test certification execution failed:\n" + "\n".join(f"- {issue}" for issue in issues), file=sys.stderr)
                 return 1
