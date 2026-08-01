@@ -1,0 +1,5 @@
+version = 1
+
+# Quarantine is a temporary relocation to Extended validation, never a skip or
+# continue-on-error. Active entries use [[quarantines]] and the audited schema
+# documented in workflows/README.md.

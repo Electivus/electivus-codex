@@ -380,6 +380,7 @@ jobs:
           extract_dir="${RUNNER_TEMP}/nextest-extracted"
           workspace_root="$(pwd)"
           mkdir -p "${extract_dir}"
+          rm -f -- "${CARGO_TARGET_DIR}/nextest/default/junit.xml"
 
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
             archive_file="$(cygpath -w "${archive_file}")"
@@ -465,6 +466,14 @@ jobs:
           RUST_MIN_STACK: "8388608" # 8 MiB
           NEXTEST_STATUS_LEVEL: leak
 
+      - name: Inspect nextest JUnit signal
+        id: junit
+        if: always()
+        shell: bash
+        run: |
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/check_nextest_junit.py" \
+            "${CARGO_TARGET_DIR}/nextest/default/junit.xml"
+
       - name: Upload nextest JUnit report
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
@@ -485,11 +494,24 @@ jobs:
         env:
           STEPS_TEST_OUTCOME: ${{ steps.test.outcome }}
 
-      - name: verify tests passed
-        if: steps.test.outcome == 'failure'
+      - name: Confirm nextest shard result
+        if: always()
+        shell: bash
+        env:
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+          JUNIT_OUTCOME: ${{ steps.junit.outcome }}
         run: |
-          echo "Tests failed. See logs for details."
-          exit 1
+          set -euo pipefail
+          status=0
+          if [[ "${TEST_OUTCOME}" != "success" ]]; then
+            echo "Nextest command finished with outcome: ${TEST_OUTCOME}" >&2
+            status=1
+          fi
+          if [[ "${JUNIT_OUTCOME}" != "success" ]]; then
+            echo "Nextest JUnit inspection finished with outcome: ${JUNIT_OUTCOME}" >&2
+            status=1
+          fi
+          exit "${status}"
 
   result:
     name: Platform result

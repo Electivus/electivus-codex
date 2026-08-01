@@ -64,6 +64,51 @@ remain the fallback.
   the staged artifact pair. All V8 work stays outside the pull-request Merge
   gate.
 
+## Test Signal Integrity
+
+Every full-Rust nextest shard treats its JUnit XML as a required result, including
+when the nextest command fails. `check_nextest_junit.py` fails closed on a missing,
+malformed, or wrong-root report; nonzero failure/error counts; testcase failures;
+and the Jenkins/nextest retry elements `flakyFailure`, `flakyError`,
+`rerunFailure`, and `rerunError` (with or without XML namespaces). Thus a
+retry-assisted pass remains red while the diagnostic log and JUnit artifact are
+uploaded on both success and failure. Specialized archive consumers should reuse
+this checker rather than reimplement retry interpretation.
+
+`rust-test-policy.toml` is the exact inventory of tracked Rust test ignores. Each
+identity contains the source path, following test function, and normalized ignore
+attribute/condition. A new, changed, duplicate, stale, or unclassified occurrence
+fails repository checks. Update the exact identity alongside an intentional source
+change; do not add a path-, module-, or category-wide exemption.
+
+The allowed ignore categories have these boundaries:
+
+- `helper-process`: an ignored subprocess entry point invoked by another test.
+- `live-external-api`: the two opt-in smoke tests that call the real OpenAI API.
+- `manual-smoke`: the tmux/local-binary resize checks run explicitly by an operator.
+- `schema-generation`: only the two inherited Windows shell-snapshot generation
+  cases; this is not a general generated-artifact exemption.
+- `out-of-boundary-platform`: a conditionally inapplicable product-platform case,
+  including inherited Windows-only failures outside the current Linux boundary.
+- `specialized-environment`: PostgreSQL 18 and other named process-contract
+  environments provisioned outside ordinary nextest shards.
+- `pending-behavior-change`: only the two inherited compaction expectations already
+  assigned to their follow-up behavior change.
+- `temporary-certification`: exactly
+  `injected_user_input_triggers_follow_up_request_with_deltas` and
+  `review_start_exec_approval_item_id_matches_command_execution_item`, tracked by
+  issue #89 until they can be unignored.
+
+`quarantined-checks.toml` starts empty. An active `[[quarantines]]` record requires
+an exact `check_identity`, narrow `scope`, concrete `evidence`, substantive
+`justification`, `extended_workflow` and `extended_job` naming where the check keeps
+running in Extended validation, an exact GitHub issue or pull-request `tracking`
+URL, and TOML `start_date`/`expiry_date` values. Identities must be unique, wildcard
+or blanket scopes are rejected, and expiry must be on or after the start, no later
+than seven days after it, and not already elapsed. Quarantine is temporary
+relocation of signal, never `continue-on-error`, a permanent skip, or permission to
+stop Extended validation.
+
 ## Rule Of Thumb
 
 - If a build/test/clippy check can be expressed in Bazel, prefer putting the PR-time version in `bazel.yml`.
