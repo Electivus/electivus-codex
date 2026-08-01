@@ -1,226 +1,161 @@
-import contextlib
 import datetime as dt
-import io
 from pathlib import Path
-import subprocess
 import tempfile
 import unittest
 
-import check_rust_test_policy
+import check_rust_test_policy as policy
 
 
-class RustTestPolicyCliTests(unittest.TestCase):
-    def test_unclassified_ignore_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            repo = Path(temp_dir)
-            (repo / "src").mkdir()
-            (repo / "src/lib.rs").write_text(
-                "#[test]\n#[ignore]\nfn needs_classification() {}\n", encoding="utf-8"
-            )
-            (repo / "policy.toml").write_text("version = 1\n", encoding="utf-8")
-            (repo / "quarantines.toml").write_text(
-                "version = 1\nquarantines = []\n", encoding="utf-8"
-            )
-            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-            subprocess.run(["git", "add", "src/lib.rs"], cwd=repo, check=True)
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                result = check_rust_test_policy.main(
-                    [
-                        "--repo",
-                        str(repo),
-                        "--policy",
-                        str(repo / "policy.toml"),
-                        "--quarantines",
-                        str(repo / "quarantines.toml"),
-                        "--today",
-                        "2026-07-31",
-                    ]
-                )
-
-        self.assertEqual(1, result)
-        self.assertIn("src/lib.rs", output.getvalue())
-        self.assertIn("needs_classification", output.getvalue())
-        self.assertIn("unclassified", output.getvalue())
-
-    def test_inventory_finds_direct_and_multiline_cfg_attr_but_not_text(self) -> None:
-        source = r"""
+class RustTestPolicyTests(unittest.TestCase):
+    def test_inventory_ignores_comments_strings_and_non_ignore_identifiers(self) -> None:
+        source = r'''
 // #[ignore]
 /* #[cfg_attr(windows, ignore)] */
 const EXAMPLE: &str = "#[ignore]";
 const RAW: &str = r#"#[ignore = "not code"]"#;
 #[my_ignore]
 fn ordinary_identifier() {}
-
-#[test]
 #[ignore = "manual run"]
 fn direct_test() {}
-
-#[test]
 #[cfg_attr(
     target_os = "windows",
     ignore = "Linux-only fixture",
 )]
 async fn conditional_test() {}
-"""
-
-        occurrences = check_rust_test_policy.inventory_file("src/lib.rs", source)
-
+'''
         self.assertEqual(
             [
-                check_rust_test_policy.IgnoreOccurrence(
-                    "src/lib.rs", "direct_test", 'ignore="manual run"'
-                ),
-                check_rust_test_policy.IgnoreOccurrence(
-                    "src/lib.rs",
-                    "conditional_test",
-                    'cfg_attr(target_os="windows",ignore="Linux-only fixture")',
-                ),
+                policy.IgnoreOccurrence("src/lib.rs", "direct_test", 'ignore="manual run"'),
+                policy.IgnoreOccurrence("src/lib.rs", "conditional_test", 'cfg_attr(target_os="windows",ignore="Linux-only fixture")'),
             ],
-            occurrences,
+            policy.inventory_file("src/lib.rs", source),
         )
+
+    def test_raw_string_ignore_forms_are_exact_and_unclassified(self) -> None:
+        cases = (
+            ('#[ignore = r"reason"]\nfn direct() {}', 'ignore=r"reason"'),
+            (
+                '#[cfg_attr(windows, ignore = r"reason")]\nfn conditional() {}',
+                'cfg_attr(windows,ignore=r"reason")',
+            ),
+            ('#[ignore = r#"reason"#]\nfn hashed() {}', 'ignore=r#"reason"#'),
+        )
+        for source, attribute in cases:
+            with self.subTest(attribute=attribute):
+                occurrences = policy.inventory_file("src/lib.rs", source)
+                self.assertEqual(attribute, occurrences[0].attribute)
+                issues = policy.validate_ignore_policy(occurrences, {"ignores": {}})
+                self.assertIn("unclassified", "\n".join(issues))
 
     def test_second_ignore_on_classified_test_is_unclassified(self) -> None:
-        occurrences = check_rust_test_policy.inventory_file(
-            "src/lib.rs",
-            '#[test]\n#[ignore]\n#[ignore = "second"]\nfn duplicated() {}\n',
+        occurrences = policy.inventory_file(
+            "src/lib.rs", '#[ignore]\n#[ignore = "second"]\nfn duplicated() {}\n'
         )
-        policy = {
-            "ignore": [
-                {
-                    "path": "src/lib.rs",
-                    "test": "duplicated",
-                    "attribute": "ignore",
-                    "category": "manual-smoke",
-                }
-            ]
+        inherited = policy.IgnoreOccurrence(
+            "src/lib.rs", "injected_user_input_triggers_follow_up_request_with_deltas", "ignore"
+        )
+        occurrences.append(inherited)
+        records = {
+            occurrences[0].identity: "manual-smoke",
+            inherited.identity: "manual-smoke",
+            "src/lib.rs::stale::ignore": "made-up",
         }
+        issues = policy.validate_ignore_policy(occurrences, {"ignores": records})
+        joined = "\n".join(issues)
+        for expected in ("unclassified", "stale", "unknown category", "must be temporary"):
+            self.assertIn(expected, joined)
 
-        issues = check_rust_test_policy.validate_ignore_policy(occurrences, policy)
-
-        self.assertTrue(
-            any("unclassified" in issue and "second" in issue for issue in issues)
-        )
-
-    def test_every_legitimate_ignore_category_is_accepted(self) -> None:
-        categories = sorted(check_rust_test_policy.ALLOWED_CATEGORIES)
-        occurrences = []
-        records = []
-        for index, category in enumerate(categories):
-            if category == "temporary-certification":
-                tests = sorted(check_rust_test_policy.TEMPORARY_CERTIFICATION_TESTS)
-            else:
-                tests = [f"test_{index}"]
+    def test_every_legitimate_category_is_accepted(self) -> None:
+        occurrences: list[policy.IgnoreOccurrence] = []
+        records: dict[str, str] = {}
+        examples: dict[str, policy.IgnoreOccurrence] = {}
+        for index, category in enumerate(sorted(policy.ALLOWED_CATEGORIES)):
+            tests = (
+                sorted(policy.TEMPORARY_CERTIFICATION_TESTS)
+                if category == "temporary-certification"
+                else [f"test_{index}"]
+            )
             for test in tests:
-                occurrence = check_rust_test_policy.IgnoreOccurrence(
-                    f"src/category_{index}.rs", test, 'ignore="classified"'
-                )
+                reason = "helper process fixture" if category == "helper-process" else "classified"
+                occurrence = policy.IgnoreOccurrence(f"src/category_{index}.rs", test, f'ignore="{reason}"')
                 occurrences.append(occurrence)
-                record = {
-                    "path": occurrence.path,
-                    "test": occurrence.test,
-                    "attribute": occurrence.attribute,
-                    "category": category,
-                }
-                if category == "temporary-certification":
-                    record["tracking"] = (
-                        "https://github.com/Electivus/electivus-codex/issues/89"
-                    )
-                records.append(record)
-
-        issues = check_rust_test_policy.validate_ignore_policy(
-            occurrences, {"ignore": records}
-        )
-
-        self.assertEqual([], issues)
-
-    def test_changed_stale_unknown_and_wrong_temporary_categories_fail(self) -> None:
-        occurrences = [
-            check_rust_test_policy.IgnoreOccurrence("src/lib.rs", "current", "ignore")
-        ]
-        policy = {
-            "ignore": [
-                {
-                    "path": "src/lib.rs",
-                    "test": "old_name",
-                    "attribute": "ignore",
-                    "category": "made-up",
-                },
-                {
-                    "path": "src/lib.rs",
-                    "test": "injected_user_input_triggers_follow_up_request_with_deltas",
-                    "attribute": "ignore",
-                    "category": "manual-smoke",
-                },
-                {
-                    "path": "src/lib.rs",
-                    "test": "not_inherited_flaky",
-                    "attribute": "ignore",
-                    "category": "temporary-certification",
-                    "tracking": "https://github.com/Electivus/electivus-codex/issues/89",
-                },
-            ]
-        }
-
-        issues = check_rust_test_policy.validate_ignore_policy(occurrences, policy)
-
-        self.assertTrue(any("unknown category" in issue for issue in issues))
-        self.assertTrue(any("stale" in issue for issue in issues))
-        self.assertTrue(any("unclassified" in issue for issue in issues))
-        self.assertTrue(
-            any("must use temporary-certification" in issue for issue in issues)
-        )
-        self.assertTrue(any("only the two" in issue for issue in issues))
+                examples[category] = occurrence
+                records[occurrence.identity] = category + (
+                    "|https://github.com/Electivus/electivus-codex/issues/89"
+                    if category == "temporary-certification"
+                    else ""
+                )
+        self.assertEqual([], policy.validate_ignore_policy(occurrences, {"ignores": records}))
+        helper = examples["helper-process"]
+        specialized = examples["specialized-environment"]
+        swapped = {helper.identity: "specialized-environment", specialized.identity: "helper-process"}
+        issues = "\n".join(policy.validate_ignore_policy([helper, specialized], {"ignores": swapped}))
+        self.assertIn("subprocess entry point must use helper-process", issues)
+        self.assertIn("helper-process requires a subprocess entry point", issues)
 
 
 class QuarantinePolicyTests(unittest.TestCase):
-    def valid_record(self) -> dict[str, object]:
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temp_dir.name)
+        self.workflows = self.repo / ".github/workflows"
+        self.workflows.mkdir(parents=True)
+        self.write_workflow("extended.yml", "jobs:\n  rust-tests:\n    runs-on: ubuntu-latest\n")
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def write_workflow(self, name: str, body: str) -> None:
+        (self.workflows / name).write_text(f"name: Extended\n{body}", encoding="utf-8")
+
+    def record(self) -> dict[str, object]:
         return {
             "check_identity": "Deep Linux / Cargo nextest x64 / shard 2",
             "scope": "x86_64-unknown-linux-gnu nextest shard 2",
             "evidence": "Runs 1001 and 1004 failed with the same runner disconnect.",
-            "justification": "Intermittent runner loss is masking otherwise actionable shard results.",
-            "extended_workflow": "postmerge-ci.yml",
-            "extended_job": "Full Rust / Tests x64 / shard 2",
+            "justification": "Intermittent runner loss masks otherwise actionable shard results.",
+            "extended_workflow": "extended.yml",
+            "extended_job": "rust-tests",
             "tracking": "https://github.com/Electivus/electivus-codex/issues/123",
             "start_date": dt.date(2026, 7, 31),
             "expiry_date": dt.date(2026, 8, 7),
         }
 
-    def test_complete_seven_day_quarantine_is_accepted(self) -> None:
-        issues = check_rust_test_policy.validate_quarantines(
-            {"quarantines": [self.valid_record()]}, dt.date(2026, 7, 31)
+    def validate(self, records: list[dict[str, object]], today: dt.date = dt.date(2026, 7, 31)) -> list[str]:
+        return policy.validate_quarantines({"quarantines": records}, today, self.repo)
+
+    def test_complete_seven_day_quarantine_with_real_extended_job_is_valid(self) -> None:
+        self.assertEqual([], self.validate([self.record()]))
+
+    def test_extended_workflow_and_job_references_fail_closed(self) -> None:
+        self.write_workflow("malformed.yml", "jobs:\n  broken: [\n")
+        cases = (
+            ("missing.yml", "rust-tests", "does not exist"),
+            ("extended.yml", "missing-job", "extended_job does not exist"),
+            ("malformed.yml", "broken", "malformed extended workflow"),
         )
+        for workflow, job, expected in cases:
+            with self.subTest(workflow=workflow, job=job):
+                record = self.record()
+                record.update(extended_workflow=workflow, extended_job=job)
+                self.assertIn(expected, "\n".join(self.validate([record])))
 
-        self.assertEqual([], issues)
-
-    def test_quarantine_requires_auditable_narrow_unexpired_record(self) -> None:
-        invalid = self.valid_record()
-        invalid.update(
-            {
-                "check_identity": "Deep Linux *",
-                "scope": "all tests",
-                "evidence": "",
-                "justification": "flaky",
-                "extended_workflow": "",
-                "extended_job": "",
-                "tracking": "#123",
-                "expiry_date": dt.date(2026, 8, 8),
-            }
+    def test_quarantine_requires_narrow_auditable_unexpired_fields(self) -> None:
+        record = self.record()
+        record.update(
+            check_identity="Deep Linux *",
+            scope="all tests",
+            evidence="",
+            justification="flaky",
+            tracking="#123",
+            expiry_date=dt.date(2026, 8, 8),
         )
-
-        issues = check_rust_test_policy.validate_quarantines(
-            {"quarantines": [invalid]}, dt.date(2026, 8, 9)
-        )
-
-        joined = "\n".join(issues)
+        joined = "\n".join(self.validate([record], dt.date(2026, 8, 9)))
         for expected in (
             "without wildcards",
             "narrowest affected surface",
             "nonblank evidence",
             "substantive",
-            "nonblank extended_workflow",
-            "nonblank extended_job",
             "exact GitHub",
             "seven-day maximum",
             "expired",
@@ -228,19 +163,12 @@ class QuarantinePolicyTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, joined)
 
-    def test_quarantine_identity_is_unique_and_expiry_cannot_precede_start(
-        self,
-    ) -> None:
-        first = self.valid_record()
+    def test_quarantine_identity_is_unique_and_expiry_follows_start(self) -> None:
+        first = self.record()
         first["expiry_date"] = dt.date(2026, 7, 30)
-        second = self.valid_record()
-
-        issues = check_rust_test_policy.validate_quarantines(
-            {"quarantines": [first, second]}, dt.date(2026, 7, 31)
-        )
-
-        self.assertTrue(any("duplicate" in issue for issue in issues))
-        self.assertTrue(any("precedes" in issue for issue in issues))
+        joined = "\n".join(self.validate([first, self.record()]))
+        self.assertIn("duplicate", joined)
+        self.assertIn("precedes", joined)
 
 
 if __name__ == "__main__":

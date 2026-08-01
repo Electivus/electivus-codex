@@ -81,33 +81,27 @@ attribute/condition. A new, changed, duplicate, stale, or unclassified occurrenc
 fails repository checks. Update the exact identity alongside an intentional source
 change; do not add a path-, module-, or category-wide exemption.
 
-The allowed ignore categories have these boundaries:
+The allowed ignore categories have these narrow boundaries:
 
-- `helper-process`: an ignored subprocess entry point invoked by another test.
-- `live-external-api`: the two opt-in smoke tests that call the real OpenAI API.
-- `manual-smoke`: the tmux/local-binary resize checks run explicitly by an operator.
-- `schema-generation`: only the two inherited Windows shell-snapshot generation
-  cases; this is not a general generated-artifact exemption.
-- `out-of-boundary-platform`: a conditionally inapplicable product-platform case,
-  including inherited Windows-only failures outside the current Linux boundary.
-- `specialized-environment`: PostgreSQL 18 and other named process-contract
-  environments provisioned outside ordinary nextest shards.
-- `pending-behavior-change`: only the two inherited compaction expectations already
-  assigned to their follow-up behavior change.
-- `temporary-certification`: exactly
-  `injected_user_input_triggers_follow_up_request_with_deltas` and
-  `review_start_exec_approval_item_id_matches_command_execution_item`, tracked by
-  issue #89 until they can be unignored.
+| Category                   | Boundary                                                     |
+| -------------------------- | ------------------------------------------------------------ |
+| `helper-process`           | Subprocess entry point invoked by another test.              |
+| `live-external-api`        | Two opt-in tests calling the real OpenAI API.                |
+| `manual-smoke`             | Tmux/local-binary resize checks run by an operator.          |
+| `schema-generation`        | Only two inherited Windows shell-snapshot generation cases.  |
+| `out-of-boundary-platform` | Conditionally inapplicable product-platform case.            |
+| `specialized-environment`  | PostgreSQL 18 or another named process-contract environment. |
+| `pending-behavior-change`  | Only two inherited compaction follow-up expectations.        |
+| `temporary-certification`  | Only the two #89 tests named in `rust-test-policy.toml`.     |
 
 `quarantined-checks.toml` starts empty. An active `[[quarantines]]` record requires
 an exact `check_identity`, narrow `scope`, concrete `evidence`, substantive
-`justification`, `extended_workflow` and `extended_job` naming where the check keeps
-running in Extended validation, an exact GitHub issue or pull-request `tracking`
-URL, and TOML `start_date`/`expiry_date` values. Identities must be unique, wildcard
-or blanket scopes are rejected, and expiry must be on or after the start, no later
-than seven days after it, and not already elapsed. Quarantine is temporary
-relocation of signal, never `continue-on-error`, a permanent skip, or permission to
-stop Extended validation.
+`justification`, an existing `.github/workflows` filename in `extended_workflow`, an
+actual top-level job id from that file in `extended_job`, an exact GitHub issue or
+pull-request `tracking` URL, and TOML `start_date`/`expiry_date` values. Identities
+must be unique, wildcard or blanket scopes are rejected, and expiry must be on or
+after the start, at most seven days later, and not elapsed. Quarantine is temporary
+relocation, never `continue-on-error`, a permanent skip, or stopped Extended validation.
 
 ## Rule Of Thumb
 

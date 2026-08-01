@@ -4,123 +4,72 @@ from pathlib import Path
 import tempfile
 import unittest
 
-import check_nextest_junit
+import check_nextest_junit as policy
 
 
-class NextestJunitCliTests(unittest.TestCase):
-    def run_cli(self, xml: str) -> tuple[int, str]:
+class NextestJunitTests(unittest.TestCase):
+    def run_xml(self, xml: str) -> tuple[int, str]:
         with tempfile.TemporaryDirectory() as temp_dir:
             report = Path(temp_dir) / "junit.xml"
             report.write_text(xml, encoding="utf-8")
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                result = check_nextest_junit.main([str(report)])
+            return self.run_path(report)
+
+    def run_path(self, report: Path) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            result = policy.main([str(report)])
         return result, output.getvalue()
 
-    def test_retry_assisted_pass_is_rejected_with_test_identity(self) -> None:
-        result, output = self.run_cli(
-            """\
-            <testsuites tests="1" failures="0" errors="0">
-              <testsuite name="suite" tests="1" failures="0" errors="0">
-                <testcase classname="crate::module" name="recovered">
-                  <flakyFailure message="failed first attempt" />
-                </testcase>
-              </testsuite>
-            </testsuites>
-            """
-        )
-
-        self.assertEqual(1, result)
-        self.assertIn("crate::module::recovered", output)
-        self.assertIn("flakyFailure", output)
-
     def test_retry_free_success_is_accepted(self) -> None:
-        result, output = self.run_cli(
-            """\
-            <testsuites tests="1" failures="0" errors="0">
-              <testsuite name="suite" tests="1" failures="0" errors="0">
-                <testcase classname="crate::module" name="passed" />
-              </testsuite>
-            </testsuites>
-            """
+        result, _ = self.run_xml(
+            '<testsuites tests="1" failures="0" errors="0"><testsuite name="suite" '
+            'failures="0" errors="0"><testcase name="passed" /></testsuite></testsuites>'
         )
-
         self.assertEqual(0, result)
-        self.assertIn("passed", output)
 
-    def test_every_retry_element_is_rejected_by_local_name(self) -> None:
-        for element in ("flakyFailure", "flakyError", "rerunFailure", "rerunError"):
+    def test_every_retry_element_is_rejected_by_local_name_and_identity(self) -> None:
+        for element in policy.RETRY_ELEMENTS:
             with self.subTest(element=element):
-                result, output = self.run_cli(
-                    f"""\
-                    <testsuites xmlns:jenkins="urn:jenkins" tests="1" failures="0" errors="0">
-                      <testsuite name="suite" tests="1" failures="0" errors="0">
-                        <testcase classname="crate" name="retried">
-                          <jenkins:{element} />
-                        </testcase>
-                      </testsuite>
-                    </testsuites>
-                    """
+                result, output = self.run_xml(
+                    '<testsuites xmlns:j="urn:jenkins" failures="0" errors="0"><testsuite '
+                    'name="suite"><testcase classname="crate::module" name="recovered">'
+                    f'<j:{element} message="failed first attempt" /></testcase></testsuite></testsuites>'
                 )
-
                 self.assertEqual(1, result)
-                self.assertIn(element, output)
+                self.assertIn(f"crate::module::recovered: retry evidence <{element}>", output)
 
-    def test_testcase_failure_is_rejected(self) -> None:
-        result, output = self.run_cli(
-            """\
-            <testsuites tests="1" failures="1" errors="0">
-              <testsuite name="suite" tests="1" failures="1" errors="0">
-                <testcase classname="crate" name="failed">
-                  <failure message="assertion failed" />
-                </testcase>
-              </testsuite>
-            </testsuites>
-            """
+    def test_failure_elements_and_aggregate_counts_are_rejected(self) -> None:
+        cases = (
+            (
+                '<testsuites failures="1" errors="0"><testsuite><testcase name="failed">'
+                '<failure message="assertion failed" /></testcase></testsuite></testsuites>',
+                "assertion failed",
+            ),
+            ('<testsuites failures="0" errors="1"><testsuite /></testsuites>', "errors=1"),
         )
+        for xml, expected in cases:
+            with self.subTest(expected=expected):
+                result, output = self.run_xml(xml)
+                self.assertEqual(1, result)
+                self.assertIn(expected, output)
 
-        self.assertEqual(1, result)
-        self.assertIn("crate::failed", output)
-        self.assertIn("assertion failed", output)
+    def test_malformed_and_wrong_root_reports_are_rejected(self) -> None:
+        for xml, expected in (("<testsuites>", "valid JUnit"), ("<report />", "testsuites")):
+            with self.subTest(xml=xml):
+                result, output = self.run_xml(xml)
+                self.assertEqual(1, result)
+                self.assertIn(expected, output)
 
-    def test_nonzero_aggregate_error_count_is_rejected(self) -> None:
-        result, output = self.run_cli(
-            '<testsuites tests="1" failures="0" errors="1"><testsuite name="suite" /></testsuites>'
-        )
-
-        self.assertEqual(1, result)
-        self.assertIn("errors=1", output)
-
-    def test_wrong_root_is_rejected(self) -> None:
-        result, output = self.run_cli("<report />")
-
-        self.assertEqual(1, result)
-        self.assertIn("testsuites", output)
-
-    def test_malformed_report_is_rejected(self) -> None:
-        result, output = self.run_cli("<testsuites>")
-
-        self.assertEqual(1, result)
-        self.assertIn("valid JUnit report", output)
-
-    def test_missing_report_is_rejected(self) -> None:
+    def test_missing_and_non_file_reports_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            report = Path(temp_dir) / "missing.xml"
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                result = check_nextest_junit.main([str(report)])
-
-        self.assertEqual(1, result)
-        self.assertIn("missing", output.getvalue())
-
-    def test_report_path_must_be_a_file(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                result = check_nextest_junit.main([temp_dir])
-
-        self.assertEqual(1, result)
-        self.assertIn("regular file", output.getvalue())
+            for report, expected in (
+                (Path(temp_dir) / "missing.xml", "missing"),
+                (Path(temp_dir), "regular file"),
+            ):
+                with self.subTest(report=report):
+                    result, output = self.run_path(report)
+                    self.assertEqual(1, result)
+                    self.assertIn(expected, output)
 
 
 if __name__ == "__main__":

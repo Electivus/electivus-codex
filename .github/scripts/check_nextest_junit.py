@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail a nextest result when its JUnit report contains retry evidence."""
+"""Reject failed or retry-assisted nextest JUnit reports."""
 
 import argparse
 from pathlib import Path
@@ -11,15 +11,8 @@ RETRY_ELEMENTS = {"flakyFailure", "flakyError", "rerunFailure", "rerunError"}
 FAILURE_ELEMENTS = {"failure", "error"}
 
 
-def local_name(tag: str) -> str:
-    """Return an XML local name for namespaced and unqualified elements."""
+def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
-
-
-def testcase_identity(testcase: ET.Element) -> str:
-    classname = testcase.get("classname", "").strip()
-    name = testcase.get("name", "<unnamed test>").strip()
-    return f"{classname}::{name}" if classname else name
 
 
 def inspect_report(report: Path) -> list[str]:
@@ -29,71 +22,56 @@ def inspect_report(report: Path) -> list[str]:
         root = ET.parse(report).getroot()
     except (OSError, ET.ParseError) as error:
         return [f"cannot read a valid JUnit report at {report}: {error}"]
-
-    root_name = local_name(root.tag)
+    root_name = _local_name(root.tag)
     if root_name != "testsuites":
         return [f"JUnit root must be <testsuites>, found <{root_name}>"]
 
     issues: list[str] = []
-    for aggregate in root.iter():
-        aggregate_name = local_name(aggregate.tag)
-        if aggregate_name not in {"testsuites", "testsuite"}:
+    for element in root.iter():
+        element_name = _local_name(element.tag)
+        if element_name in {"testsuites", "testsuite"}:
+            identity = element.get("name", "root testsuites")
+            for count_name in ("failures", "errors"):
+                raw_count = element.get(count_name)
+                if raw_count is None:
+                    continue
+                try:
+                    count = int(raw_count)
+                except ValueError:
+                    issues.append(f"{identity}: invalid aggregate {count_name}={raw_count!r}")
+                else:
+                    if count:
+                        issues.append(f"{identity}: aggregate {count_name}={count}")
+        if element_name != "testcase":
             continue
-        aggregate_identity = aggregate.get("name", "root testsuites")
-        for count_name in ("failures", "errors"):
-            raw_count = aggregate.get(count_name)
-            if raw_count is None:
+        classname = element.get("classname", "").strip()
+        name = element.get("name", "<unnamed test>").strip()
+        identity = f"{classname}::{name}" if classname else name
+        for child in element:
+            child_name = _local_name(child.tag)
+            if child_name not in RETRY_ELEMENTS | FAILURE_ELEMENTS:
                 continue
-            try:
-                count = int(raw_count)
-            except ValueError:
-                issues.append(
-                    f"{aggregate_identity}: invalid aggregate {count_name}={raw_count!r}"
-                )
-            else:
-                if count != 0:
-                    issues.append(
-                        f"{aggregate_identity}: aggregate {count_name}={count}"
-                    )
-
-    for testcase in (
-        element for element in root.iter() if local_name(element.tag) == "testcase"
-    ):
-        identity = testcase_identity(testcase)
-        for child in testcase:
-            child_name = local_name(child.tag)
-            if child_name in RETRY_ELEMENTS | FAILURE_ELEMENTS:
-                detail = child.get("message", "").strip()
-                suffix = f": {detail}" if detail else ""
-                kind = (
-                    "retry evidence"
-                    if child_name in RETRY_ELEMENTS
-                    else "failure evidence"
-                )
-                issues.append(f"{identity}: {kind} <{child_name}>{suffix}")
+            kind = "retry" if child_name in RETRY_ELEMENTS else "failure"
+            detail = child.get("message", "").strip()
+            issues.append(
+                f"{identity}: {kind} evidence <{child_name}>"
+                + (f": {detail}" if detail else "")
+            )
     return issues
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Reject failed or retry-assisted nextest JUnit reports."
-    )
-    parser.add_argument(
-        "report", type=Path, help="path to the required nextest JUnit XML"
-    )
-    return parser
-
-
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    issues = inspect_report(args.report)
-    if issues:
-        print("nextest JUnit policy failed:", file=sys.stderr)
-        for issue in issues:
-            print(f"- {issue}", file=sys.stderr)
-        return 1
-    print(f"nextest JUnit policy passed: {args.report}")
-    return 0
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("report", type=Path, help="required nextest JUnit XML")
+    report = parser.parse_args(argv).report
+    issues = inspect_report(report)
+    if not issues:
+        print(f"nextest JUnit policy passed: {report}")
+        return 0
+    print("nextest JUnit policy failed:", file=sys.stderr)
+    for issue in issues:
+        print(f"- {issue}", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
