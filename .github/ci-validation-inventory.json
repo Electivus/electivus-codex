@@ -16,14 +16,14 @@
     { "id": "tests-arm64-nextest", "disposition": "retained", "promotionSource": null, "activeScopes": ["extended", "full"], "cardinality": 4 }
   ],
   "v8": [
-    { "id": "v8-x64-gnu-release", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"] },
-    { "id": "v8-x64-gnu-ptrcomp-sandbox", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"] },
-    { "id": "v8-arm64-gnu-release", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"] },
-    { "id": "v8-arm64-gnu-ptrcomp-sandbox", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"] },
-    { "id": "v8-x64-musl-release", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"] },
-    { "id": "v8-x64-musl-ptrcomp-sandbox", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"] },
-    { "id": "v8-arm64-musl-release", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"] },
-    { "id": "v8-arm64-musl-ptrcomp-sandbox", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"] }
+    { "id": "v8-x64-gnu-release", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"], "cardinality": 1 },
+    { "id": "v8-x64-gnu-ptrcomp-sandbox", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"], "cardinality": 1 },
+    { "id": "v8-arm64-gnu-release", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"], "cardinality": 1 },
+    { "id": "v8-arm64-gnu-ptrcomp-sandbox", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"], "cardinality": 1 },
+    { "id": "v8-x64-musl-release", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"], "cardinality": 1 },
+    { "id": "v8-x64-musl-ptrcomp-sandbox", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"], "cardinality": 1 },
+    { "id": "v8-arm64-musl-release", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"], "cardinality": 1 },
+    { "id": "v8-arm64-musl-ptrcomp-sandbox", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"], "cardinality": 1 }
   ],
   "outOfBoundary": ["macOS", "Windows"]
 }

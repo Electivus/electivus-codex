@@ -5,7 +5,9 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
+from rust_ci_full_plan import VALIDATION_SCOPES
 from rust_ci_full_plan import plan_for_scope
+from rust_ci_full_plan import safe_scope_label
 
 
 @dataclass(frozen=True)
@@ -25,22 +27,17 @@ class RustCiFullDecision:
     issues: tuple[str, ...]
 
 
-CHILDREN = (
-    "general", "cargo_shear", "argument_comment_lint_package",
-    "argument_comment_lint_prebuilt", "lint_build", "tests_linux_x64",
-    "tests_linux_arm64",
-)
+CHILDREN = ("general", "cargo_shear", "argument_comment_lint_package", "argument_comment_lint_prebuilt", "lint_build", "tests_linux_x64", "tests_linux_arm64")
 
 
 def expected_children(resolved_scope: str) -> dict[str, bool]:
     plan = plan_for_scope(resolved_scope)
-    states = (plan.run_general,) * 4 + (True, plan.run_x64, plan.run_arm64)
-    return dict(zip(CHILDREN, states, strict=True))
+    return dict(zip(CHILDREN, (plan.run_general,) * 4 + (True, plan.run_x64, plan.run_arm64), strict=True))
 
 
-def evaluate_results(
-    resolved_scope: str, plan_result: str, results: ChildResults
-) -> RustCiFullDecision:
+def evaluate_results(resolved_scope: str, plan_result: str, results: ChildResults) -> RustCiFullDecision:
+    if resolved_scope not in VALIDATION_SCOPES:
+        return RustCiFullDecision(False, (f"resolved scope is invalid: {safe_scope_label(resolved_scope) or '<empty>'}",))
     expected = expected_children(resolved_scope)
     issues = []
     if plan_result != "success":
@@ -53,22 +50,13 @@ def evaluate_results(
     return RustCiFullDecision(success=not issues, issues=tuple(issues))
 
 
-def render_result_summary(
-    resolved_scope: str,
-    results: ChildResults,
-    decision: RustCiFullDecision,
-) -> str:
+def render_result_summary(resolved_scope: str, results: ChildResults, decision: RustCiFullDecision) -> str:
+    if resolved_scope not in VALIDATION_SCOPES:
+        issues = "\n".join(f"- Issue: {issue}" for issue in decision.issues)
+        return f"## Rust CI full result\n\n- Resolved scope: `<invalid>`\n- Outcome: `failure`\n{issues}\n"
     plan = plan_for_scope(resolved_scope)
     expected = expected_children(resolved_scope)
-    lines = [
-        "## Rust CI full result",
-        "",
-        f"- Resolved scope: `{plan.resolved_scope}`",
-        f"- Retained families: {'; '.join(plan.retained_families)}",
-        "",
-        "| Child | Expected | Actual |",
-        "| --- | --- | --- |",
-    ]
+    lines = ["## Rust CI full result", "", f"- Resolved scope: `{plan.resolved_scope}`", f"- Selected families: {'; '.join(plan.selected_families)}", "", "| Child | Expected | Actual |", "| --- | --- | --- |"]
     for name, should_run in expected.items():
         wanted = "success" if should_run else "skipped"
         lines.append(f"| `{name}` | `{wanted}` | `{getattr(results, name)}` |")
@@ -78,10 +66,8 @@ def render_result_summary(
 
 
 def main() -> int:
-    resolved_scope = os.environ.get("RESOLVED_SCOPE", "")
-    plan_result = os.environ.get("PLAN_RESULT", "")
-    env_names = tuple(f"{name.upper()}_RESULT" for name in CHILDREN)
-    results = ChildResults(*(os.environ.get(name, "") for name in env_names))
+    resolved_scope, plan_result = os.environ.get("RESOLVED_SCOPE", ""), os.environ.get("PLAN_RESULT", "")
+    results = ChildResults(*(os.environ.get(f"{name.upper()}_RESULT", "") for name in CHILDREN))
     decision = evaluate_results(resolved_scope, plan_result, results)
     summary = render_result_summary(resolved_scope, results, decision)
     if summary_path := os.environ.get("GITHUB_STEP_SUMMARY"):

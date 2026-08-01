@@ -1,9 +1,8 @@
 name: v8-canary
 
-# The Merge gate and postmerge-ci both call this Change-triggered validation;
-# #90 will remove the temporary post-merge repetition.
-# v8_canary_changes.py is the single source of truth for called workflows;
-# manual dispatches force the complete Linux matrix.
+# The Merge gate calls this Change-triggered validation. Postmerge does not;
+# manual dispatches force the complete Linux matrix. v8_canary_changes.py is
+# the single source of truth for relevant paths.
 on:
   workflow_call:
   workflow_dispatch:

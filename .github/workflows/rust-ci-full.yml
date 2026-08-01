@@ -11,9 +11,9 @@ on:
       resolved_scope:
         description: Planner-resolved validation scope.
         value: ${{ jobs.results.outputs.resolved_scope }}
-      retained_families:
+      selected_families:
         description: JSON list of validation families selected by the planner.
-        value: ${{ jobs.results.outputs.retained_families }}
+        value: ${{ jobs.results.outputs.selected_families }}
   push:
     branches:
       # Main pushes enter through postmerge-ci. Keep this opt-in branch trigger
@@ -33,7 +33,7 @@ jobs:
       run_general: ${{ steps.scope.outputs.run_general }}
       run_x64: ${{ steps.scope.outputs.run_x64 }}
       run_arm64: ${{ steps.scope.outputs.run_arm64 }}
-      retained_families: ${{ steps.scope.outputs.retained_families }}
+      selected_families: ${{ steps.scope.outputs.selected_families }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -442,7 +442,7 @@ jobs:
     name: Full CI results
     outputs:
       resolved_scope: ${{ needs.plan.outputs.resolved_scope }}
-      retained_families: ${{ needs.plan.outputs.retained_families }}
+      selected_families: ${{ needs.plan.outputs.selected_families }}
     needs:
       [
         plan,

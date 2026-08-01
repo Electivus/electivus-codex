@@ -43,11 +43,11 @@ jobs:
         if: ${{ always() }}
         env:
           RESOLVED_SCOPE: ${{ needs.rust-ci-full.outputs.resolved_scope }}
-          RETAINED_FAMILIES: ${{ needs.rust-ci-full.outputs.retained_families }}
+          SELECTED_FAMILIES: ${{ needs.rust-ci-full.outputs.selected_families }}
         run: |
           {
             echo "## Postmerge Extended validation"
             echo
             echo "- Resolved scope: \`${RESOLVED_SCOPE}\`"
-            echo "- Retained families: \`${RETAINED_FAMILIES}\`"
+            echo "- Retained families: \`${SELECTED_FAMILIES}\`"
           } >> "$GITHUB_STEP_SUMMARY"

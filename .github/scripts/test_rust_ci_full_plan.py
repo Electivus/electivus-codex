@@ -1,10 +1,6 @@
 import unittest
 
-from rust_ci_full_plan import LintLane
-from rust_ci_full_plan import RustCiFullPlan
-from rust_ci_full_plan import github_outputs
-from rust_ci_full_plan import plan_for_scope
-from rust_ci_full_plan import render_summary
+from rust_ci_full_plan import LintLane, RustCiFullPlan, github_outputs, plan_for_scope, render_summary
 
 
 MERGE = (LintLane("ubuntu-24.04", "x86_64-unknown-linux-gnu", "dev"), LintLane("ubuntu-24.04", "x86_64-unknown-linux-gnu", "release"), LintLane("ubuntu-24.04", "x86_64-unknown-linux-musl", "release"))
@@ -36,12 +32,15 @@ class RustCiFullPlanTests(unittest.TestCase):
             with self.subTest(scope=scope):
                 self.assertEqual(expected, plan_for_scope(scope))
 
+    def test_requested_scope_is_sanitized_and_outputs_are_bounded(self) -> None:
+        plan = plan_for_scope("nightly\nresolved_scope=extended" + "x" * 5000)
+        self.assertEqual(64, len(plan.requested_scope))
+        self.assertTrue(plan.requested_scope.startswith("nightly?resolved_scope?extended"))
+        self.assertTrue(all("\n" not in value and len(value) <= 4096 for value in github_outputs(plan).values()))
+
     def test_extended_github_outputs_and_summary_are_bounded(self) -> None:
         plan = plan_for_scope("extended")
-        self.assertEqual(
-            {"resolved_scope": "extended", "reason": "requested extended scope", "lint_matrix": '[{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","profile":"dev"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","profile":"dev"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","profile":"dev"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","profile":"release"}]', "run_general": "false", "run_x64": "false", "run_arm64": "true", "retained_families": '["x64 musl dev lint/build","ARM64 musl dev lint/build","ARM64 GNU dev lint/build","ARM64 musl release lint/build","ARM64 nextest"]'},
-            github_outputs(plan),
-        )
+        self.assertEqual({"resolved_scope": "extended", "reason": "requested extended scope", "lint_matrix": '[{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","profile":"dev"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","profile":"dev"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","profile":"dev"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","profile":"release"}]', "run_general": "false", "run_x64": "false", "run_arm64": "true", "selected_families": '["x64 musl dev lint/build","ARM64 musl dev lint/build","ARM64 GNU dev lint/build","ARM64 musl release lint/build","ARM64 nextest"]'}, github_outputs(plan))
         summary = render_summary(plan)
         for fragment in ("Resolved scope: `extended`", "General families: `false`", "x64 nextest 4+1 PostgreSQL: `false`", "ARM64 nextest: `true`", "Lint/build lanes: `4`"):
             self.assertIn(fragment, summary)
