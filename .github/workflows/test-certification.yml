@@ -37,6 +37,8 @@ jobs:
     env:
       TARGET: x86_64-unknown-linux-gnu
       EVIDENCE_DIR: ${{ github.workspace }}/.certification/${{ matrix.test_id }}
+      RUST_MIN_STACK: "8388608"
+      CARGO_PROFILE_CI_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -57,6 +59,11 @@ jobs:
             --run-attempt "${GITHUB_RUN_ATTEMPT}" \
             --runner-os "${RUNNER_OS}" \
             --runner-arch "${RUNNER_ARCH}"
+
+      - name: Free disk space for certification builds
+        run: |
+          set -euo pipefail
+          sudo rm -rf /opt/ghc /opt/hostedtoolcache /usr/local/.ghcup /usr/local/lib/android /usr/share/dotnet
 
       - uses: ./.github/actions/setup-ci
 

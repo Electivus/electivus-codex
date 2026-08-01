@@ -194,6 +194,24 @@ def verify_manifest(manifest: dict[str, object], expected_sha: str) -> list[str]
     return issues
 
 
+def verify_retained_reports(manifest: dict[str, object], directory: Path) -> list[str]:
+    executions = manifest.get("executions")
+    entries = executions if isinstance(executions, list) else []
+    issues: list[str] = []
+    for order in range(1, 21):
+        report = directory / "junit" / f"{order:02}.xml"
+        issues.extend(
+            f"execution {order}: {issue}"
+            for issue in inspect_report(report, expected_testcases=1, reject_skipped=True)
+        )
+        entry = entries[order - 1] if order <= len(entries) and isinstance(entries[order - 1], dict) else {}
+        if report.is_file():
+            actual_hash = hashlib.sha256(report.read_bytes()).hexdigest()
+            if entry.get("junitSha256") != actual_hash:
+                issues.append(f"execution {order}: JUnit SHA-256 does not match retained file")
+    return issues
+
+
 def _read_manifest(path: Path) -> dict[str, object]:
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
@@ -250,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Test certification failed: {error}", file=sys.stderr)
         return 1
     issues = verify_manifest(manifest, args.expected_sha)
+    issues.extend(verify_retained_reports(manifest, args.manifest.parent))
     if issues:
         print("Test certification failed:\n" + "\n".join(f"- {issue}" for issue in issues), file=sys.stderr)
         return 1

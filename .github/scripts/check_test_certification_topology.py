@@ -46,6 +46,7 @@ def validate_topology(
     checks = (
         ("isolated trigger", "push:" in trigger and "branches: [certification/issue-89]" in trigger and "workflow_dispatch:" in trigger and "pull_request:" not in trigger),
         ("immutable Linux x64", "runs-on: ubuntu-24.04\n" in workflow and "TARGET: x86_64-unknown-linux-gnu" in workflow and "ref: ${{ env.CANDIDATE_SHA }}" in workflow and "--checked-out-sha \"$(git rev-parse HEAD)\"" in workflow and "--runner-os \"${RUNNER_OS}\"" in workflow and "--runner-arch \"${RUNNER_ARCH}\"" in workflow),
+        ("hosted capacity and stack", 'RUST_MIN_STACK: "8388608"' in workflow and 'CARGO_PROFILE_CI_TEST_DEBUG: "0"' in workflow and "sudo rm -rf" in workflow and "/opt/hostedtoolcache" in workflow),
         ("two independent tests", set(MATRIX_ROW.findall(workflow)) == expected_rows and len(MATRIX_ROW.findall(workflow)) == 2 and "fail-fast: false" in workflow),
         ("exact identities", all(definition.identity in workflow and definition.identity in verifier for definition in TESTS.values())),
         ("twenty ordered executions", "seq 1 20" in workflow and "for order in" in workflow),
@@ -54,7 +55,7 @@ def validate_topology(
         ("unexpected skip", "--reject-skipped" in workflow and 'SKIP_ELEMENTS = {"skipped"}' in junit and 'if reject_skipped else ("failures", "errors")' in junit),
         ("stop failed sequence", all(status in workflow for status in ("test_status", "junit_status", "record_status")) and "if [[ \"${test_status}\" -ne 0" in workflow and "break" in workflow),
         ("retained evidence", "if: always()" in workflow and "actions/upload-artifact@" in workflow and "retention-days: 90" in workflow and "manifest.json" in workflow and "GITHUB_STEP_SUMMARY" in workflow and "actions/runs/${GITHUB_RUN_ID}" in workflow),
-        ("manifest lifecycle", all(f'verify_test_certification.py" {command}' in workflow for command in ("init", "record", "verify"))),
+        ("manifest lifecycle", all(f'verify_test_certification.py" {command}' in workflow for command in ("init", "record", "verify")) and "issues.extend(verify_retained_reports(manifest, args.manifest.parent))" in verifier),
         ("temporary policy", "TEMPORARY_CERTIFICATION_TESTS" in policy and "stale Rust ignore classification" in policy and "check_rust_test_policy.py" in repo_checks),
         ("ordinary reactivation path", "target: x86_64-unknown-linux-gnu" in x64 and "uses: ./.github/workflows/rust-ci-full-nextest-platform.yml" in x64 and "--run-ignored" not in shard and "check_nextest_junit.py" in shard and "RETRY_ELEMENTS" in junit),
         ("repository check", "python3 .github/scripts/check_test_certification_topology.py" in repo_checks),

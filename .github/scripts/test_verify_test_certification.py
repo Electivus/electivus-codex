@@ -1,5 +1,6 @@
 import copy
 import contextlib
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -50,14 +51,35 @@ def valid_manifest(test_id: str = "core-pending-input") -> dict[str, object]:
 
 
 class TestCertificationVerifierTests(unittest.TestCase):
-    def test_verify_cli_accepts_only_the_complete_manifest(self) -> None:
+    def test_verify_cli_authenticates_every_retained_junit_file(self) -> None:
+        valid_xml = '<testsuites><testsuite><testcase name="passed" /></testsuite></testsuites>'
         with tempfile.TemporaryDirectory() as temp_dir:
             manifest_path = Path(temp_dir) / "manifest.json"
+            (manifest_path.parent / "junit").mkdir()
             manifest = valid_manifest()
-            for expected, candidate in ((0, manifest), (1, manifest | {"executions": manifest["executions"][:-1]})):
-                manifest_path.write_text(json.dumps(candidate), encoding="utf-8")
-                with self.subTest(expected=expected), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    self.assertEqual(expected, certification.main(["verify", str(manifest_path), "--expected-sha", SHA]))
+            for execution in manifest["executions"]:
+                report = manifest_path.parent / execution["junitPath"]
+                report.write_text(valid_xml, encoding="utf-8")
+                execution["junitSha256"] = hashlib.sha256(valid_xml.encode()).hexdigest()
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            self.assertEqual(0, self.run_verify(manifest_path))
+            report = manifest_path.parent / "junit/01.xml"
+            cases = (
+                ("missing", None), ("hash mismatch", valid_xml.replace("passed", "also-passed")), ("malformed", "<testsuites>"),
+                ("skipped", '<testsuites><testsuite><testcase name="skipped"><skipped /></testcase></testsuite></testsuites>'), ("retry", '<testsuites><testsuite><testcase name="retried"><flakyFailure /></testcase></testsuite></testsuites>'),
+            )
+            for signal, content in cases:
+                if content is None:
+                    report.unlink()
+                else:
+                    report.write_text(content, encoding="utf-8")
+                with self.subTest(signal=signal):
+                    self.assertEqual(1, self.run_verify(manifest_path))
+                report.write_text(valid_xml, encoding="utf-8")
+
+    def run_verify(self, manifest_path: Path) -> int:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return certification.main(["verify", str(manifest_path), "--expected-sha", SHA])
 
     def test_complete_retry_free_sequence_is_accepted(self) -> None:
         self.assertEqual([], certification.verify_manifest(valid_manifest(), SHA))

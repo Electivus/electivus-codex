@@ -142,7 +142,7 @@ gh workflow run test-certification.yml --ref main -f candidate_sha=<40-character
 ```
 
 For each test, retain the workflow run URL and download its
-`test-certification-<test-id>-<candidate-sha>` artifact. Verify each downloaded `manifest.json` independently with:
+`test-certification-<test-id>-<candidate-sha>` artifact. Verify each manifest and its 20 retained JUnit files with:
 
 ```bash
 python3 .github/scripts/verify_test_certification.py verify <manifest.json> \

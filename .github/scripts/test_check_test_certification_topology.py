@@ -18,6 +18,9 @@ class TestCertificationTopologyTests(unittest.TestCase):
         cases = (
             ("isolated trigger", 0, workflow.replace("certification/issue-89", "main", 1)),
             ("immutable Linux x64", 0, workflow.replace("runs-on: ubuntu-24.04", "runs-on: ubuntu-24.04-arm")),
+            ("hosted capacity and stack", 0, workflow.replace('RUST_MIN_STACK: "8388608"', 'RUST_MIN_STACK: "1048576"')),
+            ("hosted capacity and stack", 0, workflow.replace('CARGO_PROFILE_CI_TEST_DEBUG: "0"', 'CARGO_PROFILE_CI_TEST_DEBUG: "1"')),
+            ("hosted capacity and stack", 0, workflow.replace("sudo rm -rf", "echo keep-hosted-images")),
             ("two independent tests", 0, workflow.replace("fail-fast: false", "fail-fast: true")),
             ("exact identities", 0, workflow.replace("injected_user_input_triggers_follow_up_request_with_deltas", "similar_pending_input_test")),
             ("exact identities", 1, verifier.replace("review_start_exec_approval_item_id_matches_command_execution_item", "similar_review_test")),
@@ -29,6 +32,7 @@ class TestCertificationTopologyTests(unittest.TestCase):
             ("stop failed sequence", 0, workflow.replace("break", "continue", 1)),
             ("retained evidence", 0, workflow.replace("retention-days: 90", "retention-days: 1")),
             ("manifest lifecycle", 0, workflow.replace('verify_test_certification.py" verify', 'missing_verifier.py" verify')),
+            ("manifest lifecycle", 1, verifier.replace("issues.extend(verify_retained_reports(manifest, args.manifest.parent))", "pass")),
             ("temporary policy", 3, policy.replace("stale Rust ignore classification", "stale entry ignored")),
             ("ordinary reactivation path", 5, platform.replace('--partition "hash:${{ matrix.shard }}/4"', '--run-ignored=only\n            --partition "hash:${{ matrix.shard }}/4"', 1)),
             ("repository check", 2, repo_checks.replace("check_test_certification_topology.py", "missing_certification_topology.py")),
