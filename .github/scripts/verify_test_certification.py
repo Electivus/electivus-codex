@@ -31,7 +31,7 @@ HASH_RE = re.compile(r"[0-9a-f]{64}")
 
 def command_for(test: TestDefinition) -> str:
     return (
-        f"cargo nextest run --target x86_64-unknown-linux-gnu -p {test.package} "
+        f"cargo nextest run --cargo-profile ci-test --target x86_64-unknown-linux-gnu -p {test.package} "
         "--test all --retries 0 "
         f"--run-ignored=only -E 'test(={test.identity})'"
     )

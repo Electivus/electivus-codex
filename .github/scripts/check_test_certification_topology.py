@@ -50,7 +50,7 @@ def validate_topology(
         ("two independent tests", set(MATRIX_ROW.findall(workflow)) == expected_rows and len(MATRIX_ROW.findall(workflow)) == 2 and "fail-fast: false" in workflow),
         ("exact identities", all(definition.identity in workflow and definition.identity in verifier for definition in TESTS.values())),
         ("twenty ordered executions", "seq 1 20" in workflow and "for order in" in workflow),
-        ("retry-free exact nextest", "--retries 0" in workflow and "--run-ignored=only" in workflow and "-E \"test(=${{ matrix.identity }})\"" in workflow),
+        ("retry-free exact nextest", "--cargo-profile ci-test" in workflow and "--cargo-profile ci-test" in verifier and "--retries 0" in workflow and "--run-ignored=only" in workflow and "-E \"test(=${{ matrix.identity }})\"" in workflow),
         ("single JUnit testcase", "check_nextest_junit.py" in workflow and "--expected-testcases 1" in workflow),
         ("unexpected skip", "--reject-skipped" in workflow and 'SKIP_ELEMENTS = {"skipped"}' in junit and 'if reject_skipped else ("failures", "errors")' in junit),
         ("stop failed sequence", all(status in workflow for status in ("test_status", "junit_status", "record_status")) and "if [[ \"${test_status}\" -ne 0" in workflow and "break" in workflow),

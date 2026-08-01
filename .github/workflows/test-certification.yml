@@ -91,7 +91,7 @@ jobs:
             rm -f -- "${junit_source}" "${report}"
             set +e
             cargo nextest run \
-              --target "${TARGET}" \
+              --cargo-profile ci-test --target "${TARGET}" \
               -p "${{ matrix.package }}" \
               --test all \
               --retries 0 \
