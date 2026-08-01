@@ -23,6 +23,12 @@ class DeepLinuxReleaseTopologyTests(unittest.TestCase):
 
     def test_release_topology_mutations_fail_closed(self) -> None:
         bazel, blocking, rust, repo_checks, planner, result_helper = self.sources
+        pinned_actionlint = (
+            "go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7"
+        )
+        floating_actionlint = (
+            "go install github.com/rhysd/actionlint/cmd/actionlint@latest"
+        )
         cases = (
             ("Bazel concurrency scope", 0, bazel.replace("github.event.pull_request.number > 0", "github.actor != ''")),
             ("Bazel concurrency scope", 0, bazel.replace("format('pr-{0}', github.event.pull_request.number)", "format('pr-{0}', github.actor)")),
@@ -38,6 +44,10 @@ class DeepLinuxReleaseTopologyTests(unittest.TestCase):
             ("Bazel release logs", 0, bazel.replace("bazel-execution-logs-verify-release-build", "missing-release-logs")),
             ("hosted actionlint install", 0, bazel.replace("github.com/rhysd/actionlint/cmd/actionlint@v1.7.7", "github.com/rhysd/actionlint/cmd/actionlint@latest", 1)),
             ("hosted actionlint install", 3, repo_checks.replace('echo "$GOBIN" >> "$GITHUB_PATH"', 'echo "$GOBIN"')),
+            ("hosted actionlint install", 0, bazel.replace(pinned_actionlint, f"{pinned_actionlint}\n          {floating_actionlint}", 1)),
+            ("hosted actionlint install", 3, repo_checks.replace(pinned_actionlint, f"{pinned_actionlint}\n          {floating_actionlint}", 1)),
+            ("hosted actionlint install", 0, bazel.replace(pinned_actionlint, f"{floating_actionlint}\n          # {pinned_actionlint}", 1)),
+            ("hosted actionlint install", 3, repo_checks.replace(pinned_actionlint, f"{floating_actionlint}\n          # {pinned_actionlint}", 1)),
             ("Bazel release promotion", 1, blocking.replace("needs.deep-linux-eligibility.outputs.eligible == 'true'", "needs.deep-linux-eligibility.outputs.eligible == 'false'", 1)),
             ("Bazel release promotion", 1, blocking.replace("validation_scope: release-only", "validation_scope: essential")),
             ("bounded Bazel result", 1, blocking.replace("if: ${{ always() }}", "if: ${{ needs.deep-linux-bazel-release.result == 'success' }}", 1)),

@@ -31,16 +31,29 @@ BAZEL_CONCURRENCY_GROUP = (
 
 
 def _actionlint_install_contract(step: str) -> bool:
+    run = _block(
+        step,
+        r"^        run: \|\s*$",
+        r"^        [A-Za-z_][A-Za-z0-9_-]*:\s*",
+    )
+    executable_lines = (
+        line.strip()
+        for line in run.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+    actionlint_installs = [
+        line
+        for line in executable_lines
+        if "actionlint" in line and re.search(r"\binstall\b", line)
+    ]
     return (
         "uses: taiki-e/install-action@" not in step
         and "GOBIN: ${{ runner.temp }}/actionlint/bin" in step
         and "shell: bash" in step
         and "set -euo pipefail" in step
         and 'mkdir -p "$GOBIN"' in step
-        and step.count(
-            "go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7"
-        )
-        == 1
+        and actionlint_installs
+        == ["go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7"]
         and '"$GOBIN/actionlint" -version' in step
         and 'echo "$GOBIN" >> "$GITHUB_PATH"' in step
     )
