@@ -49,6 +49,9 @@ jobs:
 
   v8-canary:
     name: v8-canary
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/v8-canary.yml
     secrets: inherit
 

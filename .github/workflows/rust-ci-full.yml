@@ -20,6 +20,16 @@ on:
       # for developers who want the full suite before merging.
       - "**full-ci**"
   workflow_dispatch:
+    inputs:
+      validation_scope:
+        description: Validation scope.
+        required: true
+        default: full
+        type: choice
+        options:
+          - merge-gate
+          - extended
+          - full
 
 jobs:
   plan:

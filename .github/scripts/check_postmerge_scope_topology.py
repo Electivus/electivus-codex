@@ -60,6 +60,7 @@ def _inventory_bound_to_execution(rust: str, platform: str, v8: str, planner: st
 
 def validate_topology(rust: str, postmerge: str, blocking: str, repo_checks: str, planner: str, result_helper: str, v8_detector: str, inventory: str, platform: str, v8: str) -> list[str]:
     rust_on = _block(rust, r"^on:\s*$", r"^jobs:\s*$")
+    rust_dispatch = _block(rust_on, r"^  workflow_dispatch:\s*$", r"^  [A-Za-z_][A-Za-z0-9_-]*:\s*$")
     plan = _job(rust, "plan")
     general_jobs = tuple(_job(rust, name) for name in ("general", "cargo_shear", "argument_comment_lint_package", "argument_comment_lint_prebuilt"))
     lint, x64, arm64, rust_results = (_job(rust, name) for name in ("lint_build", "tests_linux_x64", "tests_linux_arm64", "results"))
@@ -69,6 +70,7 @@ def validate_topology(rust: str, postmerge: str, blocking: str, repo_checks: str
     checks = (
         ("blocking trigger ownership", "pull_request: {}" in blocking_on and "workflow_dispatch:" in blocking_on and "push:" not in blocking_on),
         ("planner workflow contract", "workflow_dispatch:" in rust_on and "default: full" in rust_on and "resolved_scope:" in rust_on and "rust_ci_full_plan.py" in plan and all(f"{name}: ${{{{ steps.scope.outputs.{name} }}}}" in plan for name in ("resolved_scope", "reason", "lint_matrix", "run_general", "run_x64", "run_arm64", "selected_families"))),
+        ("direct dispatch scope contract", "inputs:\n      validation_scope:" in rust_dispatch and "required: true" in rust_dispatch and "default: full" in rust_dispatch and "type: choice" in rust_dispatch and "options:\n          - merge-gate\n          - extended\n          - full" in rust_dispatch),
         ("exact merge lint plan", _planner_matrix(planner, "MERGE_GATE_LINT_MATRIX") == MERGE_LANES),
         ("exact Extended lint plan", _planner_matrix(planner, "EXTENDED_LINT_MATRIX") == EXTENDED_LANES),
         ("exact full lint plan", _planner_matrix(planner, "FULL_LINT_MATRIX") == FULL_LANES and set(FULL_LANES) == set(MERGE_LANES) | set(EXTENDED_LANES)),

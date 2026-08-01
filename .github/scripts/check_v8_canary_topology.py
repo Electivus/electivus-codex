@@ -70,6 +70,7 @@ def validate_topology(
         ("artifact and smoke integrity", "Build Bazel V8 release pair" in build and "BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}" in build and "run_bazel_with_buildbuddy.py" in build and "rusty_v8_bazel.py stage-release-pair" in build and "x86_64-unknown-linux-gnu:x86_64|aarch64-unknown-linux-gnu:aarch64" in smoke and "Skipping non-native Cargo smoke" in smoke and "actions/upload-artifact@" in upload and "v8-canary-${{ needs.metadata.outputs.v8_version }}-${{ matrix.variant }}-${{ matrix.target }}" in upload and '"codex-rs/v8-poc/**"' in detector),
         ("red matrix", "continue-on-error:" not in build),
         ("V8 caller required", blocking.count("uses: ./.github/workflows/v8-canary.yml") == 1 and "uses: ./.github/workflows/v8-canary.yml" in caller and "- v8-canary" in required),
+        ("V8 caller permissions", "permissions:\n      contents: read\n      actions: read" in caller and "permissions:\n      contents: read\n      actions: read" in build),
         ("detector self relevance", all(f'"{path}"' in detector for path in infra_paths)),
         ("detector unknown fail safe", "KNOWN_IRRELEVANT_PATH_PATTERNS" in detector and "unknown V8 impact" in detector and "comparison failed" in detector and "comparison is missing base or head" in detector),
         ("V8 concurrency", "group: ${{ github.workflow }}::${{ github.event.pull_request.number > 0 && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}" in concurrency and "cancel-in-progress: ${{ github.ref_name != 'main' }}" in concurrency),

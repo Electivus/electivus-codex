@@ -20,6 +20,12 @@ class PostmergeScopeTopologyTests(unittest.TestCase):
         self.assertNotIn("retained_families", contract)
         self.assertIn("selected_families", contract)
 
+    def test_direct_dispatch_can_select_validation_scope(self) -> None:
+        rust_on = topology._block(self.sources[0], r"^on:\s*$", r"^jobs:\s*$")
+        self.assertIn("workflow_dispatch:\n    inputs:\n      validation_scope:", rust_on)
+        self.assertIn("type: choice", rust_on)
+        self.assertIn("options:\n          - merge-gate\n          - extended\n          - full", rust_on)
+
     def test_every_inventory_family_and_cardinality_is_executable(self) -> None:
         inventory = json.loads(self.sources[7])
         for group in ("rustCiFull", "v8"):
@@ -41,6 +47,8 @@ class PostmergeScopeTopologyTests(unittest.TestCase):
         cases = (
             ("blocking trigger ownership", 2, blocking.replace("  workflow_dispatch:", "  push:\n    branches: [main]\n  workflow_dispatch:")),
             ("planner workflow contract", 0, rust.replace("run_arm64: ${{ steps.scope.outputs.run_arm64 }}", "run_arm64: false")),
+            ("direct dispatch scope contract", 0, rust.replace("          - merge-gate", "          - essential", 1)),
+            ("direct dispatch scope contract", 0, rust.replace("        type: choice", "        type: string", 1)),
             ("exact merge lint plan", 4, planner.replace('LintLane("ubuntu-24.04", "x86_64-unknown-linux-musl", "release")', 'LintLane("ubuntu-24.04", "x86_64-unknown-linux-musl", "dev")', 1)),
             ("exact Extended lint plan", 4, planner.replace('LintLane("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu", "dev")', 'LintLane("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu", "release")', 1)),
             ("exact full lint plan", 4, planner.replace("MERGE_GATE_LINT_MATRIX[1]", "MERGE_GATE_LINT_MATRIX[0]", 1)),

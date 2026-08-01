@@ -16,6 +16,10 @@ class V8CanaryTopologyTests(unittest.TestCase):
     def test_current_v8_canary_topology_is_complete(self) -> None:
         self.assertEqual([], topology.validate_topology(*self.sources))
 
+    def test_v8_caller_allows_nested_action_reads(self) -> None:
+        caller = topology._job(self.sources[1], "v8-canary")
+        self.assertIn("permissions:\n      contents: read\n      actions: read", caller)
+
     def test_v8_canary_mutations_fail_closed(self) -> None:
         canary, blocking, repo_checks, detector = self.sources
         cases = (
@@ -35,6 +39,8 @@ class V8CanaryTopologyTests(unittest.TestCase):
             ("red matrix", 0, canary.replace("name: Build Bazel V8 release pair", "continue-on-error: true\n      - name: Build Bazel V8 release pair")),
             ("V8 caller required", 1, blocking.replace("uses: ./.github/workflows/v8-canary.yml", "uses: ./missing-v8.yml")),
             ("V8 caller required", 1, blocking.replace("- v8-canary", "- missing-v8")),
+            ("V8 caller permissions", 1, blocking.replace("      actions: read", "      actions: none", 1)),
+            ("V8 caller permissions", 0, canary.replace("      actions: read", "      actions: none", 1)),
             ("detector self relevance", 3, detector.replace('".github/workflows/blocking-ci.yml"', '"missing-blocking.yml"')),
             ("detector unknown fail safe", 3, detector.replace("unknown V8 impact", "unknown path ignored")),
             ("V8 repository check", 2, repo_checks.replace("check_v8_canary_topology.py", "missing_v8_topology.py")),
