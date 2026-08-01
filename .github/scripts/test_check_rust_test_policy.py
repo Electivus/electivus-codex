@@ -89,10 +89,15 @@ class QuarantinePolicyTests(unittest.TestCase):
         self.repo = Path(self.temp_dir.name)
         self.workflows = self.repo / ".github/workflows"
         self.workflows.mkdir(parents=True)
-        self.write_workflow("extended.yml", "jobs:\n  rust-tests:\n    runs-on: ubuntu-latest\n")
+        self.write_workflow(
+            "extended.yml",
+            "jobs:\n  rust-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+        )
 
     def write_workflow(self, name: str, body: str) -> None:
-        (self.workflows / name).write_text(f"name: Extended\n{body}", encoding="utf-8")
+        (self.workflows / name).write_text(
+            f"name: Extended\non: workflow_call\n{body}", encoding="utf-8"
+        )
 
     def record(self) -> dict[str, object]:
         return {
@@ -114,7 +119,7 @@ class QuarantinePolicyTests(unittest.TestCase):
         self.assertEqual([], self.validate([self.record()]))
         self.write_workflow(
             "valid.yml",
-            "jobs:\n  rust-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          echo '['\n  reusable:\n    uses: ./reusable.yml\n",
+            "jobs:\n  rust-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n  reusable:\n    uses: ./.github/workflows/reusable.yml\n",
         )
         self.assertEqual(({"reusable", "rust-tests"}, []), policy._workflow_jobs(self.repo, "valid.yml"))
         self.assertEqual(
@@ -122,19 +127,25 @@ class QuarantinePolicyTests(unittest.TestCase):
             policy._workflow_jobs(self.repo, "missing.yml"),
         )
         invalid = (
-            ("flow", "  broken:\n    runs-on: [\n", "unbalanced flow or quote"),
-            ("quote", '  broken:\n    runs-on: "ubuntu\n', "unbalanced flow or quote"),
-            ("indent", "  broken:\n   runs-on: ubuntu\n", "tabs or invalid indentation"),
-            ("tab", "  broken:\n\truns-on: ubuntu\n", "tabs or invalid indentation"),
-            ("duplicate", "  broken:\n    runs-on: ubuntu\n  broken:\n    runs-on: ubuntu\n", "duplicate job id broken"),
-            ("nonmapping", "  broken: ubuntu\n", "job must be a mapping"),
-            ("not-runnable", "  broken:\n    name: Broken\n", "jobs lack runs-on or uses: broken"),
+            ("empty-runs-on", "  broken:\n    runs-on: []\n    steps:\n      - run: echo ok\n", '"runs-on" section should not be empty [syntax-check]'),
+            ("duplicate-runs-on", "  broken:\n    runs-on: ubuntu-latest\n    runs-on:\n    steps:\n      - run: echo ok\n", 'key "runs-on" is duplicated in "broken" job. previously defined at line:5,col:5 [syntax-check]'),
+            ("missing-steps", "  broken:\n    runs-on: ubuntu-latest\n", '"steps" section is missing in job "broken" [syntax-check]'),
+            ("malformed-quote", '  broken:\n    runs-on: "ubuntu" garbage\n    steps:\n      - run: echo ok\n', "could not parse as YAML: yaml: line 4: did not find expected key [syntax-check]"),
         )
-        for name, body, reason in invalid:
+        for name, body, diagnostic in invalid:
             with self.subTest(name=name):
                 self.write_workflow(f"{name}.yml", f"jobs:\n{body}")
-                expected = (set(), [f"malformed extended workflow {name}.yml: {reason}"])
+                expected = (
+                    set(),
+                    [f"actionlint rejected extended workflow {name}.yml: {diagnostic}"],
+                )
                 self.assertEqual(expected, policy._workflow_jobs(self.repo, f"{name}.yml"))
+
+        missing_actionlint = "/definitely/missing/actionlint"
+        self.assertEqual(
+            (set(), [f"actionlint executable not found: {missing_actionlint}"]),
+            policy._workflow_jobs(self.repo, "valid.yml", actionlint=missing_actionlint),
+        )
 
         record = self.record() | {"extended_job": "missing-job"}
         self.assertEqual(

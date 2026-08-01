@@ -33,6 +33,11 @@ jobs:
       - name: Test standalone installer
         run: python3 -m unittest discover -s scripts/install -p 'test_*.py'
 
+      - name: Install actionlint
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: actionlint@1.7.7
+
       - name: Test GitHub helper scripts
         run: just test-github-scripts
 

@@ -5,8 +5,10 @@ import argparse
 from collections import Counter
 from dataclasses import dataclass
 import datetime as dt
+import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -19,6 +21,7 @@ RAW_STRING_RE = re.compile(r'(?:b|c)?r(#{0,255})"')
 FUNCTION_RE = re.compile(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)")
 ATTRIBUTE_START_RE = re.compile(r"#\s*\[")
 JOB_RE = re.compile(r"  ([A-Za-z_][A-Za-z0-9_-]*):\s*(?:#.*)?$")
+ACTIONLINT_IGNORE = "SC2317|SC2129"
 
 
 @dataclass(frozen=True, order=True)
@@ -233,94 +236,66 @@ def _required_string(
     return value.strip()
 
 
-def _yaml_flow_state(
-    line: str, stack: list[str], quote: str | None
-) -> tuple[list[str], str | None] | None:
-    cursor = 0
-    while cursor < len(line):
-        character = line[cursor]
-        if quote == '"' and character == "\\":
-            cursor += 2
-            continue
-        if quote:
-            if character == quote:
-                if quote == "'" and line[cursor + 1 : cursor + 2] == "'":
-                    cursor += 1
-                else:
-                    quote = None
-        elif character in "'\"":
-            quote = character
-        elif character == "#" and (cursor == 0 or line[cursor - 1].isspace()):
-            break
-        elif character in "[{":
-            stack.append(character)
-        elif character in "]}":
-            if not stack or (stack.pop(), character) not in {("[", "]"), ("{", "}")}:
-                return None
-        cursor += 1
-    return stack, quote
-
-
-def _workflow_jobs(repo: Path, name: str) -> tuple[set[str], list[str]]:
+def _workflow_jobs(
+    repo: Path, name: str, *, actionlint: str = "actionlint"
+) -> tuple[set[str], list[str]]:
     relative = Path(name)
     if relative.name != name or relative.suffix not in {".yml", ".yaml"}:
         return set(), [f"extended_workflow must be a workflow filename: {name}"]
     path = repo / ".github/workflows" / name
     if not path.is_file():
         return set(), [f"extended workflow does not exist: {name}"]
+    executable = shutil.which(actionlint)
+    if executable is None:
+        return set(), [f"actionlint executable not found: {actionlint}"]
+    try:
+        result = subprocess.run(
+            [
+                executable,
+                "-no-color",
+                "-format",
+                "{{json .}}",
+                "-ignore",
+                ACTIONLINT_IGNORE,
+                str(path.resolve()),
+            ],
+            cwd=repo,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        return set(), [f"cannot execute actionlint for {name}: {error}"]
+    if result.returncode:
+        try:
+            diagnostics = json.loads(result.stdout)
+            detail = "; ".join(
+                f"{diagnostic['message']} [{diagnostic['kind']}]"
+                for diagnostic in diagnostics
+            )
+        except (json.JSONDecodeError, KeyError, TypeError):
+            detail = (result.stdout or result.stderr).strip()
+        if not detail:
+            detail = f"actionlint exited with status {result.returncode}"
+        return set(), [f"actionlint rejected extended workflow {name}: {detail}"]
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError) as error:
         return set(), [f"cannot read extended workflow {name}: {error}"]
     jobs_markers = [index for index, line in enumerate(lines) if re.fullmatch(r"jobs:\s*(?:#.*)?", line)]
     if len(jobs_markers) != 1:
-        return set(), [f"malformed extended workflow {name}: expected one top-level jobs mapping"]
-    jobs: dict[str, bool] = {}
-    current_job = scalar_indent = None
-    flow_stack: list[str] = []
-    quote: str | None = None
+        return set(), [f"cannot extract top-level jobs from validated workflow {name}"]
+    jobs: set[str] = set()
     for line in lines[jobs_markers[0] + 1 :]:
         if not line.strip() or line.lstrip().startswith("#"):
             continue
-        indent = len(line) - len(line.lstrip(" "))
-        if scalar_indent is not None and indent > scalar_indent:
-            continue
-        scalar_indent = None
-        if "\t" in line or indent % 2:
-            return set(), [f"malformed extended workflow {name}: tabs or invalid indentation"]
-        if indent == 0:
+        if not line.startswith(" "):
             break
-        if indent == 2:
-            if flow_stack or quote:
-                return set(), [f"malformed extended workflow {name}: unbalanced flow or quote"]
-            match = JOB_RE.fullmatch(line)
-            if match is None:
-                return set(), [f"malformed extended workflow {name}: job must be a mapping"]
-            current_job = match.group(1)
-            if current_job in jobs:
-                return set(), [f"malformed extended workflow {name}: duplicate job id {current_job}"]
-            jobs[current_job] = False
-            continue
-        state = _yaml_flow_state(line, flow_stack, quote)
-        if current_job is None or indent < 4 or state is None:
-            return set(), [f"malformed extended workflow {name}: invalid job block"]
-        flow_stack, quote = state
-        if re.search(r":\s*[|>][-+]?\s*(?:#.*)?$", line):
-            scalar_indent = indent
-        if indent == 4:
-            key, separator, value = line.strip().partition(":")
-            if not separator:
-                return set(), [f"malformed extended workflow {name}: job property must be a mapping"]
-            concrete = value.strip() not in {"", "''", '\"\"', "null", "~"}
-            if key in {"runs-on", "uses"} and concrete and not value.lstrip().startswith("#"):
-                jobs[current_job] = True
+        if match := JOB_RE.fullmatch(line):
+            jobs.add(match.group(1))
     if not jobs:
-        return set(), [f"malformed extended workflow {name}: jobs mapping is empty"]
-    if flow_stack or quote:
-        return set(), [f"malformed extended workflow {name}: unbalanced flow or quote"]
-    if missing := [job for job, runnable in jobs.items() if not runnable]:
-        return set(), [f"malformed extended workflow {name}: jobs lack runs-on or uses: {', '.join(sorted(missing))}"]
-    return set(jobs), []
+        return set(), [f"cannot extract top-level jobs from validated workflow {name}"]
+    return jobs, []
 
 
 def validate_quarantines(

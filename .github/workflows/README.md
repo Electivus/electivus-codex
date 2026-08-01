@@ -90,6 +90,8 @@ The allowed ignore categories have these narrow boundaries:
 
 `quarantined-checks.toml` starts empty. Each record needs an exact `check_identity`, narrow `scope`, evidence,
 justification, an existing workflow and top-level job, an exact GitHub issue or pull-request URL, and TOML dates.
+Repository checks install pinned actionlint first; quarantine validation requires it to accept the exact workflow
+before the Python policy helper verifies the named top-level job exists. Missing actionlint or lint failures fail closed.
 Identities must be unique; wildcard or blanket scopes fail. Expiry must be on or after the start, no more than seven
 days later, and not elapsed. Quarantine is temporary relocation, never a silent pass or stopped validation.
 
