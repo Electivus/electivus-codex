@@ -35,6 +35,7 @@ class PostgresArchiveTopologyTests(unittest.TestCase):
             ("PostgreSQL service and concurrency", 1, postgres.replace("--test-threads 4", "--test-threads 8")),
             ("exact JUnit cardinality", 1, postgres.replace("--expected-testcases", "--minimum-testcases")),
             ("platform result fail closed", 0, platform.replace('needs.postgres-contracts.result }}" != "success"', 'needs.postgres-contracts.result }}" == "success"')),
+            ("platform result fail closed", 0, platform.replace('needs.shard.result }}" != "success"', 'needs.shard.result }}" == "success"')),
             ("x64 fifth consumer", 2, full.replace("postgres_contracts: true", "postgres_contracts: false")),
             ("standalone Merge gate", 4, blocking.replace("uses: ./.github/workflows/postgres-runtime-state-contracts.yml", "uses: ./missing.yml")),
             ("standalone Merge gate", 4, blocking.replace("- postgres-runtime-state-contracts", "- missing-postgres-gate")),

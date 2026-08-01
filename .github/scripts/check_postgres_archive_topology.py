@@ -76,7 +76,7 @@ def validate_topology(
         ("PostgreSQL archive execution", "cargo nextest run" in pg_run and '--archive-file "${archive_file}"' in pg_run and "just test" not in pg_run and not re.search(r"cargo\s+(?:build|test|nextest\s+archive)", postgres)),
         ("PostgreSQL service and concurrency", postgres.count("      postgres:\n") == 1 and postgres.count("image: postgres:18") == 1 and pg_run.count("--test-threads 4") == 1),
         ("exact JUnit cardinality", '--expected-testcases "${{ steps.inventory.outputs.expected_total }}"' in postgres and "JUNIT_OUTCOME: ${{ steps.archive_junit.outcome }}" in postgres and "TEST_STATUS: ${{ steps.archive_test.outputs.status }}" in postgres),
-        ("platform result fail closed", "needs: [shard, postgres-contracts]" in result and '"${{ inputs.postgres_contracts }}" == "true"' in result and '"${{ needs.postgres-contracts.result }}" != "success"' in result and "exit 1" in result),
+        ("platform result fail closed", "needs: [shard, postgres-contracts]" in result and 'if [[ "${{ needs.shard.result }}" != "success" ]]; then' in result and 'if [[ "${{ inputs.postgres_contracts }}" == "true" && "${{ needs.postgres-contracts.result }}" != "success" ]]; then' in result and result.count("exit 1") == 2),
         ("standalone Merge gate", re.search(r"artifact_id:\n\s+required: false\n\s+default: \"\"", postgres) is not None and "if: ${{ inputs.artifact_id == '' }}" in standalone and standalone.count("just test -p ") == 6 and "uses: ./.github/workflows/postgres-runtime-state-contracts.yml" in pg_gate and "- postgres-runtime-state-contracts" in required and "check_ci_results.py" in required),
         ("repository check", "python3 .github/scripts/check_postgres_archive_topology.py" in repo_checks),
     )
