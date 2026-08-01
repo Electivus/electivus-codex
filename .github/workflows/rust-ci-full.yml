@@ -138,7 +138,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.validation_scope == 'merge-gate' && '[{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"dev"}]' || '[{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","profile":"dev"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"dev"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","profile":"dev"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","profile":"dev"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","profile":"release"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","profile":"release"}]') }}
+        include: ${{ fromJSON(inputs.validation_scope == 'merge-gate' && '[{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"dev"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"release"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","profile":"release"}]' || '[{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","profile":"dev"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"dev"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","profile":"dev"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","profile":"dev"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","profile":"release"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","profile":"release"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"release"}]') }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -291,8 +291,25 @@ jobs:
           cargo chef prepare --recipe-path "$RECIPE"
           cargo chef cook --recipe-path "$RECIPE" --target ${{ matrix.target }} --release
 
-      - name: cargo clippy
-        run: cargo clippy --workspace --target ${{ matrix.target }} --tests --profile ${{ matrix.profile }} --timings -- -D warnings
+      - name: cargo build (release)
+        if: ${{ matrix.profile == 'release' }}
+        run: cargo build --workspace --target ${{ matrix.target }} --profile release --timings
+
+      - name: Upload Cargo timings (build)
+        if: always() && matrix.profile == 'release'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: cargo-timings-rust-ci-build-${{ matrix.target }}-release
+          path: ${{ env.CARGO_TARGET_DIR }}/**/cargo-timings/cargo-timing.html
+          if-no-files-found: warn
+
+      - name: cargo clippy (dev)
+        if: ${{ matrix.profile == 'dev' }}
+        run: cargo clippy --workspace --target ${{ matrix.target }} --tests --profile dev --timings -- -D warnings
+
+      - name: cargo clippy (release)
+        if: ${{ matrix.profile == 'release' }}
+        run: cargo clippy --workspace --target ${{ matrix.target }} --tests --profile release --timings -- -D warnings
 
       - name: Upload Cargo timings (clippy)
         if: always()

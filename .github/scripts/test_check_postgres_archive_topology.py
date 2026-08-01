@@ -46,7 +46,7 @@ class PostgresArchiveTopologyTests(unittest.TestCase):
             ("platform result fail closed", 0, platform.replace('needs.shard.result }}" != "success"', 'needs.shard.result }}" == "success"')),
             ("x64 fifth consumer", 2, full.replace("postgres_contracts: true", "postgres_contracts: false")),
             ("eligible Cargo promotion", 4, blocking.replace("needs.deep-linux-eligibility.outputs.eligible == 'true'", "needs.deep-linux-eligibility.outputs.eligible == 'false'")),
-            ("bounded Cargo result", 4, blocking.replace("if: ${{ always() }}", "if: ${{ needs.deep-linux-cargo.result == 'success' }}", 1)),
+            ("bounded Cargo result", 4, blocking.replace("needs: [deep-linux-eligibility, deep-linux-cargo]\n    if: ${{ always() }}", "needs: [deep-linux-eligibility, deep-linux-cargo]\n    if: ${{ needs.deep-linux-cargo.result == 'success' }}")),
             ("eligible Cargo promotion", 4, blocking.replace("validation_scope: merge-gate", "validation_scope: full")),
             ("merge-gate lint matrix", 2, full.replace("cargo clippy --workspace", "cargo clippy -p codex-core")),
             ("merge-gate lint matrix", 2, full.replace('"target":"x86_64-unknown-linux-gnu"', '"target":"x86_64-unknown-linux-musl"', 1)),

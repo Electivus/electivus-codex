@@ -9,8 +9,9 @@ remain the fallback.
 ## Linux Support Boundary
 
 - Native Linux x64 on `ubuntu-24.04` is the current Essential platform.
-- Linux ARM64 on `ubuntu-24.04-arm`, musl variants, release builds, and V8
-  canaries are Extended validation.
+- Linux ARM64 on `ubuntu-24.04-arm`, remaining musl/build variants, and V8
+  canaries are Extended validation. Promoted release lanes remain repeated
+  there until post-merge deduplication under #90.
 - macOS and Windows remain Codex product platforms, but this fork does not
   select them in active validation matrices. They can return by restoring
   inherited jobs and widening matrices after their standard-runner paths are
@@ -21,10 +22,11 @@ remain the fallback.
 - `blocking-ci.yml` owns the version-controlled list of merge-blocking child
   workflows. After Stability certification, the active `main` ruleset requires
   only its aggregate `CI required` job and enforces strict base freshness.
-- `bazel.yml` is the main pre-merge verification path for Rust code. It runs
-  native Linux x64 Bazel `test` and `clippy`,
-  including the generated Rust test binaries needed to lint inline `#[cfg(test)]`
-  code.
+- `bazel.yml` runs native Linux x64 Bazel `test` and `clippy` as the Essential
+  path, including the generated Rust test binaries needed to lint inline
+  `#[cfg(test)]` code. Eligible Deep Linux changes independently run its
+  release-only scope, preserving the fastbuild no-debug-assertion targets and
+  bwrap compilation.
 - `rust-ci.yml` keeps the Cargo-native PR checks intentionally small:
   - `cargo fmt --check`
   - `cargo shear`
@@ -36,11 +38,12 @@ remain the fallback.
   and a summary whether the change is eligible or explicitly irrelevant;
   comparison or classifier uncertainty defaults to eligible. `CI required`
   requires this decision alongside every existing child workflow. Eligible
-  changes call `rust-ci-full.yml` with the `merge-gate` scope: one native x64
-  full-workspace Cargo clippy lane and the x64 nextest archive's four ordinary
-  shards plus PostgreSQL consumer. Irrelevant changes skip that Cargo call;
-  a bounded result job accepts only the exact eligible/success or
-  irrelevant/skipped pair and fails closed on every other conclusion.
+  changes call `rust-ci-full.yml` with the `merge-gate` scope: native x64 GNU
+  dev clippy, native x64 GNU release build plus clippy, x64 musl release build
+  plus clippy, and the x64 nextest archive's four ordinary shards plus
+  PostgreSQL consumer. Irrelevant changes skip both expensive release calls;
+  independent Bazel and Cargo result jobs accept only the exact
+  eligible/success or irrelevant/skipped pair and fail closed otherwise.
 - Only root `README.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, and
   `SECURITY.md`; `docs/**`; and GitHub community metadata under
   `.github/CODEOWNERS`, `.github/ISSUE_TEMPLATE/**`,
@@ -54,7 +57,8 @@ remain the fallback.
   Both suites can also be dispatched against a non-default branch for Stability
   certification or a single diagnostic retry.
 - `rust-ci-full.yml` defaults to the complete Linux x64 and ARM64 Cargo `clippy`, nextest,
-  GNU/musl, release-profile, and argument-comment-lint coverage. Native Linux
+  GNU/musl, release-profile, and argument-comment-lint coverage, including the
+  promoted native x64 GNU and musl release lanes until #90. Native Linux
   x64 builds one archive and matching runtime-helper artifact identity for four
   ordinary partitioned consumers plus one PostgreSQL 18 consumer. The fifth
   consumer runs the explicit 107 database-contract and two process-contract

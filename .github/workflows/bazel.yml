@@ -5,6 +5,12 @@ name: Bazel
 
 on:
   workflow_call:
+    inputs:
+      validation_scope:
+        description: Validation scope; unknown values run all Bazel jobs.
+        required: false
+        default: essential
+        type: string
   workflow_dispatch:
 
 concurrency:
@@ -18,6 +24,7 @@ jobs:
     # Native Linux x64 is the current essential platform. Additional Linux
     # architectures and build variants run in Extended validation.
     timeout-minutes: 45
+    if: ${{ inputs.validation_scope != 'release-only' }}
     strategy:
       fail-fast: false
       matrix:
@@ -120,6 +127,7 @@ jobs:
 
   clippy:
     timeout-minutes: 45
+    if: ${{ inputs.validation_scope != 'release-only' }}
     strategy:
       fail-fast: false
       matrix:
@@ -195,9 +203,9 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   verify-release-build:
-    # Release-only compilation belongs to Extended validation and must not add
-    # latency to the pull-request merge gate.
-    if: github.event_name == 'push'
+    # An empty scope is the manual-dispatch default and preserves Essential
+    # validation. Unknown nonempty scopes fail safe by running every job.
+    if: ${{ inputs.validation_scope != 'essential' && inputs.validation_scope != '' }}
     timeout-minutes: 45
     strategy:
       fail-fast: false

@@ -15,6 +15,8 @@ jobs:
   bazel:
     name: Bazel
     uses: ./.github/workflows/bazel.yml
+    with:
+      validation_scope: essential
     secrets: inherit
 
   blob-size-policy:
@@ -104,6 +106,38 @@ jobs:
             echo "- Reason: ${reason}"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  deep-linux-bazel-release:
+    name: Deep Linux Bazel release
+    needs: deep-linux-eligibility
+    if: ${{ needs.deep-linux-eligibility.result == 'success' && needs.deep-linux-eligibility.outputs.eligible == 'true' }}
+    uses: ./.github/workflows/bazel.yml
+    with:
+      validation_scope: release-only
+    secrets: inherit
+
+  deep-linux-bazel-release-result:
+    name: Deep Linux Bazel release result
+    needs: [deep-linux-eligibility, deep-linux-bazel-release]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Validate Deep Linux Bazel release result
+        env:
+          ELIGIBILITY_RESULT: ${{ needs.deep-linux-eligibility.result }}
+          ELIGIBLE: ${{ needs.deep-linux-eligibility.outputs.eligible }}
+          VALIDATION_LABEL: Deep Linux Bazel release
+          VALIDATION_RESULT: ${{ needs.deep-linux-bazel-release.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/deep_linux_result.py | tee -a "$GITHUB_STEP_SUMMARY"
+
   deep-linux-cargo:
     name: Deep Linux Cargo
     needs: deep-linux-eligibility
@@ -146,6 +180,7 @@ jobs:
       - blob-size-policy
       - cargo-deny
       - codespell
+      - deep-linux-bazel-release-result
       - deep-linux-cargo-result
       - deep-linux-eligibility
       - repo-checks
