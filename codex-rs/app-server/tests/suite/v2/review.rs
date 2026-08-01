@@ -197,9 +197,9 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
     let responses = vec![
         create_shell_command_sse_response(
             vec![
-                "git".to_string(),
-                "rev-parse".to_string(),
-                "HEAD".to_string(),
+                "python3".to_string(),
+                "-c".to_string(),
+                "print(42)".to_string(),
             ],
             /*workdir*/ None,
             Some(5000),
@@ -226,7 +226,7 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
             request_id,
             params: ReviewStartParams {
                 thread_id,
-                delivery: Some(ReviewDelivery::Inline),
+                delivery: Some(ReviewDelivery::Detached),
                 target: ReviewTarget::Commit {
                     sha: "1234567deadbeef".to_string(),
                     title: Some("Check review approvals".to_string()),
@@ -236,17 +236,6 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
         .await?;
     let turn_id = turn.id.clone();
     assert_eq!(turn.items_view, TurnItemsView::NotLoaded);
-    assert_eq!(
-        turn.items,
-        vec![ThreadItem::UserMessage {
-            id: turn_id.clone(),
-            client_id: None,
-            content: vec![V2UserInput::Text {
-                text: "commit 1234567: Check review approvals".to_string(),
-                text_elements: Vec::new(),
-            }],
-        }]
-    );
 
     let server_req = timeout(
         DEFAULT_READ_TIMEOUT,

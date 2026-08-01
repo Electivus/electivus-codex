@@ -20,14 +20,8 @@ class TestDefinition:
 
 
 TESTS = {
-    "core-pending-input": TestDefinition(
-        "codex-core",
-        "suite::pending_input::injected_user_input_triggers_follow_up_request_with_deltas",
-    ),
-    "app-server-exec-approval-item-id": TestDefinition(
-        "codex-app-server",
-        "suite::v2::review::review_start_exec_approval_item_id_matches_command_execution_item",
-    ),
+    "core-pending-input": TestDefinition("codex-core", "suite::pending_input::injected_user_input_triggers_follow_up_request_with_deltas"),
+    "app-server-exec-approval-item-id": TestDefinition("codex-app-server", "suite::v2::review::review_start_exec_approval_item_id_matches_command_execution_item"),
 }
 WORKFLOW_IDENTITY = ".github/workflows/test-certification.yml"
 WORKFLOW_REF_PREFIX = f"Electivus/electivus-codex/{WORKFLOW_IDENTITY}@"
@@ -44,15 +38,8 @@ def command_for(test: TestDefinition) -> str:
 
 
 def new_manifest(
-    *,
-    candidate_sha: str,
-    checked_out_sha: str,
-    test_id: str,
-    workflow_ref: str,
-    run_id: str,
-    run_attempt: int,
-    runner_os: str,
-    runner_arch: str,
+    *, candidate_sha: str, checked_out_sha: str, test_id: str, workflow_ref: str,
+    run_id: str, run_attempt: int, runner_os: str, runner_arch: str,
 ) -> dict[str, object]:
     if SHA_RE.fullmatch(candidate_sha) is None or candidate_sha != checked_out_sha:
         raise ValueError("candidate must be the full checked-out commit SHA")
