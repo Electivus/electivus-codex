@@ -126,7 +126,7 @@ def _action_input(step: str, field: str) -> str | None:
         return None
     inputs = _block(
         step,
-        r"^(?:      - with:|        with:)\s*$",
+        r"^(?:      - with:|        with:)[ \t]*(?:#.*)?$",
         r"^        [A-Za-z_][A-Za-z0-9_-]*:",
     )
     match = re.search(

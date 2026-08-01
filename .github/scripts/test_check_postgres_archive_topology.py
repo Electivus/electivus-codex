@@ -88,6 +88,13 @@ class PostgresArchiveTopologyTests(unittest.TestCase):
             postgres,
             "postgres-contracts",
             "Install pinned nextest for archive consumption",
+            "        with:\n",
+            "        with: # archive installer inputs\n",
+        )
+        postgres = replace_in_step(
+            postgres,
+            "postgres-contracts",
+            "Install pinned nextest for archive consumption",
             action,
             f'"{action}"',
         )
@@ -150,6 +157,9 @@ class PostgresArchiveTopologyTests(unittest.TestCase):
         )
         quoted_archive_installer = additional_archive_installer.replace(
             f"tool: {tool}", "tool: 'nextest@0.9.104'"
+        )
+        commented_archive_installer = additional_archive_installer.replace(
+            "        with:\n", "        with: # alternate archive inputs\n"
         )
         cases = (
             (
@@ -301,6 +311,16 @@ class PostgresArchiveTopologyTests(unittest.TestCase):
                     postgres,
                     "postgres-contracts",
                     quoted_archive_installer,
+                    step_name="Install pinned nextest for archive consumption",
+                ),
+            ),
+            (
+                "PostgreSQL archive consumer nextest pin",
+                1,
+                append_installer(
+                    postgres,
+                    "postgres-contracts",
+                    commented_archive_installer,
                     step_name="Install pinned nextest for archive consumption",
                 ),
             ),
