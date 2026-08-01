@@ -36,7 +36,7 @@ class TestCertificationTopologyTests(unittest.TestCase):
             ("twenty ordered executions", 0, displaced(workflow, "seq 1 20", "seq 1 19")),
             ("retry-free exact nextest", 0, displaced(workflow, "--retries 0", "--retries 1")), ("retry-free exact nextest", 0, displaced(workflow, "--cargo-profile ci-test", "--cargo-profile test")),
             ("retry-free exact nextest", 0, displaced(workflow, "--run-ignored=only", "--run-ignored=all")), ("retry-free exact nextest", 1, verifier.replace("--cargo-profile ci-test", "--cargo-profile test")),
-            ("single JUnit testcase", 0, displaced(workflow, "--expected-testcases 1", "--expected-testcases 2")),
+            ("single JUnit testcase", 0, displaced(workflow, "--expected-testcases 1", "--expected-testcases 2")), ("single JUnit testcase", 0, displaced(workflow, 'junit_source="${GITHUB_WORKSPACE}/codex-rs/target/nextest/default/junit.xml"', 'junit_source="${CARGO_TARGET_DIR}/nextest/default/junit.xml"')),
             ("unexpected skip", 4, junit.replace('SKIP_ELEMENTS = {"skipped"}', "SKIP_ELEMENTS = set()")),
             ("stop failed sequence", 0, displaced(workflow, "break", "continue")),
             ("retained evidence", 0, displaced(workflow, 'verify_test_certification.py" verify', 'missing_verifier.py" verify')), ("retained evidence", 0, displaced(workflow, 'exit "${status}"', "true")), ("retained evidence", 0, displaced(workflow, 'exit "${status}"', 'true # exit "${status}"')), ("retained evidence", 0, displaced(workflow, "      - name: Verify and summarize independent sequence\n        if: always()", "      - name: Verify and summarize independent sequence\n        if: always()\n        continue-on-error: true", "if: always()")),

@@ -85,7 +85,7 @@ jobs:
       - name: Run ordered retry-free sequence
         run: |
           set -euo pipefail
-          junit_source="${CARGO_TARGET_DIR}/nextest/default/junit.xml"
+          junit_source="${GITHUB_WORKSPACE}/codex-rs/target/nextest/default/junit.xml"
           for order in $(seq 1 20); do
             report="${EVIDENCE_DIR}/junit/$(printf '%02d' "${order}").xml"
             rm -f -- "${junit_source}" "${report}"
