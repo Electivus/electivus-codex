@@ -1,0 +1,47 @@
+from pathlib import Path
+import unittest
+
+import check_postmerge_scope_topology as topology
+
+
+class PostmergeScopeTopologyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.repo = Path(__file__).resolve().parents[2]
+        cls.sources = tuple((cls.repo / path).read_text(encoding="utf-8") for path in topology.SOURCES)
+
+    def test_current_postmerge_scope_topology_is_complete(self) -> None:
+        self.assertEqual([], topology.validate_topology(*self.sources))
+
+    def test_postmerge_scope_mutations_fail_closed(self) -> None:
+        rust, postmerge, blocking, repo_checks, planner, result, detector, inventory = self.sources
+        v8_job = "\n  v8-canary:\n    uses: ./.github/workflows/v8-canary.yml\n"
+        cases = (
+            ("blocking trigger ownership", 2, blocking.replace("  workflow_dispatch:", "  push:\n    branches: [main]\n  workflow_dispatch:")),
+            ("planner workflow contract", 0, rust.replace("run_arm64: ${{ steps.scope.outputs.run_arm64 }}", "run_arm64: false")),
+            ("exact merge lint plan", 4, planner.replace('LintLane("ubuntu-24.04", "x86_64-unknown-linux-musl", "release")', 'LintLane("ubuntu-24.04", "x86_64-unknown-linux-musl", "dev")', 1)),
+            ("exact Extended lint plan", 4, planner.replace('LintLane("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu", "dev")', 'LintLane("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu", "release")', 1)),
+            ("exact full lint plan", 4, planner.replace("MERGE_GATE_LINT_MATRIX[1]", "MERGE_GATE_LINT_MATRIX[0]", 1)),
+            ("scoped general scheduling", 0, rust.replace("needs.plan.outputs.run_general == 'true'", "needs.plan.outputs.run_general != 'false'", 1)),
+            ("scoped lint scheduling", 0, rust.replace("fromJSON(needs.plan.outputs.lint_matrix)", "fromJSON(inputs.validation_scope)")),
+            ("scoped test scheduling", 0, rust.replace("needs.plan.outputs.run_x64 == 'true'", "needs.plan.outputs.run_arm64 == 'true'")),
+            ("merge-gate Cargo preserved", 0, rust.replace("postgres_contracts: true", "postgres_contracts: false")),
+            ("full result fail closed", 0, rust.replace("PLAN_RESULT: ${{ needs.plan.result }}", "PLAN_RESULT: success")),
+            ("result helper exact states", 5, result.replace("actual != wanted", "actual == wanted")),
+            ("postmerge only Extended Rust", 1, postmerge.replace("validation_scope: extended", "validation_scope: full")),
+            ("postmerge only Extended Rust", 1, postmerge.replace("\n  results:\n", v8_job + "\n  results:\n")),
+            ("V8 postmerge ownership removed", 6, detector.replace('".github/workflows/repo-checks.yml",', '".github/workflows/postmerge-ci.yml",\n    ".github/workflows/repo-checks.yml",')),
+            ("validation inventory complete", 7, inventory.replace('"lint-arm64-musl-release", "disposition": "retained"', '"lint-arm64-musl-release", "disposition": "promoted"')),
+            ("validation inventory complete", 7, inventory.replace("v8-arm64-musl-ptrcomp-sandbox", "v8-x64-musl-ptrcomp-sandbox")),
+            ("postmerge repository check", 3, repo_checks.replace("check_postmerge_scope_topology.py", "missing_postmerge_topology.py")),
+            ("planner fallback fail safe", 4, planner.replace("defaults fail-safe to full", "defaults to extended")),
+        )
+        for expected, index, changed in cases:
+            mutated = list(self.sources)
+            mutated[index] = changed
+            with self.subTest(expected=expected):
+                self.assertIn(expected, "\n".join(topology.validate_topology(*mutated)))
+
+
+if __name__ == "__main__":
+    unittest.main()

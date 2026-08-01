@@ -119,8 +119,9 @@ merge gate is activated in repository rules.
 _Avoid_: Experimental main push, local-only validation
 
 **Extended validation**:
-The full post-merge validation suite across Linux architectures and specialized Linux build paths,
-preserved as actionable signal without adding latency to pull requests.
+A post-merge validation contract for supported Linux architectures and specialized build paths that
+have not already been promoted into the Merge gate, preserved as actionable signal without adding
+latency to pull requests or repeating promoted validation.
 _Avoid_: Merge gate, best-effort CI, optional tests
 
 **Stability certification**:

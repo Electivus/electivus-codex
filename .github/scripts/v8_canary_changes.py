@@ -34,7 +34,6 @@ CANARY_PATH_PATTERNS = {
     ".github/scripts/v8_canary_changes.py",
     ".github/scripts/v8_canary_result.py",
     ".github/workflows/blocking-ci.yml",
-    ".github/workflows/postmerge-ci.yml",
     ".github/workflows/repo-checks.yml",
     ".github/workflows/README.md",
     ".github/workflows/rusty-v8-release.yml",

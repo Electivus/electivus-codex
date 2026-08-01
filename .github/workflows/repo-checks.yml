@@ -56,6 +56,9 @@ jobs:
       - name: Verify V8 canary topology
         run: python3 .github/scripts/check_v8_canary_topology.py
 
+      - name: Verify postmerge scope topology
+        run: python3 .github/scripts/check_postmerge_scope_topology.py
+
       - name: Setup pnpm
         uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
         with:

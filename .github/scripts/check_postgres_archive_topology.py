@@ -13,6 +13,52 @@ NAMES = (
     "rust-ci-full.yml", "repo-checks.yml", "blocking-ci.yml",
 )
 WORKFLOWS = tuple(f".github/workflows/{name}" for name in NAMES)
+SOURCES = WORKFLOWS + (
+    ".github/scripts/rust_ci_full_plan.py",
+    ".github/scripts/rust_ci_full_result.py",
+)
+LANE = re.compile(r'LintLane\("([^"]+)", "([^"]+)", "([^"]+)"\)')
+MERGE_LANES = (
+    ("ubuntu-24.04", "x86_64-unknown-linux-gnu", "dev"),
+    ("ubuntu-24.04", "x86_64-unknown-linux-gnu", "release"),
+    ("ubuntu-24.04", "x86_64-unknown-linux-musl", "release"),
+)
+EXTENDED_LANES = (
+    ("ubuntu-24.04", "x86_64-unknown-linux-musl", "dev"),
+    ("ubuntu-24.04-arm", "aarch64-unknown-linux-musl", "dev"),
+    ("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu", "dev"),
+    ("ubuntu-24.04-arm", "aarch64-unknown-linux-musl", "release"),
+)
+FULL_LANES = (
+    EXTENDED_LANES[0],
+    MERGE_LANES[0],
+    EXTENDED_LANES[1],
+    EXTENDED_LANES[2],
+    MERGE_LANES[2],
+    EXTENDED_LANES[3],
+    MERGE_LANES[1],
+)
+
+
+def _planner_matrix(source: str, name: str) -> tuple[tuple[str, str, str], ...]:
+    match = re.search(
+        rf"^{re.escape(name)} = \(\n(?P<body>.*?)^\)$",
+        source,
+        re.MULTILINE | re.DOTALL,
+    )
+    if not match:
+        return ()
+    body = match.group("body")
+    if lanes := tuple(LANE.findall(body)):
+        return lanes
+    matrices = {
+        "MERGE_GATE": _planner_matrix(source, "MERGE_GATE_LINT_MATRIX"),
+        "EXTENDED": _planner_matrix(source, "EXTENDED_LINT_MATRIX"),
+    }
+    return tuple(
+        matrices[matrix][int(index)]
+        for matrix, index in re.findall(r"(MERGE_GATE|EXTENDED)_LINT_MATRIX\[(\d)\]", body)
+    )
 
 
 def _block(text: str, start: str, following: str) -> str:
@@ -57,7 +103,13 @@ def _identity(block: str) -> bool:
 
 
 def validate_topology(
-    platform: str, postgres: str, full: str, repo_checks: str, blocking: str
+    platform: str,
+    postgres: str,
+    full: str,
+    repo_checks: str,
+    blocking: str,
+    planner: str,
+    result_helper: str,
 ) -> list[str]:
     archive, shard = (_job(platform, name) for name in ("archive", "shard"))
     consumer, result = (_job(platform, name) for name in ("postgres-contracts", "result"))
@@ -68,10 +120,6 @@ def validate_topology(
     required = _job(blocking, "required")
     lint = _job(full, "lint_build")
     full_results = _job(full, "results")
-    full_only_results = (
-        "argument_comment_lint_package", "argument_comment_lint_prebuilt",
-        "general", "cargo_shear", "tests_linux_arm64",
-    )
     archive_checkout = _checkout(archive)
     shard_checkout = _checkout(shard)
     postgres_checkout = _checkout(_job(postgres, "postgres-contracts"))
@@ -98,11 +146,11 @@ def validate_topology(
         ("exact JUnit cardinality", '--expected-testcases "${{ steps.inventory.outputs.expected_total }}"' in postgres and "JUNIT_OUTCOME: ${{ steps.archive_junit.outcome }}" in postgres and "TEST_STATUS: ${{ steps.archive_test.outputs.status }}" in postgres),
         ("platform result fail closed", "needs: [shard, postgres-contracts]" in result and 'if [[ "${{ needs.shard.result }}" != "success" ]]; then' in result and 'if [[ "${{ inputs.postgres_contracts }}" == "true" && "${{ needs.postgres-contracts.result }}" != "success" ]]; then' in result and result.count("exit 1") == 2),
         ("standalone fallback remains callable", re.search(r"artifact_id:\n\s+required: false\n\s+default: \"\"", postgres) is not None and "if: ${{ inputs.artifact_id == '' }}" in standalone and standalone.count("just test -p ") == 6),
-        ("validation scope fails safe", re.search(r"validation_scope:\n\s+description: .*\n\s+required: false\n\s+default: full\n\s+type: string", full) is not None and "inputs.validation_scope == 'merge-gate'" in lint and "inputs.validation_scope != 'merge-gate'" in full),
-        ("merge-gate lint matrix", lint.count('inputs.validation_scope == \'merge-gate\'') == 1 and lint.count('"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"dev"') == 2 and "cargo clippy --workspace --target ${{ matrix.target }} --tests --profile dev --timings -- -D warnings" in lint),
-        ("full Extended matrix", all(fragment in lint for fragment in ('"target":"x86_64-unknown-linux-musl","profile":"dev"', '"target":"aarch64-unknown-linux-musl","profile":"dev"', '"target":"aarch64-unknown-linux-gnu","profile":"dev"', '"target":"x86_64-unknown-linux-musl","profile":"release"', '"target":"aarch64-unknown-linux-musl","profile":"release"'))),
-        ("merge-gate schedules only x64", all("if: ${{ inputs.validation_scope != 'merge-gate' }}" in _job(full, name) for name in ("general", "cargo_shear", "argument_comment_lint_package", "argument_comment_lint_prebuilt", "tests_linux_arm64")) and "inputs.validation_scope != 'merge-gate'" not in x64 and "inputs.validation_scope != 'merge-gate'" not in lint),
-        ("scope-aware full result", "VALIDATION_SCOPE: ${{ inputs.validation_scope }}" in full_results and "needs.lint_build.result }}' == 'success'" in full_results and "needs.tests_linux_x64.result }}' == 'success'" in full_results and "if [[ \"$VALIDATION_SCOPE\" != 'merge-gate' ]]" in full_results and all(f"needs.{name}.result }}}}' == 'success'" in full_results for name in full_only_results)),
+        ("validation scope fails safe", re.search(r"validation_scope:\n\s+description: .*\n\s+required: false\n\s+default: full\n\s+type: string", full) is not None and "empty scope defaults to full" in planner and "defaults fail-safe to full" in planner),
+        ("merge-gate lint matrix", _planner_matrix(planner, "MERGE_GATE_LINT_MATRIX") == MERGE_LANES and "cargo clippy --workspace --target ${{ matrix.target }} --tests --profile dev --timings -- -D warnings" in lint),
+        ("full Extended matrix", _planner_matrix(planner, "EXTENDED_LINT_MATRIX") == EXTENDED_LANES),
+        ("merge-gate schedules only x64", all("needs.plan.outputs.run_general == 'true'" in _job(full, name) for name in ("general", "cargo_shear", "argument_comment_lint_package", "argument_comment_lint_prebuilt")) and "needs.plan.outputs.run_x64 == 'true'" in x64 and "needs.plan.outputs.run_arm64 == 'true'" in arm64 and "include: ${{ fromJSON(needs.plan.outputs.lint_matrix) }}" in lint),
+        ("scope-aware full result", "rust_ci_full_result.py" in full_results and "plan expected success" in result_helper and 'wanted = "success" if should_run else "skipped"' in result_helper and "actual != wanted" in result_helper and "tests_linux_x64" in result_helper and "tests_linux_arm64" in result_helper),
         ("eligible Cargo promotion", not pg_gate and "needs: deep-linux-eligibility" in cargo_gate and "needs.deep-linux-eligibility.result == 'success'" in cargo_gate and "needs.deep-linux-eligibility.outputs.eligible == 'true'" in cargo_gate and "uses: ./.github/workflows/rust-ci-full.yml" in cargo_gate and "validation_scope: merge-gate" in cargo_gate),
         ("bounded Cargo result", "needs: [deep-linux-eligibility, deep-linux-cargo]" in cargo_result and "if: ${{ always() }}" in cargo_result and "timeout-minutes: 10" in cargo_result and "VALIDATION_LABEL: Deep Linux Cargo" in cargo_result and "VALIDATION_RESULT: ${{ needs.deep-linux-cargo.result }}" in cargo_result and "ELIGIBILITY_RESULT: ${{ needs.deep-linux-eligibility.result }}" in cargo_result and "ELIGIBLE: ${{ needs.deep-linux-eligibility.outputs.eligible }}" in cargo_result and "set -euo pipefail" in cargo_result and "deep_linux_result.py | tee -a \"$GITHUB_STEP_SUMMARY\"" in cargo_result),
         ("required aggregate promotion", "- deep-linux-eligibility" in required and "- deep-linux-cargo-result" in required and "- deep-linux-cargo\n" not in required and "- postgres-runtime-state-contracts" not in required and "check_ci_results.py" in required),
@@ -120,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
         _, workflow_issues = _workflow_jobs(repo, name)
         issues.extend(workflow_issues)
     try:
-        sources = [(repo / path).read_text(encoding="utf-8") for path in WORKFLOWS]
+        sources = [(repo / path).read_text(encoding="utf-8") for path in SOURCES]
     except (OSError, UnicodeError) as error:
         issues.append(f"cannot read topology workflows: {error}")
     else:

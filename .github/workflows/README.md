@@ -10,8 +10,8 @@ remain the fallback.
 
 - Native Linux x64 on `ubuntu-24.04` is the current Essential platform.
 - Linux ARM64 on `ubuntu-24.04-arm` and remaining build variants are Extended
-  validation. Promoted release and V8 lanes remain repeated there until
-  post-merge deduplication under #90.
+  validation. Promoted release, x64 test, and V8 lanes are not repeated after
+  merge.
 - macOS and Windows remain Codex product platforms, but this fork does not
   select them in active validation matrices. They can return by restoring
   inherited jobs and widening matrices after their standard-runner paths are
@@ -57,13 +57,19 @@ remain the fallback.
 
 ## Extended Validation
 
-- `postmerge-ci.yml` calls the full Rust and V8 suites after pushes to `main`.
-  Both suites can also be dispatched against a non-default branch for Stability
-  certification or a single diagnostic retry.
-- `rust-ci-full.yml` defaults to the complete Linux x64 and ARM64 Cargo `clippy`, nextest,
-  GNU/musl, release-profile, and argument-comment-lint coverage, including the
-  promoted native x64 GNU and musl release lanes until #90. Native Linux
-  x64 builds one archive and matching runtime-helper artifact identity for four
+- A normal push to `main` enters only `postmerge-ci.yml`, which calls
+  `rust-ci-full.yml` with the `extended` scope. That scope runs x64 musl dev,
+  ARM64 musl dev, ARM64 GNU dev, and ARM64 musl release lint/build lanes plus
+  ARM64 nextest. General checks, x64 nextest/PostgreSQL, promoted release lanes,
+  Bazel no-debug release validation, and V8 are not repeated.
+- `rust-ci-full.yml` resolves `merge-gate`, `extended`, and `full` through the
+  repository-owned planner. Empty direct-dispatch input resolves to `full`, and
+  an unknown nonempty scope fails safe to `full`. Manual dispatch and the
+  opt-in `**full-ci**` branch trigger therefore retain the complete suite for
+  Stability certification or diagnosis. Its aggregate accepts only `success`
+  for planned children and `skipped` for every unplanned child.
+- In `full` and `merge-gate`, native Linux x64 builds one archive and matching
+  runtime-helper artifact identity for four
   ordinary partitioned consumers plus one PostgreSQL 18 consumer. The fifth
   consumer runs the explicit 107 database-contract and two process-contract
   inventory across `codex-state`, `codex-thread-store`, `codex-app-server`,
@@ -79,8 +85,25 @@ remain the fallback.
 - `v8-canary.yml` retains V8 version resolution, source builds, checksums,
   staging, and artifact-pair validation for Linux x64 and ARM64 GNU/musl
   targets. Native Cargo smoke runs for the GNU targets; musl coverage ends at
-  the staged artifact pair. The same Change-triggered workflow remains called
-  after merge until #90 removes the temporary repetition.
+  the staged artifact pair. It remains Change-triggered in the Merge gate and
+  complete on manual dispatch, but is not called by postmerge.
+
+### Validation Inventory
+
+`.github/ci-validation-inventory.json` is the machine-checked source that
+accounts for every active Full Rust family and all eight V8 legs exactly once.
+
+| Family or lanes                                                            |   Cardinality | Disposition                         | Active scope                        |
+| -------------------------------------------------------------------------- | ------------: | ----------------------------------- | ----------------------------------- |
+| Format + benchmark smoke                                                   |             2 | Promoted (existing Rust/Bazel gate) | `full` manual only                  |
+| Cargo shear                                                                |             1 | Promoted (existing Rust gate)       | `full` manual only                  |
+| Argument-comment-lint package + prebuilt                                   |             2 | Promoted (existing Rust/Bazel gate) | `full` manual only                  |
+| x64 GNU dev; x64 GNU release; x64 musl release lint/build                  |             3 | Promoted by #86/#87                 | `merge-gate`, `full`                |
+| x64 musl dev; ARM64 musl dev; ARM64 GNU dev; ARM64 musl release lint/build |             4 | Retained                            | `extended`, `full`                  |
+| x64 nextest four shards + PostgreSQL consumer                              |             5 | Promoted by #86                     | `merge-gate`, `full`                |
+| ARM64 nextest shards                                                       |             4 | Retained                            | `extended`, `full`                  |
+| x64/ARM64 x GNU/musl x release/ptrcomp-sandbox V8                          |             8 | Promoted by #88                     | Change-triggered Merge gate, manual |
+| macOS and Windows                                                          | 0 active legs | Out of boundary                     | None                                |
 
 ## Test Signal Integrity
 

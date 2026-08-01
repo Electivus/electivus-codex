@@ -3,10 +3,17 @@ on:
   workflow_call:
     inputs:
       validation_scope:
-        description: Validation scope; only merge-gate selects the reduced matrix.
+        description: Validation scope (merge-gate, extended, or full).
         required: false
         default: full
         type: string
+    outputs:
+      resolved_scope:
+        description: Planner-resolved validation scope.
+        value: ${{ jobs.results.outputs.resolved_scope }}
+      retained_families:
+        description: JSON list of validation families selected by the planner.
+        value: ${{ jobs.results.outputs.retained_families }}
   push:
     branches:
       # Main pushes enter through postmerge-ci. Keep this opt-in branch trigger
@@ -15,10 +22,33 @@ on:
   workflow_dispatch:
 
 jobs:
+  plan:
+    name: Plan Rust CI scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      resolved_scope: ${{ steps.scope.outputs.resolved_scope }}
+      reason: ${{ steps.scope.outputs.reason }}
+      lint_matrix: ${{ steps.scope.outputs.lint_matrix }}
+      run_general: ${{ steps.scope.outputs.run_general }}
+      run_x64: ${{ steps.scope.outputs.run_x64 }}
+      run_arm64: ${{ steps.scope.outputs.run_arm64 }}
+      retained_families: ${{ steps.scope.outputs.retained_families }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Resolve validation scope
+        id: scope
+        env:
+          VALIDATION_SCOPE: ${{ inputs.validation_scope }}
+        run: python3 .github/scripts/rust_ci_full_plan.py
+
   # --- CI that doesn't need specific targets ---------------------------------
   general:
     name: Format / etc
-    if: ${{ inputs.validation_scope != 'merge-gate' }}
+    needs: plan
+    if: ${{ needs.plan.result == 'success' && needs.plan.outputs.run_general == 'true' }}
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -38,7 +68,8 @@ jobs:
 
   cargo_shear:
     name: cargo shear
-    if: ${{ inputs.validation_scope != 'merge-gate' }}
+    needs: plan
+    if: ${{ needs.plan.result == 'success' && needs.plan.outputs.run_general == 'true' }}
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -57,7 +88,8 @@ jobs:
 
   argument_comment_lint_package:
     name: Argument comment lint package
-    if: ${{ inputs.validation_scope != 'merge-gate' }}
+    needs: plan
+    if: ${{ needs.plan.result == 'success' && needs.plan.outputs.run_general == 'true' }}
     runs-on: ubuntu-24.04
     env:
       CARGO_DYLINT_VERSION: 5.0.0
@@ -100,7 +132,8 @@ jobs:
 
   argument_comment_lint_prebuilt:
     name: Argument comment lint - ${{ matrix.name }}
-    if: ${{ inputs.validation_scope != 'merge-gate' }}
+    needs: plan
+    if: ${{ needs.plan.result == 'success' && needs.plan.outputs.run_general == 'true' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     environment:
@@ -124,6 +157,8 @@ jobs:
   # --- CI to validate on different os/targets --------------------------------
   lint_build:
     name: Lint/Build — ${{ matrix.runner }} - ${{ matrix.target }}${{ matrix.profile == 'release' && ' (release)' || '' }}
+    needs: plan
+    if: ${{ needs.plan.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     defaults:
@@ -138,7 +173,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.validation_scope == 'merge-gate' && '[{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"dev"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"release"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","profile":"release"}]' || '[{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","profile":"dev"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"dev"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","profile":"dev"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","profile":"dev"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","profile":"release"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","profile":"release"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"release"}]') }}
+        include: ${{ fromJSON(needs.plan.outputs.lint_matrix) }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -373,6 +408,8 @@ jobs:
 
   tests_linux_x64:
     name: Tests — ubuntu-24.04 - x86_64-unknown-linux-gnu
+    needs: plan
+    if: ${{ needs.plan.result == 'success' && needs.plan.outputs.run_x64 == 'true' }}
     uses: ./.github/workflows/rust-ci-full-nextest-platform.yml
     with:
       runner: ubuntu-24.04
@@ -387,7 +424,8 @@ jobs:
 
   tests_linux_arm64:
     name: Tests — ubuntu-24.04-arm - aarch64-unknown-linux-gnu
-    if: ${{ inputs.validation_scope != 'merge-gate' }}
+    needs: plan
+    if: ${{ needs.plan.result == 'success' && needs.plan.outputs.run_arm64 == 'true' }}
     uses: ./.github/workflows/rust-ci-full-nextest-platform.yml
     with:
       runner: ubuntu-24.04-arm
@@ -402,8 +440,12 @@ jobs:
   # --- Gatherer job for the full post-merge workflow --------------------------
   results:
     name: Full CI results
+    outputs:
+      resolved_scope: ${{ needs.plan.outputs.resolved_scope }}
+      retained_families: ${{ needs.plan.outputs.retained_families }}
     needs:
       [
+        plan,
         general,
         cargo_shear,
         argument_comment_lint_package,
@@ -415,27 +457,22 @@ jobs:
     if: always()
     runs-on: ubuntu-24.04
     steps:
-      - name: Summarize
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Validate scoped child results
         env:
-          VALIDATION_SCOPE: ${{ inputs.validation_scope }}
-        shell: bash
-        run: |
-          echo "argpkg : ${{ needs.argument_comment_lint_package.result }}"
-          echo "arglint: ${{ needs.argument_comment_lint_prebuilt.result }}"
-          echo "general: ${{ needs.general.result }}"
-          echo "shear  : ${{ needs.cargo_shear.result }}"
-          echo "lint   : ${{ needs.lint_build.result }}"
-          echo "test linux : ${{ needs.tests_linux_x64.result }}"
-          echo "test arm64 : ${{ needs.tests_linux_arm64.result }}"
-          [[ '${{ needs.lint_build.result }}' == 'success' ]] || { echo 'lint_build failed'; exit 1; }
-          [[ '${{ needs.tests_linux_x64.result }}' == 'success' ]] || { echo 'tests_linux_x64 failed'; exit 1; }
-          if [[ "$VALIDATION_SCOPE" != 'merge-gate' ]]; then
-            [[ '${{ needs.argument_comment_lint_package.result }}' == 'success' ]] || { echo 'argument_comment_lint_package failed'; exit 1; }
-            [[ '${{ needs.argument_comment_lint_prebuilt.result }}' == 'success' ]] || { echo 'argument_comment_lint_prebuilt failed'; exit 1; }
-            [[ '${{ needs.general.result }}' == 'success' ]] || { echo 'general failed'; exit 1; }
-            [[ '${{ needs.cargo_shear.result }}' == 'success' ]] || { echo 'cargo_shear failed'; exit 1; }
-            [[ '${{ needs.tests_linux_arm64.result }}' == 'success' ]] || { echo 'tests_linux_arm64 failed'; exit 1; }
-          fi
+          PLAN_RESULT: ${{ needs.plan.result }}
+          RESOLVED_SCOPE: ${{ needs.plan.outputs.resolved_scope }}
+          GENERAL_RESULT: ${{ needs.general.result }}
+          CARGO_SHEAR_RESULT: ${{ needs.cargo_shear.result }}
+          ARGUMENT_COMMENT_LINT_PACKAGE_RESULT: ${{ needs.argument_comment_lint_package.result }}
+          ARGUMENT_COMMENT_LINT_PREBUILT_RESULT: ${{ needs.argument_comment_lint_prebuilt.result }}
+          LINT_BUILD_RESULT: ${{ needs.lint_build.result }}
+          TESTS_LINUX_X64_RESULT: ${{ needs.tests_linux_x64.result }}
+          TESTS_LINUX_ARM64_RESULT: ${{ needs.tests_linux_arm64.result }}
+        run: python3 .github/scripts/rust_ci_full_result.py
 
       - name: sccache summary note
         if: always()

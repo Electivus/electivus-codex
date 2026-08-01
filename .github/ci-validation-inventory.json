@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "rustCiFull": [
+    { "id": "general-format-benchmark", "disposition": "promoted", "promotionSource": "existing", "activeScopes": ["full"], "cardinality": 2 },
+    { "id": "cargo-shear", "disposition": "promoted", "promotionSource": "existing", "activeScopes": ["full"], "cardinality": 1 },
+    { "id": "argument-comment-lint-package", "disposition": "promoted", "promotionSource": "existing", "activeScopes": ["full"], "cardinality": 1 },
+    { "id": "argument-comment-lint-prebuilt", "disposition": "promoted", "promotionSource": "existing", "activeScopes": ["full"], "cardinality": 1 },
+    { "id": "lint-x64-gnu-dev", "disposition": "promoted", "promotionSource": "#86", "activeScopes": ["merge-gate", "full"], "cardinality": 1 },
+    { "id": "lint-x64-gnu-release", "disposition": "promoted", "promotionSource": "#87", "activeScopes": ["merge-gate", "full"], "cardinality": 1 },
+    { "id": "lint-x64-musl-release", "disposition": "promoted", "promotionSource": "#87", "activeScopes": ["merge-gate", "full"], "cardinality": 1 },
+    { "id": "lint-x64-musl-dev", "disposition": "retained", "promotionSource": null, "activeScopes": ["extended", "full"], "cardinality": 1 },
+    { "id": "lint-arm64-musl-dev", "disposition": "retained", "promotionSource": null, "activeScopes": ["extended", "full"], "cardinality": 1 },
+    { "id": "lint-arm64-gnu-dev", "disposition": "retained", "promotionSource": null, "activeScopes": ["extended", "full"], "cardinality": 1 },
+    { "id": "lint-arm64-musl-release", "disposition": "retained", "promotionSource": null, "activeScopes": ["extended", "full"], "cardinality": 1 },
+    { "id": "tests-x64-nextest-postgres", "disposition": "promoted", "promotionSource": "#86", "activeScopes": ["merge-gate", "full"], "cardinality": 5 },
+    { "id": "tests-arm64-nextest", "disposition": "retained", "promotionSource": null, "activeScopes": ["extended", "full"], "cardinality": 4 }
+  ],
+  "v8": [
+    { "id": "v8-x64-gnu-release", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"] },
+    { "id": "v8-x64-gnu-ptrcomp-sandbox", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"] },
+    { "id": "v8-arm64-gnu-release", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"] },
+    { "id": "v8-arm64-gnu-ptrcomp-sandbox", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"] },
+    { "id": "v8-x64-musl-release", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"] },
+    { "id": "v8-x64-musl-ptrcomp-sandbox", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"] },
+    { "id": "v8-arm64-musl-release", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"] },
+    { "id": "v8-arm64-musl-ptrcomp-sandbox", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"] }
+  ],
+  "outOfBoundary": ["macOS", "Windows"]
+}

@@ -10,13 +10,17 @@ from check_postgres_archive_topology import _block
 from check_postgres_archive_topology import _job
 from check_postgres_archive_topology import _step
 from check_rust_test_policy import _workflow_jobs
+from check_postgres_archive_topology import FULL_LANES
+from check_postgres_archive_topology import MERGE_LANES
+from check_postgres_archive_topology import _planner_matrix
 
 
 NAMES = ("bazel.yml", "blocking-ci.yml", "rust-ci-full.yml", "repo-checks.yml")
 WORKFLOWS = tuple(f".github/workflows/{name}" for name in NAMES)
-
-MERGE_MATRIX = '[{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"dev"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"release"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","profile":"release"}]'
-FULL_MATRIX = '[{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","profile":"dev"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"dev"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","profile":"dev"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","profile":"dev"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","profile":"release"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","profile":"release"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"release"}]'
+SOURCES = WORKFLOWS + (
+    ".github/scripts/rust_ci_full_plan.py",
+    ".github/scripts/rust_ci_full_result.py",
+)
 BAZEL_CONCURRENCY_GROUP = (
     "concurrency-group::${{ github.workflow }}::"
     "${{ github.event.pull_request.number > 0 && "
@@ -27,7 +31,12 @@ BAZEL_CONCURRENCY_GROUP = (
 
 
 def validate_topology(
-    bazel: str, blocking: str, rust: str, repo_checks: str
+    bazel: str,
+    blocking: str,
+    rust: str,
+    repo_checks: str,
+    planner: str,
+    result_helper: str,
 ) -> list[str]:
     bazel_test = _job(bazel, "test")
     bazel_clippy = _job(bazel, "clippy")
@@ -58,11 +67,11 @@ def validate_topology(
         ("Bazel release promotion", "uses: ./.github/workflows/bazel.yml" in normal_bazel and "validation_scope: essential" in normal_bazel and "needs: deep-linux-eligibility" in release_gate and "needs.deep-linux-eligibility.result == 'success'" in release_gate and "needs.deep-linux-eligibility.outputs.eligible == 'true'" in release_gate and "uses: ./.github/workflows/bazel.yml" in release_gate and "validation_scope: release-only" in release_gate),
         ("bounded Bazel result", "needs: [deep-linux-eligibility, deep-linux-bazel-release]" in release_result and "if: ${{ always() }}" in release_result and "timeout-minutes: 10" in release_result and "ELIGIBILITY_RESULT: ${{ needs.deep-linux-eligibility.result }}" in release_result and "ELIGIBLE: ${{ needs.deep-linux-eligibility.outputs.eligible }}" in release_result and "VALIDATION_LABEL: Deep Linux Bazel release" in release_result and "VALIDATION_RESULT: ${{ needs.deep-linux-bazel-release.result }}" in release_result and "set -euo pipefail" in release_result and "deep_linux_result.py | tee -a \"$GITHUB_STEP_SUMMARY\"" in release_result),
         ("independent required results", all(f"- {name}" in required for name in ("bazel", "deep-linux-bazel-release-result", "deep-linux-cargo-result")) and "- deep-linux-bazel-release\n" not in required and "- deep-linux-cargo\n" not in required),
-        ("merge Cargo matrix", MERGE_MATRIX in lint and '"target":"x86_64-unknown-linux-musl","profile":"dev"' not in lint.split("||", 1)[0]),
-        ("full Cargo matrix", FULL_MATRIX in lint),
+        ("merge Cargo matrix", _planner_matrix(planner, "MERGE_GATE_LINT_MATRIX") == MERGE_LANES),
+        ("full Cargo matrix", _planner_matrix(planner, "FULL_LINT_MATRIX") == FULL_LANES),
         ("Cargo release build and lint", "if: ${{ matrix.profile == 'release' }}" in release_build and "cargo build --workspace --target ${{ matrix.target }} --profile release --timings" in release_build and "if: ${{ matrix.profile == 'release' }}" in release_clippy and "cargo clippy --workspace --target ${{ matrix.target }} --tests --profile release --timings -- -D warnings" in release_clippy and "if: ${{ matrix.profile == 'dev' }}" in dev_clippy),
         ("Cargo release timings", "if: always() && matrix.profile == 'release'" in build_timings and "cargo-timings-rust-ci-build-${{ matrix.target }}-release" in build_timings and "cargo-timing.html" in build_timings and "cargo-timings-rust-ci-clippy-${{ matrix.target }}-${{ matrix.profile }}" in lint),
-        ("scope-aware Cargo aggregate", "needs.lint_build.result }}' == 'success'" in rust_results and "needs.tests_linux_x64.result }}' == 'success'" in rust_results),
+        ("scope-aware Cargo aggregate", "rust_ci_full_result.py" in rust_results and "plan expected success" in result_helper and 'wanted = "success" if should_run else "skipped"' in result_helper and "actual != wanted" in result_helper),
         ("release repository check", "python3 .github/scripts/check_deep_linux_release_topology.py" in repo_checks),
     )
     return [f"Deep Linux release topology drift: {label}" for label, valid in checks if not valid]
@@ -80,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         _, workflow_issues = _workflow_jobs(repo, name)
         issues.extend(workflow_issues)
     try:
-        sources = [(repo / path).read_text(encoding="utf-8") for path in WORKFLOWS]
+        sources = [(repo / path).read_text(encoding="utf-8") for path in SOURCES]
     except (OSError, UnicodeError) as error:
         issues.append(f"cannot read release workflows: {error}")
     else:

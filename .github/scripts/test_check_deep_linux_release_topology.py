@@ -15,14 +15,14 @@ class DeepLinuxReleaseTopologyTests(unittest.TestCase):
         cls.repo = Path(__file__).resolve().parents[2]
         cls.sources = tuple(
             (cls.repo / path).read_text(encoding="utf-8")
-            for path in topology.WORKFLOWS
+            for path in topology.SOURCES
         )
 
     def test_current_release_topology_is_complete(self) -> None:
         self.assertEqual([], topology.validate_topology(*self.sources))
 
     def test_release_topology_mutations_fail_closed(self) -> None:
-        bazel, blocking, rust, repo_checks = self.sources
+        bazel, blocking, rust, repo_checks, planner, result_helper = self.sources
         cases = (
             ("Bazel concurrency scope", 0, bazel.replace("github.event.pull_request.number > 0", "github.actor != ''")),
             ("Bazel concurrency scope", 0, bazel.replace("format('pr-{0}', github.event.pull_request.number)", "format('pr-{0}', github.actor)")),
@@ -41,12 +41,12 @@ class DeepLinuxReleaseTopologyTests(unittest.TestCase):
             ("bounded Bazel result", 1, blocking.replace("if: ${{ always() }}", "if: ${{ needs.deep-linux-bazel-release.result == 'success' }}", 1)),
             ("bounded Bazel result", 1, blocking.replace("VALIDATION_LABEL: Deep Linux Bazel release", "VALIDATION_LABEL: ''")),
             ("independent required results", 1, blocking.replace("- deep-linux-bazel-release-result", "- deep-linux-cargo")),
-            ("merge Cargo matrix", 2, rust.replace('"target":"x86_64-unknown-linux-musl","profile":"release"', '"target":"x86_64-unknown-linux-musl","profile":"dev"', 1)),
-            ("full Cargo matrix", 2, rust.replace('"target":"x86_64-unknown-linux-gnu","profile":"release"}]', '"target":"x86_64-unknown-linux-gnu","profile":"dev"}]')),
+            ("merge Cargo matrix", 4, planner.replace('LintLane("ubuntu-24.04", "x86_64-unknown-linux-musl", "release")', 'LintLane("ubuntu-24.04", "x86_64-unknown-linux-musl", "dev")', 1)),
+            ("full Cargo matrix", 4, planner.replace('LintLane("ubuntu-24.04", "x86_64-unknown-linux-gnu", "release")', 'LintLane("ubuntu-24.04", "x86_64-unknown-linux-gnu", "dev")', 2)),
             ("Cargo release build and lint", 2, rust.replace("cargo build --workspace", "cargo build -p codex-core")),
             ("Cargo release build and lint", 2, rust.replace("cargo clippy --workspace --target ${{ matrix.target }} --tests --profile release", "cargo clippy -p codex-core --profile release")),
             ("Cargo release timings", 2, rust.replace("cargo-timings-rust-ci-build", "missing-build-timings")),
-            ("scope-aware Cargo aggregate", 2, rust.replace("needs.lint_build.result }}' == 'success'", "needs.lint_build.result }}' == 'failure'")),
+            ("scope-aware Cargo aggregate", 5, result_helper.replace("actual != wanted", "actual == wanted")),
             ("release repository check", 3, repo_checks.replace("check_deep_linux_release_topology.py", "missing_release_topology.py")),
         )
         for expected, index, changed in cases:

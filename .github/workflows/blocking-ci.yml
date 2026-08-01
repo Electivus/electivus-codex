@@ -1,12 +1,10 @@
 name: blocking-ci
 
-# This is the single entrypoint for checks that block a PR merge. It also runs
-# after pushes to main so the same check family stays grouped in the Actions UI.
-# Manual dispatch supports a second non-retry run during Stability certification.
+# This is the single entrypoint for checks that block a PR merge. Manual
+# dispatch preserves the complete Stability-certification path without
+# repeating promoted checks after every push to main.
 on:
   pull_request: {}
-  push:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
