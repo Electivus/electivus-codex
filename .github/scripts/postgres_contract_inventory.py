@@ -9,7 +9,13 @@ import subprocess
 import sys
 import tomllib
 
-from check_rust_test_policy import IgnoreOccurrence, inventory_ignores, load_toml
+from check_rust_test_policy import (
+    IgnoreOccurrence,
+    RustFunctionOccurrence,
+    inventory_ignores,
+    inventory_rust_test_functions,
+    load_toml,
+)
 
 
 DB_REASON = 'ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"'
@@ -48,13 +54,18 @@ def _nextest_filter(packages: tuple[str, ...]) -> str:
     package_filter = " | ".join(f"package({package})" for package in packages)
     return (
         f"({package_filter}) & "
-        "test(/postgres_contract_|state_(migrate|initialize)_process_/)"
+        "test(/(^|::)(postgres_contract_|state_(migrate|initialize)_process_)/)"
     )
+
+
+def _category(classification: object) -> str | None:
+    return classification.partition("|")[0] if isinstance(classification, str) else None
 
 
 def validate_inventory(
     repo: Path,
     occurrences: list[IgnoreOccurrence],
+    functions: list[RustFunctionOccurrence],
     policy: dict[str, object],
 ) -> tuple[InventorySummary | None, list[str]]:
     config = policy.get("postgres_contracts")
@@ -68,10 +79,9 @@ def validate_inventory(
     process_count = config.get("process_count")
     configured_packages = config.get("packages")
     issues: list[str] = []
-    if type(database_count) is not int or database_count < 0:
-        issues.append("postgres_contracts database_count must be a nonnegative integer")
-    if type(process_count) is not int or process_count < 0:
-        issues.append("postgres_contracts process_count must be a nonnegative integer")
+    for field, count in (("database_count", database_count), ("process_count", process_count)):
+        if type(count) is not int or count < 0:
+            issues.append(f"postgres_contracts {field} must be a nonnegative integer")
     if (
         not isinstance(configured_packages, list)
         or not configured_packages
@@ -86,28 +96,15 @@ def validate_inventory(
         issues.append("rust test policy field 'ignores' must be a table")
     if issues:
         return None, issues
-    assert isinstance(database_count, int)
-    assert isinstance(process_count, int)
-    assert isinstance(configured_packages, list)
-    assert isinstance(records, dict)
     expected_packages = tuple(configured_packages)
     inventory = {occurrence.identity: occurrence for occurrence in occurrences}
     database: list[IgnoreOccurrence] = []
     process: list[IgnoreOccurrence] = []
     for occurrence in sorted(occurrences):
         classification = records.get(occurrence.identity)
-        category = (
-            classification.partition("|")[0]
-            if isinstance(classification, str)
-            else None
-        )
+        category = _category(classification)
         accepted_reason = occurrence.attribute in {DB_REASON, PROCESS_REASON}
         accepted_name = CONTRACT_NAME_RE.fullmatch(occurrence.test) is not None
-        if category == SPECIALIZED_CATEGORY and not accepted_reason and not accepted_name:
-            issues.append(
-                f"{occurrence.identity}: specialized-environment entry is not a PostgreSQL contract"
-            )
-            continue
         if accepted_name and not accepted_reason:
             issues.append(
                 f"{occurrence.identity}: PostgreSQL contract has an unsupported ignore reason"
@@ -129,13 +126,28 @@ def validate_inventory(
             )
 
     for identity, classification in records.items():
-        category = (
-            classification.partition("|")[0]
-            if isinstance(classification, str)
-            else None
+        category = _category(classification)
+        parts = identity.rsplit("::", 2)
+        recognized = len(parts) == 3 and (
+            parts[2] in {DB_REASON, PROCESS_REASON}
+            or CONTRACT_NAME_RE.fullmatch(parts[1]) is not None
         )
-        if category == SPECIALIZED_CATEGORY and identity not in inventory:
+        if category == SPECIALIZED_CATEGORY and recognized and identity not in inventory:
             issues.append(f"stale specialized-environment classification: {identity}")
+
+    mentioned_functions = {
+        f"{occurrence.path}::{occurrence.test}"
+        for occurrence in occurrences
+        if CONTRACT_NAME_RE.fullmatch(occurrence.test)
+    }
+    for function in functions:
+        if (
+            CONTRACT_NAME_RE.fullmatch(function.name)
+            and function.identity not in mentioned_functions
+        ):
+            issues.append(
+                f"PostgreSQL test function lacks an accepted ignore: {function.identity}"
+            )
 
     discovered_packages: set[str] = set()
     for occurrence in database + process:
@@ -173,16 +185,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--print-nextest-filter", action="store_true")
+    parser.add_argument("--github-output", action="store_true")
     args = parser.parse_args(argv)
     repo = args.repo.resolve()
     policy, issues = load_toml(repo / ".github/rust-test-policy.toml")
     if policy is not None:
         try:
             occurrences = inventory_ignores(repo)
+            functions = inventory_rust_test_functions(repo)
         except (OSError, subprocess.CalledProcessError, UnicodeError) as error:
             issues.append(f"cannot inventory tracked Rust sources: {error}")
         else:
-            summary, validation_issues = validate_inventory(repo, occurrences, policy)
+            summary, validation_issues = validate_inventory(
+                repo, occurrences, functions, policy
+            )
             issues.extend(validation_issues)
     else:
         summary = None
@@ -194,7 +210,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     assert summary is not None
-    if args.print_nextest_filter:
+    if args.github_output:
+        print(f"filter={summary.nextest_filter}")
+        print(f"expected_total={summary.total_count}")
+    elif args.print_nextest_filter:
         print(summary.nextest_filter)
     else:
         print(

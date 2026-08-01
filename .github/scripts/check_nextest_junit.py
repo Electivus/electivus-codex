@@ -15,7 +15,7 @@ def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
-def inspect_report(report: Path) -> list[str]:
+def inspect_report(report: Path, expected_testcases: int | None = None) -> list[str]:
     if not report.is_file():
         return [f"required JUnit report is missing or not a regular file: {report}"]
     try:
@@ -26,6 +26,7 @@ def inspect_report(report: Path) -> list[str]:
         return [f"JUnit root must be <testsuites>, found <{root_name}>"]
 
     issues: list[str] = []
+    testcase_count = 0
     for element in root.iter():
         element_name = _local_name(element.tag)
         if element_name in {"testsuites", "testsuite"}:
@@ -41,6 +42,7 @@ def inspect_report(report: Path) -> list[str]:
                     issues.append(f"{identity}: aggregate {count_name}={count}")
         if element_name != "testcase":
             continue
+        testcase_count += 1
         classname = element.get("classname", "").strip()
         name = element.get("name", "<unnamed test>").strip()
         identity = f"{classname}::{name}" if classname else name
@@ -51,14 +53,20 @@ def inspect_report(report: Path) -> list[str]:
             kind = "retry" if child_name in RETRY_ELEMENTS else "failure"
             detail = child.get("message", "").strip()
             issues.append(f"{identity}: {kind} evidence <{child_name}>" + (f": {detail}" if detail else ""))
+    if expected_testcases is not None and testcase_count != expected_testcases:
+        issues.append(
+            f"expected {expected_testcases} testcases, found {testcase_count}"
+        )
     return issues
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path, help="required nextest JUnit XML")
-    report = parser.parse_args(argv).report
-    issues = inspect_report(report)
+    parser.add_argument("--expected-testcases", type=int)
+    args = parser.parse_args(argv)
+    report = args.report
+    issues = inspect_report(report, args.expected_testcases)
     if issues:
         print("nextest JUnit policy failed:\n" + "\n".join(f"- {issue}" for issue in issues), file=sys.stderr)
         return 1

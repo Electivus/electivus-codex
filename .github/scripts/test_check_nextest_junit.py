@@ -8,16 +8,16 @@ import check_nextest_junit as policy
 
 
 class NextestJunitTests(unittest.TestCase):
-    def run_xml(self, xml: str) -> tuple[int, str]:
+    def run_xml(self, xml: str, *args: str) -> tuple[int, str]:
         with tempfile.TemporaryDirectory() as temp_dir:
             report = Path(temp_dir) / "junit.xml"
             report.write_text(xml, encoding="utf-8")
-            return self.run_path(report)
+            return self.run_path(report, *args)
 
-    def run_path(self, report: Path) -> tuple[int, str]:
+    def run_path(self, report: Path, *args: str) -> tuple[int, str]:
         output = io.StringIO()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-            result = policy.main([str(report)])
+            result = policy.main([str(report), *args])
         return result, output.getvalue()
 
     def test_every_retry_element_is_rejected_by_local_name_and_identity(self) -> None:
@@ -59,7 +59,15 @@ class NextestJunitTests(unittest.TestCase):
                 with self.subTest(report=report):
                     result, output = self.run_path(report)
                     self.assertEqual(1, result)
-                    self.assertIn(expected, output)
+                self.assertIn(expected, output)
+
+    def test_expected_testcase_count_rejects_a_green_subset(self) -> None:
+        result, output = self.run_xml(
+            '<testsuites><testsuite><testcase name="only-one" /></testsuite></testsuites>',
+            "--expected-testcases",
+            "2",
+        )
+        self.assertEqual((1, True), (result, "expected 2 testcases, found 1" in output))
 
 
 if __name__ == "__main__":

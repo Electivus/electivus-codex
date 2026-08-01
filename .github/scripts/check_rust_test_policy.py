@@ -34,6 +34,15 @@ class IgnoreOccurrence:
     def identity(self) -> str:
         return f"{self.path}::{self.test}::{self.attribute}"
 
+@dataclass(frozen=True, order=True)
+class RustFunctionOccurrence:
+    path: str
+    name: str
+
+    @property
+    def identity(self) -> str:
+        return f"{self.path}::{self.name}"
+
 def _raw_string_end(text: str, start: int) -> int | None:
     match = RAW_STRING_RE.match(text, start) if text[start] in "bcr" else None
     if match is None:
@@ -150,9 +159,9 @@ def _ignore_forms(attribute: str) -> list[str]:
         if _is_ignore_meta(candidate)
     ]
 
-def inventory_file(path: str, text: str) -> list[IgnoreOccurrence]:
+def _function_attributes(text: str) -> list[tuple[str, str]]:
     masked = _code_mask(text)
-    occurrences: list[IgnoreOccurrence] = []
+    attributes: list[tuple[str, str]] = []
     for match in ATTRIBUTE_START_RE.finditer(masked):
         opening = match.end() - 1
         depth = 1
@@ -163,27 +172,46 @@ def inventory_file(path: str, text: str) -> list[IgnoreOccurrence]:
             cursor += 1
         if depth:
             continue
-        forms = _ignore_forms(text[opening + 1 : cursor - 1])
-        if not forms:
-            continue
         function = FUNCTION_RE.search(masked, cursor)
         test = function.group(1) if function else "<missing-test-function>"
-        occurrences.extend(IgnoreOccurrence(path, test, form) for form in forms)
-    return occurrences
+        attributes.append((test, text[opening + 1 : cursor - 1]))
+    return attributes
 
-def inventory_ignores(repo: Path) -> list[IgnoreOccurrence]:
+def inventory_file(path: str, text: str) -> list[IgnoreOccurrence]:
+    return [
+        IgnoreOccurrence(path, test, form)
+        for test, attribute in _function_attributes(text)
+        for form in _ignore_forms(attribute)
+    ]
+
+def _tracked_rust_sources(repo: Path) -> list[tuple[str, str]]:
     result = subprocess.run(
         ["git", "ls-files", "-z", "--", "*.rs"],
         cwd=repo,
         check=True,
         capture_output=True,
     )
+    return [
+        (relative_path, (repo / relative_path).read_text(encoding="utf-8"))
+        for relative_path in filter(None, sorted(result.stdout.decode().split("\0")))
+    ]
+
+def inventory_ignores(repo: Path) -> list[IgnoreOccurrence]:
     occurrences: list[IgnoreOccurrence] = []
-    for relative_path in filter(None, sorted(result.stdout.decode().split("\0"))):
-        text = (repo / relative_path).read_text(encoding="utf-8")
+    for relative_path, text in _tracked_rust_sources(repo):
         if "ignore" in text:
             occurrences.extend(inventory_file(relative_path, text))
     return sorted(occurrences)
+
+def inventory_rust_test_functions(repo: Path) -> list[RustFunctionOccurrence]:
+    return sorted(
+        {
+            RustFunctionOccurrence(path, test)
+            for path, text in _tracked_rust_sources(repo)
+            for test, attribute in _function_attributes(text)
+            if re.fullmatch(r"(?:[A-Za-z_][A-Za-z0-9_]*::)*test(?:\(.*\))?", _normalize_meta(attribute))
+        }
+    )
 
 def load_toml(path: Path) -> tuple[dict[str, object] | None, list[str]]:
     if not path.is_file():

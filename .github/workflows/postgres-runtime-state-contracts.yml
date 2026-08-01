@@ -167,8 +167,8 @@ jobs:
         run: |
           set -euo pipefail
           rm -f -- "${CARGO_TARGET_DIR}/nextest/default/junit.xml"
-          filter="$(python3 "${GITHUB_WORKSPACE}/.github/scripts/postgres_contract_inventory.py" --print-nextest-filter)"
-          echo "filter=${filter}" >> "$GITHUB_OUTPUT"
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/postgres_contract_inventory.py" \
+            --github-output >> "$GITHUB_OUTPUT"
 
       - name: Run PostgreSQL contracts from nextest archive
         id: archive_test
@@ -236,7 +236,8 @@ jobs:
         shell: bash
         run: |
           python3 "${GITHUB_WORKSPACE}/.github/scripts/check_nextest_junit.py" \
-            "${CARGO_TARGET_DIR}/nextest/default/junit.xml"
+            "${CARGO_TARGET_DIR}/nextest/default/junit.xml" \
+            --expected-testcases "${{ steps.inventory.outputs.expected_total }}"
 
       - name: Upload archive nextest JUnit report
         if: ${{ always() && inputs.artifact_id != '' }}

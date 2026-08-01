@@ -78,8 +78,9 @@ Every full-Rust nextest shard treats its JUnit XML as a required result, includi
 testcase failures; and the retry elements `flakyFailure`, `flakyError`, `rerunFailure`, and `rerunError`, with or
 without XML namespaces. A retry-assisted pass therefore stays red while logs and JUnit artifacts are uploaded.
 The PostgreSQL archive consumer uses the same checker and explicit outcome composition as the four ordinary
-consumers. Producer Cargo timings and all five consumers' JUnit durations and failure diagnostics remain available
-as artifacts and job logs. The standalone Merge-gate workflow remains independent until promotion is handled by #86.
+consumers, and additionally requires exactly 109 executed JUnit testcases. Producer Cargo timings and all five
+consumers' JUnit durations and failure diagnostics remain available as artifacts and job logs. The standalone
+Merge-gate workflow remains independent until promotion is handled by #86.
 
 `rust-test-policy.toml` inventories tracked Rust test ignores by source path, following test function, and normalized
 attribute or condition. New, changed, duplicate, stale, or unclassified occurrences fail repository checks. Review
