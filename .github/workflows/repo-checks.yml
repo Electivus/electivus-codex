@@ -34,9 +34,15 @@ jobs:
         run: python3 -m unittest discover -s scripts/install -p 'test_*.py'
 
       - name: Install actionlint
-        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
-        with:
-          tool: actionlint@1.7.7
+        env:
+          GOBIN: ${{ runner.temp }}/actionlint/bin
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GOBIN"
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          "$GOBIN/actionlint" -version
+          echo "$GOBIN" >> "$GITHUB_PATH"
 
       - name: Test GitHub helper scripts
         run: just test-github-scripts

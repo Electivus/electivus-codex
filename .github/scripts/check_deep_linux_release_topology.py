@@ -30,6 +30,22 @@ BAZEL_CONCURRENCY_GROUP = (
 )
 
 
+def _actionlint_install_contract(step: str) -> bool:
+    return (
+        "uses: taiki-e/install-action@" not in step
+        and "GOBIN: ${{ runner.temp }}/actionlint/bin" in step
+        and "shell: bash" in step
+        and "set -euo pipefail" in step
+        and 'mkdir -p "$GOBIN"' in step
+        and step.count(
+            "go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7"
+        )
+        == 1
+        and '"$GOBIN/actionlint" -version' in step
+        and 'echo "$GOBIN" >> "$GITHUB_PATH"' in step
+    )
+
+
 def validate_topology(
     bazel: str,
     blocking: str,
@@ -51,6 +67,8 @@ def validate_topology(
     release_clippy = _step(lint, "cargo clippy (release)")
     dev_clippy = _step(lint, "cargo clippy (dev)")
     build_timings = _step(lint, "Upload Cargo timings (build)")
+    bazel_actionlint = _step(bazel_test, "Install actionlint")
+    repo_actionlint = _step(_job(repo_checks, "build-test"), "Install actionlint")
     concurrency = _block(bazel, r"^concurrency:\s*$", r"^jobs:\s*$")
     group_lines = re.findall(r"^  group: (.+)$", concurrency, re.MULTILINE)
     concurrency_group = group_lines[0] if len(group_lines) == 1 else ""
@@ -64,6 +82,7 @@ def validate_topology(
         ("Bazel release targets", "list-bazel-release-targets.sh" in bazel_release and "BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}" in bazel_release and "run-bazel-ci.sh" in bazel_release),
         ("Bazel release bwrap", "Verify Bazel builds bwrap" in bazel_release and "//codex-rs/bwrap:bwrap" in bazel_release),
         ("Bazel release logs", "actions/upload-artifact@" in bazel_release and "bazel-execution-logs-verify-release-build-${{ matrix.target }}" in bazel_release and "${{ runner.temp }}/bazel-execution-logs" in bazel_release),
+        ("hosted actionlint install", _actionlint_install_contract(bazel_actionlint) and _actionlint_install_contract(repo_actionlint)),
         ("Bazel release promotion", "uses: ./.github/workflows/bazel.yml" in normal_bazel and "validation_scope: essential" in normal_bazel and "needs: deep-linux-eligibility" in release_gate and "needs.deep-linux-eligibility.result == 'success'" in release_gate and "needs.deep-linux-eligibility.outputs.eligible == 'true'" in release_gate and "uses: ./.github/workflows/bazel.yml" in release_gate and "validation_scope: release-only" in release_gate),
         ("bounded Bazel result", "needs: [deep-linux-eligibility, deep-linux-bazel-release]" in release_result and "if: ${{ always() }}" in release_result and "timeout-minutes: 10" in release_result and "ELIGIBILITY_RESULT: ${{ needs.deep-linux-eligibility.result }}" in release_result and "ELIGIBLE: ${{ needs.deep-linux-eligibility.outputs.eligible }}" in release_result and "VALIDATION_LABEL: Deep Linux Bazel release" in release_result and "VALIDATION_RESULT: ${{ needs.deep-linux-bazel-release.result }}" in release_result and "set -euo pipefail" in release_result and "deep_linux_result.py | tee -a \"$GITHUB_STEP_SUMMARY\"" in release_result),
         ("independent required results", all(f"- {name}" in required for name in ("bazel", "deep-linux-bazel-release-result", "deep-linux-cargo-result")) and "- deep-linux-bazel-release\n" not in required and "- deep-linux-cargo\n" not in required),

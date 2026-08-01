@@ -36,6 +36,8 @@ class DeepLinuxReleaseTopologyTests(unittest.TestCase):
             ("Bazel release targets", 0, bazel.replace("list-bazel-release-targets.sh", "list-bazel-clippy-targets.sh")),
             ("Bazel release bwrap", 0, bazel.replace("//codex-rs/bwrap:bwrap", "//codex-rs/cli:codex")),
             ("Bazel release logs", 0, bazel.replace("bazel-execution-logs-verify-release-build", "missing-release-logs")),
+            ("hosted actionlint install", 0, bazel.replace("github.com/rhysd/actionlint/cmd/actionlint@v1.7.7", "github.com/rhysd/actionlint/cmd/actionlint@latest", 1)),
+            ("hosted actionlint install", 3, repo_checks.replace('echo "$GOBIN" >> "$GITHUB_PATH"', 'echo "$GOBIN"')),
             ("Bazel release promotion", 1, blocking.replace("needs.deep-linux-eligibility.outputs.eligible == 'true'", "needs.deep-linux-eligibility.outputs.eligible == 'false'", 1)),
             ("Bazel release promotion", 1, blocking.replace("validation_scope: release-only", "validation_scope: essential")),
             ("bounded Bazel result", 1, blocking.replace("if: ${{ always() }}", "if: ${{ needs.deep-linux-bazel-release.result == 'success' }}", 1)),
