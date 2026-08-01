@@ -11,6 +11,8 @@ shard sharing the x64 nextest archive, and Change-triggered validation for the L
 - A test retry leaves the gate red; inherited flaky ignores must be certified or fixed, and a
   Quarantined check expires within seven days.
 - The full Merge gate targets 120 minutes at the 95th percentile, reviewed after 20 eligible runs.
+- Stability certification requires one complete retry-free successful Merge gate run plus one
+  successful run of every retained Extended validation suite for the same rollout/workflow version.
 - Promoted checks are not repeated after merge, normal ruleset bypass is removed, and post-merge
   automation retains only Extended validation that has not been promoted.
 - Docker remote-executor, macOS, Windows, and new coverage or sanitizer tooling remain deferred

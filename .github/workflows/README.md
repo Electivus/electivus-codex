@@ -66,8 +66,11 @@ remain the fallback.
   repository-owned planner. Empty direct-dispatch input resolves to `full`, and
   an unknown nonempty scope fails safe to `full`. Manual dispatch and the
   opt-in `**full-ci**` branch trigger therefore retain the complete suite for
-  Stability certification or diagnosis. Its aggregate accepts only `success`
-  for planned children and `skipped` for every unplanned child.
+  Stability certification or diagnosis. Stability certification requires one
+  complete retry-free successful Merge gate run plus one successful run of
+  every retained Extended validation suite for the same rollout/workflow
+  version. The aggregate accepts only `success` for planned children and
+  `skipped` for every unplanned child.
 - In `full` and `merge-gate`, native Linux x64 builds one archive and matching
   runtime-helper artifact identity for four
   ordinary partitioned consumers plus one PostgreSQL 18 consumer. The fifth

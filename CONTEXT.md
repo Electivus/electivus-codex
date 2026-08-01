@@ -125,9 +125,10 @@ latency to pull requests or repeating promoted validation.
 _Avoid_: Merge gate, best-effort CI, optional tests
 
 **Stability certification**:
-Initial evidence on one commit consisting of two consecutive successful merge-gate runs and one
-successful run of each extended validation suite.
-_Avoid_: Single green run, continuous reliability measurement
+Initial evidence on one commit consisting of one complete retry-free successful Merge gate run and
+one successful run of every retained Extended validation suite for the same rollout/workflow
+version.
+_Avoid_: Merge-gate-only evidence, continuous reliability measurement
 
 **Test reactivation certification**:
 Evidence for one temporarily ignored test on one immutable commit consisting of exactly 20
