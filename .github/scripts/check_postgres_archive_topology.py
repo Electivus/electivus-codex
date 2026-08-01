@@ -121,6 +121,22 @@ def _step_value(step: str, field: str) -> str | None:
     return _normalize_scalar(match.group("value")) if match else None
 
 
+def _action_input(step: str, field: str) -> str | None:
+    if _step_value(step, "uses") is None:
+        return None
+    inputs = _block(
+        step,
+        r"^(?:      - with:|        with:)\s*$",
+        r"^        [A-Za-z_][A-Za-z0-9_-]*:",
+    )
+    match = re.search(
+        rf"^          {re.escape(field)}:\s*(?P<value>.+?)\s*$",
+        inputs,
+        re.MULTILINE,
+    )
+    return _normalize_scalar(match.group("value")) if match else None
+
+
 def _steps(block: str) -> tuple[str, ...]:
     sequence = _block(
         block,
@@ -142,7 +158,7 @@ def _steps(block: str) -> tuple[str, ...]:
 def _nextest_installers(block: str) -> tuple[str, ...]:
     installers = []
     for step in _steps(block):
-        tool = _step_value(step, "tool")
+        tool = _action_input(step, "tool")
         if tool is not None and (tool == "nextest" or tool.startswith("nextest@")):
             installers.append(step)
     return tuple(installers)
@@ -158,8 +174,8 @@ def _pinned_nextest(installers: tuple[str, ...]) -> bool:
     installer = installers[0]
     return (
         _step_value(installer, "uses") == NEXTEST_INSTALL_ACTION
-        and _step_value(installer, "tool") == NEXTEST_TOOL
-        and _step_value(installer, "version") is None
+        and _action_input(installer, "tool") == NEXTEST_TOOL
+        and _action_input(installer, "version") is None
     )
 
 

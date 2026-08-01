@@ -17,7 +17,7 @@ def replace_in_step(
     changed = step.replace(old, new, 1)
     if changed == step:
         raise AssertionError(f"{old!r} not found in {step_name} step")
-    return source.replace(step, changed, 1)
+    return source.replace(job, job.replace(step, changed, 1), 1)
 
 
 def replace_in_nextest_installer(
@@ -99,6 +99,20 @@ class PostgresArchiveTopologyTests(unittest.TestCase):
             f'"{tool}"',
         )
         self.assertEqual([], topology.validate_topology(platform, postgres, *rest))
+
+    def test_non_action_tool_metadata_is_not_an_installer(self) -> None:
+        platform, *rest = self.sources
+        platform = replace_in_step(
+            platform,
+            "shard",
+            "Install Linux build dependencies",
+            "      - name: Install Linux build dependencies\n",
+            "      - name: Install Linux build dependencies\n"
+            "        env:\n"
+            "          tool: nextest@0.9.104\n"
+            "          version: 0.9.104\n",
+        )
+        self.assertEqual([], topology.validate_topology(platform, *rest))
 
     def test_mutable_topology_invariants_fail_closed(self) -> None:
         platform, postgres, full, repo_checks, blocking, planner, result_helper = self.sources
