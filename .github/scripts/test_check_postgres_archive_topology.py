@@ -28,6 +28,9 @@ class PostgresArchiveTopologyTests(unittest.TestCase):
     def test_mutable_topology_invariants_fail_closed(self) -> None:
         platform, postgres, full, repo_checks, blocking, planner, result_helper = self.sources
         cases = (
+            ("archive producer nextest pin", 0, platform.replace("tool: nextest@0.9.103", "tool: nextest", 1)),
+            ("ordinary shard nextest pin", 0, replace_last(platform, "tool: nextest@0.9.103", "tool: nextest")),
+            ("PostgreSQL archive consumer nextest pin", 1, postgres.replace("tool: nextest@0.9.103", "tool: nextest\n          version: 0.9.103")),
             ("archive producer artifact", 0, platform.replace("name: nextest-archive-${{ inputs.artifact_id }}", "name: wrong-archive", 1)),
             ("archive producer artifact", 0, platform.replace("name: ${{ env.TEST_HELPERS_ARTIFACT }}", "name: wrong-helper", 1)),
             ("ordinary shard artifacts", 0, replace_last(platform, "name: nextest-archive-${{ inputs.artifact_id }}", "name: wrong-archive")),

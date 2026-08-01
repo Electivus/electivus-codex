@@ -42,6 +42,10 @@ NEXTEST_JUNIT_ENV = (
     "NEXTEST_JUNIT_FILE: "
     "${{ github.workspace }}/codex-rs/target/nextest/default/junit.xml"
 )
+NEXTEST_INSTALL_ACTION = (
+    "taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532"
+)
+NEXTEST_TOOL = "nextest@0.9.103"
 
 
 def _planner_matrix(source: str, name: str) -> tuple[tuple[str, str, str], ...]:
@@ -98,6 +102,27 @@ def _checkout(job: str) -> str:
     )
 
 
+def _nextest_installer(block: str) -> str:
+    for match in re.finditer(r"^      - (?:name:|uses:)", block, re.MULTILINE):
+        step = _block(
+            block[match.start() :],
+            r"^      - (?:name:|uses:)",
+            r"^      - (?:name:|uses:)",
+        )
+        if re.search(r"^          tool: nextest(?:@|\s*$)", step, re.MULTILINE):
+            return step
+    return ""
+
+
+def _pinned_nextest(installer: str) -> bool:
+    return (
+        f"uses: {NEXTEST_INSTALL_ACTION}" in installer
+        and installer.count(f"          tool: {NEXTEST_TOOL}") == 1
+        and re.search(r"^          tool: nextest\s*$", installer, re.MULTILINE) is None
+        and re.search(r"^          version:", installer, re.MULTILINE) is None
+    )
+
+
 def _artifact(step: str, action: str, name: str, path: str) -> bool:
     return f"uses: actions/{action}-artifact@" in step and f"          name: {name}" in step and f"          path: {path}" in step
 
@@ -135,6 +160,9 @@ def validate_topology(
     shard_junit = _step(shard, "Inspect nextest JUnit signal")
     shard_junit_upload = _step(shard, "Upload nextest JUnit report")
     postgres_job = _job(postgres, "postgres-contracts")
+    archive_nextest = _nextest_installer(archive)
+    shard_nextest = _nextest_installer(shard)
+    postgres_nextest = _step(postgres_job, "Install pinned nextest for archive consumption")
     inventory = _step(postgres_job, "Validate PostgreSQL contract inventory")
     pg_archive = _step(postgres_job, "Download nextest archive")
     pg_helper = _step(postgres_job, "Download runtime test helpers")
@@ -173,6 +201,9 @@ def validate_topology(
         and 'if [[ "${JUNIT_OUTCOME}" != "success" ]]; then' in pg_confirm
     )
     checks = (
+        ("archive producer nextest pin", _pinned_nextest(archive_nextest)),
+        ("ordinary shard nextest pin", _pinned_nextest(shard_nextest)),
+        ("PostgreSQL archive consumer nextest pin", _pinned_nextest(postgres_nextest)),
         ("single archive producer", platform.count("cargo nextest archive") == 1 and "cargo nextest archive" in archive and "cargo nextest archive" not in postgres),
         ("archive producer artifact", _identity(archive) and _artifact(archive_upload, "upload", "nextest-archive-${{ inputs.artifact_id }}", "${{ runner.temp }}/nextest-archive/${{ env.NEXTEST_ARCHIVE_FILE }}") and _artifact(helper_upload, "upload", "${{ env.TEST_HELPERS_ARTIFACT }}", "${{ runner.temp }}/${{ env.TEST_HELPERS_ARTIFACT }}/*")),
         ("ordinary shard artifacts", _identity(shard) and _artifact(shard_archive, "download", "nextest-archive-${{ inputs.artifact_id }}", "${{ runner.temp }}/nextest-archive") and _artifact(shard_helper, "download", "${{ env.TEST_HELPERS_ARTIFACT }}", "${{ runner.temp }}/${{ env.TEST_HELPERS_ARTIFACT }}")),
