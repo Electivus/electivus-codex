@@ -129,6 +129,11 @@ Initial evidence on one commit consisting of two consecutive successful merge-ga
 successful run of each extended validation suite.
 _Avoid_: Single green run, continuous reliability measurement
 
+**Test reactivation certification**:
+Evidence for one temporarily ignored test on one immutable commit consisting of exactly 20
+consecutive retry-free Linux x64 executions, required before restoring ordinary test selection.
+_Avoid_: Stability certification, flaky retry, quarantine
+
 **Fresh merge gate**:
 A successful merge gate evaluated against the current default-branch head rather than an older
 base revision.

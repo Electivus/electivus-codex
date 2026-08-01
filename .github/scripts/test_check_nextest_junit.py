@@ -69,6 +69,18 @@ class NextestJunitTests(unittest.TestCase):
         )
         self.assertEqual((1, True), (result, "expected 2 testcases, found 1" in output))
 
+    def test_unexpected_skip_is_rejected_even_with_exact_cardinality(self) -> None:
+        for xml in (
+            '<testsuites skipped="1"><testsuite><testcase name="ignored"><skipped /></testcase></testsuite></testsuites>',
+            '<testsuites><testsuite skipped="1"><testcase name="ignored" /></testsuite></testsuites>',
+        ):
+            with self.subTest(xml=xml):
+                default_result, _ = self.run_xml(xml, "--expected-testcases", "1")
+                result, output = self.run_xml(xml, "--expected-testcases", "1", "--reject-skipped")
+                self.assertEqual(0, default_result)
+                self.assertEqual(1, result)
+                self.assertIn("skip", output)
+
 
 if __name__ == "__main__":
     unittest.main()

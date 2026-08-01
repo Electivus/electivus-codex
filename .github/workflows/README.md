@@ -120,6 +120,39 @@ standalone PostgreSQL Merge-gate job is retired because eligible changes now reu
 attribute or condition. New, changed, duplicate, stale, or unclassified occurrences fail repository checks. Review
 and assign every exact identity with its source change; names and reason text never classify it automatically.
 
+### #89 Test Reactivation Certification
+
+`test-certification.yml` runs Test reactivation certification only for the two temporary #89 identities. Its two
+Linux x64 matrix jobs are independent; each performs 20 ordered executions on one full candidate SHA with nextest
+retries disabled and exactly one JUnit testcase required. The first command or JUnit failure stops only that test's
+sequence. A rerun attempt, incomplete manifest, changed SHA, retry evidence, cancellation, or skipped testcase cannot
+certify. Each job retains its manifest and JUnit reports for 90 days and links the independent outcome in the summary.
+
+After an operator is authorized to begin hosted certification, the workflow can first run from a candidate that is
+not yet the default branch by creating the narrowly named ref without rewriting the candidate commit:
+
+```bash
+git push origin <40-character-candidate-sha>:refs/heads/certification/issue-89
+```
+
+After this workflow exists on `main`, dispatch the default-branch workflow definition against an immutable candidate:
+
+```bash
+gh workflow run test-certification.yml --ref main -f candidate_sha=<40-character-candidate-sha>
+```
+
+For each test, retain the workflow run URL and download its
+`test-certification-<test-id>-<candidate-sha>` artifact. Verify each downloaded `manifest.json` independently with:
+
+```bash
+python3 .github/scripts/verify_test_certification.py verify <manifest.json> \
+  --expected-sha <40-character-candidate-sha>
+```
+
+These commands describe the later hosted phase; no hosted evidence is asserted by this repository change. Only after
+both final-candidate manifests pass may a follow-up remove the two `#[ignore]` attributes and their
+`temporary-certification` policy entries, restoring both tests to ordinary native x64 archive selection.
+
 The allowed ignore categories have these narrow boundaries:
 
 | Category                   | Boundary                                                     |

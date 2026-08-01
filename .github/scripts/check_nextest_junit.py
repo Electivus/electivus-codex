@@ -9,13 +9,18 @@ import xml.etree.ElementTree as ET
 
 RETRY_ELEMENTS = {"flakyFailure", "flakyError", "rerunFailure", "rerunError"}
 FAILURE_ELEMENTS = {"failure", "error"}
+SKIP_ELEMENTS = {"skipped"}
 
 
 def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
-def inspect_report(report: Path, expected_testcases: int | None = None) -> list[str]:
+def inspect_report(
+    report: Path,
+    expected_testcases: int | None = None,
+    reject_skipped: bool = False,
+) -> list[str]:
     if not report.is_file():
         return [f"required JUnit report is missing or not a regular file: {report}"]
     try:
@@ -31,7 +36,8 @@ def inspect_report(report: Path, expected_testcases: int | None = None) -> list[
         element_name = _local_name(element.tag)
         if element_name in {"testsuites", "testsuite"}:
             identity = element.get("name", "root testsuites")
-            for count_name in ("failures", "errors"):
+            count_names = ("failures", "errors", "skipped") if reject_skipped else ("failures", "errors")
+            for count_name in count_names:
                 raw_count = element.get(count_name, "0")
                 try:
                     count = int(raw_count)
@@ -48,9 +54,10 @@ def inspect_report(report: Path, expected_testcases: int | None = None) -> list[
         identity = f"{classname}::{name}" if classname else name
         for child in element:
             child_name = _local_name(child.tag)
-            if child_name not in RETRY_ELEMENTS | FAILURE_ELEMENTS:
+            signal_elements = RETRY_ELEMENTS | FAILURE_ELEMENTS | (SKIP_ELEMENTS if reject_skipped else set())
+            if child_name not in signal_elements:
                 continue
-            kind = "retry" if child_name in RETRY_ELEMENTS else "failure"
+            kind = "retry" if child_name in RETRY_ELEMENTS else "skip" if child_name in SKIP_ELEMENTS else "failure"
             detail = child.get("message", "").strip()
             issues.append(f"{identity}: {kind} evidence <{child_name}>" + (f": {detail}" if detail else ""))
     if expected_testcases is not None and testcase_count != expected_testcases:
@@ -64,9 +71,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path, help="required nextest JUnit XML")
     parser.add_argument("--expected-testcases", type=int)
+    parser.add_argument("--reject-skipped", action="store_true")
     args = parser.parse_args(argv)
     report = args.report
-    issues = inspect_report(report, args.expected_testcases)
+    issues = inspect_report(report, args.expected_testcases, args.reject_skipped)
     if issues:
         print("nextest JUnit policy failed:\n" + "\n".join(f"- {issue}" for issue in issues), file=sys.stderr)
         return 1

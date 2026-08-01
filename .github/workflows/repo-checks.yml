@@ -44,6 +44,9 @@ jobs:
       - name: Verify Rust test signal policy
         run: python3 .github/scripts/check_rust_test_policy.py
 
+      - name: Verify test certification topology
+        run: python3 .github/scripts/check_test_certification_topology.py
+
       - name: Verify PostgreSQL contract inventory
         run: python3 .github/scripts/postgres_contract_inventory.py
 
