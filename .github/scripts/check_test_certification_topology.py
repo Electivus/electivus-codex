@@ -42,7 +42,7 @@ def validate_topology(
     }
     trigger = workflow.split("jobs:", 1)[0]
     certify = _job(workflow, "certify")
-    checkout, initialize, capacity = _checkout(certify), _step(certify, "Initialize immutable evidence manifest"), _step(certify, "Free disk space for certification builds")
+    checkout, initialize, capacity, nextest = _checkout(certify), _step(certify, "Initialize immutable evidence manifest"), _step(certify, "Free disk space for certification builds"), _block(certify, r"^      - uses: taiki-e/install-action@", r"^      - (?:name:|uses:)")
     sequence, verify, upload = _step(certify, "Run ordered retry-free sequence"), _step(certify, "Verify and summarize independent sequence"), _step(certify, "Upload retained certification evidence")
     verify_run = _block(verify, r"^        run: \|\s*$", r"^        [A-Za-z_][A-Za-z0-9_-]*:\s*")
     shard = _job(platform, "shard")
@@ -50,7 +50,7 @@ def validate_topology(
     checks = (
         ("isolated trigger", "push:" in trigger and "branches: [certification/issue-89]" in trigger and "workflow_dispatch:" in trigger and "pull_request:" not in trigger),
         ("immutable Linux x64", "runs-on: ubuntu-24.04\n" in certify and "TARGET: x86_64-unknown-linux-gnu" in certify and "ref: ${{ env.CANDIDATE_SHA }}" in checkout and "persist-credentials: false" in checkout and all(argument in initialize for argument in ('--candidate-sha "${CANDIDATE_SHA}"', '--checked-out-sha "$(git rev-parse HEAD)"', '--test-id "${{ matrix.test_id }}"', '--workflow-ref "${GITHUB_WORKFLOW_REF}"', '--run-id "${GITHUB_RUN_ID}"', '--run-attempt "${GITHUB_RUN_ATTEMPT}"', '--runner-os "${RUNNER_OS}"', '--runner-arch "${RUNNER_ARCH}"'))),
-        ("hosted capacity and stack", 'RUST_MIN_STACK: "8388608"' in certify and 'CARGO_PROFILE_CI_TEST_DEBUG: "0"' in certify and "sudo rm -rf" in capacity and "/opt/hostedtoolcache" in capacity),
+        ("hosted capacity and stack", 'RUST_MIN_STACK: "8388608"' in certify and 'CARGO_PROFILE_CI_TEST_DEBUG: "0"' in certify and "sudo rm -rf" in capacity and "/opt/hostedtoolcache" in capacity and "uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532" in nextest and re.search(r"^          tool: nextest@0\.9\.103\s*$", nextest, re.MULTILINE) is not None and "version:" not in nextest),
         ("two independent tests", set(MATRIX_ROW.findall(certify)) == expected_rows and len(MATRIX_ROW.findall(certify)) == 2 and "fail-fast: false" in certify),
         ("exact identities", all(definition.identity in certify and definition.identity in verifier for definition in TESTS.values())),
         ("twenty ordered executions", "seq 1 20" in sequence and "for order in" in sequence),

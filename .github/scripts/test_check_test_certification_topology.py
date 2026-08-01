@@ -28,7 +28,7 @@ class TestCertificationTopologyTests(unittest.TestCase):
             ("immutable Linux x64", 0, displaced(workflow, '--run-attempt "${GITHUB_RUN_ATTEMPT}"', '--run-attempt 1')),
             ("immutable Linux x64", 0, displaced(workflow, '--runner-os "${RUNNER_OS}"', '--runner-os "Linux"')),
             ("hosted capacity and stack", 0, workflow.replace('RUST_MIN_STACK: "8388608"', 'RUST_MIN_STACK: "1048576"')),
-            ("hosted capacity and stack", 0, workflow.replace('CARGO_PROFILE_CI_TEST_DEBUG: "0"', 'CARGO_PROFILE_CI_TEST_DEBUG: "1"')),
+            ("hosted capacity and stack", 0, workflow.replace('CARGO_PROFILE_CI_TEST_DEBUG: "0"', 'CARGO_PROFILE_CI_TEST_DEBUG: "1"')), ("hosted capacity and stack", 0, displaced(workflow, "tool: nextest@0.9.103", "tool: nextest\n          version: 0.9.103")), ("hosted capacity and stack", 0, displaced(workflow, "tool: nextest@0.9.103", "tool: nextest")),
             ("hosted capacity and stack", 0, displaced(workflow, "sudo rm -rf", "echo keep-hosted-images")),
             ("two independent tests", 0, workflow.replace("fail-fast: false", "fail-fast: true")),
             ("exact identities", 0, workflow.replace("injected_user_input_triggers_follow_up_request_with_deltas", "similar_pending_input_test")),
