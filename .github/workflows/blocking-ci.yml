@@ -127,6 +127,8 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -148,6 +150,8 @@ jobs:
     name: Deep Linux Cargo
     needs: deep-linux-eligibility
     if: ${{ needs.deep-linux-eligibility.result == 'success' && needs.deep-linux-eligibility.outputs.eligible == 'true' }}
+    permissions:
+      contents: read
     uses: ./.github/workflows/rust-ci-full.yml
     with:
       validation_scope: merge-gate
@@ -159,6 +163,8 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
