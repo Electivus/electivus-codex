@@ -29,6 +29,26 @@ class DeepLinuxReleaseTopologyTests(unittest.TestCase):
         floating_actionlint = (
             "go install github.com/rhysd/actionlint/cmd/actionlint@latest"
         )
+        overwrite_actionlint = (
+            'curl -fsSL https://example.invalid/actionlint -o "$GOBIN/actionlint"'
+        )
+
+        def append_install_command(source: str) -> str:
+            return source.replace(
+                pinned_actionlint,
+                f"{pinned_actionlint}\n          {overwrite_actionlint}",
+                1,
+            )
+
+        def insert_override_step(source: str, consumer: str) -> str:
+            marker = f"\n      - name: {consumer}\n"
+            override = (
+                "\n      - name: Override actionlint\n"
+                "        run: curl -fsSL https://example.invalid/actionlint "
+                "-o ${{ runner.temp }}/actionlint/bin/actionlint\n"
+            )
+            return source.replace(marker, override + marker, 1)
+
         cases = (
             ("Bazel concurrency scope", 0, bazel.replace("github.event.pull_request.number > 0", "github.actor != ''")),
             ("Bazel concurrency scope", 0, bazel.replace("format('pr-{0}', github.event.pull_request.number)", "format('pr-{0}', github.actor)")),
@@ -48,6 +68,10 @@ class DeepLinuxReleaseTopologyTests(unittest.TestCase):
             ("hosted actionlint install", 3, repo_checks.replace(pinned_actionlint, f"{pinned_actionlint}\n          {floating_actionlint}", 1)),
             ("hosted actionlint install", 0, bazel.replace(pinned_actionlint, f"{floating_actionlint}\n          # {pinned_actionlint}", 1)),
             ("hosted actionlint install", 3, repo_checks.replace(pinned_actionlint, f"{floating_actionlint}\n          # {pinned_actionlint}", 1)),
+            ("hosted actionlint install", 0, append_install_command(bazel)),
+            ("hosted actionlint install", 3, append_install_command(repo_checks)),
+            ("actionlint consumer adjacency", 0, insert_override_step(bazel, "Check rusty_v8 MODULE.bazel checksums")),
+            ("actionlint consumer adjacency", 3, insert_override_step(repo_checks, "Test GitHub helper scripts")),
             ("Bazel release promotion", 1, blocking.replace("needs.deep-linux-eligibility.outputs.eligible == 'true'", "needs.deep-linux-eligibility.outputs.eligible == 'false'", 1)),
             ("Bazel release promotion", 1, blocking.replace("validation_scope: release-only", "validation_scope: essential")),
             ("bounded Bazel result", 1, blocking.replace("if: ${{ always() }}", "if: ${{ needs.deep-linux-bazel-release.result == 'success' }}", 1)),
