@@ -127,13 +127,14 @@ jobs:
 
       - name: Validate Deep Linux Cargo result
         env:
-          CARGO_RESULT: ${{ needs.deep-linux-cargo.result }}
           ELIGIBILITY_RESULT: ${{ needs.deep-linux-eligibility.result }}
           ELIGIBLE: ${{ needs.deep-linux-eligibility.outputs.eligible }}
+          VALIDATION_LABEL: Deep Linux Cargo
+          VALIDATION_RESULT: ${{ needs.deep-linux-cargo.result }}
         shell: bash
         run: |
           set -euo pipefail
-          python3 .github/scripts/deep_linux_cargo_result.py | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 .github/scripts/deep_linux_result.py | tee -a "$GITHUB_STEP_SUMMARY"
 
   required:
     name: CI required
