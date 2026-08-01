@@ -17,6 +17,13 @@ WORKFLOWS = tuple(f".github/workflows/{name}" for name in NAMES)
 
 MERGE_MATRIX = '[{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"dev"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"release"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","profile":"release"}]'
 FULL_MATRIX = '[{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","profile":"dev"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"dev"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","profile":"dev"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","profile":"dev"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","profile":"release"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","profile":"release"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","profile":"release"}]'
+BAZEL_CONCURRENCY_GROUP = (
+    "concurrency-group::${{ github.workflow }}::"
+    "${{ github.event.pull_request.number > 0 && "
+    "format('pr-{0}', github.event.pull_request.number) || github.ref_name }}::"
+    "${{ inputs.validation_scope || 'essential' }}"
+    "${{ github.ref_name == 'main' && format('::{0}', github.run_id) || ''}}"
+)
 
 
 def validate_topology(
@@ -36,8 +43,10 @@ def validate_topology(
     dev_clippy = _step(lint, "cargo clippy (dev)")
     build_timings = _step(lint, "Upload Cargo timings (build)")
     concurrency = _block(bazel, r"^concurrency:\s*$", r"^jobs:\s*$")
+    group_lines = re.findall(r"^  group: (.+)$", concurrency, re.MULTILINE)
+    concurrency_group = group_lines[0] if len(group_lines) == 1 else ""
     checks = (
-        ("Bazel concurrency scope", concurrency.count("::${{ inputs.validation_scope || 'essential' }}") == 1 and "github.event.pull_request.number" in concurrency and "github.ref_name" in concurrency and "github.ref_name == 'main'" in concurrency and "github.run_id" in concurrency and "cancel-in-progress: ${{ github.ref_name != 'main' }}" in concurrency),
+        ("Bazel concurrency scope", concurrency_group == BAZEL_CONCURRENCY_GROUP and "cancel-in-progress: ${{ github.ref_name != 'main' }}" in concurrency),
         ("Bazel scope fails safe", re.search(r"validation_scope:\n\s+description: .*\n\s+required: false\n\s+default: essential\n\s+type: string", bazel) is not None and "inputs.validation_scope != 'release-only'" in bazel_test and "inputs.validation_scope != 'release-only'" in bazel_clippy and "inputs.validation_scope != 'essential' && inputs.validation_scope != ''" in bazel_release),
         ("Bazel essential scheduling", "if: ${{ inputs.validation_scope != 'release-only' }}" in bazel_test and "if: ${{ inputs.validation_scope != 'release-only' }}" in bazel_clippy and "verify-release-build" not in bazel_test + bazel_clippy),
         ("Bazel release scheduling", "if: ${{ inputs.validation_scope != 'essential' && inputs.validation_scope != '' }}" in bazel_release and "github.event_name == 'push'" not in bazel_release),
