@@ -46,6 +46,8 @@ NEXTEST_INSTALL_ACTION = (
     "taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532"
 )
 NEXTEST_TOOL = "nextest@0.9.103"
+STANDALONE_NEXTEST_CONDITION = "${{ inputs.artifact_id == '' }}"
+ARCHIVE_NEXTEST_CONDITION = "${{ inputs.artifact_id != '' }}"
 
 
 def _planner_matrix(source: str, name: str) -> tuple[tuple[str, str, str], ...]:
@@ -134,16 +136,11 @@ def _nextest_installers(block: str) -> tuple[str, ...]:
     return tuple(installers)
 
 
-def _archive_mode(installer: str) -> bool:
-    return (
-        re.search(
-            r"^        if:\s*\$\{\{\s*inputs\.artifact_id\s*!=\s*''\s*\}\}"
-            r"\s*(?:#.*)?$",
-            installer,
-            re.MULTILINE,
-        )
-        is not None
+def _step_condition(step: str) -> str | None:
+    match = re.search(
+        r"^        if:\s*(?P<condition>[^#]+?)\s*(?:#.*)?$", step, re.MULTILINE
     )
+    return match.group("condition") if match else None
 
 
 def _pinned_nextest(installers: tuple[str, ...]) -> bool:
@@ -196,10 +193,21 @@ def validate_topology(
     postgres_job = _job(postgres, "postgres-contracts")
     archive_nextest = _nextest_installers(archive)
     shard_nextest = _nextest_installers(shard)
-    postgres_nextest = tuple(
+    postgres_installers = _nextest_installers(postgres_job)
+    standalone_nextest = tuple(
         installer
-        for installer in _nextest_installers(postgres_job)
-        if _archive_mode(installer)
+        for installer in postgres_installers
+        if _step_condition(installer) == STANDALONE_NEXTEST_CONDITION
+    )
+    postgres_archive_nextest = tuple(
+        installer
+        for installer in postgres_installers
+        if _step_condition(installer) == ARCHIVE_NEXTEST_CONDITION
+    )
+    postgres_nextest_roles = (
+        len(standalone_nextest) == 1
+        and len(postgres_archive_nextest) == 1
+        and len(postgres_installers) == 2
     )
     inventory = _step(postgres_job, "Validate PostgreSQL contract inventory")
     pg_archive = _step(postgres_job, "Download nextest archive")
@@ -241,7 +249,10 @@ def validate_topology(
     checks = (
         ("archive producer nextest pin", _pinned_nextest(archive_nextest)),
         ("ordinary shard nextest pin", _pinned_nextest(shard_nextest)),
-        ("PostgreSQL archive consumer nextest pin", _pinned_nextest(postgres_nextest)),
+        (
+            "PostgreSQL archive consumer nextest pin",
+            postgres_nextest_roles and _pinned_nextest(postgres_archive_nextest),
+        ),
         ("single archive producer", platform.count("cargo nextest archive") == 1 and "cargo nextest archive" in archive and "cargo nextest archive" not in postgres),
         ("archive producer artifact", _identity(archive) and _artifact(archive_upload, "upload", "nextest-archive-${{ inputs.artifact_id }}", "${{ runner.temp }}/nextest-archive/${{ env.NEXTEST_ARCHIVE_FILE }}") and _artifact(helper_upload, "upload", "${{ env.TEST_HELPERS_ARTIFACT }}", "${{ runner.temp }}/${{ env.TEST_HELPERS_ARTIFACT }}/*")),
         ("ordinary shard artifacts", _identity(shard) and _artifact(shard_archive, "download", "nextest-archive-${{ inputs.artifact_id }}", "${{ runner.temp }}/nextest-archive") and _artifact(shard_helper, "download", "${{ env.TEST_HELPERS_ARTIFACT }}", "${{ runner.temp }}/${{ env.TEST_HELPERS_ARTIFACT }}")),

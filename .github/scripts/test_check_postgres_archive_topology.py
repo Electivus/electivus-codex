@@ -73,6 +73,15 @@ class PostgresArchiveTopologyTests(unittest.TestCase):
         additional_archive_installer = additional_installer.replace(
             "        uses:", "        if: ${{ inputs.artifact_id != '' }}\n        uses:"
         )
+        unconditional_floating_installer = additional_installer.replace(
+            f"tool: {tool}", "tool: nextest"
+        )
+        reversed_archive_installer = additional_installer.replace(
+            "        uses:", "        if: ${{ '' != inputs.artifact_id }}\n        uses:"
+        )
+        unbraced_archive_installer = additional_installer.replace(
+            "        uses:", "        if: inputs.artifact_id != ''\n        uses:"
+        )
         cases = (
             (
                 "archive producer nextest pin",
@@ -154,6 +163,46 @@ class PostgresArchiveTopologyTests(unittest.TestCase):
                     "postgres-contracts",
                     additional_archive_installer,
                     step_name="Install pinned nextest for archive consumption",
+                ),
+            ),
+            (
+                "PostgreSQL archive consumer nextest pin",
+                1,
+                append_installer(
+                    postgres,
+                    "postgres-contracts",
+                    unconditional_floating_installer,
+                    step_name="Install pinned nextest for archive consumption",
+                ),
+            ),
+            (
+                "PostgreSQL archive consumer nextest pin",
+                1,
+                append_installer(
+                    postgres,
+                    "postgres-contracts",
+                    reversed_archive_installer,
+                    step_name="Install pinned nextest for archive consumption",
+                ),
+            ),
+            (
+                "PostgreSQL archive consumer nextest pin",
+                1,
+                append_installer(
+                    postgres,
+                    "postgres-contracts",
+                    unbraced_archive_installer,
+                    step_name="Install pinned nextest for archive consumption",
+                ),
+            ),
+            (
+                "PostgreSQL archive consumer nextest pin",
+                1,
+                replace_in_nextest_installer(
+                    postgres,
+                    "postgres-contracts",
+                    topology.STANDALONE_NEXTEST_CONDITION,
+                    "${{ true }}",
                 ),
             ),
             ("archive producer nextest pin", 0, platform.replace("tool: nextest@0.9.103", "tool: nextest", 1)),
