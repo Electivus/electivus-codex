@@ -92,7 +92,7 @@ def _step(job: str, name: str) -> str:
     return _block(
         job,
         rf"^      - name: {re.escape(name)}\s*$",
-        r"^      - (?:name:|uses:)",
+        r"^      -(?:\s|$)",
     )
 
 
@@ -100,29 +100,41 @@ def _checkout(job: str) -> str:
     return _block(
         job,
         r"^      - uses: actions/checkout@",
-        r"^      - (?:name:|uses:)",
+        r"^      -(?:\s|$)",
     )
+
+
+def _normalize_scalar(value: str) -> str:
+    value = re.sub(r"\s+#.*$", "", value).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        return value[1:-1]
+    return value
 
 
 def _step_value(step: str, field: str) -> str | None:
     prefixes = (
         rf"^(?:      - {re.escape(field)}:|        {re.escape(field)}:)"
-        if field == "uses"
+        if field in {"if", "uses"}
         else rf"^          {re.escape(field)}:"
     )
-    match = re.search(
-        rf"{prefixes}\s*(?P<value>[^#\s]+)\s*(?:#.*)?$", step, re.MULTILINE
-    )
-    return match.group("value") if match else None
+    match = re.search(rf"{prefixes}\s*(?P<value>.+?)\s*$", step, re.MULTILINE)
+    return _normalize_scalar(match.group("value")) if match else None
 
 
 def _steps(block: str) -> tuple[str, ...]:
+    sequence = _block(
+        block,
+        r"^    steps:\s*$",
+        r"^    [A-Za-z_][A-Za-z0-9_-]*:\s*$",
+    )
     starts = tuple(
         match.start()
-        for match in re.finditer(r"^      - (?:name:|uses:)", block, re.MULTILINE)
+        for match in re.finditer(r"^      -(?:\s|$)", sequence, re.MULTILINE)
     )
     return tuple(
-        block[start : starts[index + 1] if index + 1 < len(starts) else len(block)]
+        sequence[
+            start : starts[index + 1] if index + 1 < len(starts) else len(sequence)
+        ]
         for index, start in enumerate(starts)
     )
 
@@ -137,10 +149,7 @@ def _nextest_installers(block: str) -> tuple[str, ...]:
 
 
 def _step_condition(step: str) -> str | None:
-    match = re.search(
-        r"^        if:\s*(?P<condition>[^#]+?)\s*(?:#.*)?$", step, re.MULTILINE
-    )
-    return match.group("condition") if match else None
+    return _step_value(step, "if")
 
 
 def _pinned_nextest(installers: tuple[str, ...]) -> bool:
@@ -150,7 +159,7 @@ def _pinned_nextest(installers: tuple[str, ...]) -> bool:
     return (
         _step_value(installer, "uses") == NEXTEST_INSTALL_ACTION
         and _step_value(installer, "tool") == NEXTEST_TOOL
-        and re.search(r"^          version:", installer, re.MULTILINE) is None
+        and _step_value(installer, "version") is None
     )
 
 

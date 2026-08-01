@@ -60,6 +60,46 @@ class PostgresArchiveTopologyTests(unittest.TestCase):
         self.assertIn("validation_scope: merge-gate", blocking)
         self.assertIn("  deep-linux-cargo-result:\n", blocking)
 
+    def test_quoted_installer_scalars_keep_their_canonical_meaning(self) -> None:
+        platform, postgres, *rest = self.sources
+        action = topology.NEXTEST_INSTALL_ACTION
+        tool = topology.NEXTEST_TOOL
+        for job_name, quote in (("archive", '"'), ("shard", "'")):
+            platform = replace_in_nextest_installer(
+                platform, job_name, action, f"{quote}{action}{quote}"
+            )
+            platform = replace_in_nextest_installer(
+                platform, job_name, tool, f"{quote}{tool}{quote}"
+            )
+        postgres = replace_in_nextest_installer(
+            postgres,
+            "postgres-contracts",
+            topology.STANDALONE_NEXTEST_CONDITION,
+            f'"{topology.STANDALONE_NEXTEST_CONDITION}"',
+        )
+        postgres = replace_in_step(
+            postgres,
+            "postgres-contracts",
+            "Install pinned nextest for archive consumption",
+            topology.ARCHIVE_NEXTEST_CONDITION,
+            f'"{topology.ARCHIVE_NEXTEST_CONDITION}"',
+        )
+        postgres = replace_in_step(
+            postgres,
+            "postgres-contracts",
+            "Install pinned nextest for archive consumption",
+            action,
+            f'"{action}"',
+        )
+        postgres = replace_in_step(
+            postgres,
+            "postgres-contracts",
+            "Install pinned nextest for archive consumption",
+            tool,
+            f'"{tool}"',
+        )
+        self.assertEqual([], topology.validate_topology(platform, postgres, *rest))
+
     def test_mutable_topology_invariants_fail_closed(self) -> None:
         platform, postgres, full, repo_checks, blocking, planner, result_helper = self.sources
         action = topology.NEXTEST_INSTALL_ACTION
@@ -81,6 +121,21 @@ class PostgresArchiveTopologyTests(unittest.TestCase):
         )
         unbraced_archive_installer = additional_installer.replace(
             "        uses:", "        if: inputs.artifact_id != ''\n        uses:"
+        )
+        if_first_installer = (
+            "      - if: ${{ always() }}\n"
+            f"        uses: {action}\n"
+            "        with:\n"
+            "          tool: nextest\n\n"
+        )
+        if_first_archive_installer = if_first_installer.replace(
+            "${{ always() }}", topology.ARCHIVE_NEXTEST_CONDITION
+        )
+        quoted_alternate_installer = additional_installer.replace(
+            f"tool: {tool}", 'tool: "nextest@0.9.104"'
+        )
+        quoted_archive_installer = additional_archive_installer.replace(
+            f"tool: {tool}", "tool: 'nextest@0.9.104'"
         )
         cases = (
             (
@@ -203,6 +258,36 @@ class PostgresArchiveTopologyTests(unittest.TestCase):
                     "postgres-contracts",
                     topology.STANDALONE_NEXTEST_CONDITION,
                     "${{ true }}",
+                ),
+            ),
+            (
+                "archive producer nextest pin",
+                0,
+                append_installer(platform, "archive", if_first_installer),
+            ),
+            (
+                "ordinary shard nextest pin",
+                0,
+                append_installer(platform, "shard", quoted_alternate_installer),
+            ),
+            (
+                "PostgreSQL archive consumer nextest pin",
+                1,
+                append_installer(
+                    postgres,
+                    "postgres-contracts",
+                    if_first_archive_installer,
+                    step_name="Install pinned nextest for archive consumption",
+                ),
+            ),
+            (
+                "PostgreSQL archive consumer nextest pin",
+                1,
+                append_installer(
+                    postgres,
+                    "postgres-contracts",
+                    quoted_archive_installer,
+                    step_name="Install pinned nextest for archive consumption",
                 ),
             ),
             ("archive producer nextest pin", 0, platform.replace("tool: nextest@0.9.103", "tool: nextest", 1)),
