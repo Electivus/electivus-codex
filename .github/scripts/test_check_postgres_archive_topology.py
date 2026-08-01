@@ -34,6 +34,7 @@ class PostgresArchiveTopologyTests(unittest.TestCase):
             ("ordinary shard artifacts", 0, replace_last(platform, "name: ${{ env.TEST_HELPERS_ARTIFACT }}", "name: wrong-helper")),
             ("ordinary shard selection", 0, platform.replace("shard: [1, 2, 3, 4]", "shard: [1, 2, 3]")),
             ("ordinary shard selection", 0, platform.replace('--partition "hash:${{ matrix.shard }}/4"', '--partition "hash:${{ matrix.shard }}/4"\n            -E test(smoke)')),
+            ("checkout revision identity", 1, postgres.replace("          persist-credentials: false", "          ref: ${{ github.event.pull_request.head.sha }}\n          persist-credentials: false", 1)),
             ("PostgreSQL artifacts", 1, postgres.replace("name: nextest-archive-${{ inputs.artifact_id }}", "name: wrong-archive")),
             ("PostgreSQL artifacts", 1, postgres.replace("name: ${{ env.TEST_HELPERS_ARTIFACT }}", "name: wrong-helper")),
             ("PostgreSQL archive execution", 1, postgres.replace("cargo nextest run", "just test")),

@@ -40,6 +40,14 @@ def _step(job: str, name: str) -> str:
     )
 
 
+def _checkout(job: str) -> str:
+    return _block(
+        job,
+        r"^      - uses: actions/checkout@",
+        r"^      - (?:name:|uses:)",
+    )
+
+
 def _artifact(step: str, action: str, name: str, path: str) -> bool:
     return f"uses: actions/{action}-artifact@" in step and f"          name: {name}" in step and f"          path: {path}" in step
 
@@ -64,6 +72,9 @@ def validate_topology(
         "argument_comment_lint_package", "argument_comment_lint_prebuilt",
         "general", "cargo_shear", "tests_linux_arm64",
     )
+    archive_checkout = _checkout(archive)
+    shard_checkout = _checkout(shard)
+    postgres_checkout = _checkout(_job(postgres, "postgres-contracts"))
     archive_upload = _step(archive, "Upload nextest archive")
     helper_upload = _step(archive, "Upload runtime test helpers")
     shard_archive = _step(shard, "Download nextest archive")
@@ -78,6 +89,7 @@ def validate_topology(
         ("archive producer artifact", _identity(archive) and _artifact(archive_upload, "upload", "nextest-archive-${{ inputs.artifact_id }}", "${{ runner.temp }}/nextest-archive/${{ env.NEXTEST_ARCHIVE_FILE }}") and _artifact(helper_upload, "upload", "${{ env.TEST_HELPERS_ARTIFACT }}", "${{ runner.temp }}/${{ env.TEST_HELPERS_ARTIFACT }}/*")),
         ("ordinary shard artifacts", _identity(shard) and _artifact(shard_archive, "download", "nextest-archive-${{ inputs.artifact_id }}", "${{ runner.temp }}/nextest-archive") and _artifact(shard_helper, "download", "${{ env.TEST_HELPERS_ARTIFACT }}", "${{ runner.temp }}/${{ env.TEST_HELPERS_ARTIFACT }}")),
         ("ordinary shard selection", re.search(r"shard:\s*\[1,\s*2,\s*3,\s*4\]", shard) is not None and '--partition "hash:${{ matrix.shard }}/4"' in ordinary_run and not re.search(r"(?:^|\s)-E(?:\s|$)", ordinary_run) and "--run-ignored" not in ordinary_run),
+        ("checkout revision identity", all(checkout and "\n          ref:" not in checkout for checkout in (archive_checkout, shard_checkout, postgres_checkout))),
         ("x64 fifth consumer", "postgres_contracts: true" in x64 and "postgres_contracts: true" not in arm64),
         ("shared archive dependency and identity", "needs: archive" in consumer and "uses: ./.github/workflows/postgres-runtime-state-contracts.yml" in consumer and "artifact_id: ${{ inputs.artifact_id }}" in consumer),
         ("PostgreSQL artifacts", _identity(_job(postgres, "postgres-contracts")) and _artifact(pg_archive, "download", "nextest-archive-${{ inputs.artifact_id }}", "${{ runner.temp }}/nextest-archive") and _artifact(pg_helper, "download", "${{ env.TEST_HELPERS_ARTIFACT }}", "${{ runner.temp }}/${{ env.TEST_HELPERS_ARTIFACT }}")),
