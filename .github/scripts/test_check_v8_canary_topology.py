@@ -31,6 +31,7 @@ class V8CanaryTopologyTests(unittest.TestCase):
             ("artifact and smoke integrity", 0, canary.replace("v8-canary-${{ needs.metadata.outputs.v8_version }}-${{ matrix.variant }}-${{ matrix.target }}", "v8-canary-shared")),
             ("artifact and smoke integrity", 0, canary.replace("run_bazel_with_buildbuddy.py", "bazel")),
             ("artifact and smoke integrity", 0, canary.replace("x86_64-unknown-linux-gnu:x86_64", "x86_64-unknown-linux-musl:x86_64")),
+            ("artifact and smoke integrity", 3, detector.replace('"codex-rs/v8-poc/**"', '"codex-rs/core/**"')),
             ("red matrix", 0, canary.replace("name: Build Bazel V8 release pair", "continue-on-error: true\n      - name: Build Bazel V8 release pair")),
             ("V8 caller required", 1, blocking.replace("uses: ./.github/workflows/v8-canary.yml", "uses: ./missing-v8.yml")),
             ("V8 caller required", 1, blocking.replace("- v8-canary", "- missing-v8")),

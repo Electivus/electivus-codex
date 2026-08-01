@@ -17,6 +17,18 @@ class V8CanaryChangesTest(unittest.TestCase):
     def test_relevant_known_irrelevant_and_unknown_paths(self) -> None:
         cases = (
             (
+                {"codex-rs/v8-poc/Cargo.toml"},
+                CanaryDecision(True, "V8 canary path changed: codex-rs/v8-poc/Cargo.toml"),
+            ),
+            (
+                {"codex-rs/v8-poc/BUILD.bazel"},
+                CanaryDecision(True, "V8 canary path changed: codex-rs/v8-poc/BUILD.bazel"),
+            ),
+            (
+                {"codex-rs/v8-poc/src/lib.rs"},
+                CanaryDecision(True, "V8 canary path changed: codex-rs/v8-poc/src/lib.rs"),
+            ),
+            (
                 {"third_party/v8/BUILD.bazel"},
                 CanaryDecision(True, "V8 canary path changed: third_party/v8/BUILD.bazel"),
             ),
