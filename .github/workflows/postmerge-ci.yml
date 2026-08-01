@@ -16,18 +16,14 @@ jobs:
   rust-ci-full:
     name: rust-ci-full
     uses: ./.github/workflows/rust-ci-full.yml
-    secrets: inherit
-
-  v8-canary:
-    name: v8-canary
-    uses: ./.github/workflows/v8-canary.yml
+    with:
+      validation_scope: extended
     secrets: inherit
 
   results:
     name: Postmerge CI results
     needs:
       - rust-ci-full
-      - v8-canary
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     steps:
@@ -42,3 +38,16 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: python3 .github/scripts/check_ci_results.py
+
+      - name: Summarize Extended validation
+        if: ${{ always() }}
+        env:
+          RESOLVED_SCOPE: ${{ needs.rust-ci-full.outputs.resolved_scope }}
+          SELECTED_FAMILIES: ${{ needs.rust-ci-full.outputs.selected_families }}
+        run: |
+          {
+            echo "## Postmerge Extended validation"
+            echo
+            echo "- Resolved scope: \`${RESOLVED_SCOPE}\`"
+            echo "- Retained families: \`${SELECTED_FAMILIES}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

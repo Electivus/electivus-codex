@@ -31,9 +31,11 @@ signal matters but does not justify adding latency to every pull request.
 _Avoid_: Optional platform, unsupported platform
 
 **Linux support boundary**:
-The current fork-validation scope: native Linux x64 in the merge gate, with Linux x64, Linux ARM64,
-GNU, musl, and specialized Linux build variants in extended validation. macOS and Windows remain
-product platforms but are deferred from fork validation until sustainable runners are certified.
+The current fork-validation scope: native Linux x64 in the merge gate, plus a Release portability
+check and Change-triggered validation for relevant V8 changes. Linux ARM64 tests, remaining GNU/musl
+build variants, and other specialized Linux paths stay in extended validation, while macOS and
+Windows remain product platforms but are deferred from fork validation until sustainable runners
+are certified.
 _Avoid_: Codex platform support, permanent platform removal
 
 **Validation workflow**:
@@ -60,14 +62,25 @@ _Avoid_: Free tier, OpenAI infrastructure, optional accelerator
 Native Linux x64 tests whose success is required by the current merge gate.
 _Avoid_: Cross-compile check, build-only signal, smoke test
 
+**Release portability check**:
+A required x64 musl release-profile compilation and lint signal that protects the static Linux
+release path without treating musl as an Essential platform test lane.
+_Avoid_: Essential validation, musl platform support, release test
+
+**Change-triggered validation**:
+A required merge-gate check whose expensive matrix runs only when a repository-owned detector marks
+the affected surface; unrelated changes complete through a bounded metadata-only path.
+_Avoid_: Optional check, informational check, path-filtered workflow
+
 **Merge feedback budget**:
-The target elapsed time from a pull-request head update to completion of the merge gate, initially
-45 minutes at the 95th percentile.
+The target elapsed time from a pull-request head update to completion of the full Merge gate path:
+120 minutes at the 95th percentile, reviewed after the first 20 eligible runs.
 _Avoid_: Job timeout, average job duration
 
 **Quarantined check**:
 A demonstrably intermittent validation temporarily removed from the merge gate with tracking,
-justification, and a deadline for restoration.
+justification, continued execution in Extended validation, and a restoration deadline no later
+than seven days after quarantine begins.
 _Avoid_: Ignored failure, permanent skip, continue-on-error
 
 **Coordinated baseline pin**:
@@ -106,14 +119,21 @@ merge gate is activated in repository rules.
 _Avoid_: Experimental main push, local-only validation
 
 **Extended validation**:
-The full post-merge validation suite across Linux architectures and specialized Linux build paths,
-preserved as actionable signal without adding latency to pull requests.
+A post-merge validation contract for supported Linux architectures and specialized build paths that
+have not already been promoted into the Merge gate, preserved as actionable signal without adding
+latency to pull requests or repeating promoted validation.
 _Avoid_: Merge gate, best-effort CI, optional tests
 
 **Stability certification**:
-Initial evidence on one commit consisting of two consecutive successful merge-gate runs and one
-successful run of each extended validation suite.
-_Avoid_: Single green run, continuous reliability measurement
+Initial evidence on one commit consisting of one complete retry-free successful Merge gate run and
+one successful run of every retained Extended validation suite for the same rollout/workflow
+version.
+_Avoid_: Merge-gate-only evidence, continuous reliability measurement
+
+**Test reactivation certification**:
+Evidence for one temporarily ignored test on one immutable commit consisting of exactly 20
+consecutive retry-free Linux x64 executions, required before restoring ordinary test selection.
+_Avoid_: Stability certification, flaky retry, quarantine
 
 **Fresh merge gate**:
 A successful merge gate evaluated against the current default-branch head rather than an older

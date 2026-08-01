@@ -47,6 +47,10 @@ on:
         required: false
         default: false
         type: boolean
+      postgres_contracts:
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   archive:
@@ -186,8 +190,7 @@ jobs:
 
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
-          tool: nextest
-          version: 0.9.103
+          tool: nextest@0.9.103
 
       - name: Enable unprivileged user namespaces (Linux)
         if: runner.os == 'Linux'
@@ -307,6 +310,7 @@ jobs:
         working-directory: codex-rs
     env:
       NEXTEST_ARCHIVE_FILE: nextest-${{ inputs.artifact_id }}.tar.zst
+      NEXTEST_JUNIT_FILE: ${{ github.workspace }}/codex-rs/target/nextest/default/junit.xml
       TEST_HELPERS_ARTIFACT: nextest-test-helpers-${{ inputs.artifact_id }}
     strategy:
       fail-fast: false
@@ -335,8 +339,7 @@ jobs:
 
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
-          tool: nextest
-          version: 0.9.103
+          tool: nextest@0.9.103
 
       - name: Enable unprivileged user namespaces (Linux)
         if: runner.os == 'Linux'
@@ -380,6 +383,7 @@ jobs:
           extract_dir="${RUNNER_TEMP}/nextest-extracted"
           workspace_root="$(pwd)"
           mkdir -p "${extract_dir}"
+          rm -f -- "${NEXTEST_JUNIT_FILE}"
 
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
             archive_file="$(cygpath -w "${archive_file}")"
@@ -465,12 +469,20 @@ jobs:
           RUST_MIN_STACK: "8388608" # 8 MiB
           NEXTEST_STATUS_LEVEL: leak
 
+      - name: Inspect nextest JUnit signal
+        id: junit
+        if: always()
+        shell: bash
+        run: |
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/check_nextest_junit.py" \
+            "${NEXTEST_JUNIT_FILE}"
+
       - name: Upload nextest JUnit report
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: nextest-junit-rust-ci-${{ inputs.artifact_id }}-shard-${{ matrix.shard }}
-          path: ${{ env.CARGO_TARGET_DIR }}/nextest/default/junit.xml
+          path: ${{ env.NEXTEST_JUNIT_FILE }}
           if-no-files-found: warn
 
       - name: Tear down remote test env
@@ -485,15 +497,36 @@ jobs:
         env:
           STEPS_TEST_OUTCOME: ${{ steps.test.outcome }}
 
-      - name: verify tests passed
-        if: steps.test.outcome == 'failure'
+      - name: Confirm nextest shard result
+        if: always()
+        shell: bash
+        env:
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+          JUNIT_OUTCOME: ${{ steps.junit.outcome }}
         run: |
-          echo "Tests failed. See logs for details."
-          exit 1
+          set -euo pipefail
+          status=0
+          if [[ "${TEST_OUTCOME}" != "success" ]]; then
+            echo "Nextest command finished with outcome: ${TEST_OUTCOME}" >&2
+            status=1
+          fi
+          if [[ "${JUNIT_OUTCOME}" != "success" ]]; then
+            echo "Nextest JUnit inspection finished with outcome: ${JUNIT_OUTCOME}" >&2
+            status=1
+          fi
+          exit "${status}"
+
+  postgres-contracts:
+    name: PostgreSQL contracts
+    if: ${{ inputs.postgres_contracts }}
+    needs: archive
+    uses: ./.github/workflows/postgres-runtime-state-contracts.yml
+    with:
+      artifact_id: ${{ inputs.artifact_id }}
 
   result:
     name: Platform result
-    needs: shard
+    needs: [shard, postgres-contracts]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -502,5 +535,9 @@ jobs:
         run: |
           if [[ "${{ needs.shard.result }}" != "success" ]]; then
             echo "Nextest shards finished with result: ${{ needs.shard.result }}" >&2
+            exit 1
+          fi
+          if [[ "${{ inputs.postgres_contracts }}" == "true" && "${{ needs.postgres-contracts.result }}" != "success" ]]; then
+            echo "PostgreSQL contracts finished with result: ${{ needs.postgres-contracts.result }}" >&2
             exit 1
           fi

@@ -1,9 +1,8 @@
 name: v8-canary
 
-# Keep the canary in Extended validation: postmerge-ci calls it after pushes to
-# main, and workflow_dispatch remains available for certification and retries.
-# v8_canary_changes.py is the single source of truth for called workflows;
-# manual dispatches force the complete Linux matrix.
+# The Merge gate calls this Change-triggered validation. Postmerge does not;
+# manual dispatches force the complete Linux matrix. v8_canary_changes.py is
+# the single source of truth for relevant paths.
 on:
   workflow_call:
   workflow_dispatch:
@@ -17,10 +16,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
-      # A stale PR head can contain the old detector, which does not emit this
-      # output. Missing must mean "run" so older branches cannot silently skip
-      # the expensive V8 coverage while reporting success.
-      canary_required: ${{ steps.changes.outputs.canary_required || 'true' }}
+      canary_reason: ${{ steps.changes.outputs.canary_reason }}
+      canary_required: ${{ steps.changes.outputs.canary_required }}
       v8_version: ${{ steps.v8_version.outputs.version }}
 
     steps:
@@ -40,7 +37,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="$(python3 .github/scripts/rusty_v8_bazel.py resolved-v8-crate-version)"
+          version="unknown-${GITHUB_SHA:0:12}"
+          resolved=""
+          if resolved="$(python3 .github/scripts/rusty_v8_bazel.py resolved-v8-crate-version)" \
+            && [[ "$resolved" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
+            version="$resolved"
+          fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Detect V8 canary changes
@@ -53,21 +55,66 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Manual runs have no meaningful before/after range. Force every V8
-          # variant so workflow_dispatch remains a reliable retry path.
+          canary_required=true
+          canary_reason="detector did not run; V8 canary remains required"
+          detector_status=0
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
-            output="$(python3 .github/scripts/v8_canary_changes.py --force)"
+            output="$(python3 .github/scripts/v8_canary_changes.py --force 2>&1)" || detector_status=$?
           else
             output="$(python3 .github/scripts/v8_canary_changes.py \
               --base "${BASE_SHA}" \
-              --head "${HEAD_SHA}")"
+              --head "${HEAD_SHA}" 2>&1)" || detector_status=$?
           fi
-          echo "${output}"
-          echo "${output}" >> "${GITHUB_OUTPUT}"
+
+          if [[ $detector_status -ne 0 ]]; then
+            canary_reason="detector exited with status ${detector_status}; V8 canary remains required"
+          else
+            mapfile -t detector_lines <<< "$output"
+            if [[ ${#detector_lines[@]} -eq 2 \
+              && ${detector_lines[0]} =~ ^canary_required=(true|false)$ \
+              && ${detector_lines[1]} =~ ^canary_reason=([[:print:]]{1,240})$ ]]; then
+              canary_required="${detector_lines[0]#canary_required=}"
+              canary_reason="${detector_lines[1]#canary_reason=}"
+            else
+              canary_reason="classifier returned malformed output; V8 canary remains required"
+            fi
+          fi
+
+          echo "canary_required=${canary_required}" >> "$GITHUB_OUTPUT"
+          echo "canary_reason=${canary_reason}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## V8 canary metadata"
+            echo
+            echo "- Required: \`${canary_required}\`"
+            echo "- Reason: ${canary_reason}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
+
+  result:
+    name: V8 canary result
+    needs: [metadata, build]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Validate V8 canary result
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          CANARY_REASON: ${{ needs.metadata.outputs.canary_reason }}
+          CANARY_REQUIRED: ${{ needs.metadata.outputs.canary_required }}
+          METADATA_RESULT: ${{ needs.metadata.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/v8_canary_result.py | tee -a "$GITHUB_STEP_SUMMARY"
 
   build:
     name: Build ${{ matrix.variant }} ${{ matrix.target }}
