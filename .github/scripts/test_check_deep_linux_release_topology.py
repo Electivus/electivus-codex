@@ -24,6 +24,7 @@ class DeepLinuxReleaseTopologyTests(unittest.TestCase):
     def test_release_topology_mutations_fail_closed(self) -> None:
         bazel, blocking, rust, repo_checks = self.sources
         cases = (
+            ("Bazel concurrency scope", 0, bazel.replace("::${{ inputs.validation_scope || 'essential' }}", "::shared-scope")),
             ("Bazel scope fails safe", 0, bazel.replace("default: essential", "default: release-only", 1)),
             ("Bazel essential scheduling", 0, bazel.replace("inputs.validation_scope != 'release-only'", "inputs.validation_scope == 'essential'", 1)),
             ("Bazel release scheduling", 0, bazel.replace("inputs.validation_scope != 'essential' && inputs.validation_scope != ''", "inputs.validation_scope == 'release-only'", 1)),

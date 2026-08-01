@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import sys
 
+from check_postgres_archive_topology import _block
 from check_postgres_archive_topology import _job
 from check_postgres_archive_topology import _step
 from check_rust_test_policy import _workflow_jobs
@@ -34,7 +35,9 @@ def validate_topology(
     release_clippy = _step(lint, "cargo clippy (release)")
     dev_clippy = _step(lint, "cargo clippy (dev)")
     build_timings = _step(lint, "Upload Cargo timings (build)")
+    concurrency = _block(bazel, r"^concurrency:\s*$", r"^jobs:\s*$")
     checks = (
+        ("Bazel concurrency scope", concurrency.count("::${{ inputs.validation_scope || 'essential' }}") == 1 and "github.event.pull_request.number" in concurrency and "github.ref_name" in concurrency and "github.ref_name == 'main'" in concurrency and "github.run_id" in concurrency and "cancel-in-progress: ${{ github.ref_name != 'main' }}" in concurrency),
         ("Bazel scope fails safe", re.search(r"validation_scope:\n\s+description: .*\n\s+required: false\n\s+default: essential\n\s+type: string", bazel) is not None and "inputs.validation_scope != 'release-only'" in bazel_test and "inputs.validation_scope != 'release-only'" in bazel_clippy and "inputs.validation_scope != 'essential' && inputs.validation_scope != ''" in bazel_release),
         ("Bazel essential scheduling", "if: ${{ inputs.validation_scope != 'release-only' }}" in bazel_test and "if: ${{ inputs.validation_scope != 'release-only' }}" in bazel_clippy and "verify-release-build" not in bazel_test + bazel_clippy),
         ("Bazel release scheduling", "if: ${{ inputs.validation_scope != 'essential' && inputs.validation_scope != '' }}" in bazel_release and "github.event_name == 'push'" not in bazel_release),
