@@ -38,6 +38,10 @@ FULL_LANES = (
     EXTENDED_LANES[3],
     MERGE_LANES[1],
 )
+NEXTEST_JUNIT_ENV = (
+    "NEXTEST_JUNIT_FILE: "
+    "${{ github.workspace }}/codex-rs/target/nextest/default/junit.xml"
+)
 
 
 def _planner_matrix(source: str, name: str) -> tuple[tuple[str, str, str], ...]:
@@ -128,10 +132,46 @@ def validate_topology(
     shard_archive = _step(shard, "Download nextest archive")
     shard_helper = _step(shard, "Download runtime test helpers")
     ordinary_run = _step(shard, "tests")
-    pg_archive = _step(_job(postgres, "postgres-contracts"), "Download nextest archive")
-    pg_helper = _step(_job(postgres, "postgres-contracts"), "Download runtime test helpers")
-    pg_run = _step(_job(postgres, "postgres-contracts"), "Run PostgreSQL contracts from nextest archive")
-    standalone = _step(_job(postgres, "postgres-contracts"), "Run PostgreSQL Runtime State contracts")
+    shard_junit = _step(shard, "Inspect nextest JUnit signal")
+    shard_junit_upload = _step(shard, "Upload nextest JUnit report")
+    postgres_job = _job(postgres, "postgres-contracts")
+    inventory = _step(postgres_job, "Validate PostgreSQL contract inventory")
+    pg_archive = _step(postgres_job, "Download nextest archive")
+    pg_helper = _step(postgres_job, "Download runtime test helpers")
+    pg_run = _step(postgres_job, "Run PostgreSQL contracts from nextest archive")
+    pg_junit = _step(postgres_job, "Inspect archive nextest JUnit signal")
+    pg_junit_upload = _step(postgres_job, "Upload archive nextest JUnit report")
+    pg_confirm = _step(postgres_job, "Confirm archive PostgreSQL contract result")
+    standalone = _step(postgres_job, "Run PostgreSQL Runtime State contracts")
+    shard_junit_path = (
+        shard.count(NEXTEST_JUNIT_ENV) == 1
+        and ordinary_run.count('rm -f -- "${NEXTEST_JUNIT_FILE}"') == 1
+        and shard_junit.count('"${NEXTEST_JUNIT_FILE}"') == 1
+        and "path: ${{ env.NEXTEST_JUNIT_FILE }}" in shard_junit_upload
+        and "${CARGO_TARGET_DIR}/nextest/default/junit.xml" not in shard
+    )
+    postgres_junit_path = (
+        postgres_job.count(NEXTEST_JUNIT_ENV) == 1
+        and inventory.count('rm -f -- "${NEXTEST_JUNIT_FILE}"') == 1
+        and 'junit="${NEXTEST_JUNIT_FILE}"' in pg_run
+        and pg_run.count('rm -f -- "${junit}"') == 1
+        and pg_junit.count('"${NEXTEST_JUNIT_FILE}"') == 1
+        and "path: ${{ env.NEXTEST_JUNIT_FILE }}" in pg_junit_upload
+        and "${CARGO_TARGET_DIR}/nextest/default/junit.xml" not in postgres_job
+    )
+    inventory_root = (
+        "postgres_contract_inventory.py" in inventory
+        and '--repo "${GITHUB_WORKSPACE}"' in inventory
+        and "--github-output" in inventory
+    )
+    inventory_gated_junit = (
+        "if: ${{ always() && inputs.artifact_id != '' && steps.inventory.outcome == 'success' }}"
+        in pg_junit
+        and "INVENTORY_OUTCOME: ${{ steps.inventory.outcome }}" in pg_confirm
+        and "JUNIT_OUTCOME: ${{ steps.archive_junit.outcome }}" in pg_confirm
+        and 'if [[ "${INVENTORY_OUTCOME}" != "success" ]]; then' in pg_confirm
+        and 'if [[ "${JUNIT_OUTCOME}" != "success" ]]; then' in pg_confirm
+    )
     checks = (
         ("single archive producer", platform.count("cargo nextest archive") == 1 and "cargo nextest archive" in archive and "cargo nextest archive" not in postgres),
         ("archive producer artifact", _identity(archive) and _artifact(archive_upload, "upload", "nextest-archive-${{ inputs.artifact_id }}", "${{ runner.temp }}/nextest-archive/${{ env.NEXTEST_ARCHIVE_FILE }}") and _artifact(helper_upload, "upload", "${{ env.TEST_HELPERS_ARTIFACT }}", "${{ runner.temp }}/${{ env.TEST_HELPERS_ARTIFACT }}/*")),
@@ -140,10 +180,14 @@ def validate_topology(
         ("checkout revision identity", all(checkout and "\n          ref:" not in checkout for checkout in (archive_checkout, shard_checkout, postgres_checkout))),
         ("x64 fifth consumer", "postgres_contracts: true" in x64 and "postgres_contracts: true" not in arm64),
         ("shared archive dependency and identity", "needs: archive" in consumer and "uses: ./.github/workflows/postgres-runtime-state-contracts.yml" in consumer and "artifact_id: ${{ inputs.artifact_id }}" in consumer),
-        ("PostgreSQL artifacts", _identity(_job(postgres, "postgres-contracts")) and _artifact(pg_archive, "download", "nextest-archive-${{ inputs.artifact_id }}", "${{ runner.temp }}/nextest-archive") and _artifact(pg_helper, "download", "${{ env.TEST_HELPERS_ARTIFACT }}", "${{ runner.temp }}/${{ env.TEST_HELPERS_ARTIFACT }}")),
+        ("PostgreSQL artifacts", _identity(postgres_job) and _artifact(pg_archive, "download", "nextest-archive-${{ inputs.artifact_id }}", "${{ runner.temp }}/nextest-archive") and _artifact(pg_helper, "download", "${{ env.TEST_HELPERS_ARTIFACT }}", "${{ runner.temp }}/${{ env.TEST_HELPERS_ARTIFACT }}")),
         ("PostgreSQL archive execution", "cargo nextest run" in pg_run and '--archive-file "${archive_file}"' in pg_run and "just test" not in pg_run and not re.search(r"cargo\s+(?:build|test|nextest\s+archive)", postgres)),
         ("PostgreSQL service and concurrency", postgres.count("      postgres:\n") == 1 and postgres.count("image: postgres:18") == 1 and pg_run.count("--test-threads 4") == 1),
-        ("exact JUnit cardinality", '--expected-testcases "${{ steps.inventory.outputs.expected_total }}"' in postgres and "JUNIT_OUTCOME: ${{ steps.archive_junit.outcome }}" in postgres and "TEST_STATUS: ${{ steps.archive_test.outputs.status }}" in postgres),
+        ("ordinary shard JUnit path", shard_junit_path),
+        ("PostgreSQL JUnit path", postgres_junit_path),
+        ("PostgreSQL inventory root", inventory_root),
+        ("inventory-gated JUnit inspection", inventory_gated_junit),
+        ("exact JUnit cardinality", '--expected-testcases "${{ steps.inventory.outputs.expected_total }}"' in pg_junit and "TEST_STATUS: ${{ steps.archive_test.outputs.status }}" in pg_confirm),
         ("platform result fail closed", "needs: [shard, postgres-contracts]" in result and 'if [[ "${{ needs.shard.result }}" != "success" ]]; then' in result and 'if [[ "${{ inputs.postgres_contracts }}" == "true" && "${{ needs.postgres-contracts.result }}" != "success" ]]; then' in result and result.count("exit 1") == 2),
         ("standalone fallback remains callable", re.search(r"artifact_id:\n\s+required: false\n\s+default: \"\"", postgres) is not None and "if: ${{ inputs.artifact_id == '' }}" in standalone and standalone.count("just test -p ") == 6),
         ("validation scope fails safe", re.search(r"validation_scope:\n\s+description: .*\n\s+required: false\n\s+default: full\n\s+type: string", full) is not None and "empty scope defaults to full" in planner and "defaults fail-safe to full" in planner),

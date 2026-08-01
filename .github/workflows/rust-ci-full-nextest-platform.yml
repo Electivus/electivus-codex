@@ -311,6 +311,7 @@ jobs:
         working-directory: codex-rs
     env:
       NEXTEST_ARCHIVE_FILE: nextest-${{ inputs.artifact_id }}.tar.zst
+      NEXTEST_JUNIT_FILE: ${{ github.workspace }}/codex-rs/target/nextest/default/junit.xml
       TEST_HELPERS_ARTIFACT: nextest-test-helpers-${{ inputs.artifact_id }}
     strategy:
       fail-fast: false
@@ -384,7 +385,7 @@ jobs:
           extract_dir="${RUNNER_TEMP}/nextest-extracted"
           workspace_root="$(pwd)"
           mkdir -p "${extract_dir}"
-          rm -f -- "${CARGO_TARGET_DIR}/nextest/default/junit.xml"
+          rm -f -- "${NEXTEST_JUNIT_FILE}"
 
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
             archive_file="$(cygpath -w "${archive_file}")"
@@ -476,14 +477,14 @@ jobs:
         shell: bash
         run: |
           python3 "${GITHUB_WORKSPACE}/.github/scripts/check_nextest_junit.py" \
-            "${CARGO_TARGET_DIR}/nextest/default/junit.xml"
+            "${NEXTEST_JUNIT_FILE}"
 
       - name: Upload nextest JUnit report
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: nextest-junit-rust-ci-${{ inputs.artifact_id }}-shard-${{ matrix.shard }}
-          path: ${{ env.CARGO_TARGET_DIR }}/nextest/default/junit.xml
+          path: ${{ env.NEXTEST_JUNIT_FILE }}
           if-no-files-found: warn
 
       - name: Tear down remote test env

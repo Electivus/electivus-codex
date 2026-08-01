@@ -21,6 +21,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CODEX_TEST_POSTGRES_URL: postgresql://codex:codex-test@localhost:5432/codex_runtime_state_test
       NEXTEST_ARCHIVE_FILE: nextest-${{ inputs.artifact_id }}.tar.zst
+      NEXTEST_JUNIT_FILE: ${{ github.workspace }}/codex-rs/target/nextest/default/junit.xml
       TEST_HELPERS_ARTIFACT: nextest-test-helpers-${{ inputs.artifact_id }}
       SCCACHE_CACHE_SIZE: 2G
     services:
@@ -165,8 +166,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -f -- "${CARGO_TARGET_DIR}/nextest/default/junit.xml"
+          rm -f -- "${NEXTEST_JUNIT_FILE}"
           python3 "${GITHUB_WORKSPACE}/.github/scripts/postgres_contract_inventory.py" \
+            --repo "${GITHUB_WORKSPACE}" \
             --github-output >> "$GITHUB_OUTPUT"
 
       - name: Run PostgreSQL contracts from nextest archive
@@ -180,7 +182,7 @@ jobs:
           workspace_root="$(pwd)"
           helper_dir="${RUNNER_TEMP}/${TEST_HELPERS_ARTIFACT}"
           helper_target_dir="${CARGO_TARGET_DIR}/x86_64-unknown-linux-gnu/ci-test"
-          junit="${CARGO_TARGET_DIR}/nextest/default/junit.xml"
+          junit="${NEXTEST_JUNIT_FILE}"
           mkdir -p "${extract_dir}" "${helper_target_dir}"
           rm -f -- "${junit}"
 
@@ -231,11 +233,11 @@ jobs:
 
       - name: Inspect archive nextest JUnit signal
         id: archive_junit
-        if: ${{ always() && inputs.artifact_id != '' }}
+        if: ${{ always() && inputs.artifact_id != '' && steps.inventory.outcome == 'success' }}
         shell: bash
         run: |
           python3 "${GITHUB_WORKSPACE}/.github/scripts/check_nextest_junit.py" \
-            "${CARGO_TARGET_DIR}/nextest/default/junit.xml" \
+            "${NEXTEST_JUNIT_FILE}" \
             --expected-testcases "${{ steps.inventory.outputs.expected_total }}"
 
       - name: Upload archive nextest JUnit report
@@ -243,7 +245,7 @@ jobs:
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: nextest-junit-rust-ci-${{ inputs.artifact_id }}-postgres-contracts
-          path: ${{ env.CARGO_TARGET_DIR }}/nextest/default/junit.xml
+          path: ${{ env.NEXTEST_JUNIT_FILE }}
           if-no-files-found: warn
 
       - name: Confirm archive PostgreSQL contract result
