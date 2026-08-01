@@ -1,5 +1,17 @@
 version = 1
 
+[postgres_contracts]
+database_count = 107
+process_count = 2
+packages = [
+    "codex-app-server",
+    "codex-app-server-transport",
+    "codex-cli",
+    "codex-memories-write",
+    "codex-state",
+    "codex-thread-store",
+]
+
 # Exact identities make every added, changed, duplicated, or removed ignore auditable.
 # Categories are intentionally narrow; their boundaries are documented in workflows/README.md.
 [ignores]

@@ -47,6 +47,10 @@ on:
         required: false
         default: false
         type: boolean
+      postgres_contracts:
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   archive:
@@ -513,9 +517,17 @@ jobs:
           fi
           exit "${status}"
 
+  postgres-contracts:
+    name: PostgreSQL contracts
+    if: ${{ inputs.postgres_contracts }}
+    needs: archive
+    uses: ./.github/workflows/postgres-runtime-state-contracts.yml
+    with:
+      artifact_id: ${{ inputs.artifact_id }}
+
   result:
     name: Platform result
-    needs: shard
+    needs: [shard, postgres-contracts]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -524,5 +536,9 @@ jobs:
         run: |
           if [[ "${{ needs.shard.result }}" != "success" ]]; then
             echo "Nextest shards finished with result: ${{ needs.shard.result }}" >&2
+            exit 1
+          fi
+          if [[ "${{ inputs.postgres_contracts }}" == "true" && "${{ needs.postgres-contracts.result }}" != "success" ]]; then
+            echo "PostgreSQL contracts finished with result: ${{ needs.postgres-contracts.result }}" >&2
             exit 1
           fi

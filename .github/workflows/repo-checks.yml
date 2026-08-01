@@ -44,6 +44,9 @@ jobs:
       - name: Verify Rust test signal policy
         run: python3 .github/scripts/check_rust_test_policy.py
 
+      - name: Verify PostgreSQL contract inventory
+        run: python3 .github/scripts/postgres_contract_inventory.py
+
       - name: Setup pnpm
         uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
         with:

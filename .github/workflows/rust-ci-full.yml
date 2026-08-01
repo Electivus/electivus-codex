@@ -376,6 +376,7 @@ jobs:
       # The per-test /tmp cleanup runner requires serial execution within each shard.
       test_threads: 1
       use_sccache: true
+      postgres_contracts: true
     secrets: inherit
 
   tests_linux_arm64:
