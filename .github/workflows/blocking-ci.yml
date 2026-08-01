@@ -49,6 +49,11 @@ jobs:
     uses: ./.github/workflows/sdk.yml
     secrets: inherit
 
+  v8-canary:
+    name: v8-canary
+    uses: ./.github/workflows/v8-canary.yml
+    secrets: inherit
+
   deep-linux-eligibility:
     name: Deep Linux eligibility
     runs-on: ubuntu-24.04
@@ -186,6 +191,7 @@ jobs:
       - repo-checks
       - rust-ci
       - sdk
+      - v8-canary
     runs-on: ubuntu-24.04
     steps:
       # Keep the helper on the same revision as the caller and child workflows.

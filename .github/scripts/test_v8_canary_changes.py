@@ -35,6 +35,10 @@ class V8CanaryChangesTest(unittest.TestCase):
                     expected,
                     classify_changed_files(paths, "149.2.0", "149.2.0"),
                 )
+        self.assertEqual(
+            CanaryDecision(True, "v8 version changed from 149.2.0 to 150.0.0"),
+            classify_changed_files(set(), "149.2.0", "150.0.0"),
+        )
 
     def test_manual_missing_comparison_and_git_error_require_canary(self) -> None:
         self.assertEqual(

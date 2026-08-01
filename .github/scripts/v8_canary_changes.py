@@ -36,6 +36,7 @@ CANARY_PATH_PATTERNS = {
     ".github/workflows/blocking-ci.yml",
     ".github/workflows/postmerge-ci.yml",
     ".github/workflows/repo-checks.yml",
+    ".github/workflows/README.md",
     ".github/workflows/rusty-v8-release.yml",
     ".github/workflows/v8-canary.yml",
     "MODULE.bazel",

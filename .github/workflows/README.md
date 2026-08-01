@@ -9,9 +9,9 @@ remain the fallback.
 ## Linux Support Boundary
 
 - Native Linux x64 on `ubuntu-24.04` is the current Essential platform.
-- Linux ARM64 on `ubuntu-24.04-arm`, remaining musl/build variants, and V8
-  canaries are Extended validation. Promoted release lanes remain repeated
-  there until post-merge deduplication under #90.
+- Linux ARM64 on `ubuntu-24.04-arm` and remaining build variants are Extended
+  validation. Promoted release and V8 lanes remain repeated there until
+  post-merge deduplication under #90.
 - macOS and Windows remain Codex product platforms, but this fork does not
   select them in active validation matrices. They can return by restoring
   inherited jobs and widening matrices after their standard-runner paths are
@@ -44,6 +44,10 @@ remain the fallback.
   PostgreSQL consumer. Irrelevant changes skip both expensive release calls;
   independent Bazel and Cargo result jobs accept only the exact
   eligible/success or irrelevant/skipped pair and fail closed otherwise.
+- `v8-canary.yml` is independently Change-triggered. Known ordinary Codex and
+  documentation changes finish through metadata only; V8-relevant, unknown,
+  indeterminate, or manual runs require its exact eight-leg Linux matrix and a
+  bounded terminal result.
 - Only root `README.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, and
   `SECURITY.md`; `docs/**`; and GitHub community metadata under
   `.github/CODEOWNERS`, `.github/ISSUE_TEMPLATE/**`,
@@ -75,8 +79,8 @@ remain the fallback.
 - `v8-canary.yml` retains V8 version resolution, source builds, checksums,
   staging, and artifact-pair validation for Linux x64 and ARM64 GNU/musl
   targets. Native Cargo smoke runs for the GNU targets; musl coverage ends at
-  the staged artifact pair. All V8 work stays outside the pull-request Merge
-  gate.
+  the staged artifact pair. The same Change-triggered workflow remains called
+  after merge until #90 removes the temporary repetition.
 
 ## Test Signal Integrity
 
@@ -117,5 +121,5 @@ days later, and not elapsed. Quarantine is temporary relocation, never a silent 
 
 - If a build/test/clippy check can be expressed in Bazel, prefer putting the PR-time version in `bazel.yml`.
 - Keep `rust-ci.yml` fast enough that it usually does not dominate PR latency.
-- Keep additional Linux architectures, specialized build variants, and V8
-  canaries in Extended validation so they do not add pull-request latency.
+- Keep additional Linux architectures and unpromoted specialized build
+  variants in Extended validation so they do not add pull-request latency.
