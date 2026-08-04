@@ -24,7 +24,7 @@ assets on standard GitHub-hosted runners. This fork-specific workflow does not
 use the inherited self-hosted runner groups or Azure Trusted Signing, so its
 executables are unsigned and Windows may show an unverified-publisher warning.
 
-The requested tag must already exist and its `rust-v` version must match
+The requested tag must already exist and its `windows-v` version must match
 `workspace.package.version` in `codex-rs/Cargo.toml` at the tagged commit. Run
 the workflow from the default branch while passing the release tag explicitly:
 
@@ -32,9 +32,12 @@ the workflow from the default branch while passing the release tag explicitly:
 gh workflow run rust-release-windows-unsigned.yml \
   --repo Electivus/electivus-codex \
   --ref main \
-  -f release_tag=rust-v0.1.0 \
+  -f release_tag=windows-v0.1.0 \
   -f publish_release=false
 ```
+
+The fork-specific `windows-v` prefix intentionally avoids triggering the
+inherited full-release workflow, which owns the upstream `rust-v*` tag family.
 
 The default stores unsigned target archives and Python runtime wheels as
 workflow artifacts for 30 days. Set `publish_release=true` only when those

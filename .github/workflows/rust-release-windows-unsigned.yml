@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing rust-v* tag whose commit should be built.
+        description: Existing windows-v* tag whose commit should be built.
         required: true
         type: string
       publish_release:
@@ -45,12 +45,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ ! "$RELEASE_TAG" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+(-(alpha(\.[0-9]+){0,2}|beta(\.[0-9]+)?))?$ ]]; then
-            echo "Release tag '$RELEASE_TAG' does not match the supported rust-v* format" >&2
+          if [[ ! "$RELEASE_TAG" =~ ^windows-v[0-9]+\.[0-9]+\.[0-9]+(-(alpha(\.[0-9]+){0,2}|beta(\.[0-9]+)?))?$ ]]; then
+            echo "Release tag '$RELEASE_TAG' does not match the supported windows-v* format" >&2
             exit 1
           fi
 
-          version="${RELEASE_TAG#rust-v}"
+          version="${RELEASE_TAG#windows-v}"
           cargo_version="$(sed -nE 's/^version = "([^"]+)"/\1/p' codex-rs/Cargo.toml | head -n1)"
           if [[ "$version" != "$cargo_version" ]]; then
             echo "Release tag version $version does not match Cargo version $cargo_version" >&2
