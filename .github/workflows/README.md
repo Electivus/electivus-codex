@@ -17,6 +17,30 @@ remain the fallback.
   inherited jobs and widening matrices after their standard-runner paths are
   certified.
 
+## Manual Unsigned Windows Release
+
+`rust-release-windows-unsigned.yml` builds the Windows x64 and ARM64 release
+assets on standard GitHub-hosted runners. This fork-specific workflow does not
+use the inherited self-hosted runner groups or Azure Trusted Signing, so its
+executables are unsigned and Windows may show an unverified-publisher warning.
+
+The requested tag must already exist and its `rust-v` version must match
+`workspace.package.version` in `codex-rs/Cargo.toml` at the tagged commit. Run
+the workflow from the default branch while passing the release tag explicitly:
+
+```bash
+gh workflow run rust-release-windows-unsigned.yml \
+  --repo Electivus/electivus-codex \
+  --ref main \
+  -f release_tag=rust-v0.1.0 \
+  -f publish_release=false
+```
+
+The default stores unsigned target archives and Python runtime wheels as
+workflow artifacts for 30 days. Set `publish_release=true` only when those
+assets should also be attached to a public GitHub prerelease; the workflow
+never marks an unsigned release as latest.
+
 ## Merge Gate
 
 - `blocking-ci.yml` owns the version-controlled list of merge-blocking child
