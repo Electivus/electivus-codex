@@ -24,9 +24,24 @@ assets on standard GitHub-hosted runners. This fork-specific workflow does not
 use the inherited self-hosted runner groups or Azure Trusted Signing, so its
 executables are unsigned and Windows may show an unverified-publisher warning.
 
+Keep `workspace.package.version` at `0.0.0` on normal development branches. As
+in the upstream release process, create a release-only commit from the source
+commit that changes only that version in `codex-rs/Cargo.toml`; leave
+`codex-rs/Cargo.lock` unchanged, do not merge the release commit into the normal
+branch, and tag the release commit with the matching `windows-v` version:
+
+```bash
+git switch --detach <source-commit>
+# Change only workspace.package.version in codex-rs/Cargo.toml to 0.1.0.
+git add codex-rs/Cargo.toml
+git commit -m "Release 0.1.0"
+git tag -a windows-v0.1.0 -m "Release 0.1.0"
+git push origin windows-v0.1.0
+```
+
 The requested tag must already exist and its `windows-v` version must match
-`workspace.package.version` in `codex-rs/Cargo.toml` at the tagged commit. Run
-the workflow from the default branch while passing the release tag explicitly:
+`workspace.package.version` at that tagged commit. Run the workflow from the
+default branch while passing the release tag explicitly:
 
 ```bash
 gh workflow run rust-release-windows-unsigned.yml \

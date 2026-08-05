@@ -29,6 +29,7 @@ jobs:
     permissions:
       contents: read
     outputs:
+      release_commit: ${{ steps.release.outputs.release_commit }}
       version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -64,6 +65,7 @@ jobs:
             exit 1
           fi
 
+          echo "release_commit=$tag_commit" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build-windows-binaries:
@@ -115,7 +117,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-          ref: ${{ inputs.release_tag }}
+          ref: ${{ needs.validate-release-tag.outputs.release_commit }}
 
       - uses: ./.github/actions/setup-ci
 
@@ -196,7 +198,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-          ref: ${{ inputs.release_tag }}
+          ref: ${{ needs.validate-release-tag.outputs.release_commit }}
 
       - uses: ./.github/actions/setup-ci
 
@@ -352,6 +354,30 @@ jobs:
           pattern: python-runtime-wheel-*-unsigned
           merge-multiple: true
           path: dist
+
+      - name: Add Codex package checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          manifest="dist/codex-package_SHA256SUMS"
+          tmp_manifest="$(mktemp)"
+          find dist -type f \
+            \( -name 'codex-package-*.tar.gz' -o -name 'codex-app-server-package-*.tar.gz' \) \
+            -print |
+            sort |
+            while IFS= read -r archive; do
+              sha256sum "$archive" |
+                awk -v name="$(basename "$archive")" '{ print $1 "  " name }'
+            done > "$tmp_manifest"
+
+          if [[ ! -s "$tmp_manifest" ]]; then
+            echo "No Codex package archives found for checksum manifest"
+            exit 1
+          fi
+
+          mv "$tmp_manifest" "$manifest"
+          cat "$manifest"
 
       - name: Write release notes
         shell: bash
