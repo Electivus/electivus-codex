@@ -483,6 +483,31 @@ async fn postgres_contract_runtime_state_migration_reports_ready_only_after_ever
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_runtime_state_migration_rebuilds_projections_without_thread_history_database()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source = migration_source(LineageFixture::Valid).await?;
+    std::fs::remove_file(source.config.thread_history_db_path())?;
+    let source_before = source_artifacts(&source)?;
+    let fixture = PostgresThreadStoreFixture::new("runtime_migration_without_history_db")?;
+    fixture.migrate().await?;
+
+    let report = run_migration(&source, &fixture).await?;
+
+    assert_eq!(report.fencing_token(), 4);
+    let pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
+    assert_eq!(
+        thread_public_view(&store, source.legacy_id, source.thread_id).await?,
+        source.public_view
+    );
+    assert_eq!(source_artifacts(&source)?, source_before);
+    pool.close().await;
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
 async fn postgres_contract_runtime_state_migration_resumes_an_interrupted_phase_chain()
 -> Result<(), Box<dyn std::error::Error>> {
     let source = migration_source(LineageFixture::Valid).await?;

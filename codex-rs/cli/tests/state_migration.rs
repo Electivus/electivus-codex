@@ -24,18 +24,16 @@ async fn state_migrate_process_runs_the_complete_offline_migration() -> Result<(
     .await?;
     let sqlite =
         codex_state::SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(source.path())?);
-    codex_state::open_thread_history_db(&sqlite)
-        .await?
-        .close()
-        .await;
     runtime.close().await;
     let runtime_db_paths = sqlite.runtime_db_paths();
     anyhow::ensure!(
         runtime_db_paths.len() == 5
             && runtime_db_paths
                 .iter()
-                .all(|database| database.path.is_file()),
-        "process fixture must contain every SQLite Runtime State authority"
+                .filter(|database| database.path != sqlite.thread_history_db_path())
+                .all(|database| database.path.is_file())
+            && !sqlite.thread_history_db_path().exists(),
+        "process fixture must omit only the optional thread history database"
     );
     let config = b"model = \"gpt-5\"\n";
     let memory = b"# Preserved process migration memory\n";

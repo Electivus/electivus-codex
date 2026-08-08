@@ -135,7 +135,7 @@ impl RuntimeStateMigrationInventory {
     }
 }
 
-/// Logical and physical inventory for one mandatory SQLite runtime database.
+/// Logical and physical inventory for one present SQLite runtime database.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SqliteDatabaseInventory {
     label: &'static str,
@@ -293,13 +293,18 @@ async fn inspect_sqlite_databases(
     source: &SqliteConfig,
 ) -> anyhow::Result<Vec<SqliteDatabaseInventory>> {
     let mut databases = Vec::new();
+    let optional_thread_history_path = source.thread_history_db_path();
     for database in source.runtime_db_paths() {
         let relative_path = database
             .path
             .strip_prefix(source.home())
             .unwrap_or(database.path.as_path());
+        let exists = tokio::fs::try_exists(&database.path).await?;
+        if !exists && database.path == optional_thread_history_path {
+            continue;
+        }
         anyhow::ensure!(
-            tokio::fs::try_exists(&database.path).await?,
+            exists,
             "required SQLite {} is missing at {}; restore it from backup or point the migration at the complete SQLite home",
             database.label,
             database.path.display()
