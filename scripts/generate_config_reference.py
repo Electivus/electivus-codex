@@ -1,328 +1,378 @@
 #!/usr/bin/env python3
-
-"""Generate a Markdown reference from Codex's config JSON Schema."""
+"""Generate a Markdown reference from Codex's config.toml JSON Schema."""
 
 import argparse
-import json
-import sys
-from collections import OrderedDict
 from dataclasses import dataclass, field
+import html
+import json
 from pathlib import Path
-from typing import Any
+import sys
+from typing import Any, Iterable
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_SCHEMA = REPO_ROOT / "codex-rs/core/config.schema.json"
-DEFAULT_OUTPUT = Path("config-reference.md")
-UNION_KEYS = ("anyOf", "oneOf")
+DEFAULT_SCHEMA_PATH = REPO_ROOT / "codex-rs" / "core" / "config.schema.json"
+DEFAULT_TITLE = "Codex config.toml reference"
+COMBINATORS = ("allOf", "anyOf", "oneOf")
+NO_DESCRIPTION = "_No description available._"
 
 
-def merge_schemas(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
-    """Merge the parts of JSON Schema objects that can be composed by `allOf`."""
-    merged = dict(base)
-    for key, value in overlay.items():
-        if key == "properties" and isinstance(value, dict):
-            properties = dict(merged.get("properties", {}))
-            properties.update(value)
-            merged[key] = properties
-        elif key == "required" and isinstance(value, list):
-            merged[key] = list(dict.fromkeys([*merged.get(key, []), *value]))
-        else:
-            merged[key] = value
-    return merged
-
-
-class SchemaResolver:
-    def __init__(self, root: dict[str, Any]) -> None:
-        self.root = root
-
-    def resolve_ref(self, ref: str) -> dict[str, Any]:
-        if not ref.startswith("#/"):
-            raise ValueError(f"unsupported non-local schema reference: {ref}")
-
-        value: Any = self.root
-        for encoded_part in ref[2:].split("/"):
-            part = encoded_part.replace("~1", "/").replace("~0", "~")
-            if not isinstance(value, dict) or part not in value:
-                raise ValueError(f"schema reference does not exist: {ref}")
-            value = value[part]
-        if not isinstance(value, dict):
-            raise ValueError(f"schema reference is not an object: {ref}")
-        return value
-
-    def normalize(
-        self, schema: dict[str, Any], resolving: frozenset[str] = frozenset()
-    ) -> dict[str, Any]:
-        """Resolve top-level references and `allOf` compositions."""
-        normalized: dict[str, Any] = {}
-        ref = schema.get("$ref")
-        if isinstance(ref, str) and ref not in resolving:
-            normalized = self.normalize(self.resolve_ref(ref), resolving | {ref})
-
-        for component in schema.get("allOf", []):
-            if isinstance(component, dict):
-                normalized = merge_schemas(
-                    normalized, self.normalize(component, resolving)
-                )
-
-        local = {
-            key: value for key, value in schema.items() if key not in {"$ref", "allOf"}
-        }
-        return merge_schemas(normalized, local)
-
-
-def json_literal(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-
-def enum_values(schema: dict[str, Any], resolver: SchemaResolver) -> list[Any] | None:
-    node = resolver.normalize(schema)
-    if "const" in node:
-        return [node["const"]]
-    if isinstance(node.get("enum"), list):
-        return node["enum"]
-
-    union_key = next((key for key in UNION_KEYS if key in node), None)
-    if union_key is None:
-        return None
-
-    values: list[Any] = []
-    for variant in node[union_key]:
-        if not isinstance(variant, dict):
-            return None
-        variant_values = enum_values(variant, resolver)
-        if variant_values is None:
-            return None
-        values.extend(variant_values)
-
-    unique_values: list[Any] = []
-    seen_values: set[str] = set()
-    for value in values:
-        marker = json_literal(value)
-        if marker not in seen_values:
-            unique_values.append(value)
-            seen_values.add(marker)
-    return unique_values
-
-
-def type_label(schema: dict[str, Any], resolver: SchemaResolver) -> str:
-    node = resolver.normalize(schema)
-    values = enum_values(node, resolver)
-    if values is not None:
-        rendered_values = [
-            value if isinstance(value, str) else json_literal(value) for value in values
-        ]
-        return f"enum {{{', '.join(rendered_values)}}}"
-
-    union_key = next((key for key in UNION_KEYS if key in node), None)
-    if union_key is not None:
-        labels = [
-            type_label(variant, resolver)
-            for variant in node[union_key]
-            if isinstance(variant, dict)
-        ]
-        labels = list(dict.fromkeys(labels))
-        if labels:
-            return " / ".join(labels)
-
-    schema_type = node.get("type")
-    if isinstance(schema_type, list):
-        return " / ".join(str(value) for value in schema_type)
-    if schema_type == "array":
-        items = node.get("items")
-        item_type = type_label(items, resolver) if isinstance(items, dict) else "value"
-        return f"array<{item_type}>"
-    if schema_type == "object" or "properties" in node:
-        additional = node.get("additionalProperties")
-        if isinstance(additional, dict) and not node.get("properties") and additional:
-            return f"table<string, {type_label(additional, resolver)}>"
-        return "table"
-    if isinstance(schema_type, str):
-        schema_format = node.get("format")
-        return (
-            f"{schema_type} ({schema_format})"
-            if isinstance(schema_format, str)
-            else schema_type
-        )
-    return "value"
-
-
-def top_level_refs(schema: dict[str, Any]) -> set[str]:
-    refs: set[str] = set()
-    ref = schema.get("$ref")
-    if isinstance(ref, str):
-        refs.add(ref)
-    for component in schema.get("allOf", []):
-        if isinstance(component, dict):
-            refs.update(top_level_refs(component))
-    return refs
+JsonObject = dict[str, Any]
+ConfigPath = tuple[str, ...]
 
 
 @dataclass
-class ConfigRow:
-    path: str
-    types: list[str] = field(default_factory=list)
-    defaults: list[str] = field(default_factory=list)
-    description: str = ""
+class ReferenceEntry:
+    path: ConfigPath
+    schemas: list[JsonObject] = field(default_factory=list)
 
-    def add_schema(self, schema: dict[str, Any], resolver: SchemaResolver) -> None:
-        node = resolver.normalize(schema)
-        label = type_label(node, resolver)
-        if label not in self.types:
-            self.types.append(label)
-        if "default" in node:
-            default = json_literal(node["default"])
-            if default not in self.defaults:
-                self.defaults.append(default)
-        if not self.description and isinstance(node.get("description"), str):
-            self.description = node["description"].strip()
+    def add_schema(self, schema: JsonObject) -> None:
+        if not any(existing is schema for existing in self.schemas):
+            self.schemas.append(schema)
 
 
-class ConfigCollector:
-    def __init__(self, schema: dict[str, Any]) -> None:
-        self.resolver = SchemaResolver(schema)
-        self.rows: OrderedDict[str, ConfigRow] = OrderedDict()
+def load_schema(path: Path) -> JsonObject:
+    with path.open(encoding="utf-8") as schema_file:
+        schema = json.load(schema_file)
+    if not isinstance(schema, dict):
+        raise ValueError(f"schema root must be a JSON object: {path}")
+    return schema
 
-    def collect(self) -> list[ConfigRow]:
-        self._collect_children(self.resolver.root, "", frozenset())
-        return list(self.rows.values())
 
-    def _add(self, path: str, schema: dict[str, Any]) -> None:
-        row = self.rows.setdefault(path, ConfigRow(path))
-        row.add_schema(schema, self.resolver)
+def _reference_name(reference: str) -> str | None:
+    prefix = "#/definitions/"
+    if not reference.startswith(prefix):
+        return None
+    return reference.removeprefix(prefix)
 
-    def _collect_property(
-        self,
-        path: str,
-        schema: dict[str, Any],
-        ancestor_refs: frozenset[str],
+
+def _definition_for(root_schema: JsonObject, reference: str) -> JsonObject | None:
+    name = _reference_name(reference)
+    if name is None:
+        return None
+    definition = root_schema.get("definitions", {}).get(name)
+    return definition if isinstance(definition, dict) else None
+
+
+def collect_reference_entries(root_schema: JsonObject) -> list[ReferenceEntry]:
+    entries: dict[ConfigPath, ReferenceEntry] = {}
+
+    def add_entry(path: ConfigPath, node: JsonObject) -> None:
+        entries.setdefault(path, ReferenceEntry(path)).add_schema(node)
+
+    def walk(
+        node: JsonObject,
+        path: ConfigPath,
+        active_references: frozenset[str],
     ) -> None:
-        self._add(path, schema)
-        self._collect_children(schema, path, ancestor_refs)
+        reference = node.get("$ref")
+        if isinstance(reference, str) and reference not in active_references:
+            definition = _definition_for(root_schema, reference)
+            if definition is not None:
+                walk(definition, path, active_references | {reference})
 
-    def _collect_children(
-        self,
-        schema: dict[str, Any],
-        path: str,
-        ancestor_refs: frozenset[str],
-    ) -> None:
-        refs = top_level_refs(schema)
-        if refs & ancestor_refs:
-            return
-        descendant_refs = ancestor_refs | refs
-        node = self.resolver.normalize(schema)
+        for combinator in COMBINATORS:
+            variants = node.get(combinator, [])
+            if isinstance(variants, list):
+                for variant in variants:
+                    if isinstance(variant, dict):
+                        walk(variant, path, active_references)
 
-        properties = node.get("properties")
+        properties = node.get("properties", {})
         if isinstance(properties, dict):
-            for name in sorted(properties):
-                child = properties[name]
-                if not isinstance(child, dict):
+            for name, child in properties.items():
+                if not isinstance(name, str) or not isinstance(child, dict):
                     continue
-                child_path = f"{path}.{name}" if path else name
-                self._collect_property(child_path, child, descendant_refs)
+                child_path = (*path, name)
+                add_entry(child_path, child)
+                walk(child, child_path, active_references)
 
-        additional = node.get("additionalProperties")
-        if isinstance(additional, dict) and additional:
-            child_path = f"{path}.<name>" if path else "<name>"
-            self._collect_property(child_path, additional, descendant_refs)
+        additional_properties = node.get("additionalProperties")
+        if isinstance(additional_properties, dict):
+            child_path = (*path, "<key>")
+            add_entry(child_path, additional_properties)
+            walk(additional_properties, child_path, active_references)
 
         items = node.get("items")
         if isinstance(items, dict):
-            self._collect_children(items, f"{path}[]", descendant_refs)
+            walk(items, (*path, "[]"), active_references)
 
-        for union_key in UNION_KEYS:
-            for variant in node.get(union_key, []):
+    walk(root_schema, (), frozenset())
+    return sorted(entries.values(), key=lambda e: tuple(map(str.casefold, e.path)))
+
+
+def format_config_path(path: ConfigPath) -> str:
+    return ".".join(path).replace(".[]", "[]")
+
+
+def _walk_schema_fragments(
+    node: JsonObject,
+    root_schema: JsonObject,
+    active_references: frozenset[str] = frozenset(),
+) -> Iterable[JsonObject]:
+    yield node
+
+    reference = node.get("$ref")
+    if isinstance(reference, str) and reference not in active_references:
+        definition = _definition_for(root_schema, reference)
+        if definition is not None:
+            yield from _walk_schema_fragments(
+                definition,
+                root_schema,
+                active_references | {reference},
+            )
+
+    for combinator in COMBINATORS:
+        variants = node.get(combinator, [])
+        if isinstance(variants, list):
+            for variant in variants:
                 if isinstance(variant, dict):
-                    self._collect_children(variant, path, descendant_refs)
+                    yield from _walk_schema_fragments(
+                        variant,
+                        root_schema,
+                        active_references,
+                    )
 
 
-def markdown_code(value: str) -> str:
-    delimiter = "`"
-    while delimiter in value:
-        delimiter += "`"
-    padding = " " if value.startswith("`") or value.endswith("`") else ""
-    return f"{delimiter}{padding}{value}{padding}{delimiter}"
+def _type_names_for_node(node: JsonObject, root_schema: JsonObject) -> list[str]:
+    type_names: list[str] = []
+    for fragment in _walk_schema_fragments(node, root_schema):
+        declared_types = fragment.get("type")
+        if isinstance(declared_types, str):
+            declared_types = [declared_types]
+        if not isinstance(declared_types, list):
+            continue
+
+        for declared_type in declared_types:
+            if declared_type == "object":
+                rendered_type = "table"
+            elif declared_type == "array":
+                items = fragment.get("items")
+                if isinstance(items, dict):
+                    item_type = format_schema_type([items], root_schema)
+                    rendered_type = f"array<{item_type}>"
+                else:
+                    rendered_type = "array"
+            elif isinstance(declared_type, str):
+                rendered_type = declared_type
+            else:
+                continue
+
+            if rendered_type not in type_names:
+                type_names.append(rendered_type)
+    return type_names
 
 
-def markdown_cell(value: str) -> str:
+def _enum_values_for_node(node: JsonObject, root_schema: JsonObject) -> list[Any]:
+    enum_values: list[Any] = []
+    for fragment in _walk_schema_fragments(node, root_schema):
+        values = fragment.get("enum", [])
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if value not in enum_values:
+                enum_values.append(value)
+    return enum_values
+
+
+def _format_json_scalar(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def format_schema_type(schemas: list[JsonObject], root_schema: JsonObject) -> str:
+    type_names: list[str] = []
+    enum_values: list[Any] = []
+
+    for node in schemas:
+        for type_name in _type_names_for_node(node, root_schema):
+            if type_name not in type_names:
+                type_names.append(type_name)
+        for value in _enum_values_for_node(node, root_schema):
+            if value not in enum_values:
+                enum_values.append(value)
+
+    if not type_names:
+        type_names.append("value")
+
+    rendered = " or ".join(type_names)
+    if enum_values and type_names == ["string"]:
+        allowed_values = ", ".join(_format_json_scalar(value) for value in enum_values)
+        rendered += f" ({allowed_values})"
+    return rendered
+
+
+def _common_description(
+    node: JsonObject,
+    root_schema: JsonObject,
+    active_references: frozenset[str] = frozenset(),
+) -> str | None:
+    description = node.get("description")
+    if isinstance(description, str) and description.strip():
+        return description.strip()
+
+    reference = node.get("$ref")
+    if isinstance(reference, str) and reference not in active_references:
+        definition = _definition_for(root_schema, reference)
+        if definition is not None:
+            referenced_description = _common_description(
+                definition,
+                root_schema,
+                active_references | {reference},
+            )
+            if referenced_description:
+                return referenced_description
+
+    variants = node.get("allOf", [])
+    if isinstance(variants, list):
+        for variant in variants:
+            if not isinstance(variant, dict):
+                continue
+            variant_description = _common_description(
+                variant,
+                root_schema,
+                active_references,
+            )
+            if variant_description:
+                return variant_description
+    return None
+
+
+def _variant_description_notes(
+    node: JsonObject,
+    root_schema: JsonObject,
+    active_references: frozenset[str] = frozenset(),
+) -> list[str]:
+    notes: list[str] = []
+
+    reference = node.get("$ref")
+    if isinstance(reference, str) and reference not in active_references:
+        definition = _definition_for(root_schema, reference)
+        if definition is not None:
+            notes.extend(
+                _variant_description_notes(
+                    definition,
+                    root_schema,
+                    active_references | {reference},
+                )
+            )
+
+    for combinator in ("anyOf", "oneOf"):
+        variants = node.get(combinator, [])
+        if not isinstance(variants, list):
+            continue
+        for variant in variants:
+            if not isinstance(variant, dict):
+                continue
+            description = _common_description(variant, root_schema, active_references)
+            if not description:
+                continue
+            enum_values = _enum_values_for_node(variant, root_schema)
+            if enum_values:
+                labels = ", ".join(
+                    f"`{_format_json_scalar(value)}`" for value in enum_values
+                )
+                note = f"{labels}: {description}"
+            else:
+                note = description
+            if note not in notes:
+                notes.append(note)
+    return notes
+
+
+def format_schema_description(
+    schemas: list[JsonObject],
+    root_schema: JsonObject,
+) -> str:
+    descriptions: list[str] = []
+    variant_notes: list[str] = []
+
+    for node in schemas:
+        description = _common_description(node, root_schema)
+        if description and description not in descriptions:
+            descriptions.append(description)
+        for note in _variant_description_notes(node, root_schema):
+            if note not in variant_notes and note not in descriptions:
+                variant_notes.append(note)
+
+    paragraphs = descriptions
+    if variant_notes:
+        paragraphs.append("Options: " + " ".join(variant_notes))
+    return "\n\n".join(paragraphs) if paragraphs else NO_DESCRIPTION
+
+
+def _escape_table_cell(value: str) -> str:
     return value.replace("|", "\\|").replace("\r\n", "\n").replace("\n", "<br>")
 
 
-def render_markdown(schema: dict[str, Any], schema_label: str) -> str:
-    rows = ConfigCollector(schema).collect()
-    title = schema.get("title", "Configuration")
+def render_markdown(
+    root_schema: JsonObject,
+    entries: list[ReferenceEntry],
+    *,
+    title: str = DEFAULT_TITLE,
+) -> str:
     lines = [
-        "<!-- Generated by scripts/generate_config_reference.py. Do not edit. -->",
+        f"# {title}",
         "",
-        f"# {title} reference",
+        "<!-- Generated by scripts/generate_config_reference.py. Do not edit manually. -->",
         "",
-        f"Generated from {markdown_code(schema_label)}.",
+        "Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown as "
+        "`<key>`, and `[]` identifies fields inside an array of tables.",
         "",
-        "Dynamic table keys are represented by `<name>` and array elements by `[]`.",
-        "",
-        "| Configuration | Type | Default | Description |",
-        "| --- | --- | --- | --- |",
+        "| Configuration | Type | Description |",
+        "| --- | --- | --- |",
     ]
-    for row in rows:
-        type_value = " / ".join(row.types)
-        default_value = " / ".join(row.defaults) if row.defaults else "-"
-        description = row.description or "-"
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    markdown_cell(markdown_code(row.path)),
-                    markdown_cell(markdown_code(type_value)),
-                    markdown_cell(markdown_code(default_value)),
-                    markdown_cell(description),
-                ]
-            )
-            + " |"
+
+    for entry in entries:
+        path = _escape_table_cell(format_config_path(entry.path))
+        type_name = html.escape(format_schema_type(entry.schemas, root_schema))
+        description = _escape_table_cell(
+            format_schema_description(entry.schemas, root_schema)
         )
+        lines.append(f"| `{path}` | <code>{type_name}</code> | {description} |")
+
     lines.append("")
     return "\n".join(lines)
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Generate a Markdown reference from Codex's config JSON Schema."
-    )
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--schema",
         type=Path,
-        default=DEFAULT_SCHEMA,
-        help=f"JSON Schema to read (default: {DEFAULT_SCHEMA}).",
+        default=DEFAULT_SCHEMA_PATH,
+        help=f"JSON Schema to read (default: {DEFAULT_SCHEMA_PATH})",
     )
     parser.add_argument(
-        "--out",
+        "-o",
+        "--output",
         type=Path,
-        default=DEFAULT_OUTPUT,
-        help=f"Markdown file to write (default: {DEFAULT_OUTPUT}).",
+        help="Markdown file to write. Omit to write to stdout.",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--title",
+        default=DEFAULT_TITLE,
+        help=f"Top-level Markdown heading (default: {DEFAULT_TITLE!r}).",
+    )
+    return parser.parse_args()
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+def main() -> int:
+    args = parse_args()
     try:
-        schema = json.loads(args.schema.read_text(encoding="utf-8"))
-        if not isinstance(schema, dict):
-            raise ValueError("schema root must be a JSON object")
-        resolved_schema = args.schema.resolve()
-        try:
-            schema_label = str(resolved_schema.relative_to(REPO_ROOT))
-        except ValueError:
-            schema_label = str(args.schema)
-        markdown = render_markdown(schema, schema_label)
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(markdown, encoding="utf-8")
-    except (OSError, json.JSONDecodeError, ValueError) as error:
+        schema = load_schema(args.schema)
+        entries = collect_reference_entries(schema)
+        markdown = render_markdown(schema, entries, title=args.title)
+        if args.output is None:
+            sys.stdout.write(markdown)
+        else:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            with args.output.open("w", encoding="utf-8", newline="\n") as output_file:
+                output_file.write(markdown)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-
-    print(f"Wrote {args.out}.")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
