@@ -26,7 +26,7 @@ pub(super) async fn validate_database_schema(
         "goals DB" => (3, GOALS_TABLES),
         "memories DB" => (1, "_sqlx_migrations,jobs,stage1_outputs"),
         "thread history DB" => (4, THREAD_HISTORY_TABLES),
-        _ => anyhow::bail!("unknown mandatory SQLite database `{label}`"),
+        _ => anyhow::bail!("unknown SQLite database `{label}`"),
     };
     anyhow::ensure!(
         required_tables

@@ -65,6 +65,30 @@ impl CanonicalThreadHistoryReader for FixtureHistoryReader {
 }
 
 #[tokio::test]
+async fn snapshot_accepts_missing_thread_history_database() -> anyhow::Result<()> {
+    let (source, runtime) = test_support::initialized_runtime_source("no-thread-history").await?;
+    let _cleanup = scopeguard::guard(source.clone(), |path| {
+        let _ = std::fs::remove_dir_all(path);
+    });
+    runtime.close().await;
+    let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(source.as_path())?);
+    std::fs::remove_file(sqlite.thread_history_db_path())?;
+    let source_before = test_support::snapshot_source(&source)?;
+    let reader = FixtureHistoryReader {
+        histories: HashMap::new(),
+        minimum_read_budget: 0,
+    };
+
+    let snapshot =
+        snapshot_runtime_state_migration_threads(&sqlite, &inventory(&source, [])?, &reader)
+            .await?;
+
+    assert!(snapshot.threads().is_empty());
+    assert_eq!(test_support::snapshot_source(&source)?, source_before);
+    Ok(())
+}
+
+#[tokio::test]
 async fn snapshot_preserves_complete_legacy_and_current_thread_domain_read_only()
 -> anyhow::Result<()> {
     let (source, runtime) = test_support::initialized_runtime_source("thread-snapshot").await?;
