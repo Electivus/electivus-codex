@@ -1181,6 +1181,11 @@ pub struct ThreadListParams {
     /// exactly matches one of these paths are returned.
     #[ts(optional = nullable, type = "string | Array<string> | null")]
     pub cwd: Option<ThreadListCwdFilter>,
+    /// Optional project checkout used to discover threads from the same Recorded Working
+    /// Directory or Repository Identity. Mutually exclusive with `cwd`.
+    #[experimental("thread/list.projectCwd")]
+    #[ts(optional = nullable)]
+    pub project_cwd: Option<LegacyAppPathString>,
     /// If true, return from the state DB without scanning JSONL rollouts to
     /// repair thread metadata. Omitted or false preserves scan-and-repair
     /// behavior.

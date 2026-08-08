@@ -67,15 +67,15 @@ impl RemoteControlHandle {
             return Ok(self.desired_state_tx.borrow().is_enabled());
         }
 
-        let state_db = self
-            .state_db
-            .as_deref()
+        let enrollment_store = self
+            .enrollment_store
+            .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, RemoteControlUnavailable))?;
         let auth = super::auth::load_remote_control_auth(&self.auth_manager).await?;
         let remote_control_target = normalize_remote_control_url(&self.remote_control_url)?;
         let app_server_client_name = self.pairing_persistence_key(app_server_client_name)?;
-        let enrollment = state_db
-            .get_remote_control_enrollment(
+        let enrollment = enrollment_store
+            .get(
                 &remote_control_target.websocket_url,
                 &auth.account_id,
                 app_server_client_name.as_deref(),
@@ -104,9 +104,9 @@ impl RemoteControlHandle {
             .acquire()
             .await
             .unwrap_or_else(|_| unreachable!());
-        let state_db = self
-            .state_db
-            .as_deref()
+        let enrollment_store = self
+            .enrollment_store
+            .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, RemoteControlUnavailable))?;
         let mut auth = super::auth::load_remote_control_auth(&self.auth_manager).await?;
         let remote_control_target = normalize_remote_control_url(&self.remote_control_url)?;
@@ -134,8 +134,8 @@ impl RemoteControlHandle {
         }
 
         let _persistence = acquire_persistence_lock(&self.desired_state_persistence_lock).await;
-        let updated = state_db
-            .set_remote_control_enabled(
+        let updated = enrollment_store
+            .set_enabled(
                 &remote_control_target.websocket_url,
                 &auth.account_id,
                 app_server_client_name,
@@ -145,7 +145,7 @@ impl RemoteControlHandle {
             .map_err(io::Error::other)?;
         if updated == 0 {
             update_persisted_remote_control_enrollment(
-                Some(state_db),
+                Some(enrollment_store),
                 &remote_control_target,
                 &auth.account_id,
                 app_server_client_name,

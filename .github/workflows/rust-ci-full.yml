@@ -1,17 +1,64 @@
 name: rust-ci-full
 on:
   workflow_call:
+    inputs:
+      validation_scope:
+        description: Validation scope (merge-gate, extended, or full).
+        required: false
+        default: full
+        type: string
+    outputs:
+      resolved_scope:
+        description: Planner-resolved validation scope.
+        value: ${{ jobs.results.outputs.resolved_scope }}
+      selected_families:
+        description: JSON list of validation families selected by the planner.
+        value: ${{ jobs.results.outputs.selected_families }}
   push:
     branches:
       # Main pushes enter through postmerge-ci. Keep this opt-in branch trigger
       # for developers who want the full suite before merging.
       - "**full-ci**"
   workflow_dispatch:
+    inputs:
+      validation_scope:
+        description: Validation scope.
+        required: true
+        default: full
+        type: choice
+        options:
+          - merge-gate
+          - extended
+          - full
 
 jobs:
+  plan:
+    name: Plan Rust CI scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      resolved_scope: ${{ steps.scope.outputs.resolved_scope }}
+      reason: ${{ steps.scope.outputs.reason }}
+      lint_matrix: ${{ steps.scope.outputs.lint_matrix }}
+      run_general: ${{ steps.scope.outputs.run_general }}
+      run_x64: ${{ steps.scope.outputs.run_x64 }}
+      run_arm64: ${{ steps.scope.outputs.run_arm64 }}
+      selected_families: ${{ steps.scope.outputs.selected_families }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Resolve validation scope
+        id: scope
+        env:
+          VALIDATION_SCOPE: ${{ inputs.validation_scope }}
+        run: python3 .github/scripts/rust_ci_full_plan.py
+
   # --- CI that doesn't need specific targets ---------------------------------
   general:
     name: Format / etc
+    needs: plan
+    if: ${{ needs.plan.result == 'success' && needs.plan.outputs.run_general == 'true' }}
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -31,6 +78,8 @@ jobs:
 
   cargo_shear:
     name: cargo shear
+    needs: plan
+    if: ${{ needs.plan.result == 'success' && needs.plan.outputs.run_general == 'true' }}
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -49,6 +98,8 @@ jobs:
 
   argument_comment_lint_package:
     name: Argument comment lint package
+    needs: plan
+    if: ${{ needs.plan.result == 'success' && needs.plan.outputs.run_general == 'true' }}
     runs-on: ubuntu-24.04
     env:
       CARGO_DYLINT_VERSION: 5.0.0
@@ -91,8 +142,10 @@ jobs:
 
   argument_comment_lint_prebuilt:
     name: Argument comment lint - ${{ matrix.name }}
-    runs-on: ${{ matrix.runs_on || matrix.runner }}
-    timeout-minutes: 30
+    needs: plan
+    if: ${{ needs.plan.result == 'success' && needs.plan.outputs.run_general == 'true' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     environment:
       name: bazel
       deployment: false
@@ -102,147 +155,35 @@ jobs:
         include:
           - name: Linux
             runner: ubuntu-24.04
-          - name: macOS
-            runner: macos-15-xlarge
-          - name: Windows
-            runner: windows-x64
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-windows-x64
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-bazel-ci
+      - uses: ./.github/actions/run-argument-comment-lint
         with:
           target: ${{ runner.os }}
-      - name: Install Linux sandbox build dependencies
-        if: ${{ runner.os == 'Linux' }}
-        shell: bash
-        run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
-      - name: Run argument comment lint on codex-rs via Bazel
-        if: ${{ runner.os != 'Windows' }}
-        env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-        shell: bash
-        run: |
-          bazel_targets="$(./tools/argument-comment-lint/list-bazel-targets.sh)"
-          ./.github/scripts/run-bazel-ci.sh \
-            -- \
-            build \
-            --config=argument-comment-lint \
-            --keep_going \
-            --build_metadata=COMMIT_SHA=${GITHUB_SHA} \
-            -- \
-            ${bazel_targets}
-      - name: Run argument comment lint on codex-rs via Bazel
-        if: ${{ runner.os == 'Windows' }}
-        env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-        shell: bash
-        run: |
-          ./.github/scripts/run-argument-comment-lint-bazel.sh \
-            --config=argument-comment-lint \
-            --platforms=//:local_windows \
-            --keep_going \
-            --build_metadata=COMMIT_SHA=${GITHUB_SHA}
+          buildbuddy-api-key: ${{ secrets.BUILDBUDDY_API_KEY }}
 
   # --- CI to validate on different os/targets --------------------------------
   lint_build:
     name: Lint/Build — ${{ matrix.runner }} - ${{ matrix.target }}${{ matrix.profile == 'release' && ' (release)' || '' }}
-    runs-on: ${{ matrix.runs_on || matrix.runner }}
-    timeout-minutes: 30
+    needs: plan
+    if: ${{ needs.plan.result == 'success' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: codex-rs
     env:
-      # Speed up repeated builds across CI runs by caching compiled objects, except on
-      # arm64 macOS runners cross-targeting x86_64 where ring/cc-rs can produce
-      # mixed-architecture archives under sccache.
-      USE_SCCACHE: ${{ (startsWith(matrix.runner, 'windows') || (matrix.runner == 'macos-15-xlarge' && matrix.target == 'x86_64-apple-darwin')) && 'false' || 'true' }}
+      # Speed up repeated Linux builds across CI runs by caching compiled objects.
+      USE_SCCACHE: "true"
       CARGO_INCREMENTAL: "0"
       SCCACHE_CACHE_SIZE: 10G
 
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: macos-15-xlarge
-            target: aarch64-apple-darwin
-            profile: dev
-          - runner: macos-15-xlarge
-            target: x86_64-apple-darwin
-            profile: dev
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            profile: dev
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-linux-x64
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            profile: dev
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-linux-x64
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            profile: dev
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-linux-arm64
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            profile: dev
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-linux-arm64
-          - runner: windows-x64
-            target: x86_64-pc-windows-msvc
-            profile: dev
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-windows-x64
-          - runner: windows-arm64
-            target: aarch64-pc-windows-msvc
-            profile: dev
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-windows-arm64
-
-          # Also run representative release builds on Mac and Linux because
-          # there could be release-only build errors we want to catch.
-          # Hopefully this also pre-populates the build cache to speed up
-          # releases.
-          - runner: macos-15-xlarge
-            target: aarch64-apple-darwin
-            profile: release
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            profile: release
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-linux-x64
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            profile: release
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-linux-arm64
-          - runner: windows-x64
-            target: x86_64-pc-windows-msvc
-            profile: release
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-windows-x64
-          - runner: windows-arm64
-            target: aarch64-pc-windows-msvc
-            profile: release
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-windows-arm64
+        include: ${{ fromJSON(needs.plan.outputs.lint_matrix) }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -395,8 +336,25 @@ jobs:
           cargo chef prepare --recipe-path "$RECIPE"
           cargo chef cook --recipe-path "$RECIPE" --target ${{ matrix.target }} --release
 
-      - name: cargo clippy
-        run: cargo clippy --target ${{ matrix.target }} --tests --profile ${{ matrix.profile }} --timings -- -D warnings
+      - name: cargo build (release)
+        if: ${{ matrix.profile == 'release' }}
+        run: cargo build --workspace --target ${{ matrix.target }} --profile release --timings
+
+      - name: Upload Cargo timings (build)
+        if: always() && matrix.profile == 'release'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: cargo-timings-rust-ci-build-${{ matrix.target }}-release
+          path: ${{ env.CARGO_TARGET_DIR }}/**/cargo-timings/cargo-timing.html
+          if-no-files-found: warn
+
+      - name: cargo clippy (dev)
+        if: ${{ matrix.profile == 'dev' }}
+        run: cargo clippy --workspace --target ${{ matrix.target }} --tests --profile dev --timings -- -D warnings
+
+      - name: cargo clippy (release)
+        if: ${{ matrix.profile == 'release' }}
+        run: cargo clippy --workspace --target ${{ matrix.target }} --tests --profile release --timings -- -D warnings
 
       - name: Upload Cargo timings (clippy)
         if: always()
@@ -458,116 +416,73 @@ jobs:
             /var/cache/apt
           key: apt-${{ matrix.runner }}-${{ matrix.target }}-v1
 
-  tests_macos_aarch64:
-    name: Tests — macos-15-xlarge - aarch64-apple-darwin
-    uses: ./.github/workflows/rust-ci-full-nextest-platform.yml
-    with:
-      runner: macos-15-xlarge
-      target: aarch64-apple-darwin
-      profile: ci-test
-      artifact_id: macos-aarch64
-      use_sccache: true
-    secrets: inherit
-
-  tests_linux_x64_remote:
-    name: Tests — ubuntu-24.04 - x86_64-unknown-linux-gnu (remote)
+  tests_linux_x64:
+    name: Tests — ubuntu-24.04 - x86_64-unknown-linux-gnu
+    needs: plan
+    if: ${{ needs.plan.result == 'success' && needs.plan.outputs.run_x64 == 'true' }}
     uses: ./.github/workflows/rust-ci-full-nextest-platform.yml
     with:
       runner: ubuntu-24.04
-      runner_group: ${{ github.event.repository.name }}-runners
-      runner_labels: ${{ github.event.repository.name }}-linux-x64
       target: x86_64-unknown-linux-gnu
       profile: ci-test
-      artifact_id: linux-x64-remote
-      remote_env: true
+      artifact_id: linux-x64
+      # The per-test /tmp cleanup runner requires serial execution within each shard.
+      test_threads: 1
       use_sccache: true
+      postgres_contracts: true
     secrets: inherit
 
   tests_linux_arm64:
     name: Tests — ubuntu-24.04-arm - aarch64-unknown-linux-gnu
+    needs: plan
+    if: ${{ needs.plan.result == 'success' && needs.plan.outputs.run_arm64 == 'true' }}
     uses: ./.github/workflows/rust-ci-full-nextest-platform.yml
     with:
       runner: ubuntu-24.04-arm
-      runner_group: ${{ github.event.repository.name }}-runners
-      runner_labels: ${{ github.event.repository.name }}-linux-arm64
       target: aarch64-unknown-linux-gnu
       profile: ci-test
       artifact_id: linux-arm64
-      use_sccache: true
-    secrets: inherit
-
-  tests_windows_x64:
-    name: Tests — windows-x64 - x86_64-pc-windows-msvc
-    uses: ./.github/workflows/rust-ci-full-nextest-platform.yml
-    with:
-      runner: windows-x64
-      runner_group: ${{ github.event.repository.name }}-runners
-      runner_labels: ${{ github.event.repository.name }}-windows-x64
-      target: x86_64-pc-windows-msvc
-      profile: ci-test
-      artifact_id: windows-x64
-      test_threads: 8
-    secrets: inherit
-
-  tests_windows_arm64:
-    name: Tests — windows-arm64 - aarch64-pc-windows-msvc
-    uses: ./.github/workflows/rust-ci-full-nextest-platform.yml
-    with:
-      runner: windows-arm64
-      runner_group: ${{ github.event.repository.name }}-runners
-      runner_labels: ${{ github.event.repository.name }}-windows-arm64
-      archive_runner: windows-x64
-      archive_runner_group: ${{ github.event.repository.name }}-runners
-      archive_runner_labels: ${{ github.event.repository.name }}-windows-x64
-      target: aarch64-pc-windows-msvc
-      profile: ci-test
-      artifact_id: windows-arm64
-      test_threads: 8
+      # The per-test /tmp cleanup runner requires serial execution within each shard.
+      test_threads: 1
       use_sccache: true
     secrets: inherit
 
   # --- Gatherer job for the full post-merge workflow --------------------------
   results:
     name: Full CI results
+    outputs:
+      resolved_scope: ${{ needs.plan.outputs.resolved_scope }}
+      selected_families: ${{ needs.plan.outputs.selected_families }}
     needs:
       [
+        plan,
         general,
         cargo_shear,
         argument_comment_lint_package,
         argument_comment_lint_prebuilt,
         lint_build,
-        tests_macos_aarch64,
-        tests_linux_x64_remote,
+        tests_linux_x64,
         tests_linux_arm64,
-        tests_windows_x64,
-        tests_windows_arm64,
       ]
     if: always()
     runs-on: ubuntu-24.04
     steps:
-      - name: Summarize
-        shell: bash
-        run: |
-          echo "argpkg : ${{ needs.argument_comment_lint_package.result }}"
-          echo "arglint: ${{ needs.argument_comment_lint_prebuilt.result }}"
-          echo "general: ${{ needs.general.result }}"
-          echo "shear  : ${{ needs.cargo_shear.result }}"
-          echo "lint   : ${{ needs.lint_build.result }}"
-          echo "test macos : ${{ needs.tests_macos_aarch64.result }}"
-          echo "test linux : ${{ needs.tests_linux_x64_remote.result }}"
-          echo "test arm64 : ${{ needs.tests_linux_arm64.result }}"
-          echo "test winx64: ${{ needs.tests_windows_x64.result }}"
-          echo "test winarm: ${{ needs.tests_windows_arm64.result }}"
-          [[ '${{ needs.argument_comment_lint_package.result }}' == 'success' ]] || { echo 'argument_comment_lint_package failed'; exit 1; }
-          [[ '${{ needs.argument_comment_lint_prebuilt.result }}' == 'success' ]] || { echo 'argument_comment_lint_prebuilt failed'; exit 1; }
-          [[ '${{ needs.general.result }}' == 'success' ]] || { echo 'general failed'; exit 1; }
-          [[ '${{ needs.cargo_shear.result }}' == 'success' ]] || { echo 'cargo_shear failed'; exit 1; }
-          [[ '${{ needs.lint_build.result }}' == 'success' ]] || { echo 'lint_build failed'; exit 1; }
-          [[ '${{ needs.tests_macos_aarch64.result }}' == 'success' ]] || { echo 'tests_macos_aarch64 failed'; exit 1; }
-          [[ '${{ needs.tests_linux_x64_remote.result }}' == 'success' ]] || { echo 'tests_linux_x64_remote failed'; exit 1; }
-          [[ '${{ needs.tests_linux_arm64.result }}' == 'success' ]] || { echo 'tests_linux_arm64 failed'; exit 1; }
-          [[ '${{ needs.tests_windows_x64.result }}' == 'success' ]] || { echo 'tests_windows_x64 failed'; exit 1; }
-          [[ '${{ needs.tests_windows_arm64.result }}' == 'success' ]] || { echo 'tests_windows_arm64 failed'; exit 1; }
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Validate scoped child results
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          RESOLVED_SCOPE: ${{ needs.plan.outputs.resolved_scope }}
+          GENERAL_RESULT: ${{ needs.general.result }}
+          CARGO_SHEAR_RESULT: ${{ needs.cargo_shear.result }}
+          ARGUMENT_COMMENT_LINT_PACKAGE_RESULT: ${{ needs.argument_comment_lint_package.result }}
+          ARGUMENT_COMMENT_LINT_PREBUILT_RESULT: ${{ needs.argument_comment_lint_prebuilt.result }}
+          LINT_BUILD_RESULT: ${{ needs.lint_build.result }}
+          TESTS_LINUX_X64_RESULT: ${{ needs.tests_linux_x64.result }}
+          TESTS_LINUX_ARM64_RESULT: ${{ needs.tests_linux_arm64.result }}
+        run: python3 .github/scripts/rust_ci_full_result.py
 
       - name: sccache summary note
         if: always()

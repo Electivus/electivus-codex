@@ -6,7 +6,7 @@
 )]
 
 use crate::DbTelemetry;
-use crate::migrations::repair_legacy_recency_migration_version;
+use crate::migrations::repair_legacy_state_migration_versions;
 use crate::runtime::RuntimeDbInitError;
 use crate::telemetry;
 use crate::telemetry::DbKind;
@@ -224,7 +224,7 @@ impl SqliteConfig {
         let started = Instant::now();
         let migrate_result = async {
             if matches!(spec.kind, DbKind::State) {
-                repair_legacy_recency_migration_version(&pool, migrator).await?;
+                repair_legacy_state_migration_versions(&pool, migrator).await?;
             }
             migrator.run(&pool).await.map_err(anyhow::Error::from)
         }
@@ -267,6 +267,20 @@ impl SqliteConfig {
             .filename(path)
             .create_if_missing(false)
             .read_only(true)
+            .log_statements(LevelFilter::Off);
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+    }
+
+    /// Open an existing database as an immutable snapshot without creating SQLite sidecars.
+    pub(crate) async fn open_immutable_pool(&self, path: &Path) -> Result<SqlitePool, Error> {
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(false)
+            .read_only(true)
+            .immutable(true)
             .log_statements(LevelFilter::Off);
         SqlitePoolOptions::new()
             .max_connections(1)

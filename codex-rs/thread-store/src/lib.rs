@@ -6,8 +6,46 @@
 
 mod error;
 mod in_memory;
+#[cfg(test)]
+#[path = "lifecycle_contract_tests.rs"]
+mod lifecycle_contract_tests;
+#[cfg(test)]
+#[path = "list_threads_contract_tests.rs"]
+mod list_threads_contract_tests;
 mod live_thread;
 mod local;
+#[cfg(test)]
+#[path = "metadata_contract_tests.rs"]
+mod metadata_contract_tests;
+#[cfg(test)]
+#[path = "model_context_contract_tests.rs"]
+mod model_context_contract_tests;
+mod occurrence_search;
+mod postgres;
+#[cfg(test)]
+#[path = "postgres_contract_tests.rs"]
+mod postgres_contract_tests;
+#[cfg(test)]
+#[path = "postgres_item_projection_contract_tests.rs"]
+mod postgres_item_projection_contract_tests;
+#[cfg(test)]
+#[path = "postgres_lease_recovery_contract_tests.rs"]
+mod postgres_lease_recovery_contract_tests;
+#[cfg(test)]
+#[path = "postgres_turn_projection_contract_tests.rs"]
+mod postgres_turn_projection_contract_tests;
+#[cfg(test)]
+#[path = "runtime_state_migration_contract_tests.rs"]
+mod runtime_state_migration_contract_tests;
+#[cfg(test)]
+#[path = "runtime_state_migration_rejection_contract_tests.rs"]
+mod runtime_state_migration_rejection_contract_tests;
+#[cfg(test)]
+#[path = "search_thread_occurrences_contract_tests.rs"]
+mod search_thread_occurrences_contract_tests;
+#[cfg(test)]
+#[path = "search_threads_contract_tests.rs"]
+mod search_threads_contract_tests;
 mod store;
 mod thread_metadata_sync;
 mod types;
@@ -20,8 +58,14 @@ pub use live_thread::LiveThread;
 pub use live_thread::LiveThreadInitGuard;
 pub use local::LocalThreadStore;
 pub use local::LocalThreadStoreConfig;
+pub use postgres::PostgresThreadProjectionMaterializer;
+pub use postgres::PostgresThreadStore;
+pub use store::ChildRegistrationGuard;
 pub use store::ThreadStore;
 pub use store::ThreadStoreFuture;
+pub use types::AppendBatchCommit;
+pub use types::AppendBatchId;
+pub use types::AppendThreadItemsBatch;
 pub use types::AppendThreadItemsParams;
 pub use types::ArchiveThreadParams;
 pub use types::ArchiveThreadsParams;
@@ -58,6 +102,7 @@ pub use types::StoredTurn;
 pub use types::StoredTurnError;
 pub use types::StoredTurnItemsView;
 pub use types::StoredTurnStatus;
+pub use types::ThreadLocationFilter;
 pub use types::ThreadMetadataPatch;
 pub use types::ThreadOccurrenceSearchPage;
 pub use types::ThreadPage;

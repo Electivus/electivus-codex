@@ -203,6 +203,59 @@ fn thread_turns_list_params_accepts_items_view() {
 }
 
 #[test]
+fn thread_recorded_working_directory_preserves_foreign_wire_path_and_exposes_uri() {
+    #[cfg(not(windows))]
+    let (recorded_working_directory, expected_uri) =
+        (r"C:\Users\alice\project", "file:///C:/Users/alice/project");
+    #[cfg(windows)]
+    let (recorded_working_directory, expected_uri) =
+        ("/home/alice/project", "file:///home/alice/project");
+    let thread: Thread = serde_json::from_value(json!({
+        "id": "thr_123",
+        "extra": null,
+        "sessionId": "thr_123",
+        "forkedFromId": null,
+        "parentThreadId": null,
+        "preview": "",
+        "ephemeral": false,
+        "isPinned": false,
+        "historyMode": "legacy",
+        "modelProvider": "openai",
+        "createdAt": 1,
+        "updatedAt": 1,
+        "recencyAt": 1,
+        "status": {"type": "idle"},
+        "path": null,
+        "cwd": recorded_working_directory,
+        "cliVersion": "0.0.0",
+        "source": "exec",
+        "canAcceptDirectInput": null,
+        "threadSource": null,
+        "agentNickname": null,
+        "agentRole": null,
+        "gitInfo": null,
+        "name": null,
+        "turns": [],
+    }))
+    .expect("foreign Recorded Working Directory should deserialize");
+
+    assert_eq!(
+        thread.cwd,
+        LegacyAppPathString::from_string(recorded_working_directory)
+    );
+    assert_eq!(
+        thread.cwd.to_inferred_path_uri(),
+        Some(PathUri::parse(expected_uri).expect("expected path URI"))
+    );
+    assert_eq!(
+        serde_json::to_value(&thread)
+            .expect("thread should serialize")
+            .get("cwd"),
+        Some(&json!(recorded_working_directory))
+    );
+}
+
+#[test]
 fn thread_resume_params_accept_turns_page_bootstrap() {
     let params = serde_json::from_value::<ThreadResumeParams>(json!({
         "threadId": "thr_123",
@@ -248,7 +301,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
             recency_at: Some(1),
             status: ThreadStatus::Idle,
             path: None,
-            cwd: absolute_path("tmp"),
+            cwd: absolute_path("tmp").into(),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Exec,
             can_accept_direct_input: None,

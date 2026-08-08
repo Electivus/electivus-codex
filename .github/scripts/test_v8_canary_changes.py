@@ -3,14 +3,72 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from v8_canary_changes import CanaryDecision
 from v8_canary_changes import changed_files
 from v8_canary_changes import canary_required
+from v8_canary_changes import classify_changed_files
+from v8_canary_changes import decision_for_revisions
 from v8_canary_changes import merge_base
 from v8_canary_changes import resolved_v8_version
 from v8_canary_changes import windows_source_required
 
 
 class V8CanaryChangesTest(unittest.TestCase):
+    def test_relevant_known_irrelevant_and_unknown_paths(self) -> None:
+        cases = (
+            (
+                {"codex-rs/v8-poc/Cargo.toml"},
+                CanaryDecision(True, "V8 canary path changed: codex-rs/v8-poc/Cargo.toml"),
+            ),
+            (
+                {"codex-rs/v8-poc/BUILD.bazel"},
+                CanaryDecision(True, "V8 canary path changed: codex-rs/v8-poc/BUILD.bazel"),
+            ),
+            (
+                {"codex-rs/v8-poc/src/lib.rs"},
+                CanaryDecision(True, "V8 canary path changed: codex-rs/v8-poc/src/lib.rs"),
+            ),
+            (
+                {"third_party/v8/BUILD.bazel"},
+                CanaryDecision(True, "V8 canary path changed: third_party/v8/BUILD.bazel"),
+            ),
+            (
+                {"codex-rs/core/src/lib.rs", "docs/architecture.md"},
+                CanaryDecision(False, "all 2 changed paths are explicitly V8-irrelevant"),
+            ),
+            (
+                {"new-top-level/tool.py"},
+                CanaryDecision(True, "unknown V8 impact: new-top-level/tool.py"),
+            ),
+        )
+        for paths, expected in cases:
+            with self.subTest(paths=paths):
+                self.assertEqual(
+                    expected,
+                    classify_changed_files(paths, "149.2.0", "149.2.0"),
+                )
+        self.assertEqual(
+            CanaryDecision(True, "v8 version changed from 149.2.0 to 150.0.0"),
+            classify_changed_files(set(), "149.2.0", "150.0.0"),
+        )
+
+    def test_manual_missing_comparison_and_git_error_require_canary(self) -> None:
+        self.assertEqual(
+            CanaryDecision(True, "manual workflow dispatch"),
+            decision_for_revisions(None, None, force=True),
+        )
+        self.assertEqual(
+            CanaryDecision(True, "comparison is missing base or head"),
+            decision_for_revisions(None, "head"),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self.assertEqual(
+                CanaryDecision(True, "comparison failed (CalledProcessError)"),
+                decision_for_revisions(
+                    "missing-base", "missing-head", root=Path(temp_dir)
+                ),
+            )
+
     def test_resolved_v8_version(self) -> None:
         cargo_lock = b"""\
 [[package]]

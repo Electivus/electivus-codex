@@ -233,7 +233,8 @@ def codex_rust_crate(
         integration_compile_data_extra: Extra compile_data for integration tests.
         integration_test_args: Optional args for integration test binaries.
         unit_test_args: Optional args for the unit test binary.
-        binary_test_target_compatible_with: Platform constraints for binary unit tests.
+        binary_test_target_compatible_with: Platform constraints applied to
+            binary targets that are surfaced to tests.
         integration_test_timeout: Optional Bazel timeout for integration test
             targets generated from `tests/*.rs`.
         test_data_extra: Extra runtime data for tests.
@@ -387,6 +388,7 @@ def codex_rust_crate(
             edition = crate_edition,
             rustc_flags = rustc_flags_extra + WINDOWS_RUSTC_LINK_FLAGS,
             srcs = native.glob(["src/**/*.rs"]),
+            target_compatible_with = binary_test_target_compatible_with,
             visibility = ["//visibility:public"],
         )
 

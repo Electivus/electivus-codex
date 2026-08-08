@@ -7,7 +7,7 @@ use crate::AgentGraphStoreError;
 use crate::AgentGraphStoreFuture;
 use crate::ThreadSpawnEdgeStatus;
 
-/// SQLite-backed implementation of [`AgentGraphStore`] using an existing state runtime.
+/// Runtime-backed implementation of [`AgentGraphStore`] using the selected state backend.
 #[derive(Clone)]
 pub struct LocalAgentGraphStore {
     state_db: Arc<StateRuntime>,
@@ -22,7 +22,7 @@ impl std::fmt::Debug for LocalAgentGraphStore {
 }
 
 impl LocalAgentGraphStore {
-    /// Create a local graph store from an already-initialized state runtime.
+    /// Create a graph store from an already-initialized state runtime.
     pub fn new(state_db: Arc<StateRuntime>) -> Self {
         Self { state_db }
     }

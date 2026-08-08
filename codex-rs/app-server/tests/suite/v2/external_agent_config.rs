@@ -420,12 +420,16 @@ source = {:?}
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let response: ThreadListResponse =
         timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
     let thread = response.data.first().expect("imported session");
-    assert_eq!(thread.cwd.as_path(), project_root);
+    assert_eq!(
+        thread.cwd,
+        codex_utils_path_uri::LegacyAppPathString::from_path(&project_root)
+    );
     assert_eq!(thread.preview, "first request");
     assert_eq!(thread.name, None);
 
@@ -1005,6 +1009,24 @@ async fn external_agent_config_detects_and_imports_project_memory_files() -> Res
             ),
         ]
     );
+
+    let state_db = codex_state::StateRuntime::init_sqlite(
+        codex_home.path().to_path_buf(),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    let claim = state_db
+        .memories()
+        .try_claim_global_phase2_job(codex_protocol::ThreadId::new(), /*lease_seconds*/ 60)
+        .await?;
+    let codex_state::Phase2JobClaimOutcome::Claimed {
+        input_watermark, ..
+    } = claim
+    else {
+        anyhow::bail!("expected imported-memory consolidation claim, got {claim:?}");
+    };
+    assert!(input_watermark > 0);
+    state_db.close().await;
 
     Ok(())
 }
@@ -1679,6 +1701,7 @@ async fn external_agent_config_import_creates_session_rollouts() -> Result<()> {
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let response: ThreadListResponse =
@@ -1866,6 +1889,7 @@ required = true
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let response: ThreadListResponse =
@@ -1950,6 +1974,7 @@ async fn external_agent_config_import_accepts_detected_session_payload_after_res
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let response: ThreadListResponse =
@@ -2031,6 +2056,7 @@ async fn external_agent_config_import_skips_already_imported_session_versions() 
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let response: ThreadListResponse =
@@ -2158,6 +2184,7 @@ async fn external_agent_config_import_returns_before_background_session_import_f
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let response: ThreadListResponse =
@@ -2273,6 +2300,7 @@ async fn external_agent_config_import_compacts_huge_session_before_first_follow_
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let response: ThreadListResponse =

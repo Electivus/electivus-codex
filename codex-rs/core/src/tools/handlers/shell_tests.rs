@@ -65,12 +65,12 @@ fn commands_generated_by_shell_command_handler_can_be_matched_by_is_known_safe_c
 }
 
 fn assert_safe(shell: &Shell, command: &str) {
-    assert!(is_known_safe_command(&shell.derive_exec_args(
-        command, /* use_login_shell */ /*use_login_shell*/ true
-    )));
-    assert!(is_known_safe_command(&shell.derive_exec_args(
-        command, /* use_login_shell */ /*use_login_shell*/ false
-    )));
+    assert!(is_known_safe_command(
+        &shell.derive_exec_args(command, /*use_login_shell*/ true)
+    ));
+    assert!(is_known_safe_command(
+        &shell.derive_exec_args(command, /*use_login_shell*/ false)
+    ));
 }
 
 #[tokio::test]
@@ -88,7 +88,7 @@ async fn shell_command_handler_to_exec_params_uses_selected_environment() {
     let command = "echo hello".to_string();
     let workdir = Some("subdir".to_string());
     let login = None;
-    let timeout_ms = Some(1234);
+    let timeout_ms = 1234;
     let sandbox_permissions = SandboxPermissions::RequireEscalated;
     let justification = Some("because tests".to_string());
 
@@ -123,7 +123,7 @@ async fn shell_command_handler_to_exec_params_uses_selected_environment() {
         command,
         workdir,
         login,
-        timeout_ms,
+        timeout_ms: Some(timeout_ms),
         sandbox_permissions: Some(sandbox_permissions),
         additional_permissions: None,
         prefix_rule: None,
@@ -137,6 +137,7 @@ async fn shell_command_handler_to_exec_params_uses_selected_environment() {
         &selected_environment,
         expected_cwd.clone(),
         /*allow_login_shell*/ true,
+        timeout_ms,
     )
     .expect("login shells should be allowed");
 
@@ -155,7 +156,7 @@ async fn shell_command_handler_to_exec_params_uses_selected_environment() {
         exec_params.network_environment_id.as_deref(),
         Some("selected-environment")
     );
-    assert_eq!(exec_params.expiration.timeout_ms(), timeout_ms);
+    assert_eq!(exec_params.expiration.timeout_ms(), Some(timeout_ms));
     assert_eq!(exec_params.sandbox_permissions, sandbox_permissions);
     assert_eq!(exec_params.justification, justification);
     assert_eq!(exec_params.arg0, None);
@@ -218,6 +219,7 @@ async fn shell_command_handler_defaults_to_non_login_when_disallowed() {
         turn_environment,
         cwd,
         /*allow_login_shell*/ false,
+        /*timeout_ms*/ turn_context.config.tool_execution.timeout().default_ms(),
     )
     .expect("non-login shells should still be allowed");
 

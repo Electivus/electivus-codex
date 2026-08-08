@@ -110,6 +110,30 @@ fn exec_repo_root() -> anyhow::Result<std::path::PathBuf> {
     Ok(codex_utils_cargo_bin::repo_root()?)
 }
 
+fn init_git_repo_with_origin(path: &std::path::Path, origin: &str) -> anyhow::Result<()> {
+    std::fs::create_dir_all(path)?;
+    let init = std::process::Command::new("git")
+        .arg("init")
+        .arg(path)
+        .output()?;
+    anyhow::ensure!(
+        init.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let remote = std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["remote", "add", "origin", origin])
+        .output()?;
+    anyhow::ensure!(
+        remote.status.success(),
+        "git remote add failed: {}",
+        String::from_utf8_lossy(&remote.stderr)
+    );
+    Ok(())
+}
+
 fn exec_sse_response(index: usize) -> String {
     let response_id = format!("resp-exec-{index}");
     let message_id = format!("msg-exec-{index}");
@@ -256,6 +280,165 @@ async fn exec_resume_last_accepts_prompt_after_flag_in_json_mode() -> anyhow::Re
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exec_resume_last_selects_newest_thread_in_project_session_scope() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let test = test_codex_exec();
+    let server = MockServer::start().await;
+    let _response_mock = mount_exec_responses(&server, /*count*/ 4).await;
+    let repositories = TempDir::new()?;
+    let exact_checkout = repositories.path().join("exact-checkout");
+    let repository_checkout = repositories.path().join("repository-checkout");
+    let unrelated_checkout = repositories.path().join("unrelated-checkout");
+    init_git_repo_with_origin(&exact_checkout, "https://example.com/acme/project.git")?;
+    init_git_repo_with_origin(&repository_checkout, "git@example.com:acme/project.git")?;
+    init_git_repo_with_origin(
+        &unrelated_checkout,
+        "https://example.com/acme/unrelated.git",
+    )?;
+
+    let exact_marker = format!("resume-project-exact-{}", Uuid::new_v4());
+    test.cmd_with_server(&server)
+        .arg("--skip-git-repo-check")
+        .arg("-C")
+        .arg(&exact_checkout)
+        .arg(format!("echo {exact_marker}"))
+        .assert()
+        .success();
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    let repository_marker = format!("resume-project-repository-{}", Uuid::new_v4());
+    test.cmd_with_server(&server)
+        .arg("--skip-git-repo-check")
+        .arg("-C")
+        .arg(&repository_checkout)
+        .arg(format!("echo {repository_marker}"))
+        .assert()
+        .success();
+    let sessions_dir = test.home_path().join("sessions");
+    let repository_path = find_session_file_containing_marker(&sessions_dir, &repository_marker)
+        .expect("no session file found for same-repository marker");
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    let unrelated_marker = format!("resume-project-unrelated-{}", Uuid::new_v4());
+    test.cmd_with_server(&server)
+        .arg("--skip-git-repo-check")
+        .arg("-C")
+        .arg(&unrelated_checkout)
+        .arg(format!("echo {unrelated_marker}"))
+        .assert()
+        .success();
+
+    let resumed_marker = format!("resume-project-selected-{}", Uuid::new_v4());
+    test.cmd_with_server(&server)
+        .arg("--skip-git-repo-check")
+        .arg("-C")
+        .arg(&exact_checkout)
+        .arg("resume")
+        .arg("--last")
+        .arg(format!("echo {resumed_marker}"))
+        .assert()
+        .success();
+
+    let resumed_path = find_session_file_containing_marker(&sessions_dir, &resumed_marker)
+        .expect("no resumed session file containing project-selected marker");
+    assert_eq!(
+        resumed_path, repository_path,
+        "resume --last should choose the newest same-repository thread"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exec_resume_by_name_excludes_unrelated_repository_collision() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let test = test_codex_exec();
+    let server = MockServer::start().await;
+    let _response_mock = mount_exec_responses(&server, /*count*/ 3).await;
+    let repositories = TempDir::new()?;
+    let current_checkout = repositories.path().join("current-checkout");
+    let repository_checkout = repositories.path().join("repository-checkout");
+    let unrelated_checkout = repositories.path().join("unrelated-checkout");
+    init_git_repo_with_origin(&current_checkout, "https://example.com/acme/project.git")?;
+    init_git_repo_with_origin(&repository_checkout, "git@example.com:acme/project.git")?;
+    init_git_repo_with_origin(
+        &unrelated_checkout,
+        "https://example.com/acme/unrelated.git",
+    )?;
+
+    let repository_marker = format!("resume-name-repository-{}", Uuid::new_v4());
+    test.cmd_with_server(&server)
+        .arg("--skip-git-repo-check")
+        .arg("-C")
+        .arg(&repository_checkout)
+        .arg(format!("echo {repository_marker}"))
+        .assert()
+        .success();
+    let sessions_dir = test.home_path().join("sessions");
+    let repository_path = find_session_file_containing_marker(&sessions_dir, &repository_marker)
+        .expect("no session file found for same-repository marker");
+    let repository_id =
+        codex_protocol::ThreadId::from_string(&extract_conversation_id(&repository_path))?;
+
+    let unrelated_marker = format!("resume-name-unrelated-{}", Uuid::new_v4());
+    test.cmd_with_server(&server)
+        .arg("--skip-git-repo-check")
+        .arg("-C")
+        .arg(&unrelated_checkout)
+        .arg(format!("echo {unrelated_marker}"))
+        .assert()
+        .success();
+    let unrelated_path = find_session_file_containing_marker(&sessions_dir, &unrelated_marker)
+        .expect("no session file found for unrelated marker");
+    let unrelated_id =
+        codex_protocol::ThreadId::from_string(&extract_conversation_id(&unrelated_path))?;
+
+    let shared_name = format!("shared-project-name-{}", Uuid::new_v4());
+    let mut config = codex_core::config::ConfigBuilder::default()
+        .codex_home(test.home_path().to_path_buf())
+        .build()
+        .await?;
+    config.sqlite = codex_core::config::SqliteConfig::from_sqlite_home(
+        codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(test.home_path())?,
+    );
+    let state_db = codex_core::init_state_db(&config)
+        .await
+        .expect("exec sessions should initialize the local Runtime State Backend");
+    assert!(
+        state_db
+            .update_thread_name(repository_id, Some(&shared_name))
+            .await?
+    );
+    assert!(
+        state_db
+            .update_thread_name(unrelated_id, Some(&shared_name))
+            .await?
+    );
+    codex_core::append_thread_name(test.home_path(), repository_id, &shared_name).await?;
+    codex_core::append_thread_name(test.home_path(), unrelated_id, &shared_name).await?;
+
+    let resumed_marker = format!("resume-name-selected-{}", Uuid::new_v4());
+    test.cmd_with_server(&server)
+        .arg("--skip-git-repo-check")
+        .arg("-C")
+        .arg(&current_checkout)
+        .arg("resume")
+        .arg(&shared_name)
+        .arg(format!("echo {resumed_marker}"))
+        .assert()
+        .success();
+
+    let resumed_path = find_session_file_containing_marker(&sessions_dir, &resumed_marker)
+        .expect("no resumed session file containing name-selected marker");
+    assert_eq!(
+        resumed_path, repository_path,
+        "name lookup should choose only the same-repository collision"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exec_resume_last_respects_cwd_filter_and_all_flag() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -287,7 +470,7 @@ async fn exec_resume_last_respects_cwd_filter_and_all_flag() -> anyhow::Result<(
         .success();
 
     let sessions_dir = test.home_path().join("sessions");
-    find_session_file_containing_marker(&sessions_dir, &marker_a)
+    let path_a = find_session_file_containing_marker(&sessions_dir, &marker_a)
         .expect("no session file found for marker_a");
     let path_b = find_session_file_containing_marker(&sessions_dir, &marker_b)
         .expect("no session file found for marker_b");
@@ -349,12 +532,9 @@ async fn exec_resume_last_respects_cwd_filter_and_all_flag() -> anyhow::Result<(
 
     let resumed_path_cwd = find_session_file_containing_marker(&sessions_dir, &marker_a2)
         .expect("no resumed session file containing marker_a2");
-    // The `--all` resume above appends a new turn to `path_b` while running from `dir_a`, so the
-    // session's latest cwd now matches `dir_a`. A subsequent `resume --last` should therefore pick
-    // the newest matching session (`path_b`).
     assert_eq!(
-        resumed_path_cwd, path_b,
-        "resume --last should prefer sessions whose latest turn context matches the current cwd"
+        resumed_path_cwd, path_a,
+        "project lookup without a Repository Identity should fall back to exact Recorded Working Directory"
     );
 
     Ok(())
@@ -460,7 +640,8 @@ async fn exec_resume_by_id_appends_to_existing_file() -> anyhow::Result<()> {
     let test = test_codex_exec();
     let server = MockServer::start().await;
     let _response_mock = mount_exec_responses(&server, /*count*/ 2).await;
-    let repo_root = exec_repo_root()?;
+    let source_cwd = TempDir::new()?;
+    let current_cwd = TempDir::new()?;
 
     // 1) First run: create a session
     let marker = format!("resume-by-id-{}", Uuid::new_v4());
@@ -469,7 +650,7 @@ async fn exec_resume_by_id_appends_to_existing_file() -> anyhow::Result<()> {
     test.cmd_with_server(&server)
         .arg("--skip-git-repo-check")
         .arg("-C")
-        .arg(&repo_root)
+        .arg(source_cwd.path())
         .arg(&prompt)
         .assert()
         .success();
@@ -490,7 +671,7 @@ async fn exec_resume_by_id_appends_to_existing_file() -> anyhow::Result<()> {
     test.cmd_with_server(&server)
         .arg("--skip-git-repo-check")
         .arg("-C")
-        .arg(&repo_root)
+        .arg(current_cwd.path())
         .arg(&prompt2)
         .arg("resume")
         .arg(&session_id)
@@ -501,7 +682,7 @@ async fn exec_resume_by_id_appends_to_existing_file() -> anyhow::Result<()> {
         .expect("no resumed session file containing marker2");
     assert_eq!(
         resumed_path, path,
-        "resume by id should append to existing file"
+        "resume by explicit id should remain global"
     );
     let content = std::fs::read_to_string(&resumed_path)?;
     assert!(content.contains(&marker));

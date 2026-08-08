@@ -94,7 +94,7 @@ pub enum Feature {
     // Experimental
     /// Enable JavaScript code mode backed by the in-process V8 runtime.
     CodeMode,
-    /// Use a 30-second default yield timeout for code mode exec calls.
+    /// Removed compatibility flag retained as a no-op.
     CodeModeBufferedExec,
     /// Run JavaScript code mode in the standalone host process.
     CodeModeHost,
@@ -136,6 +136,8 @@ pub enum Feature {
     DeferredExecutor,
     /// Enable runtime metrics snapshots via a manual reader.
     RuntimeMetrics,
+    /// Allow selecting PostgreSQL as the Runtime State Backend.
+    PostgresqlState,
     /// Enable startup memory extraction and file-backed memory consolidation.
     MemoryTool,
     /// Enable importing project-scoped memory from external agents.
@@ -898,7 +900,7 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::CodeModeBufferedExec,
         key: "code_mode_buffered_exec",
-        stage: Stage::UnderDevelopment,
+        stage: Stage::Removed,
         default_enabled: false,
     },
     FeatureSpec {
@@ -959,6 +961,16 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::RuntimeMetrics,
         key: "runtime_metrics",
         stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::PostgresqlState,
+        key: "postgresql_state",
+        stage: Stage::Experimental {
+            name: "PostgreSQL runtime state",
+            menu_description: "Allow PostgreSQL 18 or later to store Codex runtime state.",
+            announcement: "",
+        },
         default_enabled: false,
     },
     FeatureSpec {

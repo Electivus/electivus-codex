@@ -48,17 +48,10 @@ pub(crate) fn runtime_thread_history_migrator() -> Migrator {
     runtime_migrator(&THREAD_HISTORY_MIGRATOR)
 }
 
-pub(crate) async fn repair_legacy_recency_migration_version(
+pub(crate) async fn repair_legacy_state_migration_versions(
     pool: &SqlitePool,
     migrator: &Migrator,
 ) -> anyhow::Result<()> {
-    let Some(recency_migration) = migrator
-        .migrations
-        .iter()
-        .find(|migration| migration.version == 39)
-    else {
-        return Ok(());
-    };
     let migrations_table_exists = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
     )
@@ -69,8 +62,13 @@ pub(crate) async fn repair_legacy_recency_migration_version(
         return Ok(());
     }
 
-    let legacy_recency_needs_repair = sqlx::query_scalar::<_, i64>(
-        r#"
+    if let Some(recency_migration) = migrator
+        .migrations
+        .iter()
+        .find(|migration| migration.version == 39)
+    {
+        let legacy_recency_needs_repair = sqlx::query_scalar::<_, i64>(
+            r#"
 SELECT 1
 FROM _sqlx_migrations
 WHERE version = ?
@@ -78,20 +76,17 @@ WHERE version = ?
   AND NOT EXISTS (
       SELECT 1 FROM _sqlx_migrations WHERE version = ?
   )
-        "#,
-    )
-    .bind(38_i64)
-    .bind(recency_migration.checksum.as_ref())
-    .bind(recency_migration.version)
-    .fetch_optional(pool)
-    .await?
-    .is_some();
-    if !legacy_recency_needs_repair {
-        return Ok(());
-    }
-
-    sqlx::query(
-        r#"
+            "#,
+        )
+        .bind(38_i64)
+        .bind(recency_migration.checksum.as_ref())
+        .bind(recency_migration.version)
+        .fetch_optional(pool)
+        .await?
+        .is_some();
+        if legacy_recency_needs_repair {
+            sqlx::query(
+                r#"
 UPDATE _sqlx_migrations
 SET version = ?, description = ?
 WHERE version = ?
@@ -99,18 +94,89 @@ WHERE version = ?
   AND NOT EXISTS (
       SELECT 1 FROM _sqlx_migrations WHERE version = ?
   )
-        "#,
+                "#,
+            )
+            .bind(recency_migration.version)
+            .bind(recency_migration.description.as_ref())
+            .bind(38_i64)
+            .bind(recency_migration.checksum.as_ref())
+            .bind(recency_migration.version)
+            .execute(pool)
+            .await?;
+        }
+    }
+
+    // Upstream assigned its pin and provider migrations versions 43 and 44, while this fork
+    // already used version 43. Match the SQL checksums before shifting only those official
+    // history entries forward to the versions used by the combined migration sequence.
+    let Some(pin_migration) = migrator
+        .migrations
+        .iter()
+        .find(|migration| migration.version == 44)
+    else {
+        return Ok(());
+    };
+    let Some(provider_migration) = migrator
+        .migrations
+        .iter()
+        .find(|migration| migration.version == 45)
+    else {
+        return Ok(());
+    };
+    let version_43_checksum =
+        sqlx::query_scalar::<_, Vec<u8>>("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
+            .bind(43_i64)
+            .fetch_optional(pool)
+            .await?;
+    if version_43_checksum.as_deref() != Some(pin_migration.checksum.as_ref()) {
+        return Ok(());
+    }
+
+    let version_44_checksum =
+        sqlx::query_scalar::<_, Vec<u8>>("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
+            .bind(44_i64)
+            .fetch_optional(pool)
+            .await?;
+    let provider_is_at_version_44 =
+        version_44_checksum.as_deref() == Some(provider_migration.checksum.as_ref());
+    if version_44_checksum.is_some() && !provider_is_at_version_44 {
+        return Ok(());
+    }
+    if provider_is_at_version_44
+        && sqlx::query_scalar::<_, i64>("SELECT 1 FROM _sqlx_migrations WHERE version = ?")
+            .bind(45_i64)
+            .fetch_optional(pool)
+            .await?
+            .is_some()
+    {
+        return Ok(());
+    }
+
+    let mut transaction = pool.begin().await?;
+    if provider_is_at_version_44 {
+        sqlx::query(
+            "UPDATE _sqlx_migrations SET version = ?, description = ? WHERE version = ? AND checksum = ?",
+        )
+        .bind(provider_migration.version)
+        .bind(provider_migration.description.as_ref())
+        .bind(44_i64)
+        .bind(provider_migration.checksum.as_ref())
+        .execute(&mut *transaction)
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE _sqlx_migrations SET version = ?, description = ? WHERE version = ? AND checksum = ?",
     )
-    .bind(recency_migration.version)
-    .bind(recency_migration.description.as_ref())
-    .bind(38_i64)
-    .bind(recency_migration.checksum.as_ref())
-    .bind(recency_migration.version)
-    .execute(pool)
+    .bind(pin_migration.version)
+    .bind(pin_migration.description.as_ref())
+    .bind(43_i64)
+    .bind(pin_migration.checksum.as_ref())
+    .execute(&mut *transaction)
     .await?;
+    transaction.commit().await?;
     Ok(())
 }
 
 #[cfg(test)]
 #[path = "migrations_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -143,7 +143,22 @@ impl App {
                 tui.frame_requester().schedule_frame();
             }
             AppEvent::ResumeSessionByIdOrName(id_or_name) => {
-                match crate::lookup_session_target_with_app_server(app_server, &id_or_name).await? {
+                let remote_cwd_override = app_server
+                    .remote_cwd_override()
+                    .map(std::path::Path::to_path_buf);
+                let project_cwd = crate::contextual_session_project_cwd(
+                    app_server.uses_remote_workspace(),
+                    remote_cwd_override.as_deref(),
+                    &self.config,
+                    /*show_all*/ false,
+                );
+                match crate::lookup_session_target_with_app_server(
+                    app_server,
+                    &id_or_name,
+                    project_cwd,
+                )
+                .await?
+                {
                     Some(target_session) => {
                         return self
                             .resume_target_session(tui, app_server, target_session)

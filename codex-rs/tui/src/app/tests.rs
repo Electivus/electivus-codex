@@ -2253,6 +2253,8 @@ fn update_memory_settings_updates_current_thread_memory_mode() -> Result<()> {
         let codex_home = tempdir()?;
         app.config.codex_home = codex_home.path().to_path_buf().abs();
         app.config.sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
+        app.config.runtime_state_backend =
+            codex_state::RuntimeStateBackendConfig::Sqlite(app.config.sqlite.clone());
         // Seed the previous setting so this test exercises the thread-mode update path.
         app.config.memories.generate_memories = true;
 
@@ -3470,7 +3472,7 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
                 recency_at: Some(2),
                 status: codex_app_server_protocol::ThreadStatus::Idle,
                 path: Some(rollout_path.clone()),
-                cwd: test_path_buf("/tmp/agent").abs(),
+                cwd: test_path_buf("/tmp/agent").abs().into(),
                 cli_version: "0.0.0".to_string(),
                 source: codex_app_server_protocol::SessionSource::Unknown,
                 can_accept_direct_input: None,
@@ -3515,6 +3517,103 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
             is_running: false,
             is_closed: false,
         })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn inactive_thread_started_notification_with_foreign_cwd_keeps_execution_session()
+-> Result<()> {
+    let mut app = make_test_app().await;
+    let main_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000401").expect("valid thread");
+    let agent_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000402").expect("valid thread");
+    let primary_cwd = test_path_buf("/tmp/main").abs();
+    let shared_root = test_path_buf("/tmp/shared").abs();
+    let primary_session = ThreadSessionState {
+        runtime_workspace_roots: vec![primary_cwd.clone(), shared_root.clone()],
+        ..test_thread_session(main_thread_id, primary_cwd.to_path_buf())
+    };
+    #[cfg(not(windows))]
+    let foreign_recorded_working_directory = r"C:\Users\alice\project";
+    #[cfg(windows)]
+    let foreign_recorded_working_directory = "/home/alice/project";
+
+    app.primary_thread_id = Some(main_thread_id);
+    app.active_thread_id = Some(main_thread_id);
+    app.primary_session_configured = Some(primary_session.clone());
+    app.thread_event_channels.insert(
+        main_thread_id,
+        ThreadEventChannel::new_with_session(
+            /*capacity*/ 4,
+            primary_session.clone(),
+            Vec::new(),
+        ),
+    );
+
+    app.enqueue_thread_notification(
+        agent_thread_id,
+        ServerNotification::ThreadStarted(ThreadStartedNotification {
+            thread: Thread {
+                id: agent_thread_id.to_string(),
+                extra: None,
+                session_id: agent_thread_id.to_string(),
+                forked_from_id: None,
+                parent_thread_id: None,
+                preview: "foreign agent thread".to_string(),
+                ephemeral: false,
+                section: None,
+                section_entered_at: None,
+                history_mode: Default::default(),
+                model_provider: "agent-provider".to_string(),
+                created_at: 1,
+                updated_at: 2,
+                recency_at: Some(2),
+                status: codex_app_server_protocol::ThreadStatus::Idle,
+                path: None,
+                cwd: codex_utils_path_uri::LegacyAppPathString::from_string(
+                    foreign_recorded_working_directory,
+                ),
+                cli_version: "0.0.0".to_string(),
+                source: codex_app_server_protocol::SessionSource::Unknown,
+                can_accept_direct_input: None,
+                thread_source: None,
+                agent_nickname: Some("Robie".to_string()),
+                agent_role: Some("explorer".to_string()),
+                git_info: None,
+                name: Some("foreign agent thread".to_string()),
+                turns: Vec::new(),
+            },
+        }),
+    )
+    .await?;
+
+    let store = app
+        .thread_event_channels
+        .get(&agent_thread_id)
+        .expect("foreign agent thread channel")
+        .store
+        .lock()
+        .await;
+    let session = store.session.clone().expect("retained execution session");
+
+    assert_eq!(
+        (
+            session.thread_id,
+            session.thread_name,
+            session.model_provider_id,
+            session.cwd,
+            session.runtime_workspace_roots,
+        ),
+        (
+            agent_thread_id,
+            Some("foreign agent thread".to_string()),
+            "agent-provider".to_string(),
+            primary_cwd,
+            vec![test_path_buf("/tmp/main").abs(), shared_root],
+        )
     );
 
     Ok(())
@@ -3568,7 +3667,7 @@ async fn inactive_thread_started_notification_preserves_primary_model_when_path_
                 recency_at: Some(2),
                 status: codex_app_server_protocol::ThreadStatus::Idle,
                 path: None,
-                cwd: test_path_buf("/tmp/agent").abs(),
+                cwd: test_path_buf("/tmp/agent").abs().into(),
                 cli_version: "0.0.0".to_string(),
                 source: codex_app_server_protocol::SessionSource::Unknown,
                 can_accept_direct_input: None,
@@ -3633,7 +3732,7 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
         recency_at: Some(2),
         status: codex_app_server_protocol::ThreadStatus::Idle,
         path: None,
-        cwd: test_path_buf("/tmp/read").abs(),
+        cwd: test_path_buf("/tmp/read").abs().into(),
         cli_version: "0.0.0".to_string(),
         source: codex_app_server_protocol::SessionSource::Unknown,
         can_accept_direct_input: None,

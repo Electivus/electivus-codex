@@ -90,6 +90,7 @@ test *args:
 [no-cd]
 test-github-scripts:
     {{ python }} -m unittest discover -s {{ justfile_directory() }}/.github/scripts -p 'test_*.py'
+    {{ python }} -m unittest discover -s {{ justfile_directory() }}/scripts -p 'test_generate_references.py'
 
 # Run explicit workspace benchmark targets.
 bench *args:

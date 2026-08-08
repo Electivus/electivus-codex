@@ -27,6 +27,7 @@ use codex_app_server::in_process::InProcessServerEvent;
 use codex_app_server::in_process::InProcessStartArgs;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::RequestId;
@@ -68,7 +69,7 @@ use uuid::Uuid;
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[tokio::test]
-async fn thread_section_list_without_sqlite_returns_method_not_found() -> Result<()> {
+async fn thread_section_list_without_runtime_state_returns_method_not_found() -> Result<()> {
     let codex_home = TempDir::new()?;
     let store_id = Uuid::new_v4().to_string();
     create_config_toml_with_thread_store(codex_home.path(), "http://127.0.0.1:1", &store_id)?;
@@ -81,12 +82,12 @@ async fn thread_section_list_without_sqlite_returns_method_not_found() -> Result
             params: ThreadSectionListParams::default(),
         })
         .await?
-        .expect_err("section discovery requires sqlite state");
+        .expect_err("section discovery requires Runtime State");
 
     assert_eq!(error.code, -32601);
     assert_eq!(
         error.message,
-        "threadSection/list is unavailable without sqlite state"
+        "threadSection/list is unavailable without Runtime State"
     );
 
     client.shutdown().await?;
@@ -218,6 +219,7 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
                 search_term: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
+                project_cwd: None,
             },
         })
         .await?
@@ -379,11 +381,39 @@ async fn start_in_process_server(codex_home: &Path) -> Result<InProcessClientHan
     Ok(start_in_process_client(config, loader_overrides).await?)
 }
 
+pub(super) async fn start_in_process_server_with_thread_store(
+    codex_home: &Path,
+    thread_store: Arc<dyn ThreadStore>,
+) -> Result<InProcessClientHandle> {
+    let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
+    let config = Arc::new(
+        ConfigBuilder::default()
+            .codex_home(codex_home.to_path_buf())
+            .fallback_cwd(Some(codex_home.to_path_buf()))
+            .loader_overrides(loader_overrides.clone())
+            .build()
+            .await?,
+    );
+    let mut args = in_process_start_args(config, loader_overrides);
+    args.initialize.capabilities = Some(InitializeCapabilities {
+        experimental_api: true,
+        ..Default::default()
+    });
+    Ok(in_process::start_with_thread_store(args, thread_store).await?)
+}
+
 async fn start_in_process_client(
     config: Arc<Config>,
     loader_overrides: LoaderOverrides,
 ) -> std::io::Result<InProcessClientHandle> {
-    in_process::start(InProcessStartArgs {
+    in_process::start(in_process_start_args(config, loader_overrides)).await
+}
+
+fn in_process_start_args(
+    config: Arc<Config>,
+    loader_overrides: LoaderOverrides,
+) -> InProcessStartArgs {
+    InProcessStartArgs {
         arg0_paths: Arg0DispatchPaths::default(),
         config,
         cli_overrides: Vec::new(),
@@ -407,8 +437,7 @@ async fn start_in_process_client(
             capabilities: None,
         },
         channel_capacity: in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
-    })
-    .await
+    }
 }
 
 async fn delete_thread(

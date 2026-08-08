@@ -81,6 +81,7 @@ use codex_thread_store::ThreadPersistenceMetadata;
 use codex_thread_store::ThreadStore;
 use codex_thread_store::UpdateThreadMetadataParams;
 use codex_utils_absolute_path::test_support::PathExt;
+use codex_utils_path_uri::LegacyAppPathString;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -141,7 +142,10 @@ async fn thread_read_returns_summary_without_turns() -> Result<()> {
     assert_eq!(thread.model_provider, "mock_provider");
     assert!(!thread.ephemeral, "stored rollouts should not be ephemeral");
     assert!(thread.path.as_ref().expect("thread path").is_absolute());
-    assert_eq!(thread.cwd, test_absolute_path("/"));
+    assert_eq!(
+        thread.cwd,
+        LegacyAppPathString::from_abs_path(&test_absolute_path("/"))
+    );
     assert_eq!(thread.cli_version, "0.0.0");
     assert_eq!(thread.source, SessionSource::Cli);
     assert_eq!(thread.git_info, None);
@@ -260,6 +264,7 @@ async fn paginated_stored_thread_routes_projected_turns_and_rejects_legacy_histo
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let ThreadListResponse { data, .. } =
@@ -961,6 +966,7 @@ async fn thread_list_includes_store_thread_without_rollout_path() -> Result<()> 
                 search_term: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
+                project_cwd: None,
             },
         })
         .await?
@@ -1340,6 +1346,7 @@ async fn paginated_thread_name_set_is_reflected_in_read_list_and_metadata_resume
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let list_resp: JSONRPCResponse = timeout(

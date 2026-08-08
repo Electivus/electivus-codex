@@ -16,8 +16,6 @@ use codex_code_mode::CodeModeSession;
 use codex_code_mode::CodeModeSessionProvider;
 use codex_code_mode::CodeModeToolKind;
 use codex_code_mode::RuntimeResponse;
-use codex_features::Feature;
-use codex_features::Features;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use serde_json::Value as JsonValue;
 use tokio::sync::OnceCell;
@@ -53,15 +51,6 @@ pub(crate) use wait_handler::CodeModeWaitHandler;
 
 pub(crate) const PUBLIC_TOOL_NAME: &str = codex_code_mode::PUBLIC_TOOL_NAME;
 pub(crate) const WAIT_TOOL_NAME: &str = codex_code_mode::WAIT_TOOL_NAME;
-pub(crate) const DEFAULT_WAIT_YIELD_TIME_MS: u64 = codex_code_mode::DEFAULT_WAIT_YIELD_TIME_MS;
-const BUFFERED_EXEC_YIELD_TIME_MS: u64 = 30_000;
-
-pub(crate) fn default_exec_yield_time_override_ms(features: &Features) -> Option<u64> {
-    features
-        .enabled(Feature::CodeModeBufferedExec)
-        .then_some(BUFFERED_EXEC_YIELD_TIME_MS)
-}
-
 /// Returns true for the un-namespaced code-mode `exec` tool.
 pub(crate) fn is_exec_tool_name(tool_name: &ToolName) -> bool {
     tool_name.namespace.is_none() && tool_name.name == PUBLIC_TOOL_NAME
@@ -77,21 +66,16 @@ pub(crate) struct CodeModeService {
     session: OnceCell<Arc<dyn CodeModeSession>>,
     session_provider: Arc<dyn CodeModeSessionProvider>,
     dispatch_broker: Arc<CodeModeDispatchBroker>,
-    default_exec_yield_time_override_ms: Option<u64>,
     shutting_down: AtomicBool,
 }
 
 impl CodeModeService {
-    pub(crate) fn new(
-        session_provider: Arc<dyn CodeModeSessionProvider>,
-        features: &Features,
-    ) -> Self {
+    pub(crate) fn new(session_provider: Arc<dyn CodeModeSessionProvider>) -> Self {
         let dispatch_broker = Arc::new(CodeModeDispatchBroker::new());
         Self {
             session: OnceCell::new(),
             session_provider,
             dispatch_broker,
-            default_exec_yield_time_override_ms: default_exec_yield_time_override_ms(features),
             shutting_down: AtomicBool::new(false),
         }
     }
@@ -102,11 +86,8 @@ impl CodeModeService {
 
     pub(crate) async fn execute(
         &self,
-        mut request: codex_code_mode::ExecuteRequest,
+        request: codex_code_mode::ExecuteRequest,
     ) -> Result<codex_code_mode::StartedCell, String> {
-        if request.yield_time_ms.is_none() {
-            request.yield_time_ms = self.default_exec_yield_time_override_ms;
-        }
         self.session().await?.execute(request).await
     }
 
@@ -389,7 +370,6 @@ mod tests {
     use codex_code_mode::FunctionCallOutputContentItem as CodeModeOutputContentItem;
     use codex_code_mode::ProcessOwnedCodeModeSessionProvider;
     use codex_code_mode::RuntimeResponse;
-    use codex_features::Features;
     use codex_protocol::models::FunctionCallOutputContentItem;
     use codex_tools::ToolName;
     use serde_json::json;
@@ -463,12 +443,11 @@ mod tests {
 
     #[tokio::test]
     async fn missing_process_host_falls_back_to_in_process_session() {
-        let service = CodeModeService::new(
-            Arc::new(ProcessOwnedCodeModeSessionProvider::with_host_program(
+        let service = CodeModeService::new(Arc::new(
+            ProcessOwnedCodeModeSessionProvider::with_host_program(
                 "codex-code-mode-host-does-not-exist".into(),
-            )),
-            &Features::with_defaults(),
-        );
+            ),
+        ));
 
         let response = service
             .execute(ExecuteRequest {

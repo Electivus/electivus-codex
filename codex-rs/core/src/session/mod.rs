@@ -22,6 +22,7 @@ use crate::build_available_skills;
 use crate::compact;
 use crate::compact::CompactedHistoryMetadata;
 use crate::config::ManagedFeatures;
+use crate::config::resolve_tool_execution_config;
 use crate::config::resolve_tool_suggest_config_from_layer_stack;
 use crate::context::ApprovedCommandPrefixSaved;
 use crate::context::AvailableSkillsInstructions;
@@ -153,6 +154,7 @@ use codex_thread_store::CreateThreadParams;
 use codex_thread_store::LiveThread;
 use codex_thread_store::LiveThreadInitGuard;
 use codex_thread_store::LocalThreadStore;
+use codex_thread_store::PostgresThreadStore;
 use codex_thread_store::ReadThreadParams;
 use codex_thread_store::ResumeThreadParams;
 use codex_thread_store::ThreadPersistenceMetadata;
@@ -1661,6 +1663,7 @@ impl Session {
                 .with_user_layer_from(&next_config.config_layer_stack);
             config.tool_suggest =
                 resolve_tool_suggest_config_from_layer_stack(&config.config_layer_stack);
+            config.tool_execution = next_config.tool_execution;
             config.mcp_servers = next_config.mcp_servers.clone();
             config.mcp_oauth_credentials_store_mode = next_config.mcp_oauth_credentials_store_mode;
             if let Err(err) = config.features.set_enabled(
@@ -1811,6 +1814,21 @@ impl Session {
             }
             config.tool_suggest =
                 resolve_tool_suggest_config_from_layer_stack(&config.config_layer_stack);
+            let effective_config: codex_config::config_toml::ConfigToml =
+                match config.config_layer_stack.effective_config().try_into() {
+                    Ok(config) => config,
+                    Err(err) => {
+                        warn!("failed to resolve user config while reloading layer: {err}");
+                        return;
+                    }
+                };
+            config.tool_execution = match resolve_tool_execution_config(&effective_config) {
+                Ok(policy) => policy,
+                Err(err) => {
+                    warn!("failed to resolve tool execution config while reloading layer: {err}");
+                    return;
+                }
+            };
             config
         };
         self.services.skills_service.clear_cache();

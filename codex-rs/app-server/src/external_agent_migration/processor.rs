@@ -44,6 +44,7 @@ use codex_features::Feature;
 use codex_rollout::StateDbHandle;
 use codex_state::ExternalAgentConfigImportFailureRecord;
 use codex_state::ExternalAgentConfigImportSuccessRecord;
+use codex_state::ExternalAgentMemoryImport;
 use codex_thread_store::ThreadStore;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -210,6 +211,7 @@ impl ExternalAgentConfigRequestProcessor {
         }
 
         let mut completed_item_results = Vec::new();
+        let memory_import = import_outcome.memory_import().cloned();
         if let Some(session_validation_result) = session_validation_result {
             send_import_progress(&self.outgoing, &import_id, &session_validation_result).await;
             completed_item_results.push(session_validation_result);
@@ -226,10 +228,13 @@ impl ExternalAgentConfigRequestProcessor {
                 &self.outgoing,
                 self.state_db.as_ref(),
                 &self.analytics_events_client,
-                import_id,
-                analytics_source,
-                provider_id,
-                &completed_item_results,
+                CompletedImport {
+                    import_id,
+                    analytics_source,
+                    provider_id,
+                    item_results: completed_item_results,
+                    memory_import,
+                },
             )
             .await;
             return Ok(());
@@ -321,10 +326,13 @@ impl ExternalAgentConfigRequestProcessor {
                 &outgoing,
                 state_db.as_ref(),
                 &analytics_events_client,
-                import_id,
-                analytics_source,
-                provider_id,
-                &completed_item_results,
+                CompletedImport {
+                    import_id,
+                    analytics_source,
+                    provider_id,
+                    item_results: completed_item_results,
+                    memory_import,
+                },
             )
             .await;
         });
@@ -360,7 +368,12 @@ impl ExternalAgentConfigRequestProcessor {
         let histories = state_db
             .external_agent_config_import_history_records()
             .await
-            .map_err(|err| internal_error(format!("failed to read import histories: {err}")))?;
+            .map_err(|err| {
+                tracing::warn!(error = %err, "failed to read external-agent import histories");
+                internal_error(
+                    "failed to read import histories; verify Runtime State health and retry",
+                )
+            })?;
         let data = histories
             .into_iter()
             .map(protocol_import_history)
@@ -415,6 +428,7 @@ impl ExternalAgentConfigRequestProcessor {
             import_id.as_str(),
             Some(params.provider_id.as_str()),
             &item_type_results,
+            /*memory_import*/ None,
         )
         .await
         .map_err(|err| internal_error(format!("failed to record import history: {err}")))?;
@@ -521,16 +535,44 @@ async fn send_import_progress(
         .await;
 }
 
+struct CompletedImport {
+    import_id: String,
+    analytics_source: String,
+    provider_id: Option<String>,
+    item_results: Vec<CoreImportItemResult>,
+    memory_import: Option<ExternalAgentMemoryImport>,
+}
+
 async fn send_completed_import_notification(
     outgoing: &OutgoingMessageSender,
     state_db: Option<&StateDbHandle>,
     analytics_events_client: &AnalyticsEventsClient,
-    import_id: String,
-    analytics_source: String,
-    provider_id: Option<String>,
-    item_results: &[CoreImportItemResult],
+    completed_import: CompletedImport,
 ) {
-    let notification = completed_notification(import_id, item_results);
+    let CompletedImport {
+        import_id,
+        analytics_source,
+        provider_id,
+        item_results,
+        memory_import,
+    } = completed_import;
+    let mut notification = completed_notification(import_id, &item_results);
+    if let Some(state_db) = state_db
+        && let Err(err) = record_completed_import_notification(
+            state_db,
+            provider_id.as_deref(),
+            &notification,
+            memory_import.as_ref(),
+        )
+        .await
+    {
+        tracing::warn!(
+            import_id = %notification.import_id,
+            error = %err,
+            "failed to record external agent config import completion"
+        );
+        mark_import_persistence_failed(&mut notification);
+    }
     log_completed_import_failures(&notification);
     track_completed_import_notification(
         analytics_events_client,
@@ -538,22 +580,29 @@ async fn send_completed_import_notification(
         provider_id.as_deref().unwrap_or_default(),
         &notification,
     );
-    if let Some(state_db) = state_db
-        && let Err(err) =
-            record_completed_import_notification(state_db, provider_id.as_deref(), &notification)
-                .await
-    {
-        tracing::warn!(
-            import_id = %notification.import_id,
-            error = %err,
-            "failed to record external agent config import completion"
-        );
-    }
     outgoing
         .send_server_notification(ServerNotification::ExternalAgentConfigImportCompleted(
             notification,
         ))
         .await;
+}
+
+fn mark_import_persistence_failed(
+    notification: &mut ExternalAgentConfigImportCompletedNotification,
+) {
+    for type_result in &mut notification.item_type_results {
+        type_result.successes.clear();
+        type_result.failures.push(ProtocolImportFailure {
+            item_type: type_result.item_type,
+            error_type: Some("runtime_state_unavailable".to_string()),
+            sub_error_type: None,
+            failure_stage: "persist_import_completion".to_string(),
+            message: "failed to persist import completion; verify Runtime State health and retry"
+                .to_string(),
+            cwd: None,
+            source: None,
+        });
+    }
 }
 
 fn log_completed_import_failures(notification: &ExternalAgentConfigImportCompletedNotification) {
@@ -634,12 +683,14 @@ async fn record_completed_import_notification(
     state_db: &StateDbHandle,
     provider_id: Option<&str>,
     notification: &ExternalAgentConfigImportCompletedNotification,
+    memory_import: Option<&ExternalAgentMemoryImport>,
 ) -> anyhow::Result<()> {
     record_import_history(
         state_db,
         notification.import_id.as_str(),
         provider_id,
         &notification.item_type_results,
+        memory_import,
     )
     .await
 }
@@ -649,6 +700,7 @@ async fn record_import_history(
     import_id: &str,
     provider_id: Option<&str>,
     item_type_results: &[ProtocolImportTypeResult],
+    memory_import: Option<&ExternalAgentMemoryImport>,
 ) -> anyhow::Result<()> {
     let successes = item_type_results
         .iter()
@@ -678,14 +730,29 @@ async fn record_import_history(
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    state_db
-        .record_external_agent_config_import_completed(
-            import_id,
-            provider_id,
-            &successes,
-            &failures,
-        )
-        .await
+    match memory_import {
+        Some(memory_import) => {
+            state_db
+                .record_external_agent_config_import_completed_with_memory_import(
+                    import_id,
+                    provider_id,
+                    &successes,
+                    &failures,
+                    memory_import,
+                )
+                .await
+        }
+        None => {
+            state_db
+                .record_external_agent_config_import_completed(
+                    import_id,
+                    provider_id,
+                    &successes,
+                    &failures,
+                )
+                .await
+        }
+    }
 }
 
 fn apply_plugin_outcome_to_item_result(

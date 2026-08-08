@@ -2,7 +2,6 @@ use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::session::turn_context::TurnContext;
-use crate::tools::code_mode::default_exec_yield_time_override_ms;
 use crate::tools::code_mode::execute_spec::create_code_mode_tool;
 use crate::tools::context::ToolInvocation;
 use crate::tools::effective_tool_mode;
@@ -516,9 +515,7 @@ fn build_code_mode_executors(
         .sort_by(|left, right| compare_code_mode_tools(left, right, &namespace_descriptions));
     let deferred_tools =
         collect_code_mode_exec_prompt_tool_definitions(deferred_exec_prompt_tool_specs.iter());
-    let default_exec_yield_time_ms =
-        default_exec_yield_time_override_ms(&turn_context.config.features)
-            .unwrap_or(codex_code_mode::DEFAULT_EXEC_YIELD_TIME_MS);
+    let yield_time = turn_context.config.tool_execution.yield_time();
 
     vec![
         Arc::new(CodeModeExecuteHandler::new(
@@ -526,12 +523,12 @@ fn build_code_mode_executors(
                 &enabled_tools,
                 &deferred_tools,
                 &namespace_descriptions,
-                default_exec_yield_time_ms,
+                yield_time,
                 tool_mode == ToolMode::CodeModeOnly,
             ),
             code_mode_nested_tool_specs,
         )),
-        Arc::new(CodeModeWaitHandler),
+        Arc::new(CodeModeWaitHandler::new(yield_time)),
     ]
 }
 
@@ -621,8 +618,9 @@ fn add_tool_sources(context: &CoreToolPlanContext<'_>, planned_tools: &mut Plann
                     turn_context,
                     context.environments,
                 ),
+                tool_execution: turn_context.config.tool_execution,
             }));
-            planned_tools.add(WriteStdinHandler);
+            planned_tools.add(WriteStdinHandler::new(turn_context.config.tool_execution));
             planned_tools.add(ViewImageHandler::new(ViewImageToolOptions {
                 can_request_original_image_detail: can_request_original_image_detail(
                     &turn_context.model_info,
@@ -678,6 +676,7 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut Planne
         backend_config: shell_command_backend_for_features(features),
         allow_login_shell,
         exec_permission_approvals_enabled,
+        tool_execution: turn_context.config.tool_execution,
     };
 
     match shell_type_for_model_and_features(&turn_context.model_info, features) {
@@ -690,8 +689,9 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut Planne
                     turn_context,
                     context.environments,
                 ),
+                tool_execution: turn_context.config.tool_execution,
             }));
-            planned_tools.add(WriteStdinHandler);
+            planned_tools.add(WriteStdinHandler::new(turn_context.config.tool_execution));
 
             // Keep the legacy shell tool registered while unified exec is
             // model-visible.

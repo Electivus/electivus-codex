@@ -1,3 +1,4 @@
+use super::recorded_working_directory::execution_cwd_from_recorded_working_directory;
 use super::thread_enrichment::enrich_loaded_threads;
 use super::thread_fork_goal::inherit_thread_goal_snapshot;
 use super::turn_processor::can_accept_direct_input;
@@ -15,6 +16,7 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_utils_path_uri::LegacyAppPathString;
 
 const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 const THREAD_LIST_MAX_LIMIT: usize = 100;
@@ -27,7 +29,7 @@ struct ThreadListFilters {
     source_kinds: Option<Vec<ThreadSourceKind>>,
     archived: bool,
     section_id: Option<Option<String>>,
-    cwd_filters: Option<Vec<PathBuf>>,
+    location_filter: StoreThreadLocationFilter,
     search_term: Option<String>,
     use_state_db_only: bool,
     relation_filter: Option<StoreThreadRelationFilter>,
@@ -216,6 +218,15 @@ fn normalize_thread_list_cwd_filters(
     }
 
     Ok(Some(normalized_cwds))
+}
+
+fn exact_thread_location_filter(
+    cwd: Option<ThreadListCwdFilter>,
+) -> Result<StoreThreadLocationFilter, JSONRPCErrorError> {
+    Ok(match normalize_thread_list_cwd_filters(cwd)? {
+        Some(cwds) => StoreThreadLocationFilter::ExactCwds(cwds),
+        None => StoreThreadLocationFilter::Unrestricted,
+    })
 }
 
 fn has_model_resume_override(
@@ -753,7 +764,7 @@ impl ThreadRequestProcessor {
             .unwrap_or(THREAD_LIST_DEFAULT_LIMIT)
             .clamp(1, THREAD_LIST_MAX_LIMIT);
         let state_db = self.state_db.clone().ok_or_else(|| {
-            method_not_found("threadSection/list is unavailable without sqlite state")
+            method_not_found("threadSection/list is unavailable without Runtime State")
         })?;
         let page = state_db
             .list_thread_sections(params.cursor.as_deref(), limit)
@@ -1690,23 +1701,15 @@ impl ThreadRequestProcessor {
         let state_db = self
             .state_db
             .clone()
-            .ok_or_else(|| internal_error("sqlite state db unavailable for memory reset"))?;
+            .ok_or_else(|| internal_error("runtime state unavailable for memory reset"))?;
 
-        state_db
-            .memories()
-            .clear_memory_data()
+        reset_memories(state_db.memories(), &self.config.codex_home)
             .await
             .map_err(|err| {
-                internal_error(format!("failed to clear memory rows in memories db: {err}"))
-            })?;
-
-        clear_memory_roots_contents(&self.config.codex_home)
-            .await
-            .map_err(|err| {
-                internal_error(format!(
-                    "failed to clear memory directories under {}: {err}",
-                    self.config.codex_home.display()
-                ))
+                warn!(error = %err, "failed to reset Runtime State memory");
+                internal_error(
+                    "failed to reset memory state; verify Runtime State health and retry",
+                )
             })?;
 
         Ok(MemoryResetResponse {})
@@ -1862,15 +1865,19 @@ impl ThreadRequestProcessor {
         }
 
         let (thread_id, thread) = self.load_thread(&thread_id).await?;
-        if matches!(
-            thread.config_snapshot().await.history_mode,
-            ThreadHistoryMode::Paginated
-        ) {
+        let config_snapshot = thread.config_snapshot().await;
+        if config_snapshot.ephemeral {
+            return Err(invalid_request(
+                "thread rollback requires persisted thread history",
+            ));
+        }
+        if matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated)
+            && !self.thread_store.supports_paginated_rollback()
+        {
             return Err(invalid_request(
                 "paginated threads do not support thread/rollback",
             ));
         }
-
         let request = request_id.clone();
 
         let rollback_already_in_progress = {
@@ -2051,12 +2058,27 @@ impl ThreadRequestProcessor {
             archived,
             section_id,
             cwd,
+            project_cwd,
             use_state_db_only,
             search_term,
             parent_thread_id,
             ancestor_thread_id,
         } = params;
-        let cwd_filters = normalize_thread_list_cwd_filters(cwd)?;
+        if cwd.is_some() && project_cwd.is_some() {
+            return Err(invalid_params(
+                "cwd and projectCwd are mutually exclusive thread/list filters",
+            ));
+        }
+        let location_filter = match project_cwd {
+            Some(project_cwd) => {
+                super::project_session_scope::resolve_project_location_filter(
+                    &self.thread_manager.environment_manager(),
+                    project_cwd,
+                )
+                .await
+            }
+            None => exact_thread_location_filter(cwd)?,
+        };
         let relation_filter = match (parent_thread_id, ancestor_thread_id) {
             (Some(_), Some(_)) => {
                 return Err(invalid_request(
@@ -2101,7 +2123,7 @@ impl ThreadRequestProcessor {
                     source_kinds,
                     archived: archived.unwrap_or(false),
                     section_id,
-                    cwd_filters,
+                    location_filter,
                     search_term,
                     use_state_db_only,
                     relation_filter,
@@ -3193,7 +3215,9 @@ impl ThreadRequestProcessor {
         let needs_paginated_projection =
             paginated_resume && (include_turns || initial_turns_page.is_some());
 
-        let history_cwd = thread_history.session_cwd();
+        let history_cwd = thread_history
+            .session_cwd()
+            .and_then(|cwd| execution_cwd_from_recorded_working_directory(&cwd, "thread/resume"));
         let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
@@ -3271,12 +3295,6 @@ impl ThreadRequestProcessor {
                 }
                 let instruction_sources = codex_thread.legacy_instruction_sources().await;
                 let SessionConfiguredEvent { rollout_path, .. } = session_configured;
-                let Some(rollout_path) = rollout_path else {
-                    let error =
-                        internal_error(format!("rollout path missing for thread {thread_id}"));
-                    self.outgoing.send_error(request_id, error).await;
-                    return Ok(());
-                };
                 // Paginated JSONL is canonical, but its SQLite projection can lag after a
                 // previous write failure. Persist after reopening the live writer so legacy
                 // response hydration reads the latest durable turns and items.
@@ -3319,7 +3337,7 @@ impl ThreadRequestProcessor {
                         thread_id,
                         codex_thread.as_ref(),
                         &response_history,
-                        rollout_path.as_path(),
+                        rollout_path.as_deref(),
                         resume_source_thread,
                         include_turns && !paginated_resume,
                     )
@@ -3810,7 +3828,9 @@ impl ThreadRequestProcessor {
         path: Option<&PathBuf>,
         include_history: bool,
     ) -> Result<StoredThread, JSONRPCErrorError> {
-        let result = if let Some(path) = path {
+        let result = if let Some(path) = path
+            && self.thread_store.supports_rollout_path_lookup()
+        {
             self.thread_store
                 .read_thread_by_rollout_path(StoreReadThreadByRolloutPathParams {
                     rollout_path: path.clone(),
@@ -3904,7 +3924,7 @@ impl ThreadRequestProcessor {
         thread_id: ThreadId,
         thread: &CodexThread,
         thread_history: &InitialHistory,
-        rollout_path: &Path,
+        rollout_path: Option<&Path>,
         resume_source_thread: Option<StoredThread>,
         include_turns: bool,
     ) -> std::result::Result<Thread, String> {
@@ -3978,7 +3998,7 @@ impl ThreadRequestProcessor {
                     session_id.clone(),
                     thread.multi_agent_version(),
                     &config_snapshot,
-                    Some(rollout_path.into()),
+                    rollout_path.map(Path::to_path_buf),
                 );
                 thread.preview = preview_from_rollout_items(items);
                 Ok(thread)
@@ -3991,7 +4011,9 @@ impl ThreadRequestProcessor {
         thread.can_accept_direct_input = Some(can_accept_direct_input);
         thread.id = thread_id.to_string();
         thread.session_id = session_id;
-        thread.path = Some(rollout_path.to_path_buf());
+        if let Some(rollout_path) = rollout_path {
+            thread.path = Some(rollout_path.to_path_buf());
+        }
         if include_turns {
             let history_items = thread_history.get_rollout_items();
             populate_thread_turns_from_history(
@@ -4099,24 +4121,31 @@ impl ThreadRequestProcessor {
                 (None, None) => codex_thread_store::ForkBoundary::Latest,
                 (Some(_), Some(_)) => unreachable!("fork boundaries are mutually exclusive"),
             };
-            Some(
-                self.thread_store
-                    .prepare_fork(codex_thread_store::PrepareForkParams {
-                        thread_id: source_thread_id,
-                        boundary,
-                    })
-                    .await
-                    .map_err(|err| match err {
-                        ThreadStoreError::InvalidRequest { message } => invalid_request(message),
-                        ThreadStoreError::ThreadNotFound { thread_id } => {
-                            invalid_request(format!("no rollout found for thread id {thread_id}"))
-                        }
-                        ThreadStoreError::Unsupported { .. } => {
-                            method_not_found("paginated_threads is not supported yet")
-                        }
-                        err => internal_error(format!("failed to prepare paginated fork: {err}")),
-                    })?,
-            )
+            match self
+                .thread_store
+                .prepare_fork(codex_thread_store::PrepareForkParams {
+                    thread_id: source_thread_id,
+                    boundary,
+                })
+                .await
+            {
+                Ok(prepared_fork) => Some(prepared_fork),
+                // The PostgreSQL store still forks by copying its database-native history.
+                Err(ThreadStoreError::Unsupported { .. }) => None,
+                Err(ThreadStoreError::InvalidRequest { message }) => {
+                    return Err(invalid_request(message));
+                }
+                Err(ThreadStoreError::ThreadNotFound { thread_id }) => {
+                    return Err(invalid_request(format!(
+                        "no rollout found for thread id {thread_id}"
+                    )));
+                }
+                Err(err) => {
+                    return Err(internal_error(format!(
+                        "failed to prepare paginated fork: {err}"
+                    )));
+                }
+            }
         } else {
             None
         };
@@ -4142,7 +4171,8 @@ impl ThreadRequestProcessor {
                     })?,
             )
         };
-        let history_cwd = Some(source_thread.cwd.clone());
+        let history_cwd =
+            execution_cwd_from_recorded_working_directory(&source_thread.cwd, "thread/fork");
 
         // Persist Windows sandbox mode.
         let mut cli_overrides = cli_overrides.unwrap_or_default();
@@ -4310,9 +4340,7 @@ impl ThreadRequestProcessor {
             app_server_client_version,
         )
         .await?;
-        if session_configured.rollout_path.is_some()
-            && let Some(name) = source_thread_name.clone()
-        {
+        if !ephemeral && let Some(name) = source_thread_name.clone() {
             self.thread_manager
                 .update_thread_metadata(
                     thread_id,
@@ -4325,10 +4353,7 @@ impl ThreadRequestProcessor {
                 .await
                 .map_err(|err| core_thread_write_error("inherit source thread name", err))?;
         }
-        let inherited_goal = if defer_goal_continuation
-            && session_configured.rollout_path.is_some()
-            && goals_enabled
-        {
+        let inherited_goal = if defer_goal_continuation && !ephemeral && goals_enabled {
             if let Some(state_db) = forked_thread.state_db().or_else(|| self.state_db.clone()) {
                 self.thread_goal_processor
                     .flush_goal_progress_for_fork(source_thread_id)
@@ -4546,7 +4571,7 @@ impl ThreadRequestProcessor {
             source_kinds,
             archived,
             section_id,
-            cwd_filters,
+            location_filter,
             search_term,
             use_state_db_only,
             relation_filter,
@@ -4591,7 +4616,7 @@ impl ThreadRequestProcessor {
                     sort_direction: store_sort_direction,
                     allowed_sources: allowed_sources.to_vec(),
                     model_providers: model_provider_filter.clone(),
-                    cwd_filters: cwd_filters.clone(),
+                    location_filter: location_filter.clone(),
                     archived,
                     section: section_id.clone(),
                     search_term: search_term.clone(),
@@ -4611,11 +4636,21 @@ impl ThreadRequestProcessor {
                 if source_kind_filter
                     .as_ref()
                     .is_none_or(|filter| source_kind_matches(&source, filter))
-                    && cwd_filters.as_ref().is_none_or(|expected_cwds| {
-                        expected_cwds.iter().any(|expected_cwd| {
-                            path_utils::paths_match_after_normalization(&it.cwd, expected_cwd)
-                        })
-                    })
+                    && match &location_filter {
+                        StoreThreadLocationFilter::Unrestricted => true,
+                        StoreThreadLocationFilter::ExactCwds(expected_cwds) => {
+                            expected_cwds.iter().any(|expected_cwd| {
+                                path_utils::paths_match_after_normalization(&it.cwd, expected_cwd)
+                            })
+                        }
+                        StoreThreadLocationFilter::ProjectSessionScope {
+                            cwd,
+                            repository_identity,
+                        } => {
+                            path_utils::paths_match_after_normalization(&it.cwd, cwd)
+                                || it.repository_identity.as_ref() == Some(repository_identity)
+                        }
+                    }
                 {
                     filtered.push(it);
                     if filtered.len() >= remaining {
@@ -5157,7 +5192,7 @@ fn set_thread_name_from_title(thread: &mut Thread, title: String) {
 pub(crate) fn thread_from_stored_thread(
     thread: StoredThread,
     fallback_provider: &str,
-    fallback_cwd: &AbsolutePathBuf,
+    _fallback_cwd: &AbsolutePathBuf,
 ) -> (Thread, Option<codex_thread_store::StoredThreadHistory>) {
     let path = thread.rollout_path;
     let git_info = thread.git_info.map(|info| ApiGitInfo {
@@ -5165,13 +5200,7 @@ pub(crate) fn thread_from_stored_thread(
         branch: info.branch,
         origin_url: info.repository_url,
     });
-    let cwd = AbsolutePathBuf::relative_to_current_dir(path_utils::normalize_for_native_workdir(
-        thread.cwd,
-    ))
-    .unwrap_or_else(|err| {
-        warn!("failed to normalize thread cwd while reading stored thread: {err}");
-        fallback_cwd.clone()
-    });
+    let cwd = LegacyAppPathString::from_path(&thread.cwd);
     let source = with_thread_spawn_agent_metadata(
         thread.source,
         thread.agent_nickname.clone(),
@@ -5414,7 +5443,7 @@ fn build_thread_from_snapshot(
         recency_at: Some(now),
         status: ThreadStatus::NotLoaded,
         path,
-        cwd: config_snapshot.cwd().clone(),
+        cwd: LegacyAppPathString::from_abs_path(config_snapshot.cwd()),
         cli_version: env!("CARGO_PKG_VERSION").to_string(),
         agent_nickname: config_snapshot.session_source.get_nickname(),
         agent_role: config_snapshot.session_source.get_agent_role(),
