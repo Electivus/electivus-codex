@@ -8,6 +8,7 @@ The schemas describe accepted wire shapes. The runtime may intentionally support
 
 ## Event catalog
 
+<!-- prettier-ignore -->
 | Event | Fires | Matcher input | Scope | Output schema |
 | --- | --- | --- | --- | --- |
 | [`SessionStart`](#session-start) | Before the first model turn after startup, resume, clear, or compaction. | Session source: `startup`, `resume`, `clear`, or `compact`. | `thread` | `session-start.command.output.schema.json` |
@@ -50,6 +51,7 @@ trusted_hash = "<hash returned by hooks/list>"
 
 Configured handler variants are `command`, `prompt`, `agent`. Only `command` executes today; `prompt` and `agent` parse successfully but discovery skips them with warnings. Empty commands are also skipped. `commandWindows` overrides `command` only on Windows.
 
+<!-- prettier-ignore -->
 | Command field | Meaning |
 | --- | --- |
 | `command` | Shell command used on non-Windows platforms and as the Windows fallback. |
@@ -82,6 +84,7 @@ Every selected command receives one compact JSON object on stdin (no trailing ne
 
 All matching handlers for one event start concurrently. Results are collected by completion but sorted back into configured/display order for reporting and most aggregation. The one intentional completion-order rule is competing `PreToolUse.updatedInput`: the last process to finish wins. Duplicate declarations are not deduplicated.
 
+<!-- prettier-ignore -->
 | Timeout class | Default | Bound |
 | --- | ---: | ---: |
 | Most command hooks | 600s | minimum 1s; no explicit maximum |
@@ -118,6 +121,7 @@ Top-level `notify = [program, args...]` is separate from the 11 configurable com
 
 Canonical fixture: `codex-rs/hooks/schema/generated/session-start.command.input.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `cwd` | yes | <code>string</code> | — | _No description available in the generated schema._ |
@@ -130,6 +134,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/session-start.command.input.
 
 <details><summary>Raw JSON Schema: <code>session-start.command.input.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -199,6 +204,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/session-start.command.input.
 
 Canonical fixture: `codex-rs/hooks/schema/generated/session-start.command.output.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `continue` | no | <code>boolean</code> | default `true` | _No description available in the generated schema._ |
@@ -211,6 +217,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/session-start.command.output
 
 <details><summary>Raw JSON Schema: <code>session-start.command.output.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -284,6 +291,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/session-start.command.output
 
 Canonical fixture: `codex-rs/hooks/schema/generated/session-end.command.input.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `cwd` | yes | <code>string</code> | — | _No description available in the generated schema._ |
@@ -294,6 +302,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/session-end.command.input.sc
 
 <details><summary>Raw JSON Schema: <code>session-end.command.input.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -360,6 +369,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/session-end.command.input.sc
 
 Canonical fixture: `codex-rs/hooks/schema/generated/user-prompt-submit.command.input.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `agent_id` | no | <code>string</code> | — | _No description available in the generated schema._ |
@@ -375,6 +385,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/user-prompt-submit.command.i
 
 <details><summary>Raw JSON Schema: <code>user-prompt-submit.command.input.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -449,6 +460,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/user-prompt-submit.command.i
 
 Canonical fixture: `codex-rs/hooks/schema/generated/user-prompt-submit.command.output.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `continue` | no | <code>boolean</code> | default `true` | _No description available in the generated schema._ |
@@ -463,6 +475,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/user-prompt-submit.command.o
 
 <details><summary>Raw JSON Schema: <code>user-prompt-submit.command.output.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -554,6 +567,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/user-prompt-submit.command.o
 
 Canonical fixture: `codex-rs/hooks/schema/generated/pre-tool-use.command.input.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `agent_id` | no | <code>string</code> | — | _No description available in the generated schema._ |
@@ -570,6 +584,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/pre-tool-use.command.input.s
 
 <details><summary>Raw JSON Schema: <code>pre-tool-use.command.input.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -650,6 +665,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/pre-tool-use.command.input.s
 
 Canonical fixture: `codex-rs/hooks/schema/generated/pre-tool-use.command.output.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `continue` | no | <code>boolean</code> | default `true` | _No description available in the generated schema._ |
@@ -667,6 +683,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/pre-tool-use.command.output.
 
 <details><summary>Raw JSON Schema: <code>pre-tool-use.command.output.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -782,6 +799,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/pre-tool-use.command.output.
 
 Canonical fixture: `codex-rs/hooks/schema/generated/permission-request.command.input.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `agent_id` | no | <code>string</code> | — | _No description available in the generated schema._ |
@@ -797,6 +815,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/permission-request.command.i
 
 <details><summary>Raw JSON Schema: <code>permission-request.command.input.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -873,6 +892,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/permission-request.command.i
 
 Canonical fixture: `codex-rs/hooks/schema/generated/permission-request.command.output.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `continue` | no | <code>boolean</code> | default `true` | _No description available in the generated schema._ |
@@ -890,6 +910,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/permission-request.command.o
 
 <details><summary>Raw JSON Schema: <code>permission-request.command.output.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -1004,6 +1025,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/permission-request.command.o
 
 Canonical fixture: `codex-rs/hooks/schema/generated/post-tool-use.command.input.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `agent_id` | no | <code>string</code> | — | _No description available in the generated schema._ |
@@ -1020,6 +1042,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/post-tool-use.command.input.
 
 <details><summary>Raw JSON Schema: <code>post-tool-use.command.input.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -1102,6 +1125,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/post-tool-use.command.input.
 
 Canonical fixture: `codex-rs/hooks/schema/generated/post-tool-use.command.output.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `continue` | no | <code>boolean</code> | default `true` | _No description available in the generated schema._ |
@@ -1117,6 +1141,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/post-tool-use.command.output
 
 <details><summary>Raw JSON Schema: <code>post-tool-use.command.output.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -1211,6 +1236,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/post-tool-use.command.output
 
 Canonical fixture: `codex-rs/hooks/schema/generated/pre-compact.command.input.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `agent_id` | no | <code>string</code> | — | _No description available in the generated schema._ |
@@ -1225,6 +1251,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/pre-compact.command.input.sc
 
 <details><summary>Raw JSON Schema: <code>pre-compact.command.input.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -1292,6 +1319,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/pre-compact.command.input.sc
 
 Canonical fixture: `codex-rs/hooks/schema/generated/pre-compact.command.output.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `continue` | no | <code>boolean</code> | default `true` | _No description available in the generated schema._ |
@@ -1301,6 +1329,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/pre-compact.command.output.s
 
 <details><summary>Raw JSON Schema: <code>pre-compact.command.output.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -1347,6 +1376,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/pre-compact.command.output.s
 
 Canonical fixture: `codex-rs/hooks/schema/generated/post-compact.command.input.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `agent_id` | no | <code>string</code> | — | _No description available in the generated schema._ |
@@ -1361,6 +1391,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/post-compact.command.input.s
 
 <details><summary>Raw JSON Schema: <code>post-compact.command.input.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -1428,6 +1459,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/post-compact.command.input.s
 
 Canonical fixture: `codex-rs/hooks/schema/generated/post-compact.command.output.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `continue` | no | <code>boolean</code> | default `true` | _No description available in the generated schema._ |
@@ -1437,6 +1469,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/post-compact.command.output.
 
 <details><summary>Raw JSON Schema: <code>post-compact.command.output.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -1483,6 +1516,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/post-compact.command.output.
 
 Canonical fixture: `codex-rs/hooks/schema/generated/subagent-start.command.input.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `agent_id` | yes | <code>string</code> | — | _No description available in the generated schema._ |
@@ -1497,6 +1531,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/subagent-start.command.input
 
 <details><summary>Raw JSON Schema: <code>subagent-start.command.input.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -1569,6 +1604,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/subagent-start.command.input
 
 Canonical fixture: `codex-rs/hooks/schema/generated/subagent-start.command.output.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `continue` | no | <code>boolean</code> | default `true` | _No description available in the generated schema._ |
@@ -1581,6 +1617,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/subagent-start.command.outpu
 
 <details><summary>Raw JSON Schema: <code>subagent-start.command.output.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -1654,6 +1691,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/subagent-start.command.outpu
 
 Canonical fixture: `codex-rs/hooks/schema/generated/subagent-stop.command.input.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `agent_id` | yes | <code>string</code> | — | _No description available in the generated schema._ |
@@ -1671,6 +1709,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/subagent-stop.command.input.
 
 <details><summary>Raw JSON Schema: <code>subagent-stop.command.input.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -1755,6 +1794,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/subagent-stop.command.input.
 
 Canonical fixture: `codex-rs/hooks/schema/generated/subagent-stop.command.output.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `continue` | no | <code>boolean</code> | default `true` | _No description available in the generated schema._ |
@@ -1766,6 +1806,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/subagent-stop.command.output
 
 <details><summary>Raw JSON Schema: <code>subagent-stop.command.output.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -1833,6 +1874,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/subagent-stop.command.output
 
 Canonical fixture: `codex-rs/hooks/schema/generated/stop.command.input.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `cwd` | yes | <code>string</code> | — | _No description available in the generated schema._ |
@@ -1847,6 +1889,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/stop.command.input.schema.js
 
 <details><summary>Raw JSON Schema: <code>stop.command.input.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -1919,6 +1962,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/stop.command.input.schema.js
 
 Canonical fixture: `codex-rs/hooks/schema/generated/stop.command.output.schema.json`.
 
+<!-- prettier-ignore -->
 | Field | Required | Type | Constraints / default | Description |
 | --- | --- | --- | --- | --- |
 | `continue` | no | <code>boolean</code> | default `true` | _No description available in the generated schema._ |
@@ -1930,6 +1974,7 @@ Canonical fixture: `codex-rs/hooks/schema/generated/stop.command.output.schema.j
 
 <details><summary>Raw JSON Schema: <code>stop.command.output.schema.json</code></summary>
 
+<!-- prettier-ignore -->
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",

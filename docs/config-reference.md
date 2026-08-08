@@ -4,6 +4,7 @@
 
 Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown as `<key>`, and `[]` identifies fields inside an array of tables.
 
+<!-- prettier-ignore -->
 | Configuration | Type | Description |
 | --- | --- | --- |
 | `agents` | <code>table</code> | Agent-related settings (thread limits, etc.). |

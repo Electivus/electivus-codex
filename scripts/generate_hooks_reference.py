@@ -13,6 +13,7 @@ from typing import Any, Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SCHEMA_DIR = REPO_ROOT / "codex-rs" / "hooks" / "schema" / "generated"
+DEFAULT_OUTPUT_PATH = REPO_ROOT / "docs" / "hooks-reference.md"
 DEFAULT_TITLE = "Codex hooks reference"
 NO_DESCRIPTION = "_No description available in the generated schema._"
 SCHEMA_FILE_RE = re.compile(
@@ -507,6 +508,7 @@ def _escape_cell(value: str) -> str:
 
 def _schema_table(schema: JsonObject) -> list[str]:
     lines = [
+        "<!-- prettier-ignore -->",
         "| Field | Required | Type | Constraints / default | Description |",
         "| --- | --- | --- | --- | --- |",
     ]
@@ -528,6 +530,7 @@ def _raw_schema(path: Path, schema: JsonObject) -> list[str]:
     return [
         f"<details><summary>Raw JSON Schema: <code>{path.name}</code></summary>",
         "",
+        "<!-- prettier-ignore -->",
         "```json",
         json.dumps(schema, ensure_ascii=False, indent=2, sort_keys=True),
         "```",
@@ -583,6 +586,7 @@ def _configuration_section(
         "and `agent` parse successfully but discovery skips them with warnings. Empty commands "
         "are also skipped. `commandWindows` overrides `command` only on Windows.",
         "",
+        "<!-- prettier-ignore -->",
         "| Command field | Meaning |",
         "| --- | --- |",
         "| `command` | Shell command used on non-Windows platforms and as the Windows fallback. |",
@@ -644,6 +648,7 @@ def _runtime_section(facts: RuntimeFacts) -> list[str]:
         "intentional completion-order rule is competing `PreToolUse.updatedInput`: the last process "
         "to finish wins. Duplicate declarations are not deduplicated.",
         "",
+        "<!-- prettier-ignore -->",
         "| Timeout class | Default | Bound |",
         "| --- | ---: | ---: |",
         f"| Most command hooks | {facts.default_timeout_sec}s | minimum 1s; no explicit maximum |",
@@ -700,6 +705,7 @@ def _event_catalog(schemas: list[HookSchemas]) -> list[str]:
     lines = [
         "## Event catalog",
         "",
+        "<!-- prettier-ignore -->",
         "| Event | Fires | Matcher input | Scope | Output schema |",
         "| --- | --- | --- | --- | --- |",
     ]
@@ -825,8 +831,18 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SCHEMA_DIR,
         help=f"Directory containing generated hook schemas (default: {DEFAULT_SCHEMA_DIR})",
     )
-    parser.add_argument(
-        "-o", "--output", type=Path, help="Markdown file to write. Omit for stdout."
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=DEFAULT_OUTPUT_PATH,
+        help=f"Markdown file to write (default: {DEFAULT_OUTPUT_PATH}).",
+    )
+    output_group.add_argument(
+        "--stdout",
+        action="store_true",
+        help="Write Markdown to stdout instead of the default output file.",
     )
     parser.add_argument(
         "--title",
@@ -853,7 +869,8 @@ def main() -> int:
             configured_handler_types(),
             title=args.title,
         )
-        if args.output is None:
+        if args.stdout:
+            sys.stdout.reconfigure(encoding="utf-8", newline="\n")
             sys.stdout.write(markdown)
         else:
             args.output.parent.mkdir(parents=True, exist_ok=True)
