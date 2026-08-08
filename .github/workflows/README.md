@@ -78,7 +78,7 @@ remain the fallback.
 - In `full` and `merge-gate`, native Linux x64 builds one archive and matching
   runtime-helper artifact identity for four
   ordinary partitioned consumers plus one PostgreSQL 18 consumer. The fifth
-  consumer runs the explicit 107 database-contract and two process-contract
+  consumer runs the explicit 108 database-contract and two process-contract
   inventory across `codex-state`, `codex-thread-store`, `codex-app-server`,
   `codex-app-server-transport`, `codex-memories-write`, and `codex-cli`, with
   nextest concurrency fixed at four. ARM64 keeps only the four ordinary
@@ -119,7 +119,7 @@ Every full-Rust nextest shard treats its JUnit XML as a required result, includi
 testcase failures; and the retry elements `flakyFailure`, `flakyError`, `rerunFailure`, and `rerunError`, with or
 without XML namespaces. A retry-assisted pass therefore stays red while logs and JUnit artifacts are uploaded.
 The PostgreSQL archive consumer uses the same checker and explicit outcome composition as the four ordinary
-consumers, and additionally requires exactly 109 executed JUnit testcases. Producer Cargo timings and all five
+consumers, and additionally requires exactly 110 executed JUnit testcases. Producer Cargo timings and all five
 consumers' JUnit durations and failure diagnostics remain available as artifacts and job logs. The former
 standalone PostgreSQL Merge-gate job is retired because eligible changes now reuse this x64 Cargo archive path.
 

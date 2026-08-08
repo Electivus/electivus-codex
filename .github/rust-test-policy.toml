@@ -1,7 +1,7 @@
 version = 1
 
 [postgres_contracts]
-database_count = 107
+database_count = 108
 process_count = 2
 packages = [
     "codex-app-server",
@@ -117,7 +117,7 @@ packages = [
 'codex-rs/state/src/migration_redaction_tests.rs::postgres_redaction_process_fixture::ignore="helper process for PostgreSQL credential redaction coverage"' = "helper-process"
 'codex-rs/state/src/migration_source_tests.rs::postgres_contract_preflight_distinguishes_stale_sidecar_from_active_writer::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/state/src/migration_source_tests.rs::postgres_contract_preflight_rejects_corrupt_sqlite_without_writes::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
-'codex-rs/state/src/migration_source_tests.rs::postgres_contract_preflight_rejects_each_missing_sqlite_database_without_writes::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
+'codex-rs/state/src/migration_source_tests.rs::postgres_contract_preflight_rejects_each_missing_required_sqlite_database_without_writes::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/state/src/migration_source_tests.rs::postgres_contract_preflight_rejects_invalid_rollout_references_without_writes::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/state/src/migration_tests.rs::postgres_contract_preflight_inventories_all_source_authorities::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/state/src/migration_tests.rs::postgres_contract_preflight_reports_a_positive_active_writer_check::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
@@ -193,6 +193,7 @@ packages = [
 'codex-rs/thread-store/src/postgres_turn_projection_contract_tests.rs::postgres_contract_damaged_projections_rebuild_once_for_concurrent_public_readers::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/thread-store/src/postgres_turn_projection_contract_tests.rs::postgres_contract_inherited_prefix_is_excluded_and_turn_projection_failure_rolls_back::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/thread-store/src/postgres_turn_projection_contract_tests.rs::postgres_contract_turn_pages_match_local_summary_and_bidirectional_pagination::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
+'codex-rs/thread-store/src/runtime_state_migration_contract_tests.rs::postgres_contract_runtime_state_migration_rebuilds_projections_without_thread_history_database::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/thread-store/src/runtime_state_migration_contract_tests.rs::postgres_contract_runtime_state_migration_rejects_a_nonempty_destination::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/thread-store/src/runtime_state_migration_contract_tests.rs::postgres_contract_runtime_state_migration_reports_ready_only_after_every_phase::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/thread-store/src/runtime_state_migration_contract_tests.rs::postgres_contract_runtime_state_migration_resumes_an_interrupted_phase_chain::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
