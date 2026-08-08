@@ -48,6 +48,10 @@ remain the fallback.
   documentation changes finish through metadata only; V8-relevant, unknown,
   indeterminate, or manual runs require its exact eight-leg Linux matrix and a
   bounded terminal result.
+- Bazel-backed gate jobs that can rebuild V8 from a cold cache have a 90-minute
+  job limit. This is a failure-containment bound rather than the 120-minute p95
+  feedback objective; cached runs should finish sooner, and every selected
+  check remains required.
 - Only root `README.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, and
   `SECURITY.md`; `docs/**`; and GitHub community metadata under
   `.github/CODEOWNERS`, `.github/ISSUE_TEMPLATE/**`,

@@ -23,7 +23,7 @@ jobs:
   test:
     # Native Linux x64 is the current essential platform. Additional Linux
     # architectures and build variants run in Extended validation.
-    timeout-minutes: 45
+    timeout-minutes: 90
     if: ${{ inputs.validation_scope != 'release-only' }}
     strategy:
       fail-fast: false
@@ -132,7 +132,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   clippy:
-    timeout-minutes: 45
+    timeout-minutes: 90
     if: ${{ inputs.validation_scope != 'release-only' }}
     strategy:
       fail-fast: false
@@ -212,7 +212,7 @@ jobs:
     # An empty scope is the manual-dispatch default and preserves Essential
     # validation. Unknown nonempty scopes fail safe by running every job.
     if: ${{ inputs.validation_scope != 'essential' && inputs.validation_scope != '' }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
