@@ -1,3 +1,4 @@
+use super::inspect_source;
 use super::preflight_runtime_state_migration;
 use super::test_support;
 use crate::PostgresNamespaceAction;
@@ -10,8 +11,32 @@ use std::ffi::OsString;
 use std::path::Path;
 
 #[tokio::test]
+async fn source_inspection_accepts_missing_thread_history_database() -> anyhow::Result<()> {
+    let source = test_support::initialized_source("missing-thread-history-db").await?;
+    let _cleanup = scopeguard::guard(source.clone(), |path| {
+        let _ = std::fs::remove_dir_all(path);
+    });
+    let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(source.as_path())?);
+    std::fs::remove_file(sqlite.thread_history_db_path())?;
+    let source_before = test_support::snapshot_source(&source)?;
+
+    let inventory = inspect_source(&sqlite).await?;
+
+    assert_eq!(
+        inventory
+            .databases
+            .iter()
+            .map(|database| database.label)
+            .collect::<Vec<_>>(),
+        vec!["state DB", "log DB", "goals DB", "memories DB"]
+    );
+    assert_eq!(test_support::snapshot_source(&source)?, source_before);
+    Ok(())
+}
+
+#[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_contract_preflight_rejects_each_missing_sqlite_database_without_writes()
+async fn postgres_contract_preflight_rejects_each_missing_required_sqlite_database_without_writes()
 -> anyhow::Result<()> {
     let mut destination =
         PostgresContractFixture::new(test_database_url()?, "preflight_missing_db")?;
@@ -19,7 +44,11 @@ async fn postgres_contract_preflight_rejects_each_missing_sqlite_database_withou
     let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(
         std::env::current_dir()?.join("placeholder"),
     )?);
-    for database in sqlite.runtime_db_paths() {
+    for database in sqlite
+        .runtime_db_paths()
+        .into_iter()
+        .filter(|database| database.path != sqlite.thread_history_db_path())
+    {
         let source = test_support::initialized_source("missing-db").await?;
         let database_path = source.join(
             database

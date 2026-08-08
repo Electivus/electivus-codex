@@ -241,20 +241,28 @@ pub async fn snapshot_runtime_state_migration_threads(
         .open_immutable_pool(&source.state_db_path())
         .await
         .context("open immutable migration state DB")?;
-    let history_pool = source
-        .open_immutable_pool(&source.thread_history_db_path())
-        .await
-        .context("open immutable migration thread history DB")?;
+    let history_pool = if tokio::fs::try_exists(source.thread_history_db_path()).await? {
+        Some(
+            source
+                .open_immutable_pool(&source.thread_history_db_path())
+                .await
+                .context("open immutable migration thread history DB")?,
+        )
+    } else {
+        None
+    };
     let result = snapshot(
         source,
         inventory,
         history_reader,
         &state_pool,
-        &history_pool,
+        history_pool.as_ref(),
     )
     .await;
     state_pool.close().await;
-    history_pool.close().await;
+    if let Some(history_pool) = history_pool {
+        history_pool.close().await;
+    }
     result
 }
 
@@ -263,7 +271,7 @@ async fn snapshot(
     inventory: &RuntimeStateMigrationInventory,
     history_reader: &impl CanonicalThreadHistoryReader,
     state_pool: &sqlx::SqlitePool,
-    history_pool: &sqlx::SqlitePool,
+    history_pool: Option<&sqlx::SqlitePool>,
 ) -> anyhow::Result<RuntimeStateThreadSnapshot> {
     let rows = sqlx::query(
         "SELECT id, rollout_path, created_at_ms AS created_at, updated_at_ms AS updated_at, \
@@ -436,7 +444,7 @@ async fn read_thread_snapshot(
     polluted_at_stream_version: Option<i64>,
     canonical_history: CanonicalThreadHistorySnapshot,
     state_pool: &sqlx::SqlitePool,
-    history_pool: &sqlx::SqlitePool,
+    history_pool: Option<&sqlx::SqlitePool>,
 ) -> anyhow::Result<ThreadMigrationSnapshot> {
     let thread_id = metadata.id.to_string();
     let tool_rows = sqlx::query("SELECT namespace, name, description, input_schema, defer_loading FROM thread_dynamic_tools WHERE thread_id = ? ORDER BY position")
@@ -457,60 +465,67 @@ async fn read_thread_snapshot(
             ))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let projection_row = sqlx::query("SELECT next_rollout_byte_offset, next_rollout_ordinal FROM thread_history_projection_state WHERE thread_id = ?")
-        .bind(&thread_id)
-        .fetch_optional(history_pool)
-        .await?;
-    let projection_state = projection_row
-        .map(|row| {
-            anyhow::Ok(ThreadHistoryProjectionStateSnapshot {
-                next_rollout_byte_offset: nonnegative(row.try_get("next_rollout_byte_offset")?)?,
-                next_rollout_ordinal: nonnegative(row.try_get("next_rollout_ordinal")?)?,
+    let (projection_state, turns, items) = if let Some(history_pool) = history_pool {
+        let projection_row = sqlx::query("SELECT next_rollout_byte_offset, next_rollout_ordinal FROM thread_history_projection_state WHERE thread_id = ?")
+            .bind(&thread_id)
+            .fetch_optional(history_pool)
+            .await?;
+        let projection_state = projection_row
+            .map(|row| {
+                anyhow::Ok(ThreadHistoryProjectionStateSnapshot {
+                    next_rollout_byte_offset: nonnegative(
+                        row.try_get("next_rollout_byte_offset")?,
+                    )?,
+                    next_rollout_ordinal: nonnegative(row.try_get("next_rollout_ordinal")?)?,
+                })
             })
-        })
-        .transpose()?;
-    let turn_rows = sqlx::query("SELECT turn_id, rollout_ordinal, status, error_json, started_at, completed_at, duration_ms, first_user_item_id, final_agent_item_id FROM thread_turns WHERE thread_id = ? ORDER BY rollout_ordinal, turn_id")
-        .bind(&thread_id)
-        .fetch_all(history_pool)
-        .await?;
-    let turns = turn_rows
-        .into_iter()
-        .map(|row| {
-            let error = row
-                .try_get::<Option<String>, _>("error_json")?
-                .map(|value| serde_json::from_str(&value))
-                .transpose()?;
-            Ok(ThreadTurnProjectionSnapshot {
-                turn_id: row.try_get("turn_id")?,
-                rollout_ordinal: nonnegative(row.try_get("rollout_ordinal")?)?,
-                status: row.try_get("status")?,
-                error,
-                started_at: row.try_get("started_at")?,
-                completed_at: row.try_get("completed_at")?,
-                duration_ms: row.try_get("duration_ms")?,
-                first_user_item_id: row.try_get("first_user_item_id")?,
-                final_agent_item_id: row.try_get("final_agent_item_id")?,
+            .transpose()?;
+        let turn_rows = sqlx::query("SELECT turn_id, rollout_ordinal, status, error_json, started_at, completed_at, duration_ms, first_user_item_id, final_agent_item_id FROM thread_turns WHERE thread_id = ? ORDER BY rollout_ordinal, turn_id")
+            .bind(&thread_id)
+            .fetch_all(history_pool)
+            .await?;
+        let turns = turn_rows
+            .into_iter()
+            .map(|row| {
+                let error = row
+                    .try_get::<Option<String>, _>("error_json")?
+                    .map(|value| serde_json::from_str(&value))
+                    .transpose()?;
+                Ok(ThreadTurnProjectionSnapshot {
+                    turn_id: row.try_get("turn_id")?,
+                    rollout_ordinal: nonnegative(row.try_get("rollout_ordinal")?)?,
+                    status: row.try_get("status")?,
+                    error,
+                    started_at: row.try_get("started_at")?,
+                    completed_at: row.try_get("completed_at")?,
+                    duration_ms: row.try_get("duration_ms")?,
+                    first_user_item_id: row.try_get("first_user_item_id")?,
+                    final_agent_item_id: row.try_get("final_agent_item_id")?,
+                })
             })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let item_rows = sqlx::query("SELECT turn_id, item_id, rollout_ordinal, updated_at_ordinal, created_at_ms, item_json, item_type FROM thread_items WHERE thread_id = ? ORDER BY rollout_ordinal, turn_id, item_id")
-        .bind(&thread_id)
-        .fetch_all(history_pool)
-        .await?;
-    let items = item_rows
-        .into_iter()
-        .map(|row| {
-            Ok(ThreadItemProjectionSnapshot {
-                turn_id: row.try_get("turn_id")?,
-                item_id: row.try_get("item_id")?,
-                rollout_ordinal: nonnegative(row.try_get("rollout_ordinal")?)?,
-                updated_at_ordinal: nonnegative(row.try_get("updated_at_ordinal")?)?,
-                created_at_ms: row.try_get("created_at_ms")?,
-                item: serde_json::from_str(&row.try_get::<String, _>("item_json")?)?,
-                item_type: row.try_get("item_type")?,
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let item_rows = sqlx::query("SELECT turn_id, item_id, rollout_ordinal, updated_at_ordinal, created_at_ms, item_json, item_type FROM thread_items WHERE thread_id = ? ORDER BY rollout_ordinal, turn_id, item_id")
+            .bind(&thread_id)
+            .fetch_all(history_pool)
+            .await?;
+        let items = item_rows
+            .into_iter()
+            .map(|row| {
+                Ok(ThreadItemProjectionSnapshot {
+                    turn_id: row.try_get("turn_id")?,
+                    item_id: row.try_get("item_id")?,
+                    rollout_ordinal: nonnegative(row.try_get("rollout_ordinal")?)?,
+                    updated_at_ordinal: nonnegative(row.try_get("updated_at_ordinal")?)?,
+                    created_at_ms: row.try_get("created_at_ms")?,
+                    item: serde_json::from_str(&row.try_get::<String, _>("item_json")?)?,
+                    item_type: row.try_get("item_type")?,
+                })
             })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        (projection_state, turns, items)
+    } else {
+        (None, Vec::new(), Vec::new())
+    };
     let dynamic_tools = if tools.is_empty() {
         canonical_history
             .lines
