@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "PostgreSQL tests connect only to PostgreSQL pools"
+)]
+
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;

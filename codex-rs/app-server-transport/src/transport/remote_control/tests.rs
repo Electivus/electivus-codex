@@ -216,6 +216,10 @@ async fn plain_start_resolves_persisted_remote_control_preference() {
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "this contract test connects only to a PostgreSQL pool"
+)]
 async fn postgres_contract_replicas_share_enrollment_with_websocket_preference_resolution()
 -> anyhow::Result<()> {
     const TEST_DATABASE_URL_ENV: &str = "CODEX_TEST_POSTGRES_URL";
@@ -306,6 +310,10 @@ async fn postgres_contract_replicas_share_enrollment_with_websocket_preference_r
     Ok(())
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "this helper connects only to a PostgreSQL pool"
+)]
 async fn mark_postgres_namespace_ready(database_url: &str, schema: &str) -> anyhow::Result<()> {
     let pool = sqlx::PgPool::connect(database_url).await?;
     let migration = format!("\"{schema}\".runtime_state_migration");

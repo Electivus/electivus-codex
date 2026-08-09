@@ -697,6 +697,10 @@ async fn memories_startup_phase2_model_only_override_uses_default_effort() -> an
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "this contract test connects only to a PostgreSQL pool"
+)]
 async fn postgres_contract_memories_startup_phase1_loads_pathless_canonical_thread_history()
 -> anyhow::Result<()> {
     const DATABASE_URL_ENV: &str = "CODEX_TEST_POSTGRES_URL";
@@ -1364,6 +1368,10 @@ async fn read_rollout_summary_bodies(memory_root: &Path) -> anyhow::Result<Vec<S
     Ok(summaries)
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "this helper connects only to a PostgreSQL pool"
+)]
 async fn mark_postgres_namespace_ready(database_url: &str, schema: &str) -> anyhow::Result<()> {
     let pool = sqlx::PgPool::connect(database_url).await?;
     let migration = format!("\"{schema}\".runtime_state_migration");

@@ -1602,8 +1602,6 @@ async fn test_created_at_cursor_uses_thread_id_to_paginate_filesystem_ties() {
             first_user_message: Some("Hello from user".to_string()),
             preview: Some("Hello from user".to_string()),
             section: None,
-            section_position: None,
-            section_entered_at: None,
             cwd: Some(Path::new(".").to_path_buf()),
             git_branch: None,
             git_sha: None,
