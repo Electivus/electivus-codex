@@ -17,6 +17,48 @@ remain the fallback.
   inherited jobs and widening matrices after their standard-runner paths are
   certified.
 
+## Manual Unsigned Windows Release
+
+`rust-release-windows-unsigned.yml` builds the Windows x64 and ARM64 release
+assets on standard GitHub-hosted runners. This fork-specific workflow does not
+use the inherited self-hosted runner groups or Azure Trusted Signing, so its
+executables are unsigned and Windows may show an unverified-publisher warning.
+
+Keep `workspace.package.version` at `0.0.0` on normal development branches. As
+in the upstream release process, create a release-only commit from the source
+commit that changes only that version in `codex-rs/Cargo.toml`; leave
+`codex-rs/Cargo.lock` unchanged, do not merge the release commit into the normal
+branch, and tag the release commit with the matching `windows-v` version:
+
+```bash
+git switch --detach <source-commit>
+# Change only workspace.package.version in codex-rs/Cargo.toml to 0.1.0.
+git add codex-rs/Cargo.toml
+git commit -m "Release 0.1.0"
+git tag -a windows-v0.1.0 -m "Release 0.1.0"
+git push origin windows-v0.1.0
+```
+
+The requested tag must already exist and its `windows-v` version must match
+`workspace.package.version` at that tagged commit. Run the workflow from the
+default branch while passing the release tag explicitly:
+
+```bash
+gh workflow run rust-release-windows-unsigned.yml \
+  --repo Electivus/electivus-codex \
+  --ref main \
+  -f release_tag=windows-v0.1.0 \
+  -f publish_release=false
+```
+
+The fork-specific `windows-v` prefix intentionally avoids triggering the
+inherited full-release workflow, which owns the upstream `rust-v*` tag family.
+
+The default stores unsigned target archives and Python runtime wheels as
+workflow artifacts for 30 days. Set `publish_release=true` only when those
+assets should also be attached to a public GitHub prerelease; the workflow
+never marks an unsigned release as latest.
+
 ## Merge Gate
 
 - `blocking-ci.yml` owns the version-controlled list of merge-blocking child
