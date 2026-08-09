@@ -483,6 +483,7 @@ fn sample_thread(thread_id: &str) -> Thread {
         parent_thread_id: None,
         preview: "first prompt".to_string(),
         ephemeral: false,
+        is_pinned: false,
         section: None,
         section_entered_at: None,
         history_mode: Default::default(),

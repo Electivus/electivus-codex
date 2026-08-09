@@ -204,6 +204,7 @@ fn sample_thread_with_metadata(
         parent_thread_id,
         preview: "first prompt".to_string(),
         ephemeral,
+        is_pinned: false,
         section: None,
         section_entered_at: None,
         history_mode: Default::default(),
