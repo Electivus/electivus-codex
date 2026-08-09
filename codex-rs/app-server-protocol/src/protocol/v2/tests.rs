@@ -289,6 +289,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
             parent_thread_id: None,
             preview: String::new(),
             ephemeral: false,
+            is_pinned: true,
             section: Some(ThreadSection {
                 id: "01984de2-8f74-7c91-a3b2-5c5e937cf318".to_string(),
                 name: "Pinned".to_string(),
@@ -342,6 +343,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
         })
     );
     assert_eq!(value["thread"]["sectionEnteredAt"], json!(1));
+    assert_eq!(value["thread"]["isPinned"], json!(true));
 
     let mut legacy_thread = value["thread"].clone();
     let legacy_thread_fields = legacy_thread

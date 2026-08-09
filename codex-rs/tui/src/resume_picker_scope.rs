@@ -137,6 +137,7 @@ impl ThreadListQuery {
             model_providers: self.model_providers,
             source_kinds: Some(self.source_kinds),
             archived: Some(false),
+            is_pinned: None,
             section_id: None,
             cwd,
             project_cwd,

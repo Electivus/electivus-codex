@@ -3428,6 +3428,7 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected() -> Result<()> {
                     codex_app_server_protocol::ThreadSourceKind::SubAgentThreadSpawn,
                 ]),
                 archived: None,
+                is_pinned: None,
                 section_id: None,
                 cwd: None,
                 project_cwd: None,

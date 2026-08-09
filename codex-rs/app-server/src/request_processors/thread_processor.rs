@@ -28,6 +28,7 @@ struct ThreadListFilters {
     model_providers: Option<Vec<String>>,
     source_kinds: Option<Vec<ThreadSourceKind>>,
     archived: bool,
+    is_pinned: Option<bool>,
     section_id: Option<Option<String>>,
     location_filter: StoreThreadLocationFilter,
     search_term: Option<String>,
@@ -1722,12 +1723,13 @@ impl ThreadRequestProcessor {
         let ThreadMetadataUpdateParams {
             thread_id,
             git_info,
+            is_pinned,
         } = params;
 
         let thread_uuid = ThreadId::from_string(&thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
 
-        if git_info.is_none() {
+        if git_info.is_none() && is_pinned.is_none() {
             return Err(invalid_request(
                 "thread metadata update must include at least one field",
             ));
@@ -1765,10 +1767,38 @@ impl ThreadRequestProcessor {
                 git_info,
                 ..Default::default()
             };
-            self.thread_manager
+            let mut updated_thread = self
+                .thread_manager
                 .update_thread_metadata(thread_uuid, patch, /*include_archived*/ true)
                 .await
-                .map_err(|err| core_thread_write_error("update thread metadata", err))?
+                .map_err(|err| core_thread_write_error("update thread metadata", err))?;
+            if let Some(is_pinned) = is_pinned {
+                let currently_pinned = updated_thread
+                    .section
+                    .as_ref()
+                    .is_some_and(|section| section.id == codex_state::PINNED_THREAD_SECTION_ID);
+                if is_pinned != currently_pinned {
+                    let section = is_pinned.then_some(codex_state::PINNED_THREAD_SECTION_ID);
+                    self.thread_manager
+                        .move_thread_to_section(
+                            thread_uuid,
+                            section,
+                            /*before_thread_id*/ None,
+                        )
+                        .await
+                        .map_err(|err| core_thread_write_error("update pinned thread", err))?;
+                    updated_thread = self
+                        .thread_manager
+                        .update_thread_metadata(
+                            thread_uuid,
+                            StoreThreadMetadataPatch::default(),
+                            /*include_archived*/ true,
+                        )
+                        .await
+                        .map_err(|err| core_thread_write_error("read updated thread", err))?;
+                }
+            }
+            updated_thread
         };
         let (mut thread, _) = thread_from_stored_thread(
             updated_thread,
@@ -2056,6 +2086,7 @@ impl ThreadRequestProcessor {
             model_providers,
             source_kinds,
             archived,
+            is_pinned,
             section_id,
             cwd,
             project_cwd,
@@ -2067,6 +2098,11 @@ impl ThreadRequestProcessor {
         if cwd.is_some() && project_cwd.is_some() {
             return Err(invalid_params(
                 "cwd and projectCwd are mutually exclusive thread/list filters",
+            ));
+        }
+        if is_pinned.is_some() && section_id.is_some() {
+            return Err(invalid_params(
+                "isPinned and sectionId are mutually exclusive thread/list filters",
             ));
         }
         let location_filter = match project_cwd {
@@ -2122,6 +2158,7 @@ impl ThreadRequestProcessor {
                     model_providers,
                     source_kinds,
                     archived: archived.unwrap_or(false),
+                    is_pinned,
                     section_id,
                     location_filter,
                     search_term,
@@ -4570,6 +4607,7 @@ impl ThreadRequestProcessor {
             model_providers,
             source_kinds,
             archived,
+            is_pinned,
             section_id,
             location_filter,
             search_term,
@@ -4604,6 +4642,11 @@ impl ThreadRequestProcessor {
             SortDirection::Asc => StoreSortDirection::Asc,
             SortDirection::Desc => StoreSortDirection::Desc,
         };
+        let store_section_id = if is_pinned == Some(true) {
+            Some(Some(codex_state::PINNED_THREAD_SECTION_ID.to_string()))
+        } else {
+            section_id
+        };
 
         while remaining > 0 {
             let page_size = remaining.min(THREAD_LIST_MAX_LIMIT);
@@ -4618,7 +4661,7 @@ impl ThreadRequestProcessor {
                     model_providers: model_provider_filter.clone(),
                     location_filter: location_filter.clone(),
                     archived,
-                    section: section_id.clone(),
+                    section: store_section_id.clone(),
                     search_term: search_term.clone(),
                     use_state_db_only,
                     relation_filter,
@@ -4636,6 +4679,12 @@ impl ThreadRequestProcessor {
                 if source_kind_filter
                     .as_ref()
                     .is_none_or(|filter| source_kind_matches(&source, filter))
+                    && is_pinned.is_none_or(|expected| {
+                        let pinned = it.section.as_ref().is_some_and(|section| {
+                            section.id == codex_state::PINNED_THREAD_SECTION_ID
+                        });
+                        pinned == expected
+                    })
                     && match &location_filter {
                         StoreThreadLocationFilter::Unrestricted => true,
                         StoreThreadLocationFilter::ExactCwds(expected_cwds) => {
@@ -5216,6 +5265,10 @@ pub(crate) fn thread_from_stored_thread(
         parent_thread_id: thread.parent_thread_id.map(|id| id.to_string()),
         preview: thread.preview,
         ephemeral: false,
+        is_pinned: thread
+            .section
+            .as_ref()
+            .is_some_and(|section| section.id == codex_state::PINNED_THREAD_SECTION_ID),
         section: thread.section.map(|section| ThreadSection {
             id: section.id,
             name: section.name,
@@ -5434,6 +5487,7 @@ fn build_thread_from_snapshot(
         parent_thread_id: config_snapshot.parent_thread_id.map(|id| id.to_string()),
         preview: String::new(),
         ephemeral: config_snapshot.ephemeral,
+        is_pinned: false,
         section: None,
         section_entered_at: None,
         history_mode: config_snapshot.history_mode.into(),

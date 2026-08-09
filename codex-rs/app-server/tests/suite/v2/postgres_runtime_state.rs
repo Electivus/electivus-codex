@@ -413,6 +413,7 @@ async fn list_threads(
             model_providers: Some(Vec::new()),
             source_kinds: Some(Vec::new()),
             archived: Some(false),
+            is_pinned: None,
             section_id: None,
             cwd: None,
             use_state_db_only: true,

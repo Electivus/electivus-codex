@@ -194,6 +194,9 @@ pub struct Thread {
     pub preview: String,
     /// Whether the thread is ephemeral and should not be materialized on disk.
     pub ephemeral: bool,
+    /// Whether the thread belongs to the built-in Pinned section.
+    #[serde(default)]
+    pub is_pinned: bool,
     /// The independently persisted section selected for this thread, if any.
     #[serde(default)]
     pub section: Option<ThreadSection>,

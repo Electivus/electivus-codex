@@ -637,6 +637,7 @@ async fn lookup_session_target_by_name_with_app_server(
                 model_providers: None,
                 source_kinds: Some(vec![ThreadSourceKind::Cli, ThreadSourceKind::VsCode]),
                 archived: Some(false),
+                is_pinned: None,
                 section_id: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
@@ -754,6 +755,7 @@ fn latest_session_lookup_params(
         },
         source_kinds: Some(resume_source_kinds(include_non_interactive)),
         archived: Some(false),
+        is_pinned: None,
         section_id: None,
         parent_thread_id: None,
         ancestor_thread_id: None,
@@ -3205,6 +3207,7 @@ mod tests {
                     model_providers: None,
                     source_kinds: None,
                     archived: Some(false),
+                    is_pinned: None,
                     section_id: None,
                     cwd: None,
                     project_cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(

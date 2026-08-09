@@ -75,6 +75,13 @@
       ],
       "description": "Optional cwd filter or filters; when set, only threads whose session cwd exactly matches one of these paths are returned."
     },
+    "isPinned": {
+      "description": "Compatibility filter for membership in the built-in Pinned section. This cannot be combined with `sectionId`.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "limit": {
       "description": "Optional page size; defaults to a reasonable server-side value.",
       "format": "uint32",

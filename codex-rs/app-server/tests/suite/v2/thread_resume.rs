@@ -2845,6 +2845,7 @@ async fn thread_resume_prefers_persisted_git_metadata_for_local_threads() -> Res
                 branch: Some(Some("feature/pr-branch".to_string())),
                 origin_url: None,
             }),
+            is_pinned: None,
         })
         .await?;
     timeout(

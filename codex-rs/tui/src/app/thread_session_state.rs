@@ -425,6 +425,7 @@ mod tests {
             parent_thread_id: None,
             preview: "read thread".to_string(),
             ephemeral: false,
+            is_pinned: false,
             section: None,
             section_entered_at: None,
             history_mode: Default::default(),

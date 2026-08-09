@@ -828,6 +828,7 @@ impl AppServerSession {
                         branch: Some(Some(branch)),
                         origin_url: None,
                     }),
+                    is_pinned: None,
                 },
             })
             .await
@@ -2678,6 +2679,7 @@ mod tests {
                 parent_thread_id: None,
                 preview: "hello".to_string(),
                 ephemeral: false,
+                is_pinned: false,
                 section: None,
                 section_entered_at: None,
                 history_mode: Default::default(),
