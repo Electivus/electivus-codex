@@ -19,6 +19,16 @@
             "null"
           ]
         },
+        "onboardingEntrypoint": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DesktopOnboardingEntrypoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "success": {
           "type": "boolean"
         }
@@ -798,7 +808,7 @@
               "type": "string"
             },
             "path": {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             "type": {
               "enum": [
@@ -1081,6 +1091,12 @@
         "summary"
       ],
       "type": "object"
+    },
+    "DesktopOnboardingEntrypoint": {
+      "enum": [
+        "life_sciences"
+      ],
+      "type": "string"
     },
     "DynamicToolCallOutputContentItem": {
       "oneOf": [
@@ -2925,6 +2941,7 @@
         "self_serve_business_usage_based",
         "business",
         "ent26",
+        "enterprise_cbp_automation",
         "enterprise_cbp_usage_based",
         "enterprise",
         "edu",
@@ -4378,6 +4395,12 @@
                 "null"
               ]
             },
+            "readOnlyHint": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "result": {
               "anyOf": [
                 {
@@ -4712,6 +4735,13 @@
             },
             "status": {
               "type": "string"
+            },
+            "transparentBackground": {
+              "default": null,
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "type": {
               "enum": [

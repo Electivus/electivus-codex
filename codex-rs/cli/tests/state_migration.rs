@@ -32,7 +32,7 @@ async fn state_migrate_process_runs_the_complete_offline_migration() -> Result<(
     runtime.close().await;
     let runtime_db_paths = sqlite.runtime_db_paths();
     anyhow::ensure!(
-        runtime_db_paths.len() == 5
+        runtime_db_paths.len() == 6
             && runtime_db_paths
                 .iter()
                 .filter(|database| database.path != sqlite.thread_history_db_path())

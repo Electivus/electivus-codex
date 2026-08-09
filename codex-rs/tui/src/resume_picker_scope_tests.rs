@@ -66,6 +66,8 @@ fn thread_list_params_encode_each_scope_as_a_complete_request() {
             model_providers: Some(vec![String::from("openai")]),
             source_kinds: vec![ThreadSourceKind::Cli, ThreadSourceKind::VsCode],
             location_filter,
+            archived: true,
+            use_state_db_only: true,
         }
         .into_params();
 
@@ -78,12 +80,12 @@ fn thread_list_params_encode_each_scope_as_a_complete_request() {
                 sort_direction: None,
                 model_providers: Some(vec![String::from("openai")]),
                 source_kinds: Some(vec![ThreadSourceKind::Cli, ThreadSourceKind::VsCode]),
-                archived: Some(false),
+                archived: Some(true),
                 is_pinned: None,
                 section_id: None,
                 cwd,
                 project_cwd,
-                use_state_db_only: false,
+                use_state_db_only: true,
                 search_term: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,

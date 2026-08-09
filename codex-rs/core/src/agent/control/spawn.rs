@@ -256,6 +256,8 @@ impl AgentControl {
                 include_history: false,
             })
             .await?;
+        let stored_model = stored_thread.model.clone();
+        let stored_model_provider = stored_thread.model_provider.clone();
         let stored_source = stored_thread.source.clone();
         let stored_parent_thread_id = stored_thread.parent_thread_id;
         let history = load_agent_model_context(&state, thread_id)
@@ -307,6 +309,21 @@ impl AgentControl {
                 .map_err(|err| {
                     CodexErr::InvalidRequest(format!("permission_profile is invalid: {err}"))
                 })?;
+        }
+        if let Some(model) = stored_model {
+            config.model = Some(model);
+        }
+        if config.model_provider_id != stored_model_provider {
+            config.model_provider = config
+                .model_providers
+                .get(&stored_model_provider)
+                .cloned()
+                .ok_or_else(|| {
+                    CodexErr::InvalidRequest(format!(
+                        "Model provider `{stored_model_provider}` not found"
+                    ))
+                })?;
+            config.model_provider_id = stored_model_provider;
         }
         let residency_slot = self
             .reserve_v2_residency_slot(&state, &config, Some(thread_id))
@@ -596,7 +613,9 @@ impl AgentControl {
                 .subagent_developer_instructions
                 .as_ref(),
         ) {
-            (MultiAgentVersion::V2, Some(_)) => {
+            (MultiAgentVersion::V2, override_instructions)
+                if override_instructions.is_some() || session_source.get_agent_role().is_some() =>
+            {
                 let parent_developer_instructions = match parent_thread
                     .session
                     .new_default_turn()
@@ -613,7 +632,7 @@ impl AgentControl {
                 )
             }
             (MultiAgentVersion::Disabled | MultiAgentVersion::V1, _)
-            | (MultiAgentVersion::V2, None) => (None, None),
+            | (MultiAgentVersion::V2, _) => (None, None),
         };
         let parent_history_mode = parent_thread.config_snapshot().await.history_mode;
         // `record_conversation_items` only queues persistence writes asynchronously.
@@ -683,6 +702,9 @@ impl AgentControl {
         // Compaction stores response items separately, so sanitize both top-level messages and
         // compacted replacement histories with the same policy.
         let retain_forked_item = |response_item: &mut ResponseItem, replaced: &mut bool| {
+            if matches!(response_item, ResponseItem::AgentMessage { .. }) {
+                return false;
+            }
             if is_multi_agent_v2_usage_hint_message(
                 response_item,
                 &multi_agent_v2_usage_hint_texts_to_filter,

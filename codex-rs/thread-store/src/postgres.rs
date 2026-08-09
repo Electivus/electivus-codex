@@ -20,21 +20,27 @@ use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
 use crate::ChildRegistrationGuard;
 use crate::CreateThreadParams;
+use crate::CreateThreadSectionParams;
 use crate::DeleteThreadParams;
+use crate::DeleteThreadSectionParams;
 use crate::ItemPage;
 use crate::ListItemsParams;
+use crate::ListThreadSectionsParams;
 use crate::ListThreadsParams;
 use crate::ListTurnsParams;
 use crate::LoadThreadHistoryParams;
 use crate::MoveThreadToSectionParams;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
+use crate::RenameThreadSectionParams;
 use crate::ResumeThreadParams;
 use crate::SearchThreadOccurrencesParams;
 use crate::SearchThreadsParams;
 use crate::StoredModelContext;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
+use crate::StoredThreadSection;
+use crate::StoredThreadSectionsPage;
 use crate::ThreadOccurrenceSearchPage;
 use crate::ThreadPage;
 use crate::ThreadSearchPage;
@@ -59,6 +65,7 @@ mod projection;
 mod resume;
 mod search_thread_occurrences;
 mod search_threads;
+mod thread_sections;
 mod turns;
 
 pub(super) const WRITER_LEASE_DURATION: Duration = Duration::from_secs(30);
@@ -541,6 +548,33 @@ impl ThreadStore for PostgresThreadStore {
     }
     fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
         Box::pin(list_threads::list_threads(self, params))
+    }
+    fn supports_thread_sections(&self) -> bool {
+        self.state_db.is_some()
+    }
+    fn list_thread_sections(
+        &self,
+        params: ListThreadSectionsParams,
+    ) -> ThreadStoreFuture<'_, StoredThreadSectionsPage> {
+        Box::pin(thread_sections::list_thread_sections(self, params))
+    }
+    fn create_thread_section(
+        &self,
+        params: CreateThreadSectionParams,
+    ) -> ThreadStoreFuture<'_, StoredThreadSection> {
+        Box::pin(thread_sections::create_thread_section(self, params))
+    }
+    fn rename_thread_section(
+        &self,
+        params: RenameThreadSectionParams,
+    ) -> ThreadStoreFuture<'_, Option<StoredThreadSection>> {
+        Box::pin(thread_sections::rename_thread_section(self, params))
+    }
+    fn delete_thread_section(
+        &self,
+        params: DeleteThreadSectionParams,
+    ) -> ThreadStoreFuture<'_, bool> {
+        Box::pin(thread_sections::delete_thread_section(self, params))
     }
     fn supports_paginated_history_lists(&self) -> bool {
         true

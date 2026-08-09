@@ -46,6 +46,7 @@ NEXTEST_INSTALL_ACTION = (
     "taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532"
 )
 NEXTEST_TOOL = "nextest@0.9.103"
+RUSTY_V8_SETUP_ACTION = "./.github/actions/setup-rusty-v8"
 STANDALONE_NEXTEST_CONDITION = "${{ inputs.artifact_id == '' }}"
 ARCHIVE_NEXTEST_CONDITION = "${{ inputs.artifact_id != '' }}"
 
@@ -208,6 +209,10 @@ def validate_topology(
     archive_checkout = _checkout(archive)
     shard_checkout = _checkout(shard)
     postgres_checkout = _checkout(_job(postgres, "postgres-contracts"))
+    archive_rusty_v8 = _step(
+        archive, "Configure rusty_v8 artifact overrides and verify checksums"
+    )
+    archive_build = _step(archive, "Build nextest archive")
     archive_upload = _step(archive, "Upload nextest archive")
     helper_upload = _step(archive, "Upload runtime test helpers")
     shard_archive = _step(shard, "Download nextest archive")
@@ -272,6 +277,12 @@ def validate_topology(
         and 'if [[ "${JUNIT_OUTCOME}" != "success" ]]; then' in pg_confirm
     )
     checks = (
+        (
+            "archive producer rusty_v8 override",
+            _step_value(archive_rusty_v8, "uses") == RUSTY_V8_SETUP_ACTION
+            and _action_input(archive_rusty_v8, "target") == "${{ inputs.target }}"
+            and archive.index(archive_rusty_v8) < archive.index(archive_build),
+        ),
         ("archive producer nextest pin", _pinned_nextest(archive_nextest)),
         ("ordinary shard nextest pin", _pinned_nextest(shard_nextest)),
         (

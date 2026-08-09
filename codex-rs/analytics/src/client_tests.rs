@@ -34,6 +34,12 @@ use crate::events::FinalApprovalOutcome;
 use crate::events::SkillInvocationEventParams;
 use crate::events::SkillInvocationEventRequest;
 #[cfg(debug_assertions)]
+use crate::events::ThreadArchiveAction;
+#[cfg(debug_assertions)]
+use crate::events::ThreadArchiveEvent;
+#[cfg(debug_assertions)]
+use crate::events::ThreadArchiveEventParams;
+#[cfg(debug_assertions)]
 use crate::events::ToolItemTerminalStatus;
 use crate::events::TrackEventRequest;
 use crate::facts::AnalyticsFact;
@@ -50,12 +56,15 @@ use codex_app_server_protocol::SessionSource as AppServerSessionSource;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadArchiveParams;
 use codex_app_server_protocol::ThreadArchiveResponse;
+use codex_app_server_protocol::ThreadArchivedNotification;
 use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStatus as AppServerThreadStatus;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnDiffUpdatedNotification;
+use codex_app_server_protocol::TurnInterruptParams;
+use codex_app_server_protocol::TurnInterruptResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus as AppServerTurnStatus;
@@ -143,6 +152,10 @@ fn sample_mcp_tool_call_event(thread_id: &str, plugin_id: Option<&str>) -> Track
                 session_id: format!("session-{thread_id}"),
                 turn_id: "turn-1".to_string(),
                 item_id: format!("item-{thread_id}"),
+                cell_id: None,
+                parent_call_id: None,
+                originating_response_id: None,
+                subsequent_response_id: None,
                 app_server_client: CodexAppServerClientMetadata {
                     product_client_id: "codex_desktop".to_string(),
                     client_name: None,
@@ -369,6 +382,14 @@ async fn api_key_auth_sends_only_plugin_events_to_codex_backend() {
             sample_mcp_tool_call_event("non-plugin-mcp", /*plugin_id*/ None),
             sample_plugin_used_track_event("non-plugin-used", /*plugin_id*/ None),
             sample_accepted_line_fingerprint_event("other-event"),
+            TrackEventRequest::ThreadArchive(ThreadArchiveEvent {
+                event_type: "codex_thread_archive_event",
+                event_params: ThreadArchiveEventParams {
+                    thread_id: "non-plugin-thread-archive".to_string(),
+                    action: ThreadArchiveAction::Archived,
+                    occurred_at_ms: 1,
+                },
+            }),
             sample_plugin_used_track_event("plugin-used", Some("sample@test")),
             sample_skill_track_event("plugin-skill", Some("sample@test")),
             sample_mcp_tool_call_event("plugin-mcp", Some("sample@test")),
@@ -463,6 +484,20 @@ fn sample_turn_steer_request() -> ClientRequest {
             additional_context: None,
         },
     }
+}
+
+fn sample_turn_interrupt_request(turn_id: &str) -> ClientRequest {
+    ClientRequest::TurnInterrupt {
+        request_id: RequestId::Integer(3),
+        params: TurnInterruptParams {
+            thread_id: "thread-1".to_string(),
+            turn_id: turn_id.to_string(),
+        },
+    }
+}
+
+fn sample_turn_interrupt_response() -> ClientResponsePayload {
+    ClientResponsePayload::TurnInterrupt(TurnInterruptResponse {})
 }
 
 fn sample_thread_archive_request() -> ClientRequest {
@@ -600,11 +635,36 @@ fn track_request_only_enqueues_analytics_relevant_requests() {
         ));
     }
 
+    client.track_request(
+        /*connection_id*/ 7,
+        RequestId::Integer(3),
+        &sample_turn_interrupt_request("turn-1"),
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(AnalyticsEventsQueueMessage::Fact(input))
+            if matches!(
+                *input,
+                AnalyticsFact::ExplicitClientInterruptRequest {
+                    ref turn_id,
+                    requested_at_ms,
+                    ..
+                } if turn_id == "turn-1" && requested_at_ms > 0
+            )
+    ));
+
     let ignored_request = sample_thread_archive_request();
     client.track_request(
         /*connection_id*/ 7,
         RequestId::Integer(3),
         &ignored_request,
+    );
+    assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+
+    client.track_request(
+        /*connection_id*/ 7,
+        RequestId::Integer(4),
+        &sample_turn_interrupt_request(""),
     );
     assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
 }
@@ -619,6 +679,7 @@ fn track_response_only_enqueues_analytics_relevant_responses() {
         (RequestId::Integer(3), sample_thread_fork_response()),
         (RequestId::Integer(4), sample_turn_start_response()),
         (RequestId::Integer(5), sample_turn_steer_response()),
+        (RequestId::Integer(6), sample_turn_interrupt_response()),
     ] {
         client.track_response(/*connection_id*/ 7, request_id, &response);
         assert!(matches!(
@@ -630,7 +691,7 @@ fn track_response_only_enqueues_analytics_relevant_responses() {
 
     client.track_response(
         /*connection_id*/ 7,
-        RequestId::Integer(6),
+        RequestId::Integer(7),
         &ClientResponsePayload::ThreadArchive(ThreadArchiveResponse {}),
     );
     assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
@@ -684,7 +745,20 @@ async fn flush_waits_for_preceding_fact_delivery() {
 
 #[tokio::test]
 async fn flush_is_noop_when_analytics_is_disabled() {
-    AnalyticsEventsClient::disabled().flush().await;
+    let client = AnalyticsEventsClient::new(
+        codex_login::AuthManager::from_auth_for_testing(
+            codex_login::CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        ),
+        "https://chatgpt.com/backend-api".to_string(),
+        /*analytics_enabled*/ Some(false),
+    );
+    client.track_notification(&ServerNotification::ThreadArchived(
+        ThreadArchivedNotification {
+            thread_id: "thread-1".to_string(),
+        },
+    ));
+    assert!(client.queue.is_none());
+    client.flush().await;
 }
 
 #[test]

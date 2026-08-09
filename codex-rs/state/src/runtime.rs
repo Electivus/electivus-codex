@@ -8,6 +8,7 @@ use crate::apply_rollout_item;
 use crate::migrations::runtime_goals_migrator;
 use crate::migrations::runtime_logs_migrator;
 use crate::migrations::runtime_memories_migrator;
+use crate::migrations::runtime_queue_migrator;
 use crate::migrations::runtime_state_migrator;
 use crate::migrations::runtime_thread_history_migrator;
 use crate::model::ThreadRow;
@@ -75,14 +76,17 @@ pub(crate) mod memory_store_reset_contract_tests;
 #[cfg(test)]
 #[path = "runtime/memory_store_startup_contract_tests.rs"]
 pub(crate) mod memory_store_startup_contract_tests;
+mod queued_items;
 mod recovery;
 mod remote_control;
 #[cfg(test)]
 #[path = "runtime/remote_control_contract_tests.rs"]
 pub(crate) mod remote_control_contract_tests;
+mod rollout_migration;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod thread_section_order;
+mod thread_sections;
 mod threads;
 
 pub use backend::RuntimeStateBackendConfig;
@@ -113,6 +117,7 @@ pub use memory_store::MemoryGeneration;
 pub use memory_store::MemoryStore;
 pub use memory_store::MemoryWorkspaceMaterialization;
 pub(crate) use memory_store::import_migrated_memory_generation;
+pub use queued_items::SqliteQueueStore;
 pub use recovery::RuntimeDbBackup;
 pub(super) use recovery::RuntimeDbInitError;
 pub use recovery::backup_runtime_db_for_fresh_start;
@@ -145,6 +150,7 @@ pub struct StateRuntime {
     remote_control_enrollments: RemoteControlEnrollmentStore,
     thread_goals: GoalStore,
     memories: MemoryStore,
+    thread_queue: Option<SqliteQueueStore>,
     thread_updated_at_millis: Arc<AtomicI64>,
     thread_recency_at_millis: Arc<AtomicI64>,
 }
@@ -242,6 +248,7 @@ impl StateRuntime {
             thread_goals: pool.goal_store(),
             memories,
             backend: StateRuntimeBackend::Postgresql(pool),
+            thread_queue: None,
             thread_updated_at_millis: Arc::new(AtomicI64::new(0)),
             thread_recency_at_millis: Arc::new(AtomicI64::new(0)),
         });
@@ -263,10 +270,12 @@ impl StateRuntime {
         let logs_migrator = runtime_logs_migrator();
         let goals_migrator = runtime_goals_migrator();
         let memories_migrator = runtime_memories_migrator();
+        let queue_migrator = runtime_queue_migrator();
         let state_path = sqlite.state_db_path();
         let logs_path = sqlite.logs_db_path();
         let goals_path = sqlite.goals_db_path();
         let memories_path = sqlite.memories_db_path();
+        let queue_path = sqlite.queue_db_path();
         let pool = match sqlite
             .open_state_db(&state_migrator, telemetry_override)
             .await
@@ -313,6 +322,23 @@ impl StateRuntime {
                 return Err(err);
             }
         };
+        let queue_pool = match sqlite
+            .open_queue_db(&queue_migrator, telemetry_override)
+            .await
+        {
+            Ok(db) => Arc::new(db),
+            Err(err) => {
+                warn!("failed to open queue db at {}: {err}", queue_path.display());
+                close_sqlite_pools(&[
+                    pool.as_ref(),
+                    logs_pool.as_ref(),
+                    goals_pool.as_ref(),
+                    memories_pool.as_ref(),
+                ])
+                .await;
+                return Err(err);
+            }
+        };
         let started = Instant::now();
         let backfill_state_result = ensure_backfill_state_row_in_pool(pool.as_ref()).await;
         crate::telemetry::record_init_result(
@@ -328,6 +354,7 @@ impl StateRuntime {
                 logs_pool.as_ref(),
                 goals_pool.as_ref(),
                 memories_pool.as_ref(),
+                queue_pool.as_ref(),
             ])
             .await;
             return Err(err);
@@ -356,6 +383,7 @@ impl StateRuntime {
                         logs_pool.as_ref(),
                         goals_pool.as_ref(),
                         memories_pool.as_ref(),
+                        queue_pool.as_ref(),
                     ])
                     .await;
                     return Err(err);
@@ -370,6 +398,7 @@ impl StateRuntime {
                 memories.clone(),
             ),
             thread_goals: GoalStore::new(Arc::clone(&goals_pool)),
+            thread_queue: Some(SqliteQueueStore::new(queue_pool)),
             sqlite,
             memories,
             remote_control_enrollments: RemoteControlEnrollmentStore::from_sqlite(Arc::clone(
@@ -402,6 +431,11 @@ impl StateRuntime {
 
     pub fn memories(&self) -> &MemoryStore {
         &self.memories
+    }
+
+    /// Return the durable, SQLite-backed user-message queue.
+    pub fn thread_queue(&self) -> Option<&SqliteQueueStore> {
+        self.thread_queue.as_ref()
     }
 
     /// Whether local rollout JSONL is canonical thread history for this runtime.
@@ -450,6 +484,9 @@ impl StateRuntime {
         match &self.backend {
             StateRuntimeBackend::Postgresql(pool) => pool.close().await,
             StateRuntimeBackend::Sqlite(pool) => {
+                if let Some(thread_queue) = &self.thread_queue {
+                    thread_queue.close().await;
+                }
                 self.memories.close().await;
                 self.thread_goals.close().await;
                 self.logs.close().await;
@@ -707,6 +744,8 @@ mod tests {
             "migrate_goals",
             "open_memories",
             "migrate_memories",
+            "open_queue",
+            "migrate_queue",
             "ensure_backfill_state",
             "post_init_query",
         ]

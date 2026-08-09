@@ -367,6 +367,7 @@ mod job {
         }];
         prompt.base_instructions = BaseInstructions {
             text: crate::stage_one::PROMPT.to_string(),
+            provenance: None,
         };
         prompt.output_schema = Some(output_schema());
         prompt.output_schema_strict = true;
@@ -894,6 +895,7 @@ mod tests {
                     output_tokens: 3,
                     reasoning_output_tokens: 1,
                     total_tokens: 13,
+                    codex_rollout_budget_units: None,
                 }),
             },
             JobResult {
@@ -905,6 +907,7 @@ mod tests {
                     output_tokens: 2,
                     reasoning_output_tokens: 0,
                     total_tokens: 9,
+                    codex_rollout_budget_units: None,
                 }),
             },
             JobResult {
@@ -926,6 +929,7 @@ mod tests {
                 output_tokens: 5,
                 reasoning_output_tokens: 1,
                 total_tokens: 22,
+                codex_rollout_budget_units: None,
             })
         );
     }

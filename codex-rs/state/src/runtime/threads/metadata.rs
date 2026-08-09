@@ -15,6 +15,19 @@ pub struct ThreadResumeMetadata {
 }
 
 impl StateRuntime {
+    /// Permanently promote a thread to paginated history without changing metadata or recency.
+    pub async fn mark_thread_paginated(&self, thread_id: ThreadId) -> anyhow::Result<bool> {
+        if let Some((pool, schema)) = self.postgres_connection() {
+            return postgres::mark_thread_paginated(&pool, &schema, thread_id).await;
+        }
+
+        let result = sqlx::query("UPDATE threads SET history_mode = 'paginated' WHERE id = ?")
+            .bind(thread_id.to_string())
+            .execute(self.sqlite_pool()?)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Read the canonical working directory and model for a persisted thread.
     pub async fn get_thread_resume_metadata(
         &self,

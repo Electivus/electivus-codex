@@ -34,6 +34,7 @@ mod postgres_lease_recovery_contract_tests;
 #[cfg(test)]
 #[path = "postgres_turn_projection_contract_tests.rs"]
 mod postgres_turn_projection_contract_tests;
+mod queue_store;
 #[cfg(test)]
 #[path = "runtime_state_migration_contract_tests.rs"]
 mod runtime_state_migration_contract_tests;
@@ -48,8 +49,11 @@ mod search_thread_occurrences_contract_tests;
 mod search_threads_contract_tests;
 mod store;
 mod thread_metadata_sync;
+mod thread_sections;
 mod types;
 
+pub use codex_state::MAX_QUEUE_ITEMS;
+pub use codex_state::QueuedUserSubmissionRecord;
 pub use error::ThreadStoreError;
 pub use error::ThreadStoreResult;
 pub use in_memory::InMemoryThreadStore;
@@ -58,11 +62,25 @@ pub use live_thread::LiveThread;
 pub use live_thread::LiveThreadInitGuard;
 pub use local::LocalThreadStore;
 pub use local::LocalThreadStoreConfig;
+pub use local::RolloutMigrationMode;
+pub use local::RolloutMigrationOptions;
+pub use local::RolloutMigrationOutcome;
+pub use local::RolloutMigrationProgress;
+pub use local::RolloutMigrationReport;
+pub use local::RolloutMigrationStatus;
 pub use postgres::PostgresThreadProjectionMaterializer;
 pub use postgres::PostgresThreadStore;
+pub use queue_store::LocalQueueStore;
+pub use queue_store::QueueStore;
 pub use store::ChildRegistrationGuard;
 pub use store::ThreadStore;
 pub use store::ThreadStoreFuture;
+pub use thread_sections::CreateThreadSectionParams;
+pub use thread_sections::DeleteThreadSectionParams;
+pub use thread_sections::ListThreadSectionsParams;
+pub use thread_sections::RenameThreadSectionParams;
+pub use thread_sections::StoredThreadSection;
+pub use thread_sections::StoredThreadSectionsPage;
 pub use types::AppendBatchCommit;
 pub use types::AppendBatchId;
 pub use types::AppendThreadItemsBatch;

@@ -49,7 +49,7 @@ enabled = true
 trusted_hash = "<hash returned by hooks/list>"
 ```
 
-Configured handler variants are `command`, `prompt`, `agent`. Only `command` executes today; `prompt` and `agent` parse successfully but discovery skips them with warnings. Empty commands are also skipped. `commandWindows` overrides `command` only on Windows.
+Configured handler variants are `command`, `mcp_tool`, `prompt`, `agent`. Only `command` executes today; `prompt` and `agent` parse successfully but discovery skips them with warnings. Empty commands are also skipped. `commandWindows` overrides `command` only on Windows.
 
 <!-- prettier-ignore -->
 | Command field | Meaning |

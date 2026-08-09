@@ -15,6 +15,8 @@ use codex_app_server_protocol::ServerNotificationEnvelope;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ServerRequestPayload;
 use codex_app_server_protocol::ServerResponse;
+use codex_diagnostics::Gauge;
+use codex_diagnostics::GaugeGuard;
 use codex_otel::span_w3c_trace_context;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::W3cTraceContext;
@@ -39,6 +41,9 @@ use codex_protocol::account::PlanType;
 
 pub(crate) type ClientRequestResult = std::result::Result<Result, JSONRPCErrorError>;
 
+static IN_FLIGHT_REQUESTS: Gauge = Gauge::new("app.requests.in_flight");
+static PENDING_SERVER_REQUESTS: Gauge = Gauge::new("app.server_requests.pending");
+
 /// Stable identifier for a client request scoped to a transport connection.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct ConnectionRequestId {
@@ -53,6 +58,7 @@ pub(crate) struct RequestContext {
     request_id: ConnectionRequestId,
     span: Span,
     parent_trace: Option<W3cTraceContext>,
+    _diagnostics_guard: Arc<GaugeGuard>,
 }
 
 impl RequestContext {
@@ -65,6 +71,7 @@ impl RequestContext {
             request_id,
             span,
             parent_trace,
+            _diagnostics_guard: Arc::new(IN_FLIGHT_REQUESTS.track()),
         }
     }
 
@@ -116,6 +123,7 @@ struct PendingCallbackEntry {
     callback: oneshot::Sender<ClientRequestResult>,
     thread_id: Option<ThreadId>,
     request: ServerRequest,
+    _diagnostics_guard: GaugeGuard,
 }
 
 impl ThreadScopedOutgoingMessageSender {
@@ -303,6 +311,7 @@ impl OutgoingMessageSender {
                     callback: tx_approve,
                     thread_id,
                     request: request.clone(),
+                    _diagnostics_guard: PENDING_SERVER_REQUESTS.track(),
                 },
             );
         }
@@ -572,6 +581,13 @@ impl OutgoingMessageSender {
     }
 
     pub(crate) async fn send_server_notification(&self, notification: ServerNotification) {
+        if matches!(
+            notification,
+            ServerNotification::ThreadArchived(_) | ServerNotification::ThreadUnarchived(_)
+        ) {
+            self.analytics_events_client
+                .track_notification(&notification);
+        }
         self.send_server_notification_to_connections(&[], notification)
             .await;
     }
@@ -760,6 +776,7 @@ mod tests {
                 login_id: Some(Uuid::nil().to_string()),
                 success: true,
                 error: None,
+                onboarding_entrypoint: None,
             });
 
         let jsonrpc_notification =
@@ -774,6 +791,7 @@ mod tests {
                     "loginId": Uuid::nil().to_string(),
                     "success": true,
                     "error": null,
+                    "onboardingEntrypoint": null,
                 },
                 "emittedAtMs": 1_234,
             }),
@@ -790,6 +808,7 @@ mod tests {
                 login_id: Some(Uuid::nil().to_string()),
                 success: true,
                 error: None,
+                onboarding_entrypoint: None,
             });
 
         assert_eq!(
@@ -799,6 +818,7 @@ mod tests {
                     "loginId": Uuid::nil().to_string(),
                     "success": true,
                     "error": null,
+                    "onboardingEntrypoint": null,
                 },
             }),
             serde_json::to_value(notification)
@@ -1334,6 +1354,7 @@ mod tests {
                     turn_id: "turn-1".to_string(),
                     item_id: "call-1".to_string(),
                     questions: vec![],
+                    is_blocking: true,
                     auto_resolution_ms: None,
                 },
             ))
@@ -1397,6 +1418,7 @@ mod tests {
                     turn_id: "turn-1".to_string(),
                     item_id: "call-1".to_string(),
                     questions: vec![],
+                    is_blocking: true,
                     auto_resolution_ms: None,
                 },
             ))

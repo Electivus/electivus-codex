@@ -114,6 +114,8 @@ pub(super) struct ThreadListQuery {
     pub(super) model_providers: Option<Vec<String>>,
     pub(super) source_kinds: Vec<ThreadSourceKind>,
     pub(super) location_filter: SessionLocationFilter,
+    pub(super) archived: bool,
+    pub(super) use_state_db_only: bool,
 }
 
 impl ThreadListQuery {
@@ -136,12 +138,12 @@ impl ThreadListQuery {
             sort_direction: None,
             model_providers: self.model_providers,
             source_kinds: Some(self.source_kinds),
-            archived: Some(false),
+            archived: Some(self.archived),
             is_pinned: None,
             section_id: None,
             cwd,
             project_cwd,
-            use_state_db_only: false,
+            use_state_db_only: self.use_state_db_only,
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,

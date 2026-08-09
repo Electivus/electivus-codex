@@ -326,6 +326,9 @@ ON CONFLICT(child_thread_id) DO NOTHING
 
         for (thread_id, thread_id_string) in &thread_ids {
             self.logs.delete_logs_for_thread(thread_id_string).await?;
+            if let Some(thread_queue) = self.thread_queue() {
+                thread_queue.delete_thread_queue(*thread_id).await?;
+            }
             self.memories.delete_thread_memory(*thread_id).await?;
             self.thread_goals.delete_thread_goal(*thread_id).await?;
         }

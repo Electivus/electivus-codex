@@ -1,10 +1,10 @@
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
+use app_test_support::create_exec_command_sse_response;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence;
-use app_test_support::create_shell_command_sse_response;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
@@ -194,16 +194,7 @@ async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()
 #[tokio::test]
 async fn review_start_exec_approval_item_id_matches_command_execution_item() -> Result<()> {
     let responses = vec![
-        create_shell_command_sse_response(
-            vec![
-                "python3".to_string(),
-                "-c".to_string(),
-                "print(42)".to_string(),
-            ],
-            /*workdir*/ None,
-            Some(5000),
-            "review-call-1",
-        )?,
+        create_exec_command_sse_response("review-call-1")?,
         create_final_assistant_message_sse_response("done")?,
     ];
     let server = create_mock_responses_server_sequence(responses).await;
@@ -213,6 +204,7 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
         .with_provider_name("Mock provider")
         .with_approval_policy("untrusted")
         .disable_feature(Feature::ShellSnapshot)
+        .enable_feature(Feature::UnifiedExec)
         .write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()

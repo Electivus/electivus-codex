@@ -100,7 +100,11 @@ ON CONFLICT(id) DO UPDATE SET
     updated_at_ms = excluded.updated_at_ms,
     recency_at_ms = threads.recency_at_ms,
     source = excluded.source,
-    history_mode = excluded.history_mode,
+    -- Paginated history is a one-way promotion; stale legacy metadata must not downgrade it.
+    history_mode = CASE
+        WHEN threads.history_mode = 'paginated' THEN threads.history_mode
+        ELSE excluded.history_mode
+    END,
     thread_source = excluded.thread_source,
     agent_nickname = excluded.agent_nickname,
     agent_role = excluded.agent_role,

@@ -19,6 +19,7 @@ use codex_app_server_client::ExecServerRuntimePaths;
 use codex_app_server_client::InProcessAppServerClient;
 use codex_app_server_client::InProcessClientStartArgs;
 use codex_app_server_client::InProcessServerEvent;
+use codex_app_server_client::resolve_project_repository_identity;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
@@ -31,6 +32,8 @@ use codex_app_server_protocol::ReviewTarget as ApiReviewTarget;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::Thread as AppServerThread;
+use codex_app_server_protocol::ThreadForkParams;
+use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadItem as AppServerThreadItem;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
@@ -57,21 +60,22 @@ use codex_config::ConfigLoadError;
 use codex_config::ConfigLoadOptions;
 use codex_config::LoaderOverrides;
 use codex_config::format_config_error_with_source;
+use codex_core::StateDbHandle;
 use codex_core::check_execpolicy_for_warnings;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigTomlLoadResult;
+use codex_core::config::bootstrap_auth_config;
 use codex_core::config::find_codex_home;
 use codex_core::config::load_config_toml_with_layer_stack;
-use codex_core::config::resolve_bootstrap_auth_keyring_backend_kind;
-use codex_core::config::resolve_bootstrap_auth_route_config;
 use codex_core::config::resolve_oss_provider;
 use codex_core::config::resolve_profile_v2_config_path;
 use codex_core::format_exec_policy_error_with_source;
+use codex_core::path_utils;
+use codex_core::read_session_meta_line;
 use codex_feedback::CodexFeedback;
 use codex_git_utils::get_git_repo_root;
-use codex_login::AuthConfig;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::default_client::set_default_originator;
 use codex_login::enforce_login_restrictions;
@@ -160,6 +164,7 @@ const DEFAULT_ANALYTICS_ENABLED: bool = true;
 const EXEC_DEFAULT_LOG_FILTER: &str = "error,opentelemetry_sdk=off,opentelemetry_otlp=off";
 
 enum InitialOperation {
+    ForkOnly,
     UserTurn {
         items: Vec<UserInput>,
         output_schema: Option<Value>,
@@ -233,16 +238,12 @@ fn exec_stderr_env_filter() -> EnvFilter {
 }
 
 pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
-    #[allow(clippy::print_stderr)]
-    if let Some(message) = cli.removed_full_auto_warning() {
-        eprintln!("{message}");
-    }
-
     if let Err(err) = set_default_originator("codex_exec".to_string()) {
         tracing::warn!(?err, "Failed to set codex exec originator override {err:?}");
     }
 
     let Cli {
+        psp,
         command,
         strict_config,
         shared,
@@ -250,15 +251,15 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         ephemeral,
         ignore_user_config,
         ignore_rules,
-        removed_full_auto,
         color,
         last_message_file,
         json: json_mode,
         prompt,
         output_schema: output_schema_path,
-        config_overrides,
+        mut config_overrides,
     } = cli;
-    let shared = shared.into_inner();
+    let mut shared = shared.into_inner();
+    shared.take_auto_review_config_overrides(&mut config_overrides);
     let SharedCliOptions {
         images,
         model: model_cli_arg,
@@ -266,6 +267,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         oss_provider,
         config_profile_v2,
         sandbox_mode: sandbox_mode_cli_arg,
+        auto_review: _,
         dangerously_bypass_approvals_and_sandbox,
         bypass_hook_trust,
         cwd,
@@ -285,9 +287,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         .with_writer(std::io::stderr)
         .with_filter(exec_stderr_env_filter());
 
-    let sandbox_mode = if removed_full_auto {
-        Some(SandboxMode::WorkspaceWrite)
-    } else if dangerously_bypass_approvals_and_sandbox {
+    let sandbox_mode = if dangerously_bypass_approvals_and_sandbox {
         Some(SandboxMode::DangerFullAccess)
     } else {
         sandbox_mode_cli_arg.map(Into::<SandboxMode>::into)
@@ -341,28 +341,9 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     )
     .await;
     let bootstrap_config_toml = &bootstrap_config.config_toml;
-
-    let chatgpt_base_url = bootstrap_config_toml
-        .chatgpt_base_url
-        .clone()
-        .unwrap_or_else(|| "https://chatgpt.com/backend-api/".to_string());
-    let auth_route_config = resolve_bootstrap_auth_route_config(
-        bootstrap_config_toml,
-        bootstrap_config
-            .config_layer_stack
-            .requirements()
-            .feature_requirements
-            .as_ref(),
-    )?;
     let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
-        codex_home.to_path_buf(),
+        bootstrap_auth_config(&codex_home, &bootstrap_config)?,
         /*enable_codex_api_key_env*/ false,
-        bootstrap_config_toml
-            .cli_auth_credentials_store
-            .unwrap_or_default(),
-        resolve_bootstrap_auth_keyring_backend_kind(&bootstrap_config)?,
-        chatgpt_base_url,
-        auth_route_config,
     )
     .await;
     let run_cli_overrides = cli_kv_overrides.clone();
@@ -440,6 +421,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         tools_web_search_request: None,
         ephemeral: ephemeral.then_some(true),
         bypass_hook_trust: bypass_hook_trust.then_some(true),
+        psp: Some(psp),
         additional_writable_roots: add_dir,
     };
 
@@ -455,7 +437,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     };
     let config = build_exec_config(
         overrides,
-        dangerously_bypass_approvals_and_sandbox || removed_full_auto,
+        dangerously_bypass_approvals_and_sandbox,
         build_config,
     )
     .await?;
@@ -478,18 +460,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
 
     set_default_client_residency_requirement(config.enforce_residency.value());
 
-    let auth_route_config = config.auth_route_config();
-    if let Err(err) = enforce_login_restrictions(&AuthConfig {
-        codex_home: config.codex_home.to_path_buf(),
-        auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
-        keyring_backend_kind: config.auth_keyring_backend_kind(),
-        forced_login_method: config.forced_login_method,
-        forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
-        chatgpt_base_url: Some(config.chatgpt_base_url.clone()),
-        auth_route_config,
-    })
-    .await
-    {
+    if let Err(err) = enforce_login_restrictions(&config.auth_config()).await {
         eprintln!("{err}");
         std::process::exit(1);
     }
@@ -770,6 +741,37 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 prompt_text,
             )
         }
+        (Some(ExecCommand::Fork(args)), root_prompt, imgs) => {
+            let prompt_arg = args.prompt.clone().or(root_prompt);
+            if let Some(prompt_arg) = prompt_arg {
+                let prompt_text = resolve_prompt(Some(prompt_arg));
+                let mut items: Vec<UserInput> = imgs
+                    .into_iter()
+                    .chain(args.images.iter().cloned())
+                    .map(|path| UserInput::LocalImage { path, detail: None })
+                    .collect();
+                items.push(UserInput::Text {
+                    text: prompt_text.clone(),
+                    text_elements: Vec::new(),
+                });
+                let output_schema = load_output_schema(output_schema_path);
+                (
+                    InitialOperation::UserTurn {
+                        items,
+                        output_schema,
+                    },
+                    prompt_text,
+                )
+            } else if !imgs.is_empty() || !args.images.is_empty() {
+                anyhow::bail!("Forking with images requires a prompt");
+            } else if output_schema_path.is_some() || last_message_file.is_some() {
+                anyhow::bail!("Forking with output options requires a prompt");
+            } else if config.ephemeral {
+                anyhow::bail!("Ephemeral forks require a prompt");
+            } else {
+                (InitialOperation::ForkOnly, String::new())
+            }
+        }
         (None, root_prompt, imgs) => {
             let prompt_text = resolve_root_prompt(root_prompt);
             let mut items: Vec<UserInput> = imgs
@@ -803,18 +805,27 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     }
 
     let mut request_ids = RequestIdSequencer::new();
+    let state_db = in_process_start_args.state_db.clone();
+    let environment_manager = in_process_start_args.environment_manager.clone();
     let mut client = InProcessAppServerClient::start(in_process_start_args)
         .await
         .map_err(|err| {
             anyhow::anyhow!("failed to initialize in-process app-server client: {err}")
         })?;
 
-    // Handle resume subcommand through existing `thread/list` + `thread/resume`
-    // APIs so exec no longer reaches into rollout storage directly.
+    // Resolve resume and fork through existing app-server thread lifecycle APIs.
     let (primary_thread_id, fallback_session_configured) = if let Some(ExecCommand::Resume(args)) =
         command.as_ref()
     {
-        if let Some(thread_id) = resolve_resume_thread_id(&client, &config, args).await? {
+        if let Some(thread_id) = resolve_resume_thread_id(
+            &client,
+            &config,
+            state_db.as_ref(),
+            environment_manager.as_ref(),
+            args,
+        )
+        .await?
+        {
             let response: ThreadResumeResponse = send_request_with_response(
                 &client,
                 ClientRequest::ThreadResume {
@@ -849,6 +860,76 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     .map_err(anyhow::Error::msg)?;
             (session_configured.thread_id, session_configured)
         }
+    } else if let Some(ExecCommand::Fork(args)) = command.as_ref() {
+        let source_args = crate::cli::ResumeArgs {
+            session_id: Some(args.session_id.clone()),
+            last: false,
+            all: true,
+            images: Vec::new(),
+            prompt: None,
+        };
+        let source_thread_id = resolve_resume_thread_id(
+            &client,
+            &config,
+            state_db.as_ref(),
+            environment_manager.as_ref(),
+            &source_args,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.session_id))?;
+        let permissions = permissions_selection_from_config(&config);
+        let sandbox = permissions.is_none().then(|| {
+            sandbox_mode_from_permission_profile(
+                &config.permissions.effective_permission_profile(),
+                config.cwd.as_path(),
+            )
+        });
+        let response: ThreadForkResponse = send_request_with_response(
+            &client,
+            ClientRequest::ThreadFork {
+                request_id: request_ids.next(),
+                params: ThreadForkParams {
+                    thread_id: source_thread_id,
+                    model: config.model.clone(),
+                    model_provider: Some(config.model_provider_id.clone()),
+                    cwd: Some(config.cwd.to_string_lossy().to_string()),
+                    runtime_workspace_roots: Some(config.workspace_roots.clone()),
+                    approval_policy: Some(config.permissions.approval_policy.value().into()),
+                    approvals_reviewer: resume_approvals_reviewer_override,
+                    sandbox: sandbox.flatten(),
+                    permissions,
+                    config: thread_config_overrides_from_config(&config),
+                    ephemeral: config.ephemeral,
+                    thread_source: Some(ThreadSource::User),
+                    exclude_turns: true,
+                    defer_goal_continuation: !config.ephemeral,
+                    ..ThreadForkParams::default()
+                },
+            },
+            "thread/fork",
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        let session_configured = session_configured_from_thread_response(
+            &response.thread.session_id,
+            &response.thread.id,
+            response.thread.forked_from_id.as_deref(),
+            response.thread.parent_thread_id.as_deref(),
+            response.thread.thread_source.clone().map(Into::into),
+            response.thread.name.clone(),
+            response.thread.path.clone(),
+            response.model,
+            response.model_provider,
+            response.service_tier,
+            response.approval_policy.to_core(),
+            response.approvals_reviewer.to_core(),
+            config.permissions.effective_permission_profile(),
+            response.active_permission_profile.map(Into::into),
+            response.cwd,
+            response.reasoning_effort,
+        )
+        .map_err(anyhow::Error::msg)?;
+        (session_configured.thread_id, session_configured)
     } else {
         let response: ThreadStartResponse = send_request_with_response(
             &client,
@@ -894,6 +975,17 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     });
 
     let task_id = match initial_operation {
+        InitialOperation::ForkOnly => {
+            request_shutdown(&client, &mut request_ids, &primary_thread_id_for_span)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            client
+                .shutdown()
+                .await
+                .map_err(|err| anyhow::anyhow!("in-process app-server shutdown failed: {err}"))?;
+            event_processor.print_final_output();
+            return Ok(());
+        }
         InitialOperation::UserTurn {
             items,
             output_schema,
@@ -1190,6 +1282,7 @@ fn session_configured_from_thread_start_response(
     session_configured_from_thread_response(
         &response.thread.session_id,
         &response.thread.id,
+        response.thread.forked_from_id.as_deref(),
         response.thread.parent_thread_id.as_deref(),
         response.thread.thread_source.clone().map(Into::into),
         response.thread.name.clone(),
@@ -1213,6 +1306,7 @@ fn session_configured_from_thread_resume_response(
     session_configured_from_thread_response(
         &response.thread.session_id,
         &response.thread.id,
+        response.thread.forked_from_id.as_deref(),
         response.thread.parent_thread_id.as_deref(),
         response.thread.thread_source.clone().map(Into::into),
         response.thread.name.clone(),
@@ -1245,6 +1339,7 @@ fn review_target_to_api(target: ReviewTarget) -> ApiReviewTarget {
 fn session_configured_from_thread_response(
     session_id: &str,
     thread_id: &str,
+    forked_from_id: Option<&str>,
     parent_thread_id: Option<&str>,
     thread_source: Option<codex_protocol::protocol::ThreadSource>,
     thread_name: Option<String>,
@@ -1263,6 +1358,10 @@ fn session_configured_from_thread_response(
         .map_err(|err| format!("session id `{session_id}` is invalid: {err}"))?;
     let thread_id = ThreadId::from_string(thread_id)
         .map_err(|err| format!("thread id `{thread_id}` is invalid: {err}"))?;
+    let forked_from_id = forked_from_id
+        .map(ThreadId::from_string)
+        .transpose()
+        .map_err(|err| format!("forked-from thread id is invalid: {err}"))?;
     let parent_thread_id = parent_thread_id
         .map(ThreadId::from_string)
         .transpose()
@@ -1271,7 +1370,7 @@ fn session_configured_from_thread_response(
     Ok(SessionConfiguredEvent {
         session_id,
         thread_id,
-        forked_from_id: None,
+        forked_from_id,
         parent_thread_id,
         thread_source,
         thread_name,
@@ -1439,39 +1538,93 @@ fn all_thread_source_kinds() -> Vec<ThreadSourceKind> {
 async fn resolve_resume_thread_id(
     client: &InProcessAppServerClient,
     config: &Config,
+    state_db: Option<&StateDbHandle>,
+    environment_manager: &EnvironmentManager,
     args: &crate::cli::ResumeArgs,
 ) -> anyhow::Result<Option<String>> {
     let model_providers = resume_lookup_model_providers(config, args);
     let project_cwd = (!args.all).then(|| LegacyAppPathString::from_abs_path(&config.cwd));
+    let validate_local_rollout_project = state_db
+        .is_some_and(|state_db| state_db.uses_local_rollout_history())
+        && project_cwd.is_some();
+    let project_repository_identity = match (validate_local_rollout_project, project_cwd.clone()) {
+        (true, Some(project_cwd)) => {
+            resolve_project_repository_identity(environment_manager, project_cwd).await
+        }
+        (true, None) | (false, _) => None,
+    };
 
     if args.last {
-        let response: ThreadListResponse = send_request_with_response(
-            client,
-            ClientRequest::ThreadList {
-                request_id: RequestId::Integer(0),
-                params: ThreadListParams {
-                    cursor: None,
-                    limit: Some(1),
-                    sort_key: Some(ThreadSortKey::UpdatedAt),
-                    sort_direction: None,
-                    model_providers,
-                    source_kinds: Some(all_thread_source_kinds()),
-                    archived: Some(false),
-                    is_pinned: None,
-                    section_id: None,
-                    parent_thread_id: None,
-                    ancestor_thread_id: None,
-                    cwd: None,
-                    project_cwd,
-                    use_state_db_only: false,
-                    search_term: None,
+        let mut use_state_db_only = state_db.is_some();
+        let mut cursor = None;
+        loop {
+            let response: ThreadListResponse = send_request_with_response(
+                client,
+                ClientRequest::ThreadList {
+                    request_id: RequestId::Integer(0),
+                    params: ThreadListParams {
+                        cursor,
+                        limit: Some(100),
+                        sort_key: Some(ThreadSortKey::UpdatedAt),
+                        sort_direction: None,
+                        model_providers: model_providers.clone(),
+                        source_kinds: Some(all_thread_source_kinds()),
+                        archived: Some(false),
+                        is_pinned: None,
+                        section_id: None,
+                        parent_thread_id: None,
+                        ancestor_thread_id: None,
+                        cwd: None,
+                        project_cwd: project_cwd.clone(),
+                        use_state_db_only,
+                        search_term: None,
+                    },
                 },
-            },
-            "thread/list",
-        )
-        .await
-        .map_err(anyhow::Error::msg)?;
-        return Ok(response.data.into_iter().next().map(|thread| thread.id));
+                "thread/list",
+            )
+            .await
+            .map_err(anyhow::Error::msg)?;
+            for thread in response.data {
+                if use_state_db_only && let Some(path) = thread.path.as_deref() {
+                    let Ok(session_meta) = read_session_meta_line(path).await else {
+                        continue;
+                    };
+                    if session_meta.meta.id.to_string() != thread.id {
+                        continue;
+                    }
+                    if validate_local_rollout_project {
+                        let cwd_matches = path_utils::paths_match_after_normalization(
+                            config.cwd.as_path(),
+                            session_meta.meta.cwd.as_path(),
+                        );
+                        let repository_matches = project_repository_identity
+                            .as_deref()
+                            .is_some_and(|expected_identity| {
+                                thread
+                                    .git_info
+                                    .as_ref()
+                                    .and_then(|git_info| git_info.origin_url.as_deref())
+                                    .and_then(codex_git_utils::canonicalize_git_remote_url)
+                                    .as_deref()
+                                    == Some(expected_identity)
+                            });
+                        if !cwd_matches && !repository_matches {
+                            continue;
+                        }
+                    }
+                }
+                return Ok(Some(thread.id));
+            }
+            let Some(next_cursor) = response.next_cursor else {
+                if use_state_db_only {
+                    use_state_db_only = false;
+                    cursor = None;
+                    continue;
+                }
+                return Ok(None);
+            };
+            cursor = Some(next_cursor);
+        }
     }
 
     let Some(session_id) = args.session_id.as_deref() else {

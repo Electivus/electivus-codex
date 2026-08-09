@@ -223,7 +223,7 @@
               "type": "string"
             },
             "path": {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             "type": {
               "enum": [
@@ -1390,6 +1390,12 @@
                 "null"
               ]
             },
+            "readOnlyHint": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "result": {
               "anyOf": [
                 {
@@ -1724,6 +1730,13 @@
             },
             "status": {
               "type": "string"
+            },
+            "transparentBackground": {
+              "default": null,
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "type": {
               "enum": [

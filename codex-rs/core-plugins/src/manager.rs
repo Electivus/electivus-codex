@@ -10,8 +10,8 @@ use crate::loader::curated_plugin_cache_version;
 use crate::loader::load_plugin_apps_from_manifest;
 use crate::loader::load_plugin_hooks;
 use crate::loader::load_plugin_hooks_from_layer_stack;
-use crate::loader::load_plugin_mcp_servers_from_manifest;
-use crate::loader::load_plugin_skills_with_identity;
+use crate::loader::load_plugin_mcp_servers_from_manifest_with_format;
+use crate::loader::load_plugin_skill_inventory;
 use crate::loader::load_plugins_from_layer_stack;
 use crate::loader::log_plugin_load_errors;
 use crate::loader::materialize_marketplace_plugin_source;
@@ -21,8 +21,10 @@ use crate::loader::refresh_curated_plugin_cache;
 use crate::loader::refresh_non_curated_plugin_cache_detailed;
 use crate::loader::refresh_non_curated_plugin_cache_force_reinstall_detailed;
 use crate::loader::remote_installed_plugins_to_config;
+use crate::manifest::PluginManifestFormat;
 use crate::manifest::PluginManifestInterface;
 use crate::manifest::load_plugin_manifest;
+use crate::manifest::load_plugin_manifest_with_format;
 use crate::marketplace::MarketplaceError;
 use crate::marketplace::MarketplaceInterface;
 use crate::marketplace::MarketplaceListError;
@@ -56,6 +58,7 @@ use crate::remote_legacy::RemotePluginMutationError;
 use crate::remote_plugin_id_resolver::RemoteInstalledPluginsSnapshot;
 use crate::remote_plugin_id_resolver::RemotePluginIdResolver;
 use crate::remote_plugin_id_resolver::persisted_remote_plugin_id_for_installation;
+use crate::skill_snapshots::new_plugin_skill_snapshots;
 use crate::startup_sync::curated_plugins_api_marketplace_path;
 use crate::startup_sync::curated_plugins_repo_path;
 use crate::startup_sync::read_curated_plugins_sha;
@@ -67,14 +70,13 @@ use crate::tool_suggest_metadata::ToolSuggestMetadataCache;
 use codex_analytics::AnalyticsEventsClient;
 use codex_analytics::PluginInstallSource;
 use codex_config::ConfigLayerStack;
+use codex_config::SkillConfigRules;
 use codex_config::clear_user_plugin;
 use codex_config::set_user_plugin_enabled;
+use codex_config::skill_config_rules_from_stack;
 use codex_config::types::PluginConfig;
 use codex_config::types::ToolSuggestDisabledTool;
 use codex_config::types::ToolSuggestDiscoverableType;
-use codex_core_skills::PluginSkillSnapshots;
-use codex_core_skills::config_rules::skill_config_rules_from_stack;
-use codex_core_skills::loader::MAX_CONCURRENT_ROOT_SCANS;
 use codex_hooks::plugin_hook_declarations;
 use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
@@ -90,8 +92,9 @@ use codex_plugin::prompt_safe_plugin_description;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::Product;
-use codex_skills::SkillConfigRules;
 use codex_skills::SkillMetadata;
+use codex_skills::SkillRootLoader;
+use codex_skills::SkillRootSnapshots;
 use codex_tools::DiscoverablePluginInfo;
 use codex_tools::DiscoverableTool;
 use codex_tools::filter_request_plugin_install_discoverable_tools_for_client;
@@ -416,6 +419,7 @@ impl From<PluginDetail> for PluginCapabilitySummary {
         Self {
             config_name: value.id,
             display_name: value.name,
+            plugin_namespace: None,
             description: prompt_safe_plugin_description(value.description.as_deref()),
             has_skills,
             mcp_server_names: value.mcp_server_names,
@@ -438,7 +442,7 @@ pub struct PluginsManager {
     // Keep the cache auth-independent so auth changes only need to resolve capabilities again.
     loaded_plugins_cache: RwLock<LoadedPluginsCache>,
     loaded_plugins_load_semaphore: Semaphore,
-    skill_root_scan_slots: Arc<Semaphore>,
+    skill_root_loader: Arc<dyn SkillRootLoader<PluginSkillRoot>>,
     tool_suggest_metadata_cache: ToolSuggestMetadataCache,
     remote_installed_plugins_cache: RwLock<Option<Vec<RemoteInstalledPlugin>>>,
     remote_installed_plugins_cache_refresh_state: RwLock<RemoteInstalledPluginsCacheRefreshState>,
@@ -453,7 +457,7 @@ pub struct PluginsManager {
 struct LoadedPluginsCacheEntry {
     key: PluginLoadCacheKey,
     plugins: Vec<LoadedPlugin>,
-    plugin_skill_snapshots: PluginSkillSnapshots,
+    plugin_skill_snapshots: SkillRootSnapshots<PluginSkillRoot>,
 }
 
 #[derive(Default)]
@@ -507,14 +511,23 @@ fn target_curated_marketplace(
 }
 
 impl PluginsManager {
-    pub fn new(codex_home: PathBuf) -> Self {
-        Self::new_with_options(codex_home, Some(Product::Codex), /*auth_mode*/ None)
+    pub fn new(
+        codex_home: PathBuf,
+        skill_root_loader: Arc<dyn SkillRootLoader<PluginSkillRoot>>,
+    ) -> Self {
+        Self::new_with_options(
+            codex_home,
+            Some(Product::Codex),
+            /*auth_mode*/ None,
+            skill_root_loader,
+        )
     }
 
     pub fn new_with_options(
         codex_home: PathBuf,
         restriction_product: Option<Product>,
         auth_mode: Option<AuthMode>,
+        skill_root_loader: Arc<dyn SkillRootLoader<PluginSkillRoot>>,
     ) -> Self {
         // Product restrictions are enforced at marketplace admission time for a given CODEX_HOME:
         // listing, install, and curated refresh all consult this restriction context before new
@@ -540,7 +553,7 @@ impl PluginsManager {
             .0,
             loaded_plugins_cache: RwLock::new(LoadedPluginsCache::default()),
             loaded_plugins_load_semaphore: Semaphore::new(/*permits*/ 1),
-            skill_root_scan_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+            skill_root_loader,
             tool_suggest_metadata_cache: ToolSuggestMetadataCache::new(),
             remote_installed_plugins_cache: RwLock::new(None),
             remote_installed_plugins_cache_refresh_state: RwLock::new(
@@ -625,7 +638,7 @@ impl PluginsManager {
     pub fn plugin_skill_snapshots_for_config(
         &self,
         config: &PluginsConfigInput,
-    ) -> Option<PluginSkillSnapshots> {
+    ) -> Option<SkillRootSnapshots<PluginSkillRoot>> {
         if !config.plugins_enabled {
             return None;
         }
@@ -680,7 +693,7 @@ impl PluginsManager {
             return self.resolve_loaded_plugins_for_auth(plugins, &config.model_provider_id);
         }
         let cache_generation = self.loaded_plugins_cache_generation();
-        let plugin_skill_snapshots = PluginSkillSnapshots::for_plugin_load();
+        let plugin_skill_snapshots = new_plugin_skill_snapshots();
         let plugins = load_plugins_from_layer_stack(
             &config.config_layer_stack,
             self.remote_installed_plugins_snapshot(),
@@ -688,7 +701,7 @@ impl PluginsManager {
             Some(&plugin_skill_snapshots),
             self.restriction_product,
             remote_global_catalog_active,
-            Arc::clone(&self.skill_root_scan_slots),
+            self.skill_root_loader.as_ref(),
         )
         .await;
         log_plugin_load_errors(&plugins);
@@ -789,7 +802,7 @@ impl PluginsManager {
             /*plugin_skill_snapshots*/ None,
             self.restriction_product,
             self.remote_global_catalog_active(config),
-            Arc::clone(&self.skill_root_scan_slots),
+            self.skill_root_loader.as_ref(),
         )
         .await;
         self.resolve_loaded_plugins_for_auth(plugins, &config.model_provider_id)
@@ -849,7 +862,7 @@ impl PluginsManager {
         generation: u64,
         key: PluginLoadCacheKey,
         plugins: Vec<LoadedPlugin>,
-        plugin_skill_snapshots: PluginSkillSnapshots,
+        plugin_skill_snapshots: SkillRootSnapshots<PluginSkillRoot>,
     ) {
         let mut cache = match self.loaded_plugins_cache.write() {
             Ok(cache) => cache,
@@ -915,7 +928,14 @@ impl PluginsManager {
     ) -> PluginTelemetryMetadata {
         let mut metadata = self.telemetry_metadata_for_plugin_id(plugin_id);
         metadata.capability_summary = match self.store.active_plugin_root(plugin_id) {
-            Some(plugin_root) => plugin_capability_summary_from_root(plugin_id, &plugin_root).await,
+            Some(plugin_root) => {
+                plugin_capability_summary_from_root(
+                    plugin_id,
+                    &plugin_root,
+                    self.skill_root_loader.as_ref(),
+                )
+                .await
+            }
             None => None,
         };
         metadata
@@ -929,7 +949,14 @@ impl PluginsManager {
         let mut metadata =
             self.telemetry_metadata_for_plugin_id_with_remote_id(plugin_id, remote_plugin_id);
         metadata.capability_summary = match self.store.active_plugin_root(plugin_id) {
-            Some(plugin_root) => plugin_capability_summary_from_root(plugin_id, &plugin_root).await,
+            Some(plugin_root) => {
+                plugin_capability_summary_from_root(
+                    plugin_id,
+                    &plugin_root,
+                    self.skill_root_loader.as_ref(),
+                )
+                .await
+            }
             None => None,
         };
         metadata
@@ -1844,7 +1871,7 @@ impl PluginsManager {
                 marketplace_name,
                 plugin,
                 self.restriction_product,
-                Arc::clone(&self.skill_root_scan_slots),
+                self.skill_root_loader.as_ref(),
             )
             .await?;
         Ok(fragment.project(skill_config_rules, self.auth_mode()))
@@ -1997,18 +2024,24 @@ impl PluginsManager {
                 "path does not exist or is not a directory".to_string(),
             ));
         }
-        let manifest =
+        let loaded_manifest =
             if codex_utils_plugins::find_plugin_manifest_path(source_path.as_path()).is_some() {
-                load_plugin_manifest(source_path.as_path())
+                load_plugin_manifest_with_format(source_path.as_path())
             } else {
                 plugin
                     .manifest_fallback
                     .as_ref()
                     .and_then(|fallback| fallback.parse_for_plugin_root(source_path.as_path()))
+                    .map(|manifest| crate::manifest::LoadedPluginManifest {
+                        manifest,
+                        format: PluginManifestFormat::Legacy,
+                    })
             }
             .ok_or_else(|| {
                 MarketplaceError::InvalidPlugin("missing or invalid plugin.json".to_string())
             })?;
+        let manifest_format = loaded_manifest.format;
+        let manifest = loaded_manifest.manifest;
         let description = manifest.description.clone();
         let marketplace_category = plugin
             .interface
@@ -2022,21 +2055,25 @@ impl PluginsManager {
             plugin_id: plugin_id.as_key(),
             remote_plugin_id: self.remote_plugin_id_for(&plugin_id),
         };
-        let resolved_skills = load_plugin_skills_with_identity(
+        let skill_config_rules = skill_config_rules_from_stack(&config.config_layer_stack);
+        let resolved_skills = load_plugin_skill_inventory(
             &source_path,
             &plugin_identity,
             &manifest,
+            manifest_format,
             self.restriction_product,
-            &codex_core_skills::config_rules::skill_config_rules_from_stack(
-                &config.config_layer_stack,
-            ),
             /*plugin_skill_snapshots*/ None,
-            Arc::clone(&self.skill_root_scan_slots),
+            self.skill_root_loader.as_ref(),
         )
-        .await;
+        .await
+        .resolve(&skill_config_rules);
         let plugin_data_root = self.store.plugin_data_root(&plugin_id);
-        let (hook_sources, _hook_load_warnings) =
-            load_plugin_hooks(&source_path, &plugin_id, &plugin_data_root, &manifest.paths);
+        let (hook_sources, _hook_load_warnings) = if manifest_format == PluginManifestFormat::Legacy
+        {
+            load_plugin_hooks(&source_path, &plugin_id, &plugin_data_root, &manifest.paths)
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let hooks = plugin_hook_declarations(&hook_sources)
             .into_iter()
             .map(|hook| PluginHookSummary {
@@ -2045,15 +2082,22 @@ impl PluginsManager {
             })
             .collect();
         let auth_mode = self.auth_mode();
-        let mut app_declarations =
-            load_plugin_apps_from_manifest(source_path.as_path(), &manifest.paths).await;
-        let mut mcp_servers = load_plugin_mcp_servers_from_manifest(
+        let mut app_declarations = if manifest_format == PluginManifestFormat::Legacy {
+            load_plugin_apps_from_manifest(source_path.as_path(), &manifest.paths).await
+        } else {
+            Vec::new()
+        };
+        let mcp_data_root = (manifest_format == PluginManifestFormat::AgentPlugin)
+            .then(|| self.store.mcp_data_root(&plugin_id, manifest_format));
+        let mut mcp_servers = load_plugin_mcp_servers_from_manifest_with_format(
             source_path.as_path(),
             &manifest.paths,
             /*plugin_policy*/ None,
+            mcp_data_root.as_deref(),
+            manifest_format,
         )
         .await;
-        if auth_mode.is_some() {
+        if manifest_format == PluginManifestFormat::Legacy && auth_mode.is_some() {
             apply_app_mcp_routing_policy(
                 &mut app_declarations,
                 &mut mcp_servers,

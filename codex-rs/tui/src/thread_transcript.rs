@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use crate::app_server_session::AppServerSession;
+use crate::app_server_session::HistoryHydrationScope;
 use crate::git_action_directives::parse_assistant_markdown;
 use crate::history_cell::AgentMarkdownCell;
 use crate::history_cell::HistoryCell;
@@ -34,8 +35,18 @@ pub(crate) async fn load_session_transcript(
     raw_reasoning_visibility: RawReasoningVisibility,
     codex_home: Option<&std::path::Path>,
 ) -> std::io::Result<TranscriptCells> {
-    let thread = app_server
-        .thread_read(thread_id, /*include_turns*/ true)
+    let mut thread = app_server
+        .thread_read(thread_id, /*include_turns*/ false)
+        .await
+        .map_err(std::io::Error::other)?;
+    app_server
+        .hydrate_initial_thread_history(
+            &mut thread,
+            /*turn_cursor*/ None,
+            /*item_cursor*/ None,
+            /*config*/ None,
+            HistoryHydrationScope::Complete,
+        )
         .await
         .map_err(std::io::Error::other)?;
     Ok(thread_to_transcript_cells(
@@ -53,13 +64,34 @@ pub(crate) fn thread_to_transcript_cells(
     // Transcript rendering uses this only for lexical path display. Keeping the source-native
     // spelling avoids rebinding foreign links to the host filesystem.
     let cwd = std::path::PathBuf::from(thread.cwd.render_for_ui());
+    let thread_id = ThreadId::from_string(&thread.id).ok();
+    let mut cells = thread_items_to_transcript_cells(
+        thread_id,
+        &cwd,
+        thread.turns.into_iter().flat_map(|turn| turn.items),
+        raw_reasoning_visibility,
+        codex_home,
+    );
+    if cells.is_empty() {
+        cells.push(Arc::new(PlainHistoryCell::new(vec![
+            "No transcript content available".italic().dim().into(),
+        ])));
+    }
+    cells
+}
+
+pub(crate) fn thread_items_to_transcript_cells(
+    thread_id: Option<ThreadId>,
+    cwd: &std::path::Path,
+    items: impl IntoIterator<Item = ThreadItem>,
+    raw_reasoning_visibility: RawReasoningVisibility,
+    codex_home: Option<&std::path::Path>,
+) -> TranscriptCells {
     let inline_visualization_context = codex_home.and_then(|codex_home| {
-        ThreadId::from_string(&thread.id)
-            .ok()
-            .and_then(|thread_id| InlineVisualizationContext::new(codex_home, thread_id))
+        thread_id.and_then(|thread_id| InlineVisualizationContext::new(codex_home, thread_id))
     });
     let mut cells: TranscriptCells = Vec::new();
-    for item in thread.turns.into_iter().flat_map(|turn| turn.items) {
+    for item in items {
         match item {
             ThreadItem::UserMessage {
                 id,
@@ -93,21 +125,18 @@ pub(crate) fn thread_to_transcript_cells(
                 }));
             }
             ThreadItem::AgentMessage { text, .. } => {
-                let parsed = parse_assistant_markdown(&text, cwd.as_path());
+                let parsed = parse_assistant_markdown(&text, cwd);
                 if !parsed.visible_markdown.trim().is_empty() {
                     cells.push(Arc::new(AgentMarkdownCell::new_with_inline_visualizations(
                         parsed.visible_markdown,
-                        cwd.as_path(),
+                        cwd,
                         inline_visualization_context.clone(),
                     )));
                 }
             }
             ThreadItem::Plan { text, .. } => {
                 if !text.trim().is_empty() {
-                    cells.push(Arc::new(crate::history_cell::new_proposed_plan(
-                        text,
-                        cwd.as_path(),
-                    )));
+                    cells.push(Arc::new(crate::history_cell::new_proposed_plan(text, cwd)));
                 }
             }
             ThreadItem::Reasoning {
@@ -123,10 +152,7 @@ pub(crate) fn thread_to_transcript_cells(
                     };
                 if !text.trim().is_empty() {
                     cells.push(Arc::new(ReasoningSummaryCell::new(
-                        header,
-                        text,
-                        cwd.as_path(),
-                        /*transcript_only*/ false,
+                        header, text, cwd, /*transcript_only*/ false,
                     )));
                 }
             }
@@ -136,11 +162,6 @@ pub(crate) fn thread_to_transcript_cells(
                 }
             }
         }
-    }
-    if cells.is_empty() {
-        cells.push(Arc::new(PlainHistoryCell::new(vec![
-            "No transcript content available".italic().dim().into(),
-        ])));
     }
     cells
 }

@@ -34,7 +34,12 @@ impl ExecBackend for PendingStartExecBackend {
 impl ExecBackend for TimeoutExecBackend {
     fn start(&self, _params: ExecParams) -> ExecBackendFuture<'_> {
         let process = Arc::clone(&self.process);
-        Box::pin(async move { Ok(StartedExecProcess { process }) })
+        Box::pin(async move {
+            Ok(StartedExecProcess {
+                process,
+                sandbox_type: None,
+            })
+        })
     }
 }
 

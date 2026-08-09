@@ -188,6 +188,11 @@ jobs:
             sccache-${{ env.ARCHIVE_CACHE_RUNNER }}-${{ inputs.target }}-${{ inputs.profile }}-${{ steps.lockhash.outputs.hash }}-
             sccache-${{ env.ARCHIVE_CACHE_RUNNER }}-${{ inputs.target }}-${{ inputs.profile }}-
 
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ inputs.target }}
+
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
           tool: nextest@0.9.103
@@ -438,6 +443,9 @@ jobs:
             --extract-to "${extract_dir}"
             --workspace-remap "${workspace_root}"
             --partition "hash:${{ matrix.shard }}/4"
+            # Workspace feature unification enables V8 sandboxing through codex-code-mode-runtime.
+            # Dedicated V8 workflows test this feature contract with each intended variant.
+            --filterset 'not (package(=codex-v8-poc) & test(=tests::sandbox_feature_matches_linked_v8))'
           )
           if [[ "${{ inputs.test_threads }}" != "0" ]]; then
             nextest_args+=(--test-threads "${{ inputs.test_threads }}")

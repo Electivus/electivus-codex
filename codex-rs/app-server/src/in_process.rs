@@ -427,6 +427,7 @@ async fn start_uninitialized(
     args: InProcessStartArgs,
     thread_store: Option<Arc<dyn ThreadStore>>,
 ) -> IoResult<InProcessClientHandle> {
+    args.config.auth_config().validate()?;
     let channel_capacity = args.channel_capacity.max(1);
     let installation_id = resolve_installation_id(&args.config.codex_home).await?;
     let thread_store = match thread_store {
@@ -474,7 +475,7 @@ async fn start_uninitialized(
         ));
 
         let processor_outgoing = Arc::clone(&outgoing_message_sender);
-        let config_manager = ConfigManager::new(
+        let mut config_manager = ConfigManager::new(
             args.config.codex_home.to_path_buf(),
             args.cli_overrides,
             args.loader_overrides,
@@ -483,6 +484,7 @@ async fn start_uninitialized(
             args.arg0_paths.clone(),
             args.thread_config_loader,
         );
+        config_manager.psp = args.config.psp;
         let (processor_tx, mut processor_rx) = mpsc::channel::<ProcessorCommand>(channel_capacity);
         let mut processor_handle = tokio::spawn(async move {
             let processor_args = MessageProcessorArgs {

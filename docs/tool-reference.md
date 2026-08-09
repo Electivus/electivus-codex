@@ -1002,10 +1002,7 @@ None
 **Input**
 
 ```rust
-let properties = BTreeMap::from([
-        ("questions".to_string(), questions_schema),
-        ("autoResolutionMs".to_string(), auto_resolution_ms_schema),
-    ]);
+let properties = BTreeMap::from([("questions".to_string(), questions_schema)]);
 
 JsonSchema::object(
             properties,
@@ -1378,26 +1375,30 @@ JsonSchema::object(properties, Some(vec!["path".to_string()]), Some(false.into()
 **Output**
 
 ```rust
-fn view_image_output_schema() -> Value {
-    json!({
+fn view_image_output_schema(options: ViewImageToolOptions) -> Value {
+    let mut schema = json!({
         "type": "object",
         "properties": {
             "image_url": {
                 "type": "string",
                 "description": "Data URL for the loaded image."
-            },
-            "detail": {
-                "type": "string",
-                "enum": ["high", "original"],
-                "description": "Image detail hint returned by view_image. Returns `high` for default resized behavior or `original` when original resolution is preserved."
             }
         },
-        "required": ["image_url", "detail"],
+        "required": ["image_url"],
         "additionalProperties": false
-    })
+    });
+    if !options.unified_image_budget {
+        schema["properties"]["detail"] = json!({
+            "type": "string",
+            "enum": ["high", "original"],
+            "description": "Image detail hint returned by view_image. Returns `high` for default resized behavior or `original` when original resolution is preserved."
+        });
+        schema["required"] = json!(["image_url", "detail"]);
+    }
+    schema
 }
 
-Some(view_image_output_schema())
+Some(view_image_output_schema(options))
 ```
 
 ### `wait`
@@ -1459,7 +1460,7 @@ fn wait_agent_tool_parameters_v2(options: WaitAgentTimeoutOptions) -> JsonSchema
     let properties = BTreeMap::from([(
         "timeout_ms".to_string(),
         JsonSchema::number(Some(format!(
-            "Timeout in milliseconds. Defaults to {}, min {}, max {}. Prefer longer waits (minutes) to avoid busy polling.",
+            "Timeout in milliseconds. Defaults to {}, min {}, max {}.",
             options.default_timeout_ms, options.min_timeout_ms, options.max_timeout_ms,
         ))),
     )]);
@@ -1479,7 +1480,7 @@ fn wait_output_schema_v2() -> Value {
         "properties": {
             "message": {
                 "type": "string",
-                "description": "Brief wait summary without the agent's final content."
+                "description": "Brief wait summary without the agent's final content, including any timeout adjustment."
             },
             "timed_out": {
                 "type": "boolean",

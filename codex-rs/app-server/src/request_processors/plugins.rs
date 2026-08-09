@@ -12,6 +12,7 @@ use codex_core_plugins::OPENAI_CURATED_MARKETPLACE_NAME;
 use codex_core_plugins::PluginListBackgroundTaskOptions;
 use codex_core_plugins::is_openai_curated_marketplace_name;
 use codex_core_plugins::loader::load_configured_plugin_mcp_servers;
+use codex_core_plugins::manifest::is_agent_plugin_manifest;
 use codex_core_plugins::remote::REMOTE_CREATED_BY_ME_MARKETPLACE_NAME;
 use codex_core_plugins::remote::REMOTE_GLOBAL_MARKETPLACE_NAME;
 use codex_core_plugins::remote::REMOTE_WORKSPACE_MARKETPLACE_NAME;
@@ -32,7 +33,18 @@ use codex_plugin::PluginId;
 use codex_plugin::PluginTelemetryMetadata;
 use codex_protocol::auth::AuthMode as DomainAuthMode;
 use codex_rmcp_client::OAuthDiscoveryTimeout;
+use codex_rmcp_client::StreamableHttpRedirectMode;
 use codex_rmcp_client::perform_oauth_login_silent;
+
+mod search;
+
+fn plugin_redirect_mode(plugin_root: &Path) -> StreamableHttpRedirectMode {
+    if is_agent_plugin_manifest(plugin_root) {
+        StreamableHttpRedirectMode::AgentPluginV1
+    } else {
+        StreamableHttpRedirectMode::Legacy
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct PluginRequestProcessor {
@@ -1538,8 +1550,14 @@ impl PluginRequestProcessor {
         )
         .await;
         if !plugin_mcp_servers.is_empty() {
-            self.start_plugin_mcp_oauth_logins(&config, &result.plugin_id, plugin_mcp_servers)
-                .await;
+            let redirect_mode = plugin_redirect_mode(result.installed_path.as_path());
+            self.start_plugin_mcp_oauth_logins(
+                &config,
+                &result.plugin_id,
+                plugin_mcp_servers,
+                redirect_mode,
+            )
+            .await;
         }
 
         let plugin_app_declarations = load_plugin_apps(result.installed_path.as_path()).await;
@@ -1715,8 +1733,14 @@ impl PluginRequestProcessor {
         )
         .await;
         if !plugin_mcp_servers.is_empty() {
-            self.start_plugin_mcp_oauth_logins(&config, &result.plugin_id, plugin_mcp_servers)
-                .await;
+            let redirect_mode = plugin_redirect_mode(result.installed_path.as_path());
+            self.start_plugin_mcp_oauth_logins(
+                &config,
+                &result.plugin_id,
+                plugin_mcp_servers,
+                redirect_mode,
+            )
+            .await;
         }
 
         let is_chatgpt_auth = auth.as_ref().is_some_and(CodexAuth::is_chatgpt_auth);
@@ -1867,6 +1891,7 @@ impl PluginRequestProcessor {
         config: &Config,
         plugin_id: &PluginId,
         mut plugin_mcp_servers: HashMap<String, McpServerConfig>,
+        redirect_mode: StreamableHttpRedirectMode,
     ) {
         let plugin_id = plugin_id.as_key();
         config.apply_plugin_mcp_server_requirements(&plugin_id, &mut plugin_mcp_servers);
@@ -1898,6 +1923,7 @@ impl PluginRequestProcessor {
                 &server.transport,
                 Arc::clone(&http_client),
                 OAuthDiscoveryTimeout::LOCAL,
+                redirect_mode,
             )
             .await;
             let oauth_config = match login_support {
@@ -1923,13 +1949,14 @@ impl PluginRequestProcessor {
             let callback_url = config.mcp_oauth_callback_url.clone();
             let outgoing = Arc::clone(&self.outgoing);
             let notification_name = name.clone();
+            let oauth_credential_name = server.oauth_credential_name(&name).into_owned();
             let thread_manager = Arc::clone(&self.thread_manager);
             let http_client = Arc::clone(&http_client);
 
             tokio::spawn(async move {
                 let oauth_client_id = server.oauth_client_id();
                 let first_attempt = perform_oauth_login_silent(
-                    &name,
+                    &oauth_credential_name,
                     &oauth_config.url,
                     store_mode,
                     keyring_backend_kind,
@@ -1941,13 +1968,14 @@ impl PluginRequestProcessor {
                     callback_port,
                     callback_url.as_deref(),
                     Arc::clone(&http_client),
+                    redirect_mode,
                 )
                 .await;
 
                 let final_result = match first_attempt {
                     Err(err) if should_retry_without_scopes(&resolved_scopes, &err) => {
                         perform_oauth_login_silent(
-                            &name,
+                            &oauth_credential_name,
                             &oauth_config.url,
                             store_mode,
                             keyring_backend_kind,
@@ -1959,6 +1987,7 @@ impl PluginRequestProcessor {
                             callback_port,
                             callback_url.as_deref(),
                             http_client,
+                            redirect_mode,
                         )
                         .await
                     }

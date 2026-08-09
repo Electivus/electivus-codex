@@ -111,7 +111,7 @@ async fn postgres_contract_preflight_inventories_all_source_authorities() -> any
     assert_eq!(source_after, source_before);
     assert_eq!(destination_after, destination_before);
 
-    assert_eq!(inventory.databases().len(), 5);
+    assert_eq!(inventory.databases().len(), 6);
     assert_eq!(
         inventory
             .rollout_files()

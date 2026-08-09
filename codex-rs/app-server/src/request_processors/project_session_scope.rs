@@ -18,15 +18,8 @@ pub(super) async fn resolve_project_location_filter(
     project_cwd: LegacyAppPathString,
 ) -> ThreadLocationFilter {
     let cwd = PathBuf::from(project_cwd.as_str());
-    let Ok(cwd_uri) = PathUri::try_from(project_cwd) else {
-        return ThreadLocationFilter::ExactCwds(vec![cwd]);
-    };
-    let Some(environment) = environment_manager.default_environment() else {
-        return ThreadLocationFilter::ExactCwds(vec![cwd]);
-    };
-    let origin = read_origin(environment.get_exec_backend(), cwd_uri).await;
     let Some(repository_identity) =
-        origin.and_then(|origin| codex_git_utils::canonicalize_git_remote_url(&origin))
+        resolve_project_repository_identity(environment_manager, project_cwd).await
     else {
         return ThreadLocationFilter::ExactCwds(vec![cwd]);
     };
@@ -34,6 +27,17 @@ pub(super) async fn resolve_project_location_filter(
         cwd,
         repository_identity,
     }
+}
+
+/// Resolves the credential-free Repository Identity for a cwd in its owning environment.
+pub async fn resolve_project_repository_identity(
+    environment_manager: &EnvironmentManager,
+    project_cwd: LegacyAppPathString,
+) -> Option<String> {
+    let cwd_uri = PathUri::try_from(project_cwd).ok()?;
+    let environment = environment_manager.default_environment()?;
+    let origin = read_origin(environment.get_exec_backend(), cwd_uri).await?;
+    codex_git_utils::canonicalize_git_remote_url(&origin)
 }
 
 async fn read_origin(

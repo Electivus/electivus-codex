@@ -691,6 +691,78 @@
             },
             "method": {
               "enum": [
+                "threadSection/create"
+              ],
+              "title": "ThreadSection/createRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadSectionCreateParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "ThreadSection/createRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "threadSection/update"
+              ],
+              "title": "ThreadSection/updateRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadSectionUpdateParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "ThreadSection/updateRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "threadSection/delete"
+              ],
+              "title": "ThreadSection/deleteRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadSectionDeleteParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "ThreadSection/deleteRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "thread/loaded/list"
               ],
               "title": "Thread/loaded/listRequestMethod",
@@ -3043,8 +3115,16 @@
           "description": "Opt into receiving experimental API methods and fields.",
           "type": "boolean"
         },
+        "extensions": {
+          "additionalProperties": true,
+          "description": "MCP extension settings declared by the app-server client.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "mcpServerOpenaiFormElicitation": {
-          "description": "Allow downstream MCP servers to request OpenAI extended form elicitations.",
+          "description": "Legacy opt-in for the `openai/form` MCP extension.\n\nNew clients should declare `openai/form` in [`Self::extensions`].",
           "type": "boolean"
         },
         "optOutNotificationMethods": {
@@ -5953,12 +6033,16 @@
       "properties": {
         "autoResolutionMs": {
           "default": null,
+          "description": "@deprecated Use `isBlocking` to decide whether the request should block.",
           "format": "uint64",
           "minimum": 0.0,
           "type": [
             "integer",
             "null"
           ]
+        },
+        "isBlocking": {
+          "type": "boolean"
         },
         "itemId": {
           "type": "string"
@@ -5977,6 +6061,7 @@
         }
       },
       "required": [
+        "isBlocking",
         "itemId",
         "questions",
         "threadId",
@@ -6141,6 +6226,16 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "onboardingEntrypoint": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/DesktopOnboardingEntrypoint"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "success": {
@@ -7290,6 +7385,29 @@
         ],
         "type": "string"
       },
+      "AutoReviewRequirements": {
+        "properties": {
+          "ignoreRules": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "requiredOnModels": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "BrowserUseRequirements": {
         "properties": {
           "disableAutoReview": {
@@ -7649,7 +7767,7 @@
                 "type": "string"
               },
               "path": {
-                "$ref": "#/definitions/v2/AbsolutePathBuf"
+                "$ref": "#/definitions/v2/LegacyAppPathString"
               },
               "type": {
                 "enum": [
@@ -8696,6 +8814,16 @@
               "null"
             ]
           },
+          "autoReview": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AutoReviewRequirements"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "browserUse": {
             "anyOf": [
               {
@@ -8972,6 +9100,49 @@
               "type"
             ],
             "title": "CommandConfiguredHookHandler",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "input": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "server": {
+                "type": "string"
+              },
+              "statusMessage": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "timeoutSec": {
+                "format": "uint64",
+                "minimum": 0.0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "tool": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "mcp_tool"
+                ],
+                "title": "McpToolConfiguredHookHandlerType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "input",
+              "server",
+              "tool",
+              "type"
+            ],
+            "title": "McpToolConfiguredHookHandler",
             "type": "object"
           },
           {
@@ -9317,6 +9488,12 @@
         ],
         "title": "DeprecationNoticeNotification",
         "type": "object"
+      },
+      "DesktopOnboardingEntrypoint": {
+        "enum": [
+          "life_sciences"
+        ],
+        "type": "string"
       },
       "DynamicToolCallOutputContentItem": {
         "oneOf": [
@@ -9763,6 +9940,13 @@
       "ExternalAgentConfigDetectResponse": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "connectors": {
+            "default": [],
+            "items": {
+              "$ref": "#/definitions/v2/ExternalAgentDetectedConnectorCandidate"
+            },
+            "type": "array"
+          },
           "items": {
             "items": {
               "$ref": "#/definitions/v2/ExternalAgentConfigMigrationItem"
@@ -10171,6 +10355,34 @@
           "COMMANDS",
           "MEMORY",
           "SESSIONS"
+        ],
+        "type": "string"
+      },
+      "ExternalAgentDetectedConnectorCandidate": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "sessionCount": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "source": {
+            "$ref": "#/definitions/v2/ExternalAgentDetectedConnectorSource"
+          }
+        },
+        "required": [
+          "name",
+          "sessionCount",
+          "source"
+        ],
+        "type": "object"
+      },
+      "ExternalAgentDetectedConnectorSource": {
+        "enum": [
+          "remoteMcpServersConfig",
+          "sessionToolUse"
         ],
         "type": "string"
       },
@@ -13404,6 +13616,24 @@
           "model": {
             "type": "string"
           },
+          "modelSpecialty": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "multiAgentVersion": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/MultiAgentVersion"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Multi-agent runtime declared by this model, when available."
+          },
           "serviceTiers": {
             "default": [],
             "items": {
@@ -13737,6 +13967,15 @@
             "type": "object"
           }
         ]
+      },
+      "MultiAgentVersion": {
+        "description": "Multi-agent runtime supported by a model.",
+        "enum": [
+          "disabled",
+          "v1",
+          "v2"
+        ],
+        "type": "string"
       },
       "NetworkAccess": {
         "enum": [
@@ -14120,6 +14359,7 @@
           "self_serve_business_usage_based",
           "business",
           "ent26",
+          "enterprise_cbp_automation",
           "enterprise_cbp_usage_based",
           "enterprise",
           "edu",
@@ -14669,6 +14909,39 @@
         ],
         "title": "PluginReadResponse",
         "type": "object"
+      },
+      "PluginSearchResult": {
+        "properties": {
+          "marketplaceName": {
+            "type": "string"
+          },
+          "marketplacePath": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AbsolutePathBuf"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plugin": {
+            "$ref": "#/definitions/v2/PluginSummary"
+          }
+        },
+        "required": [
+          "marketplaceName",
+          "plugin"
+        ],
+        "type": "object"
+      },
+      "PluginSearchScope": {
+        "enum": [
+          "global",
+          "workspace",
+          "personal"
+        ],
+        "type": "string"
       },
       "PluginShareCheckoutParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
@@ -17499,6 +17772,52 @@
         "title": "SendAddCreditsNudgeEmailResponse",
         "type": "object"
       },
+      "ServerDiagnosticsGauge": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ],
+        "type": "object"
+      },
+      "ServerDiagnosticsProcess": {
+        "properties": {
+          "id": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "physicalFootprintBytes": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "residentMemoryBytes": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
       "ServerRequestResolvedNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
@@ -19266,6 +19585,12 @@
                   "null"
                 ]
               },
+              "readOnlyHint": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
               "result": {
                 "anyOf": [
                   {
@@ -19600,6 +19925,13 @@
               },
               "status": {
                 "type": "string"
+              },
+              "transparentBackground": {
+                "default": null,
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               },
               "type": {
                 "enum": [
@@ -20570,6 +20902,56 @@
         ],
         "type": "object"
       },
+      "ThreadSectionCreateParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "Parameters for creating an independently persisted thread section.",
+        "properties": {
+          "name": {
+            "description": "The user-visible name of the section.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "ThreadSectionCreateParams",
+        "type": "object"
+      },
+      "ThreadSectionCreateResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "The independently persisted section created by the server.",
+        "properties": {
+          "section": {
+            "$ref": "#/definitions/v2/ThreadSection"
+          }
+        },
+        "required": [
+          "section"
+        ],
+        "title": "ThreadSectionCreateResponse",
+        "type": "object"
+      },
+      "ThreadSectionDeleteParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "Parameters for deleting an independently persisted thread section.",
+        "properties": {
+          "sectionId": {
+            "description": "The stable, server-generated identity of the section to delete.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sectionId"
+        ],
+        "title": "ThreadSectionDeleteParams",
+        "type": "object"
+      },
+      "ThreadSectionDeleteResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "Successful deletion does not return additional section data.",
+        "title": "ThreadSectionDeleteResponse",
+        "type": "object"
+      },
       "ThreadSectionListParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "description": "Parameters for listing independently persisted thread sections.",
@@ -20651,6 +21033,40 @@
       "ThreadSectionMoveResponse": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "title": "ThreadSectionMoveResponse",
+        "type": "object"
+      },
+      "ThreadSectionUpdateParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "Parameters for updating an independently persisted thread section.",
+        "properties": {
+          "name": {
+            "description": "The updated user-visible name of the section.",
+            "type": "string"
+          },
+          "sectionId": {
+            "description": "The stable, server-generated identity of the section to update.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "sectionId"
+        ],
+        "title": "ThreadSectionUpdateParams",
+        "type": "object"
+      },
+      "ThreadSectionUpdateResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "The independently persisted section after its name is updated.",
+        "properties": {
+          "section": {
+            "$ref": "#/definitions/v2/ThreadSection"
+          }
+        },
+        "required": [
+          "section"
+        ],
+        "title": "ThreadSectionUpdateResponse",
         "type": "object"
       },
       "ThreadSetNameParams": {

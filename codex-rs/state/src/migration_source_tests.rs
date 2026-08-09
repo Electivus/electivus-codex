@@ -28,7 +28,7 @@ async fn source_inspection_accepts_missing_thread_history_database() -> anyhow::
             .iter()
             .map(|database| database.label)
             .collect::<Vec<_>>(),
-        vec!["state DB", "log DB", "goals DB", "memories DB"]
+        vec!["state DB", "log DB", "goals DB", "memories DB", "queue DB",]
     );
     assert_eq!(test_support::snapshot_source(&source)?, source_before);
     Ok(())

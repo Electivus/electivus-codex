@@ -32,6 +32,24 @@ pub(super) async fn get_thread_resume_metadata(
         .map_err(Into::into)
 }
 
+pub(super) async fn mark_thread_paginated(
+    pool: &PgPool,
+    schema: &str,
+    thread_id: ThreadId,
+) -> anyhow::Result<bool> {
+    let threads = qualified_table(schema, "threads");
+    let result = sqlx::query(AssertSqlSafe(format!(
+        "UPDATE {threads} SET projection = jsonb_set(projection, '{{history_mode}}', \
+         to_jsonb('paginated'::text), TRUE) WHERE thread_id = $1 AND \
+         COALESCE(projection ->> 'history_mode', 'legacy') <> 'paginated'"
+    )))
+    .bind(thread_id.to_string())
+    .execute(pool)
+    .await
+    .map_err(|error| map_sql_error(schema, "promote thread history mode", error))?;
+    Ok(result.rows_affected() > 0)
+}
+
 pub(super) async fn set_thread_preview_if_empty(
     pool: &PgPool,
     schema: &str,

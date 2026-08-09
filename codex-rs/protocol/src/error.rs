@@ -120,6 +120,9 @@ pub enum CodexErrorDetails {
     /// Invalid request.
     #[error("{0}")]
     InvalidRequest(String),
+    /// Multiple registered tools share the same effective name.
+    #[error("duplicate tool: {0}")]
+    ToolCollision(String),
     /// Invalid image.
     #[error("Image poisoning")]
     InvalidImageRequest(),
@@ -367,6 +370,7 @@ impl CodexErr {
             | CodexErrorDetails::QuotaExceeded
             | CodexErrorDetails::InvalidImageRequest()
             | CodexErrorDetails::InvalidRequest(_)
+            | CodexErrorDetails::ToolCollision(_)
             | CodexErrorDetails::RefreshTokenFailed(_)
             | CodexErrorDetails::UnsupportedOperation(_)
             | CodexErrorDetails::Sandbox(_)
@@ -691,6 +695,7 @@ impl std::fmt::Display for UsageLimitReachedError {
                 | KnownPlan::SelfServeBusinessUsageBased
                 | KnownPlan::Business
                 | KnownPlan::Ent26
+                | KnownPlan::EnterpriseCbpAutomation
                 | KnownPlan::EnterpriseCbpUsageBased,
             )) => {
                 format!(

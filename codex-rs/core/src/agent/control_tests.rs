@@ -649,13 +649,16 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
     let (home, mut config) = test_config().await;
     let _ = config.features.enable(Feature::MultiAgentV2);
     let _ = config.features.enable(Feature::Sqlite);
+    config.model = Some("gpt-5.6-sol".to_string());
     let harness = AgentControlHarness::new_with_config(home, config).await;
     let (parent_thread_id, _parent_thread) = harness.start_paginated_thread().await;
     let agent_path = AgentPath::try_from("/root/worker").expect("agent path");
+    let mut child_config = harness.config.clone();
+    child_config.model = Some("gpt-5.6-luna".to_string());
     let spawned_agent = harness
         .control
         .spawn_agent_with_metadata(
-            harness.config.clone(),
+            child_config,
             text_input("hello child"),
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
@@ -710,16 +713,46 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         Ok(_) => panic!("expected thread to be removed"),
     }
 
+    let mut sender_config = harness.config.clone();
+    sender_config.model_provider_id = "ollama".to_string();
+    sender_config.model_provider = sender_config
+        .model_providers
+        .get("ollama")
+        .cloned()
+        .expect("ollama provider should be configured");
+
     harness
         .control
-        .ensure_v2_agent_loaded(harness.config.clone(), spawned_agent.thread_id)
+        .ensure_v2_agent_loaded(sender_config, spawned_agent.thread_id)
         .await
         .expect("known v2 agent should reload");
-    let _ = harness
+    let reloaded_child = harness
         .manager
         .get_thread(spawned_agent.thread_id)
         .await
         .expect("reloaded child thread should exist");
+    assert_eq!(
+        reloaded_child.config_snapshot().await.model,
+        "gpt-5.6-luna",
+        "residency reload must preserve the worker model instead of inheriting its parent model",
+    );
+    assert_eq!(
+        (
+            reloaded_child.config_snapshot().await.model_provider_id,
+            reloaded_child
+                .session
+                .new_default_turn()
+                .await
+                .provider
+                .info()
+                .clone(),
+        ),
+        (
+            stored_child.model_provider,
+            harness.config.model_provider.clone()
+        ),
+        "residency reload must preserve the worker provider instead of inheriting its sender's provider",
+    );
 
     let communication = InterAgentCommunication::new(
         AgentPath::root(),
@@ -1553,6 +1586,13 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
     let parent_thread = new_thread.thread;
     let turn_context = parent_thread.session.new_default_turn().await;
     let parent_spawn_call_id = "spawn-call-compacted-usage-hints".to_string();
+    let parent_task = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::root().join("worker").expect("valid worker path"),
+        Vec::new(),
+        "compacted parent delegated task".to_string(),
+        /*trigger_turn*/ true,
+    );
     let replacement_history = vec![
         ResponseItem::Message {
             id: None,
@@ -1563,6 +1603,7 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         },
+        parent_task.to_model_input_item(),
         ResponseItem::Message {
             id: None,
             role: "developer".to_string(),
@@ -1641,6 +1682,13 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
     assert!(
         history_contains_text(history.raw_items(), "compacted parent summary"),
         "forked child history should retain compacted non-hint content"
+    );
+    assert!(
+        !history
+            .raw_items()
+            .iter()
+            .any(|item| matches!(item, ResponseItem::AgentMessage { .. })),
+        "forked child history should not inherit compacted parent agent messages"
     );
     assert!(
         !history_contains_text(history.raw_items(), "Parent root guidance."),

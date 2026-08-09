@@ -73,6 +73,22 @@ fn test_absolute_path() -> AbsolutePathBuf {
 }
 
 #[test]
+fn external_agent_config_detect_response_defaults_connectors_for_older_servers() {
+    let response = serde_json::from_value::<ExternalAgentConfigDetectResponse>(json!({
+        "items": [],
+    }))
+    .expect("older detect response should deserialize");
+
+    assert_eq!(
+        response,
+        ExternalAgentConfigDetectResponse {
+            items: Vec::new(),
+            connectors: Vec::new(),
+        }
+    );
+}
+
+#[test]
 fn thread_background_terminals_list_response_round_trips_foreign_paths() {
     for (uri, expected_cwd) in [
         ("file:///home/alice/repo", "/home/alice/repo"),
@@ -2026,6 +2042,7 @@ fn config_requirements_granular_allowed_approval_policy_is_marked_experimental()
             hooks: None,
             enforce_residency: None,
             network: None,
+            auto_review: None,
             models: None,
             sqlite_home: None,
             log_dir: None,
@@ -2966,10 +2983,19 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         plugin_id: Some("sample@openai-curated".to_string()),
         script_path: Some("scripts/run.py".to_string()),
         process_id: Some("pid-1".to_string()),
-        command: vec!["echo".to_string(), "done".to_string()],
+        command: vec![
+            "git".to_string(),
+            "-c".to_string(),
+            "http.extraHeader=Authorization: Bearer example_synthetic_bearer_token_123456"
+                .to_string(),
+            "-c".to_string(),
+            "http.extraHeader=X-Trace:example".to_string(),
+            "push".to_string(),
+        ],
         cwd: PathUri::from_abs_path(&test_path_buf("/tmp").abs()),
         parsed_cmd: vec![codex_protocol::parse_command::ParsedCommand::Unknown {
-            cmd: "echo done".to_string(),
+            cmd: "git -c 'http.extraHeader=Authorization: Bearer example_synthetic_bearer_token_123456' -c http.extraHeader=X-Trace:example push"
+                .to_string(),
         }],
         source: CoreExecCommandSource::Agent,
         interaction_input: None,
@@ -2988,13 +3014,15 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             id: "exec-1".to_string(),
             plugin_id: Some("sample@openai-curated".to_string()),
             script_path: Some("scripts/run.py".to_string()),
-            command: "echo done".to_string(),
+            command: "git -c 'http.extraHeader=Authorization: Bearer [REDACTED_SECRET]' -c 'http.extraHeader=X-Trace:example' push"
+                .to_string(),
             cwd: LegacyAppPathString::from_abs_path(&test_path_buf("/tmp").abs()),
             process_id: Some("pid-1".to_string()),
             source: CommandExecutionSource::Agent,
             status: CommandExecutionStatus::Completed,
             command_actions: vec![CommandAction::Unknown {
-                command: "echo done".to_string(),
+                command: "git -c 'http.extraHeader=Authorization: Bearer [REDACTED_SECRET]' -c http.extraHeader=X-Trace:example push"
+                    .to_string(),
             }],
             aggregated_output: Some("done\n".to_string()),
             exit_code: Some(0),
@@ -3199,6 +3227,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         app_name: Some("Calendar".to_string()),
         action_name: Some("create_event".to_string()),
         plugin_id: Some("sample@test".to_string()),
+        read_only_hint: Some(true),
         status: CoreMcpToolCallStatus::InProgress,
         result: None,
         error: None,
@@ -3222,6 +3251,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             }),
             mcp_app_resource_uri: Some("app://connector".to_string()),
             plugin_id: Some("sample@test".to_string()),
+            read_only_hint: Some(true),
             result: None,
             error: None,
             duration_ms: None,
@@ -3239,6 +3269,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         app_name: None,
         action_name: None,
         plugin_id: None,
+        read_only_hint: Some(false),
         status: CoreMcpToolCallStatus::Completed,
         result: Some(CallToolResult {
             content: vec![json!({"type": "text", "text": "ok"})],
@@ -3261,6 +3292,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             app_context: None,
             mcp_app_resource_uri: None,
             plugin_id: None,
+            read_only_hint: Some(false),
             result: Some(Box::new(McpToolCallResult {
                 content: vec![json!({"type": "text", "text": "ok"})],
                 structured_content: Some(json!({"ok": true})),
@@ -3289,6 +3321,7 @@ fn mcp_tool_call_app_context_serializes_connector_id() {
         }),
         mcp_app_resource_uri: Some("app://connector".to_string()),
         plugin_id: None,
+        read_only_hint: Some(false),
         result: None,
         error: None,
         duration_ms: None,
@@ -3312,6 +3345,7 @@ fn mcp_tool_call_app_context_serializes_connector_id() {
             },
             "mcpAppResourceUri": "app://connector",
             "pluginId": null,
+            "readOnlyHint": false,
             "result": null,
             "error": null,
             "durationMs": null,
@@ -4787,5 +4821,47 @@ fn realtime_start_deserializes_client_handoff_channel_prefixes() {
             ),
             ("final".to_string(), vec!["[DONE]".to_string()]),
         ]))
+    );
+}
+
+#[test]
+fn tool_request_user_input_params_default_legacy_missing_is_blocking_to_true() {
+    let params = serde_json::from_value::<ToolRequestUserInputParams>(json!({
+        "threadId": "thread-1",
+        "turnId": "turn-1",
+        "itemId": "call-1",
+        "questions": [{
+            "id": "q1",
+            "header": "Confirm",
+            "question": "Continue?",
+            "options": [{
+                "label": "Yes",
+                "description": "Continue."
+            }]
+        }],
+        "autoResolutionMs": 60_000
+    }))
+    .expect("legacy request_user_input params should deserialize");
+
+    assert_eq!(
+        params,
+        ToolRequestUserInputParams {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item_id: "call-1".to_string(),
+            questions: vec![ToolRequestUserInputQuestion {
+                id: "q1".to_string(),
+                header: "Confirm".to_string(),
+                question: "Continue?".to_string(),
+                is_other: false,
+                is_secret: false,
+                options: Some(vec![ToolRequestUserInputOption {
+                    label: "Yes".to_string(),
+                    description: "Continue.".to_string(),
+                }]),
+            }],
+            is_blocking: true,
+            auto_resolution_ms: Some(60_000),
+        }
     );
 }

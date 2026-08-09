@@ -32,6 +32,7 @@ pub use codex_app_server::in_process::InProcessServerEvent;
 use codex_app_server::in_process::InProcessStartArgs;
 use codex_app_server::in_process::LogDbLayer;
 pub use codex_app_server::in_process::StateDbHandle;
+pub use codex_app_server::resolve_project_repository_identity;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientNotification;
 use codex_app_server_protocol::ClientRequest;
@@ -349,6 +350,7 @@ impl InProcessClientStartArgs {
         let capabilities = InitializeCapabilities {
             experimental_api: self.experimental_api,
             request_attestation: false,
+            extensions: None,
             opt_out_notification_methods: if self.opt_out_notification_methods.is_empty() {
                 None
             } else {
@@ -1896,6 +1898,7 @@ mod tests {
                             is_secret: false,
                             options: Some(vec![]),
                         }],
+                        is_blocking: true,
                         auto_resolution_ms: None,
                     })
                     .expect("params should serialize"),
@@ -1958,6 +1961,7 @@ mod tests {
                                 is_secret: false,
                                 options: Some(vec![]),
                             }],
+                            is_blocking: true,
                             auto_resolution_ms: None,
                         })
                         .expect("params should serialize"),
