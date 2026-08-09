@@ -1,3 +1,4 @@
+use super::MAXIMUM_COMPATIBLE_SCHEMA_VERSION;
 use super::MigrationHistory;
 use super::PostgresNamespaceAction;
 use super::PostgresRuntimeStatePool;
@@ -37,6 +38,8 @@ use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
 use std::collections::HashMap;
 use std::time::Duration;
+
+const REPOSITORY_IDENTITY_MIGRATION_VERSION: i64 = 21;
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
@@ -292,6 +295,8 @@ async fn postgres_contract_repository_identity_migration_preserves_projection_an
     let threads = super::qualified_table(fixture.schema(), "threads");
     let migrations = super::qualified_migration_table(fixture.schema());
     for index in [
+        "threads_section_position_idx",
+        "threads_section_recency_idx",
         "threads_repository_identity_created_idx",
         "threads_repository_identity_updated_idx",
         "threads_repository_identity_recency_idx",
@@ -302,13 +307,22 @@ async fn postgres_contract_repository_identity_migration_preserves_projection_an
             .await?;
     }
     sqlx::query(AssertSqlSafe(format!(
-        "ALTER TABLE {threads} DROP COLUMN repository_identity"
+        "ALTER TABLE {threads} DROP COLUMN section_position, \
+         DROP COLUMN section_entered_at, DROP COLUMN thread_section_id, \
+         DROP COLUMN repository_identity"
     )))
     .execute(&pool)
     .await?;
     sqlx::query(AssertSqlSafe(format!(
-        "DELETE FROM {migrations} WHERE version = 21"
+        "DROP TABLE {}",
+        super::qualified_table(fixture.schema(), "thread_sections")
     )))
+    .execute(&pool)
+    .await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "DELETE FROM {migrations} WHERE version >= $1"
+    )))
+    .bind(REPOSITORY_IDENTITY_MIGRATION_VERSION)
     .execute(&pool)
     .await?;
 
@@ -346,7 +360,9 @@ async fn postgres_contract_repository_identity_migration_preserves_projection_an
     let replica = fixture.connect_pool().await?;
     let rows: Vec<(String, serde_json::Value, Option<String>)> =
         sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT thread_id, projection, repository_identity FROM {threads} ORDER BY thread_id"
+            "SELECT thread_id, \
+             projection - 'section' - 'section_position' - 'section_entered_at', \
+             repository_identity FROM {threads} ORDER BY thread_id"
         )))
         .fetch_all(&replica)
         .await?;
@@ -1073,7 +1089,7 @@ async fn postgres_contract_creates_migrates_validates_and_cleans_up_namespace() 
 
     assert_eq!(validated, migrated);
     assert_eq!(migrated.schema(), fixture.schema());
-    assert_eq!(migrated.version(), 21);
+    assert_eq!(migrated.version(), MAXIMUM_COMPATIBLE_SCHEMA_VERSION);
 
     fixture.cleanup().await?;
     assert!(!fixture.schema_exists().await?);
@@ -1094,8 +1110,8 @@ async fn postgres_contract_migration_is_idempotent() -> Result<()> {
         fixture.migration_history().await?,
         MigrationHistory {
             minimum: Some(1),
-            maximum: Some(21),
-            count: 21,
+            maximum: Some(MAXIMUM_COMPATIBLE_SCHEMA_VERSION),
+            count: MAXIMUM_COMPATIBLE_SCHEMA_VERSION,
         }
     );
     fixture.cleanup().await?;
@@ -1232,8 +1248,8 @@ async fn postgres_contract_migration_uses_namespace_advisory_lock() -> Result<()
         fixture.migration_history().await?,
         MigrationHistory {
             minimum: Some(1),
-            maximum: Some(21),
-            count: 21,
+            maximum: Some(MAXIMUM_COMPATIBLE_SCHEMA_VERSION),
+            count: MAXIMUM_COMPATIBLE_SCHEMA_VERSION,
         }
     );
     drop(contending_migration);
