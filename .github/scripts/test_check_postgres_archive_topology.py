@@ -163,6 +163,28 @@ class PostgresArchiveTopologyTests(unittest.TestCase):
         )
         cases = (
             (
+                "archive producer rusty_v8 override",
+                0,
+                replace_in_step(
+                    platform,
+                    "archive",
+                    "Configure rusty_v8 artifact overrides and verify checksums",
+                    topology.RUSTY_V8_SETUP_ACTION,
+                    "./missing-rusty-v8-setup",
+                ),
+            ),
+            (
+                "archive producer rusty_v8 override",
+                0,
+                replace_in_step(
+                    platform,
+                    "archive",
+                    "Configure rusty_v8 artifact overrides and verify checksums",
+                    "target: ${{ inputs.target }}",
+                    "target: x86_64-unknown-linux-gnu",
+                ),
+            ),
+            (
                 "archive producer nextest pin",
                 0,
                 replace_in_nextest_installer(
