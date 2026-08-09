@@ -87,18 +87,21 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `features.apps_mcp_path_override.enabled` | <code>boolean</code> | _No description available._ |
 | `features.apps_mcp_path_override.path` | <code>string</code> | _No description available._ |
 | `features.auth_elicitation` | <code>boolean</code> | _No description available._ |
+| `features.background_paginated_rollout_migration` | <code>boolean</code> | _No description available._ |
 | `features.browser_use` | <code>boolean</code> | _No description available._ |
 | `features.browser_use_external` | <code>boolean</code> | _No description available._ |
 | `features.browser_use_full_cdp_access` | <code>boolean</code> | _No description available._ |
 | `features.chronicle` | <code>boolean</code> | _No description available._ |
 | `features.code_mode` | <code>boolean or table</code> | _No description available._ |
+| `features.code_mode.default_exec_yield_time_ms` | <code>integer</code> | Default yield timeout for code-mode exec calls, in milliseconds. |
 | `features.code_mode.direct_only_tool_namespaces` | <code>array&lt;string&gt;</code> | Exact tool namespaces to expose only as direct model tools. These tools bypass deferral, remain top-level in code-mode-only sessions, and are omitted from the nested code-mode tool surface. |
 | `features.code_mode.enabled` | <code>boolean</code> | _No description available._ |
 | `features.code_mode.excluded_tool_namespaces` | <code>array&lt;string&gt;</code> | Exact tool namespaces to omit from the code-mode nested tool surface. |
 | `features.code_mode_buffered_exec` | <code>boolean</code> | Deprecated compatibility key retained as a no-op; the global tool execution yield default is authoritative. |
 | `features.code_mode_host` | <code>boolean or table</code> | _No description available._ |
-| `features.code_mode_host.disable_in_process_fallback` | <code>boolean</code> | Fail instead of running embedded V8 when the standalone host is unavailable. |
+| `features.code_mode_host.disable_in_process_fallback` | <code>boolean</code> | Keep code mode fail-closed when the standalone host is unavailable. |
 | `features.code_mode_host.enabled` | <code>boolean</code> | _No description available._ |
+| `features.code_mode_interrupt` | <code>boolean</code> | _No description available._ |
 | `features.code_mode_only` | <code>boolean</code> | _No description available._ |
 | `features.codex_git_commit` | <code>boolean</code> | _No description available._ |
 | `features.codex_hooks` | <code>boolean</code> | _No description available._ |
@@ -122,6 +125,7 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `features.enable_mcp_apps` | <code>boolean</code> | _No description available._ |
 | `features.enable_request_compression` | <code>boolean</code> | _No description available._ |
 | `features.exec_permission_approvals` | <code>boolean</code> | _No description available._ |
+| `features.executed_tool_call_metadata` | <code>boolean</code> | _No description available._ |
 | `features.executor_capability_discovery` | <code>boolean</code> | _No description available._ |
 | `features.experimental_use_unified_exec_tool` | <code>boolean</code> | _No description available._ |
 | `features.experimental_windows_sandbox` | <code>boolean</code> | _No description available._ |
@@ -130,10 +134,12 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `features.fast_mode` | <code>boolean</code> | _No description available._ |
 | `features.goals` | <code>boolean</code> | _No description available._ |
 | `features.guardian_approval` | <code>boolean</code> | _No description available._ |
+| `features.guardian_reuse_parent_compaction` | <code>boolean</code> | _No description available._ |
 | `features.guardianv2` | <code>boolean</code> | _No description available._ |
 | `features.hooks` | <code>boolean</code> | _No description available._ |
 | `features.image_detail_original` | <code>boolean</code> | _No description available._ |
 | `features.image_generation` | <code>boolean</code> | _No description available._ |
+| `features.image_resize_notice` | <code>boolean</code> | _No description available._ |
 | `features.imagegenext` | <code>boolean</code> | _No description available._ |
 | `features.in_app_browser` | <code>boolean</code> | _No description available._ |
 | `features.in_app_updates` | <code>boolean</code> | _No description available._ |
@@ -230,6 +236,9 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `features.token_budget.reminder_message_template` | <code>string</code> | Reminder template. `{n_remaining}` is replaced with the tokens remaining before auto-compaction. |
 | `features.token_budget.reminder_threshold_tokens` | <code>integer</code> | Number of tokens remaining before auto-compaction when the wrap-up reminder is emitted. |
 | `features.tool_call_mcp_elicitation` | <code>boolean</code> | _No description available._ |
+| `features.tool_registry` | <code>table</code> | _No description available._ |
+| `features.tool_registry.error_on_tool_collisions` | <code>boolean</code> | Fail the turn when multiple tools share the same effective name. |
+| `features.tool_registry.turn_metadata_includes_tool_info` | <code>boolean</code> | Include authoritative tool information in per-turn request metadata. |
 | `features.tool_search` | <code>boolean</code> | _No description available._ |
 | `features.tool_search_always_defer_mcp_tools` | <code>boolean</code> | _No description available._ |
 | `features.tool_suggest` | <code>boolean</code> | _No description available._ |
@@ -238,9 +247,11 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `features.undo` | <code>boolean</code> | _No description available._ |
 | `features.unified_exec` | <code>boolean</code> | _No description available._ |
 | `features.unified_exec_zsh_fork` | <code>boolean</code> | _No description available._ |
+| `features.unified_image_budget` | <code>boolean</code> | _No description available._ |
 | `features.use_agent_identity` | <code>boolean</code> | _No description available._ |
 | `features.use_legacy_landlock` | <code>boolean</code> | _No description available._ |
 | `features.use_linux_sandbox_bwrap` | <code>boolean</code> | _No description available._ |
+| `features.view_image` | <code>boolean</code> | _No description available._ |
 | `features.web_search` | <code>boolean</code> | _No description available._ |
 | `features.web_search_cached` | <code>boolean</code> | _No description available._ |
 | `features.web_search_request` | <code>boolean</code> | _No description available._ |
@@ -266,9 +277,12 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `hooks.PermissionRequest[].hooks[].async` | <code>boolean</code> | _No description available._ |
 | `hooks.PermissionRequest[].hooks[].command` | <code>string</code> | _No description available._ |
 | `hooks.PermissionRequest[].hooks[].commandWindows` | <code>string</code> | _No description available._ |
+| `hooks.PermissionRequest[].hooks[].input` | <code>table</code> | _No description available._ |
+| `hooks.PermissionRequest[].hooks[].server` | <code>string</code> | _No description available._ |
 | `hooks.PermissionRequest[].hooks[].statusMessage` | <code>string</code> | _No description available._ |
 | `hooks.PermissionRequest[].hooks[].timeout` | <code>integer</code> | _No description available._ |
-| `hooks.PermissionRequest[].hooks[].type` | <code>string (&quot;command&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
+| `hooks.PermissionRequest[].hooks[].tool` | <code>string</code> | _No description available._ |
+| `hooks.PermissionRequest[].hooks[].type` | <code>string (&quot;command&quot;, &quot;mcp_tool&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
 | `hooks.PermissionRequest[].matcher` | <code>string</code> | _No description available._ |
 | `hooks.PostCompact` | <code>array&lt;table&gt;</code> | _No description available._ |
 | `hooks.PostCompact[].hooks` | <code>array&lt;table&gt;</code> | _No description available._ |
@@ -276,9 +290,12 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `hooks.PostCompact[].hooks[].async` | <code>boolean</code> | _No description available._ |
 | `hooks.PostCompact[].hooks[].command` | <code>string</code> | _No description available._ |
 | `hooks.PostCompact[].hooks[].commandWindows` | <code>string</code> | _No description available._ |
+| `hooks.PostCompact[].hooks[].input` | <code>table</code> | _No description available._ |
+| `hooks.PostCompact[].hooks[].server` | <code>string</code> | _No description available._ |
 | `hooks.PostCompact[].hooks[].statusMessage` | <code>string</code> | _No description available._ |
 | `hooks.PostCompact[].hooks[].timeout` | <code>integer</code> | _No description available._ |
-| `hooks.PostCompact[].hooks[].type` | <code>string (&quot;command&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
+| `hooks.PostCompact[].hooks[].tool` | <code>string</code> | _No description available._ |
+| `hooks.PostCompact[].hooks[].type` | <code>string (&quot;command&quot;, &quot;mcp_tool&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
 | `hooks.PostCompact[].matcher` | <code>string</code> | _No description available._ |
 | `hooks.PostToolUse` | <code>array&lt;table&gt;</code> | _No description available._ |
 | `hooks.PostToolUse[].hooks` | <code>array&lt;table&gt;</code> | _No description available._ |
@@ -286,9 +303,12 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `hooks.PostToolUse[].hooks[].async` | <code>boolean</code> | _No description available._ |
 | `hooks.PostToolUse[].hooks[].command` | <code>string</code> | _No description available._ |
 | `hooks.PostToolUse[].hooks[].commandWindows` | <code>string</code> | _No description available._ |
+| `hooks.PostToolUse[].hooks[].input` | <code>table</code> | _No description available._ |
+| `hooks.PostToolUse[].hooks[].server` | <code>string</code> | _No description available._ |
 | `hooks.PostToolUse[].hooks[].statusMessage` | <code>string</code> | _No description available._ |
 | `hooks.PostToolUse[].hooks[].timeout` | <code>integer</code> | _No description available._ |
-| `hooks.PostToolUse[].hooks[].type` | <code>string (&quot;command&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
+| `hooks.PostToolUse[].hooks[].tool` | <code>string</code> | _No description available._ |
+| `hooks.PostToolUse[].hooks[].type` | <code>string (&quot;command&quot;, &quot;mcp_tool&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
 | `hooks.PostToolUse[].matcher` | <code>string</code> | _No description available._ |
 | `hooks.PreCompact` | <code>array&lt;table&gt;</code> | _No description available._ |
 | `hooks.PreCompact[].hooks` | <code>array&lt;table&gt;</code> | _No description available._ |
@@ -296,9 +316,12 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `hooks.PreCompact[].hooks[].async` | <code>boolean</code> | _No description available._ |
 | `hooks.PreCompact[].hooks[].command` | <code>string</code> | _No description available._ |
 | `hooks.PreCompact[].hooks[].commandWindows` | <code>string</code> | _No description available._ |
+| `hooks.PreCompact[].hooks[].input` | <code>table</code> | _No description available._ |
+| `hooks.PreCompact[].hooks[].server` | <code>string</code> | _No description available._ |
 | `hooks.PreCompact[].hooks[].statusMessage` | <code>string</code> | _No description available._ |
 | `hooks.PreCompact[].hooks[].timeout` | <code>integer</code> | _No description available._ |
-| `hooks.PreCompact[].hooks[].type` | <code>string (&quot;command&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
+| `hooks.PreCompact[].hooks[].tool` | <code>string</code> | _No description available._ |
+| `hooks.PreCompact[].hooks[].type` | <code>string (&quot;command&quot;, &quot;mcp_tool&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
 | `hooks.PreCompact[].matcher` | <code>string</code> | _No description available._ |
 | `hooks.PreToolUse` | <code>array&lt;table&gt;</code> | _No description available._ |
 | `hooks.PreToolUse[].hooks` | <code>array&lt;table&gt;</code> | _No description available._ |
@@ -306,9 +329,12 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `hooks.PreToolUse[].hooks[].async` | <code>boolean</code> | _No description available._ |
 | `hooks.PreToolUse[].hooks[].command` | <code>string</code> | _No description available._ |
 | `hooks.PreToolUse[].hooks[].commandWindows` | <code>string</code> | _No description available._ |
+| `hooks.PreToolUse[].hooks[].input` | <code>table</code> | _No description available._ |
+| `hooks.PreToolUse[].hooks[].server` | <code>string</code> | _No description available._ |
 | `hooks.PreToolUse[].hooks[].statusMessage` | <code>string</code> | _No description available._ |
 | `hooks.PreToolUse[].hooks[].timeout` | <code>integer</code> | _No description available._ |
-| `hooks.PreToolUse[].hooks[].type` | <code>string (&quot;command&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
+| `hooks.PreToolUse[].hooks[].tool` | <code>string</code> | _No description available._ |
+| `hooks.PreToolUse[].hooks[].type` | <code>string (&quot;command&quot;, &quot;mcp_tool&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
 | `hooks.PreToolUse[].matcher` | <code>string</code> | _No description available._ |
 | `hooks.SessionEnd` | <code>array&lt;table&gt;</code> | _No description available._ |
 | `hooks.SessionEnd[].hooks` | <code>array&lt;table&gt;</code> | _No description available._ |
@@ -316,9 +342,12 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `hooks.SessionEnd[].hooks[].async` | <code>boolean</code> | _No description available._ |
 | `hooks.SessionEnd[].hooks[].command` | <code>string</code> | _No description available._ |
 | `hooks.SessionEnd[].hooks[].commandWindows` | <code>string</code> | _No description available._ |
+| `hooks.SessionEnd[].hooks[].input` | <code>table</code> | _No description available._ |
+| `hooks.SessionEnd[].hooks[].server` | <code>string</code> | _No description available._ |
 | `hooks.SessionEnd[].hooks[].statusMessage` | <code>string</code> | _No description available._ |
 | `hooks.SessionEnd[].hooks[].timeout` | <code>integer</code> | _No description available._ |
-| `hooks.SessionEnd[].hooks[].type` | <code>string (&quot;command&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
+| `hooks.SessionEnd[].hooks[].tool` | <code>string</code> | _No description available._ |
+| `hooks.SessionEnd[].hooks[].type` | <code>string (&quot;command&quot;, &quot;mcp_tool&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
 | `hooks.SessionEnd[].matcher` | <code>string</code> | _No description available._ |
 | `hooks.SessionStart` | <code>array&lt;table&gt;</code> | _No description available._ |
 | `hooks.SessionStart[].hooks` | <code>array&lt;table&gt;</code> | _No description available._ |
@@ -326,9 +355,12 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `hooks.SessionStart[].hooks[].async` | <code>boolean</code> | _No description available._ |
 | `hooks.SessionStart[].hooks[].command` | <code>string</code> | _No description available._ |
 | `hooks.SessionStart[].hooks[].commandWindows` | <code>string</code> | _No description available._ |
+| `hooks.SessionStart[].hooks[].input` | <code>table</code> | _No description available._ |
+| `hooks.SessionStart[].hooks[].server` | <code>string</code> | _No description available._ |
 | `hooks.SessionStart[].hooks[].statusMessage` | <code>string</code> | _No description available._ |
 | `hooks.SessionStart[].hooks[].timeout` | <code>integer</code> | _No description available._ |
-| `hooks.SessionStart[].hooks[].type` | <code>string (&quot;command&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
+| `hooks.SessionStart[].hooks[].tool` | <code>string</code> | _No description available._ |
+| `hooks.SessionStart[].hooks[].type` | <code>string (&quot;command&quot;, &quot;mcp_tool&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
 | `hooks.SessionStart[].matcher` | <code>string</code> | _No description available._ |
 | `hooks.state` | <code>table</code> | _No description available._ |
 | `hooks.state.<key>` | <code>table</code> | _No description available._ |
@@ -340,9 +372,12 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `hooks.Stop[].hooks[].async` | <code>boolean</code> | _No description available._ |
 | `hooks.Stop[].hooks[].command` | <code>string</code> | _No description available._ |
 | `hooks.Stop[].hooks[].commandWindows` | <code>string</code> | _No description available._ |
+| `hooks.Stop[].hooks[].input` | <code>table</code> | _No description available._ |
+| `hooks.Stop[].hooks[].server` | <code>string</code> | _No description available._ |
 | `hooks.Stop[].hooks[].statusMessage` | <code>string</code> | _No description available._ |
 | `hooks.Stop[].hooks[].timeout` | <code>integer</code> | _No description available._ |
-| `hooks.Stop[].hooks[].type` | <code>string (&quot;command&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
+| `hooks.Stop[].hooks[].tool` | <code>string</code> | _No description available._ |
+| `hooks.Stop[].hooks[].type` | <code>string (&quot;command&quot;, &quot;mcp_tool&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
 | `hooks.Stop[].matcher` | <code>string</code> | _No description available._ |
 | `hooks.SubagentStart` | <code>array&lt;table&gt;</code> | _No description available._ |
 | `hooks.SubagentStart[].hooks` | <code>array&lt;table&gt;</code> | _No description available._ |
@@ -350,9 +385,12 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `hooks.SubagentStart[].hooks[].async` | <code>boolean</code> | _No description available._ |
 | `hooks.SubagentStart[].hooks[].command` | <code>string</code> | _No description available._ |
 | `hooks.SubagentStart[].hooks[].commandWindows` | <code>string</code> | _No description available._ |
+| `hooks.SubagentStart[].hooks[].input` | <code>table</code> | _No description available._ |
+| `hooks.SubagentStart[].hooks[].server` | <code>string</code> | _No description available._ |
 | `hooks.SubagentStart[].hooks[].statusMessage` | <code>string</code> | _No description available._ |
 | `hooks.SubagentStart[].hooks[].timeout` | <code>integer</code> | _No description available._ |
-| `hooks.SubagentStart[].hooks[].type` | <code>string (&quot;command&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
+| `hooks.SubagentStart[].hooks[].tool` | <code>string</code> | _No description available._ |
+| `hooks.SubagentStart[].hooks[].type` | <code>string (&quot;command&quot;, &quot;mcp_tool&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
 | `hooks.SubagentStart[].matcher` | <code>string</code> | _No description available._ |
 | `hooks.SubagentStop` | <code>array&lt;table&gt;</code> | _No description available._ |
 | `hooks.SubagentStop[].hooks` | <code>array&lt;table&gt;</code> | _No description available._ |
@@ -360,9 +398,12 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `hooks.SubagentStop[].hooks[].async` | <code>boolean</code> | _No description available._ |
 | `hooks.SubagentStop[].hooks[].command` | <code>string</code> | _No description available._ |
 | `hooks.SubagentStop[].hooks[].commandWindows` | <code>string</code> | _No description available._ |
+| `hooks.SubagentStop[].hooks[].input` | <code>table</code> | _No description available._ |
+| `hooks.SubagentStop[].hooks[].server` | <code>string</code> | _No description available._ |
 | `hooks.SubagentStop[].hooks[].statusMessage` | <code>string</code> | _No description available._ |
 | `hooks.SubagentStop[].hooks[].timeout` | <code>integer</code> | _No description available._ |
-| `hooks.SubagentStop[].hooks[].type` | <code>string (&quot;command&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
+| `hooks.SubagentStop[].hooks[].tool` | <code>string</code> | _No description available._ |
+| `hooks.SubagentStop[].hooks[].type` | <code>string (&quot;command&quot;, &quot;mcp_tool&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
 | `hooks.SubagentStop[].matcher` | <code>string</code> | _No description available._ |
 | `hooks.UserPromptSubmit` | <code>array&lt;table&gt;</code> | _No description available._ |
 | `hooks.UserPromptSubmit[].hooks` | <code>array&lt;table&gt;</code> | _No description available._ |
@@ -370,9 +411,12 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `hooks.UserPromptSubmit[].hooks[].async` | <code>boolean</code> | _No description available._ |
 | `hooks.UserPromptSubmit[].hooks[].command` | <code>string</code> | _No description available._ |
 | `hooks.UserPromptSubmit[].hooks[].commandWindows` | <code>string</code> | _No description available._ |
+| `hooks.UserPromptSubmit[].hooks[].input` | <code>table</code> | _No description available._ |
+| `hooks.UserPromptSubmit[].hooks[].server` | <code>string</code> | _No description available._ |
 | `hooks.UserPromptSubmit[].hooks[].statusMessage` | <code>string</code> | _No description available._ |
 | `hooks.UserPromptSubmit[].hooks[].timeout` | <code>integer</code> | _No description available._ |
-| `hooks.UserPromptSubmit[].hooks[].type` | <code>string (&quot;command&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
+| `hooks.UserPromptSubmit[].hooks[].tool` | <code>string</code> | _No description available._ |
+| `hooks.UserPromptSubmit[].hooks[].type` | <code>string (&quot;command&quot;, &quot;mcp_tool&quot;, &quot;prompt&quot;, &quot;agent&quot;)</code> | _No description available._ |
 | `hooks.UserPromptSubmit[].matcher` | <code>string</code> | _No description available._ |
 | `include_apps_instructions` | <code>boolean</code> | Whether to inject the `<apps_instructions>` developer block. |
 | `include_collaboration_mode_instructions` | <code>boolean</code> | Whether to inject the `<collaboration_mode>` developer block. |
@@ -416,6 +460,7 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `mcp_servers.<key>.oauth` | <code>table</code> | OAuth client settings used when Codex launches an MCP OAuth flow. |
 | `mcp_servers.<key>.oauth.client_id` | <code>string</code> | Explicit OAuth client identifier to present during authorization and token exchange. |
 | `mcp_servers.<key>.oauth_resource` | <code>string</code> | _No description available._ |
+| `mcp_servers.<key>.omit_tools_from` | <code>array&lt;string (&quot;code_mode&quot;, &quot;deferred&quot;, &quot;direct&quot;)&gt;</code> | _No description available._ |
 | `mcp_servers.<key>.required` | <code>boolean</code> | _No description available._ |
 | `mcp_servers.<key>.scopes` | <code>array&lt;string&gt;</code> | _No description available._ |
 | `mcp_servers.<key>.startup_timeout_ms` | <code>integer</code> | _No description available._ |
@@ -606,18 +651,21 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `profiles.<key>.features.apps_mcp_path_override.enabled` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.apps_mcp_path_override.path` | <code>string</code> | _No description available._ |
 | `profiles.<key>.features.auth_elicitation` | <code>boolean</code> | _No description available._ |
+| `profiles.<key>.features.background_paginated_rollout_migration` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.browser_use` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.browser_use_external` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.browser_use_full_cdp_access` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.chronicle` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.code_mode` | <code>boolean or table</code> | _No description available._ |
+| `profiles.<key>.features.code_mode.default_exec_yield_time_ms` | <code>integer</code> | Default yield timeout for code-mode exec calls, in milliseconds. |
 | `profiles.<key>.features.code_mode.direct_only_tool_namespaces` | <code>array&lt;string&gt;</code> | Exact tool namespaces to expose only as direct model tools. These tools bypass deferral, remain top-level in code-mode-only sessions, and are omitted from the nested code-mode tool surface. |
 | `profiles.<key>.features.code_mode.enabled` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.code_mode.excluded_tool_namespaces` | <code>array&lt;string&gt;</code> | Exact tool namespaces to omit from the code-mode nested tool surface. |
 | `profiles.<key>.features.code_mode_buffered_exec` | <code>boolean</code> | Deprecated compatibility key retained as a no-op; the global tool execution yield default is authoritative. |
 | `profiles.<key>.features.code_mode_host` | <code>boolean or table</code> | _No description available._ |
-| `profiles.<key>.features.code_mode_host.disable_in_process_fallback` | <code>boolean</code> | Fail instead of running embedded V8 when the standalone host is unavailable. |
+| `profiles.<key>.features.code_mode_host.disable_in_process_fallback` | <code>boolean</code> | Keep code mode fail-closed when the standalone host is unavailable. |
 | `profiles.<key>.features.code_mode_host.enabled` | <code>boolean</code> | _No description available._ |
+| `profiles.<key>.features.code_mode_interrupt` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.code_mode_only` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.codex_git_commit` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.codex_hooks` | <code>boolean</code> | _No description available._ |
@@ -641,6 +689,7 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `profiles.<key>.features.enable_mcp_apps` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.enable_request_compression` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.exec_permission_approvals` | <code>boolean</code> | _No description available._ |
+| `profiles.<key>.features.executed_tool_call_metadata` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.executor_capability_discovery` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.experimental_use_unified_exec_tool` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.experimental_windows_sandbox` | <code>boolean</code> | _No description available._ |
@@ -649,10 +698,12 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `profiles.<key>.features.fast_mode` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.goals` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.guardian_approval` | <code>boolean</code> | _No description available._ |
+| `profiles.<key>.features.guardian_reuse_parent_compaction` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.guardianv2` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.hooks` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.image_detail_original` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.image_generation` | <code>boolean</code> | _No description available._ |
+| `profiles.<key>.features.image_resize_notice` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.imagegenext` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.in_app_browser` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.in_app_updates` | <code>boolean</code> | _No description available._ |
@@ -749,6 +800,9 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `profiles.<key>.features.token_budget.reminder_message_template` | <code>string</code> | Reminder template. `{n_remaining}` is replaced with the tokens remaining before auto-compaction. |
 | `profiles.<key>.features.token_budget.reminder_threshold_tokens` | <code>integer</code> | Number of tokens remaining before auto-compaction when the wrap-up reminder is emitted. |
 | `profiles.<key>.features.tool_call_mcp_elicitation` | <code>boolean</code> | _No description available._ |
+| `profiles.<key>.features.tool_registry` | <code>table</code> | _No description available._ |
+| `profiles.<key>.features.tool_registry.error_on_tool_collisions` | <code>boolean</code> | Fail the turn when multiple tools share the same effective name. |
+| `profiles.<key>.features.tool_registry.turn_metadata_includes_tool_info` | <code>boolean</code> | Include authoritative tool information in per-turn request metadata. |
 | `profiles.<key>.features.tool_search` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.tool_search_always_defer_mcp_tools` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.tool_suggest` | <code>boolean</code> | _No description available._ |
@@ -757,9 +811,11 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `profiles.<key>.features.undo` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.unified_exec` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.unified_exec_zsh_fork` | <code>boolean</code> | _No description available._ |
+| `profiles.<key>.features.unified_image_budget` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.use_agent_identity` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.use_legacy_landlock` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.use_linux_sandbox_bwrap` | <code>boolean</code> | _No description available._ |
+| `profiles.<key>.features.view_image` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.web_search` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.web_search_cached` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.web_search_request` | <code>boolean</code> | _No description available._ |
@@ -810,7 +866,7 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `profiles.<key>.windows.sandbox` | <code>string (&quot;elevated&quot;, &quot;unelevated&quot;)</code> | _No description available._ |
 | `profiles.<key>.windows.sandbox_private_desktop` | <code>boolean</code> | Defaults to `true`. Set to `false` to launch the final sandboxed child process on `Winsta0\\Default` instead of a private desktop. |
 | `project_doc_fallback_filenames` | <code>array&lt;string&gt;</code> | Ordered list of fallback filenames to look for when AGENTS.md is missing. |
-| `project_doc_max_bytes` | <code>integer</code> | Maximum number of bytes to include from an AGENTS.md project doc file. |
+| `project_doc_max_bytes` | <code>integer</code> | Maximum total bytes of project instruction content across all selected environments. |
 | `project_root_markers` | <code>array&lt;string&gt;</code> | Markers used to detect the project root when searching parent directories for `.codex` folders. Defaults to [".git"] when unset. |
 | `projects` | <code>table</code> | _No description available._ |
 | `projects.<key>` | <code>table</code> | _No description available._ |
