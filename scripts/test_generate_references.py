@@ -1,11 +1,76 @@
+import contextlib
+import io
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
+from unittest import mock
 
 import generate_config_reference as config_reference
 import generate_hooks_reference as hooks_reference
 import generate_tool_reference as tool_reference
 
 
+REFERENCE_GENERATORS = (
+    ("config", config_reference, config_reference.DEFAULT_OUTPUT_PATH),
+    ("hooks", hooks_reference, hooks_reference.DEFAULT_OUTPUT_PATH),
+    ("tool", tool_reference, tool_reference.DEFAULT_OUTPUT_PATH),
+)
+
+
 class ReferenceGeneratorsTest(unittest.TestCase):
+    def test_cli_defaults_stdout_and_committed_docs_stay_synchronized(self) -> None:
+        for name, module, committed_path in REFERENCE_GENERATORS:
+            with self.subTest(name=name):
+                script_path = Path(module.__file__)
+                environment = os.environ.copy()
+                environment["PYTHONIOENCODING"] = "cp1252"
+                stdout_result = subprocess.run(
+                    [sys.executable, script_path, "--stdout"],
+                    check=False,
+                    capture_output=True,
+                    env=environment,
+                )
+                self.assertEqual(stdout_result.returncode, 0, stdout_result.stderr)
+                self.assertEqual(stdout_result.stdout, committed_path.read_bytes())
+
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    default_output = Path(temp_dir) / committed_path.name
+                    captured_stdout = io.StringIO()
+                    with (
+                        mock.patch.object(
+                            module, "DEFAULT_OUTPUT_PATH", default_output
+                        ),
+                        mock.patch.object(sys, "argv", [str(script_path)]),
+                        contextlib.redirect_stdout(captured_stdout),
+                    ):
+                        return_code = module.main()
+
+                    self.assertEqual(return_code, 0)
+                    self.assertEqual(captured_stdout.getvalue(), "")
+                    self.assertEqual(default_output.read_bytes(), stdout_result.stdout)
+
+    def test_cli_rejects_output_with_stdout(self) -> None:
+        for name, module, _committed_path in REFERENCE_GENERATORS:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir:
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        Path(module.__file__),
+                        "--output",
+                        Path(temp_dir) / "reference.md",
+                        "--stdout",
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
+
     def test_committed_config_schema_is_fully_reachable(self) -> None:
         schema = config_reference.load_schema(config_reference.DEFAULT_SCHEMA_PATH)
         entries = config_reference.collect_reference_entries(schema)

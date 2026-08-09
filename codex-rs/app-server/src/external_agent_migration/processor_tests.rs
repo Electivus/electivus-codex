@@ -53,6 +53,7 @@ fn import_persistence_failure_replaces_successes_with_backend_neutral_failures()
                 cwd: None,
                 source: Some("claude".to_string()),
                 target: Some("MEMORY.md".to_string()),
+                title: None,
             }],
             failures: Vec::new(),
         }],

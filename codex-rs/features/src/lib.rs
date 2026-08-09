@@ -178,6 +178,8 @@ pub enum Feature {
     NonPrefixedMcpToolNames,
     /// Enable discoverable tool suggestions for apps.
     ToolSuggest,
+    /// Include recommended plugins in model-visible context.
+    RecommendedPlugins,
     /// Enable plugins.
     Plugins,
     /// Discover selected-root plugin and skill manifests through one high-level exec-server RPC.
@@ -1172,6 +1174,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "tool_suggest",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::RecommendedPlugins,
+        key: "recommended_plugins",
+        stage: Stage::Stable,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::Plugins,

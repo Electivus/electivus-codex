@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "PostgreSQL tests connect only to PostgreSQL pools"
+)]
+
 use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;

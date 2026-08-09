@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "PostgreSQL tests connect only to PostgreSQL pools"
+)]
+
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
@@ -409,6 +414,7 @@ async fn list_threads(
             source_kinds: Some(Vec::new()),
             archived: Some(false),
             is_pinned: None,
+            section_id: None,
             cwd: None,
             use_state_db_only: true,
             search_term: None,

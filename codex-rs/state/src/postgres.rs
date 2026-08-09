@@ -23,7 +23,7 @@ pub use initialize::initialize_postgres_runtime_state;
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
 const MINIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
-pub(crate) const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 21;
+pub(crate) const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 23;
 const BASELINE_SCHEMA_VERSION: i64 = 1;
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
@@ -125,6 +125,16 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         21,
         include_str!("../postgres_migrations/0021_threads_repository_identity.sql"),
         "materialize thread repository identity",
+    ),
+    (
+        22,
+        include_str!("../postgres_migrations/0022_threads_section.sql"),
+        "create thread sections",
+    ),
+    (
+        23,
+        include_str!("../postgres_migrations/0023_threads_section_order.sql"),
+        "track thread section ordering",
     ),
 ];
 

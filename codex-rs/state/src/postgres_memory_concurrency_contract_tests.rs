@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "PostgreSQL tests connect only to PostgreSQL pools"
+)]
+
 use super::PostgresNamespaceAction;
 use super::qualified_table;
 use super::test_support::PostgresContractFixture;

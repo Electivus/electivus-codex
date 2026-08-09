@@ -34,7 +34,11 @@ struct PostgresThreadProjection {
     recency_at: DateTime<Utc>,
     archived_at: Option<DateTime<Utc>>,
     #[serde(default)]
-    is_pinned: bool,
+    section: Option<crate::ThreadSection>,
+    #[serde(default)]
+    section_position: Option<i64>,
+    #[serde(default)]
+    section_entered_at: Option<DateTime<Utc>>,
     cwd: PathBuf,
     cli_version: String,
     source: SessionSource,
@@ -334,7 +338,9 @@ fn thread_metadata_from_projection(
             .map_or(0, |usage| usage.total_tokens.max(0)),
         first_user_message: projection.first_user_message,
         archived_at: projection.archived_at,
-        is_pinned: projection.is_pinned,
+        section: projection.section,
+        section_position: projection.section_position,
+        section_entered_at: projection.section_entered_at,
         git_sha,
         git_branch,
         git_origin_url,

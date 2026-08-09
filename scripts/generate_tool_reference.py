@@ -11,6 +11,7 @@ import sys
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUST_ROOT = REPO_ROOT / "codex-rs"
+DEFAULT_OUTPUT_PATH = REPO_ROOT / "docs" / "tool-reference.md"
 NO_DESCRIPTION = "_Description is generated at runtime or is not available._"
 
 AVAILABILITY = {
@@ -416,6 +417,7 @@ def render_markdown(tools: list[Tool]) -> str:
         "",
         "This catalog lists every statically defined model tool in Codex's core registry and bundled extensions. A tool may require a feature, model capability, execution environment, extension, or collaboration mode before it is exposed.",
         "",
+        "<!-- prettier-ignore -->",
         "| Tool | Feature / availability | Kind | Description | Source |",
         "| --- | --- | --- | --- | --- |",
     ]
@@ -461,17 +463,28 @@ def render_markdown(tools: list[Tool]) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "-o", "--output", type=Path, help="Markdown file; omit for stdout."
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=DEFAULT_OUTPUT_PATH,
+        help=f"Markdown file to write (default: {DEFAULT_OUTPUT_PATH}).",
+    )
+    output_group.add_argument(
+        "--stdout",
+        action="store_true",
+        help="Write Markdown to stdout instead of the default output file.",
     )
     args = parser.parse_args()
     try:
         markdown = render_markdown(collect_tools())
-        if args.output:
+        if args.stdout:
+            sys.stdout.reconfigure(encoding="utf-8", newline="\n")
+            sys.stdout.write(markdown)
+        else:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(markdown, encoding="utf-8", newline="\n")
-        else:
-            sys.stdout.write(markdown)
     except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

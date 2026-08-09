@@ -45,6 +45,11 @@ pub(super) async fn search_threads(
         ThreadSortKey::CreatedAt => "created_at",
         ThreadSortKey::UpdatedAt => "updated_at",
         ThreadSortKey::RecencyAt => "recency_at",
+        ThreadSortKey::SectionPosition => {
+            return Err(ThreadStoreError::InvalidRequest {
+                message: "thread search does not support section-position ordering".to_string(),
+            });
+        }
     };
     let (operator, direction) = match params.sort_direction {
         SortDirection::Asc => (">", "ASC"),

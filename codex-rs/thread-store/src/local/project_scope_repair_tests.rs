@@ -82,7 +82,7 @@ impl Harness {
                 cwd: self.cwd.clone(),
                 repository_identity: PROJECT_IDENTITY.to_string(),
             },
-            is_pinned: None,
+            section: None,
             archived: false,
             search_term: None,
             relation_filter: None,
@@ -379,9 +379,9 @@ async fn failed_project_query_falls_back_only_for_desc_without_search_or_db_filt
         .expect("bounded exact-cwd fallback");
     assert_eq!(ids(&page), vec![id(uuid)]);
 
-    let mut pinned = h.params();
-    pinned.is_pinned = Some(true);
-    assert!(store.list_threads(pinned).await.is_err());
+    let mut sectioned = h.params();
+    sectioned.section = Some(Some(codex_state::PINNED_THREAD_SECTION_ID.to_string()));
+    assert!(store.list_threads(sectioned).await.is_err());
 
     let mut ascending = h.params();
     ascending.sort_direction = SortDirection::Asc;
@@ -425,13 +425,13 @@ async fn db_owned_filters_skip_project_repair() {
     )
     .expect("append invalid record");
     let mut params = h.params();
-    params.is_pinned = Some(true);
+    params.section = Some(Some(codex_state::PINNED_THREAD_SECTION_ID.to_string()));
 
     let page = h
         .store
         .list_threads(params)
         .await
-        .expect("pin filter should query the DB without repair");
+        .expect("section filter should query the DB without repair");
 
     assert!(page.items.is_empty());
     assert!(h.runtime().get_thread(id(uuid)).await.unwrap().is_none());

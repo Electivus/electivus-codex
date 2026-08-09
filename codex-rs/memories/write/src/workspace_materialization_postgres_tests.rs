@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "PostgreSQL tests connect only to PostgreSQL pools"
+)]
+
 use super::prepare_memory_workspace_from_store;
 use crate::collect_memory_artifacts;
 use crate::reset_memories;

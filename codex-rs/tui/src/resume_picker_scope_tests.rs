@@ -80,6 +80,7 @@ fn thread_list_params_encode_each_scope_as_a_complete_request() {
                 source_kinds: Some(vec![ThreadSourceKind::Cli, ThreadSourceKind::VsCode]),
                 archived: Some(false),
                 is_pinned: None,
+                section_id: None,
                 cwd,
                 project_cwd,
                 use_state_db_only: false,

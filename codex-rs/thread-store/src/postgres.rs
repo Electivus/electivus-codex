@@ -26,6 +26,7 @@ use crate::ListItemsParams;
 use crate::ListThreadsParams;
 use crate::ListTurnsParams;
 use crate::LoadThreadHistoryParams;
+use crate::MoveThreadToSectionParams;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
@@ -53,6 +54,7 @@ mod list_threads;
 mod metadata;
 mod migration;
 mod model_context;
+mod move_thread_to_section;
 mod projection;
 mod resume;
 mod search_thread_occurrences;
@@ -84,6 +86,7 @@ pub(super) struct PostgresThreadTables {
     pub(super) turns: String,
     pub(super) search_content: String,
     pub(super) spawn_edges: String,
+    pub(super) sections: String,
 }
 
 impl PostgresThreadTables {
@@ -97,6 +100,7 @@ impl PostgresThreadTables {
             turns: format!("{qualified_schema}.thread_turns"),
             search_content: format!("{qualified_schema}.thread_search_content"),
             spawn_edges: format!("{qualified_schema}.thread_spawn_edges"),
+            sections: format!("{qualified_schema}.thread_sections"),
         }
     }
 }
@@ -198,7 +202,9 @@ impl PostgresThreadStore {
             updated_at: created_at,
             recency_at: created_at,
             archived_at: None,
-            is_pinned: false,
+            section: None,
+            section_position: None,
+            section_entered_at: None,
             cwd: params.metadata.cwd.clone().unwrap_or_default(),
             cli_version: env!("CARGO_PKG_VERSION").to_string(),
             source: params.source.clone(),
@@ -569,6 +575,15 @@ impl ThreadStore for PostgresThreadStore {
         Box::pin(async move {
             let _operation_guard = self.lock_operation(params.thread_id).await;
             metadata::update_thread_metadata(self, params).await
+        })
+    }
+    fn move_thread_to_section(
+        &self,
+        params: MoveThreadToSectionParams,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            let _operation_guard = self.lock_operation(params.thread_id).await;
+            move_thread_to_section::move_thread_to_section(self, params).await
         })
     }
     fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {

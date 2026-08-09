@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "PostgreSQL tests connect only to PostgreSQL pools"
+)]
+
 use crate::ItemSortKey;
 use crate::ListItemsParams;
 use crate::ListThreadsParams;
@@ -208,7 +213,7 @@ async fn postgres_contract_runtime_state_thread_import_is_visible_to_another_poo
             allowed_sources: Vec::new(),
             model_providers: Some(Vec::new()),
             location_filter: crate::ThreadLocationFilter::Unrestricted,
-            is_pinned: None,
+            section: None,
             archived: true,
             search_term: None,
             relation_filter: None,
@@ -227,7 +232,7 @@ async fn postgres_contract_runtime_state_thread_import_is_visible_to_another_poo
                 allowed_sources: Vec::new(),
                 model_providers: Some(Vec::new()),
                 location_filter: crate::ThreadLocationFilter::Unrestricted,
-                is_pinned: None,
+                section: None,
                 archived: true,
                 search_term: None,
                 relation_filter: None,
@@ -952,7 +957,7 @@ fn list_params(archived: bool) -> ListThreadsParams {
         allowed_sources: Vec::new(),
         model_providers: Some(Vec::new()),
         location_filter: crate::ThreadLocationFilter::Unrestricted,
-        is_pinned: None,
+        section: None,
         archived,
         search_term: None,
         relation_filter: None,

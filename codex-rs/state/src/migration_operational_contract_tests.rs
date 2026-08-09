@@ -179,6 +179,7 @@ async fn postgres_contract_imports_complete_operational_state_read_only() -> any
                 cwd: Some(source.join("workspace")),
                 source: Some("source-skill".to_string()),
                 target: Some("target-skill".to_string()),
+                title: None,
             }],
             &[ExternalAgentConfigImportFailureRecord {
                 item_type: "hooks".to_string(),

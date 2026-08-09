@@ -4,6 +4,7 @@
 
 This catalog lists every statically defined model tool in Codex's core registry and bundled extensions. A tool may require a feature, model capability, execution environment, extension, or collaboration mode before it is exposed.
 
+<!-- prettier-ignore -->
 | Tool | Feature / availability | Kind | Description | Source |
 | --- | --- | --- | --- | --- |
 | `apply_patch` | No dedicated feature; execution environment + model capability. | `freeform` | The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON. | `codex-rs/core/src/tools/handlers/apply_patch_spec.rs` |

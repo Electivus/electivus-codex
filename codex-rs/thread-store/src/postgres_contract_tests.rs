@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "PostgreSQL tests connect only to PostgreSQL pools"
+)]
+
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 

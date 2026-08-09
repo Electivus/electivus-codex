@@ -12,6 +12,7 @@ from typing import Any, Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SCHEMA_PATH = REPO_ROOT / "codex-rs" / "core" / "config.schema.json"
+DEFAULT_OUTPUT_PATH = REPO_ROOT / "docs" / "config-reference.md"
 DEFAULT_TITLE = "Codex config.toml reference"
 COMBINATORS = ("allOf", "anyOf", "oneOf")
 NO_DESCRIPTION = "_No description available._"
@@ -318,6 +319,7 @@ def render_markdown(
         "Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown as "
         "`<key>`, and `[]` identifies fields inside an array of tables.",
         "",
+        "<!-- prettier-ignore -->",
         "| Configuration | Type | Description |",
         "| --- | --- | --- |",
     ]
@@ -342,11 +344,18 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SCHEMA_PATH,
         help=f"JSON Schema to read (default: {DEFAULT_SCHEMA_PATH})",
     )
-    parser.add_argument(
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument(
         "-o",
         "--output",
         type=Path,
-        help="Markdown file to write. Omit to write to stdout.",
+        default=DEFAULT_OUTPUT_PATH,
+        help=f"Markdown file to write (default: {DEFAULT_OUTPUT_PATH}).",
+    )
+    output_group.add_argument(
+        "--stdout",
+        action="store_true",
+        help="Write Markdown to stdout instead of the default output file.",
     )
     parser.add_argument(
         "--title",
@@ -362,7 +371,8 @@ def main() -> int:
         schema = load_schema(args.schema)
         entries = collect_reference_entries(schema)
         markdown = render_markdown(schema, entries, title=args.title)
-        if args.output is None:
+        if args.stdout:
+            sys.stdout.reconfigure(encoding="utf-8", newline="\n")
             sys.stdout.write(markdown)
         else:
             args.output.parent.mkdir(parents=True, exist_ok=True)

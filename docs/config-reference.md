@@ -4,6 +4,7 @@
 
 Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown as `<key>`, and `[]` identifies fields inside an array of tables.
 
+<!-- prettier-ignore -->
 | Configuration | Type | Description |
 | --- | --- | --- |
 | `agents` | <code>table</code> | Agent-related settings (thread limits, etc.). |
@@ -188,6 +189,7 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `features.postgresql_state` | <code>boolean</code> | _No description available._ |
 | `features.prevent_idle_sleep` | <code>boolean</code> | _No description available._ |
 | `features.realtime_conversation` | <code>boolean</code> | _No description available._ |
+| `features.recommended_plugins` | <code>boolean</code> | _No description available._ |
 | `features.remote_compaction_v2` | <code>boolean</code> | _No description available._ |
 | `features.remote_control` | <code>boolean</code> | _No description available._ |
 | `features.remote_models` | <code>boolean</code> | _No description available._ |
@@ -706,6 +708,7 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `profiles.<key>.features.postgresql_state` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.prevent_idle_sleep` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.realtime_conversation` | <code>boolean</code> | _No description available._ |
+| `profiles.<key>.features.recommended_plugins` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.remote_compaction_v2` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.remote_control` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.remote_models` | <code>boolean</code> | _No description available._ |

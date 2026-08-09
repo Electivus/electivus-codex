@@ -106,73 +106,51 @@ WHERE version = ?
         }
     }
 
-    // Upstream assigned its pin and provider migrations versions 43 and 44, while this fork
-    // already used version 43. Match the SQL checksums before shifting only those official
-    // history entries forward to the versions used by the combined migration sequence.
-    let Some(pin_migration) = migrator
-        .migrations
-        .iter()
-        .find(|migration| migration.version == 44)
-    else {
-        return Ok(());
-    };
-    let Some(provider_migration) = migrator
-        .migrations
-        .iter()
-        .find(|migration| migration.version == 45)
-    else {
-        return Ok(());
-    };
-    let version_43_checksum =
-        sqlx::query_scalar::<_, Vec<u8>>("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
-            .bind(43_i64)
-            .fetch_optional(pool)
-            .await?;
-    if version_43_checksum.as_deref() != Some(pin_migration.checksum.as_ref()) {
-        return Ok(());
+    // Upstream used versions 43-46 for pin, provider, section, and section-order migrations.
+    // The combined sequence inserts fork migrations at 43 and 46. Match every applied checksum,
+    // then shift the contiguous upstream suffix in reverse order to avoid version collisions.
+    let mut remaps = Vec::new();
+    let mut reached_end = false;
+    for (legacy_version, combined_version) in [(43_i64, 44_i64), (44, 45), (45, 47), (46, 48)] {
+        let Some(migration) = migrator
+            .migrations
+            .iter()
+            .find(|migration| migration.version == combined_version)
+        else {
+            return Ok(());
+        };
+        let checksum = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT checksum FROM _sqlx_migrations WHERE version = ?",
+        )
+        .bind(legacy_version)
+        .fetch_optional(pool)
+        .await?;
+        match checksum {
+            Some(checksum)
+                if !reached_end && checksum.as_slice() == migration.checksum.as_ref() =>
+            {
+                remaps.push((legacy_version, migration));
+            }
+            Some(_) => return Ok(()),
+            None => reached_end = true,
+        }
     }
-
-    let version_44_checksum =
-        sqlx::query_scalar::<_, Vec<u8>>("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
-            .bind(44_i64)
-            .fetch_optional(pool)
-            .await?;
-    let provider_is_at_version_44 =
-        version_44_checksum.as_deref() == Some(provider_migration.checksum.as_ref());
-    if version_44_checksum.is_some() && !provider_is_at_version_44 {
-        return Ok(());
-    }
-    if provider_is_at_version_44
-        && sqlx::query_scalar::<_, i64>("SELECT 1 FROM _sqlx_migrations WHERE version = ?")
-            .bind(45_i64)
-            .fetch_optional(pool)
-            .await?
-            .is_some()
-    {
+    if remaps.first().map(|(version, _)| *version) != Some(43) {
         return Ok(());
     }
 
     let mut transaction = pool.begin().await?;
-    if provider_is_at_version_44 {
+    for (legacy_version, migration) in remaps.into_iter().rev() {
         sqlx::query(
             "UPDATE _sqlx_migrations SET version = ?, description = ? WHERE version = ? AND checksum = ?",
         )
-        .bind(provider_migration.version)
-        .bind(provider_migration.description.as_ref())
-        .bind(44_i64)
-        .bind(provider_migration.checksum.as_ref())
+        .bind(migration.version)
+        .bind(migration.description.as_ref())
+        .bind(legacy_version)
+        .bind(migration.checksum.as_ref())
         .execute(&mut *transaction)
         .await?;
     }
-    sqlx::query(
-        "UPDATE _sqlx_migrations SET version = ?, description = ? WHERE version = ? AND checksum = ?",
-    )
-    .bind(pin_migration.version)
-    .bind(pin_migration.description.as_ref())
-    .bind(43_i64)
-    .bind(pin_migration.checksum.as_ref())
-    .execute(&mut *transaction)
-    .await?;
     transaction.commit().await?;
     Ok(())
 }

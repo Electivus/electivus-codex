@@ -18,12 +18,14 @@ pub(crate) async fn run_external_agent_config_import_contract(
             target: Some(
                 "extensions/external_agent_import/resources/project-alpha/MEMORY.md".to_string(),
             ),
+            title: None,
         },
         ExternalAgentConfigImportSuccessRecord {
             item_type: "SKILLS".to_string(),
             cwd: None,
             source: Some("review".to_string()),
             target: Some("review".to_string()),
+            title: None,
         },
     ];
     let failures = vec![ExternalAgentConfigImportFailureRecord {

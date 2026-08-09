@@ -59,7 +59,7 @@ impl StateRuntime {
                 model_providers,
                 cwd_filters: None,
                 repository_identity: None,
-                is_pinned: None,
+                section: None,
                 anchor: None,
                 sort_key: crate::SortKey::UpdatedAt,
                 sort_direction: SortDirection::Desc,
@@ -187,20 +187,26 @@ impl StateRuntime {
                 model_providers,
                 cwd_filters: None,
                 repository_identity: None,
-                is_pinned: None,
+                section: None,
                 anchor,
                 sort_key,
                 sort_direction: SortDirection::Desc,
                 search_term: None,
             },
-            sort_key == crate::SortKey::RecencyAt,
+            matches!(
+                sort_key,
+                crate::SortKey::RecencyAt | crate::SortKey::SectionPosition
+            ),
         );
         push_thread_order_and_limit(
             &mut builder,
             sort_key,
             SortDirection::Desc,
             OrderByIndex::Enabled,
-            sort_key == crate::SortKey::RecencyAt,
+            matches!(
+                sort_key,
+                crate::SortKey::RecencyAt | crate::SortKey::SectionPosition
+            ),
             limit,
         );
 
@@ -304,6 +310,13 @@ fn should_include_thread_id_tiebreaker(
     relation_filter: Option<crate::ThreadRelationFilter>,
 ) -> bool {
     relation_filter.is_some()
-        || filters.sort_key == SortKey::RecencyAt
+        || matches!(
+            filters.sort_key,
+            SortKey::RecencyAt | SortKey::SectionPosition
+        )
         || filters.repository_identity.is_some()
 }
+
+#[cfg(test)]
+#[path = "listing_tests.rs"]
+mod tests;

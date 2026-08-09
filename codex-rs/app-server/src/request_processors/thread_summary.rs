@@ -298,6 +298,8 @@ pub(crate) fn summary_to_thread(summary: ConversationSummary) -> Thread {
         preview,
         ephemeral: false,
         is_pinned: false,
+        section: None,
+        section_entered_at: None,
         history_mode: ThreadHistoryMode::Legacy,
         model_provider,
         created_at: created_at.map(|dt| dt.timestamp()).unwrap_or(0),

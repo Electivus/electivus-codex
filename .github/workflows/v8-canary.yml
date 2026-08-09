@@ -122,7 +122,7 @@ jobs:
     # Metadata always runs; only relevant changes pay for the large matrix.
     if: ${{ needs.metadata.outputs.canary_required == 'true' }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
       contents: read
       actions: read

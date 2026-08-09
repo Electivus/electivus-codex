@@ -26,11 +26,40 @@ pub(super) struct ListCursor {
     pub(super) thread_id: Option<ThreadId>,
 }
 
+struct SectionCursor {
+    position: i64,
+    thread_id: Option<ThreadId>,
+}
+
+enum ListSortValue {
+    Timestamp(DateTime<Utc>),
+    SectionPosition(i64),
+}
+
 pub(super) async fn list_threads(
     store: &PostgresThreadStore,
     params: ListThreadsParams,
 ) -> ThreadStoreResult<ThreadPage> {
-    let cursor = params.cursor.as_deref().map(parse_cursor).transpose()?;
+    if params.sort_key == ThreadSortKey::SectionPosition && !matches!(params.section, Some(Some(_)))
+    {
+        return Err(ThreadStoreError::InvalidRequest {
+            message: "section-position sorting requires a section filter".to_owned(),
+        });
+    }
+    let timestamp_cursor = if matches!(params.sort_key, ThreadSortKey::SectionPosition) {
+        None
+    } else {
+        params.cursor.as_deref().map(parse_cursor).transpose()?
+    };
+    let section_cursor = if matches!(params.sort_key, ThreadSortKey::SectionPosition) {
+        params
+            .cursor
+            .as_deref()
+            .map(parse_section_cursor)
+            .transpose()?
+    } else {
+        None
+    };
     let limit: i64 = params.page_size.saturating_add(1).try_into().map_err(|_| {
         ThreadStoreError::InvalidRequest {
             message: "thread list page size is too large".to_string(),
@@ -40,6 +69,7 @@ pub(super) async fn list_threads(
         ThreadSortKey::CreatedAt => "created_at",
         ThreadSortKey::UpdatedAt => "updated_at",
         ThreadSortKey::RecencyAt => "recency_at",
+        ThreadSortKey::SectionPosition => "section_position",
     };
     let (operator, direction) = match params.sort_direction {
         SortDirection::Asc => (">", "ASC"),
@@ -130,9 +160,15 @@ pub(super) async fn list_threads(
         }
         ThreadLocationFilter::Unrestricted => {}
     }
-    if let Some(is_pinned) = params.is_pinned {
-        query.push(" AND threads.is_pinned = ");
-        query.push_bind(is_pinned);
+    match params.section.as_ref() {
+        Some(Some(section)) => {
+            query.push(" AND threads.thread_section_id = ");
+            query.push_bind(section);
+        }
+        Some(None) => {
+            query.push(" AND threads.thread_section_id IS NULL");
+        }
+        None => {}
     }
     if let Some(search_term) = params.search_term.as_deref() {
         query.push(" AND (strpos(COALESCE(threads.projection ->> 'name', ''), ");
@@ -150,7 +186,7 @@ pub(super) async fn list_threads(
         query.push_bind(parent_thread_id.to_string());
         query.push(")");
     }
-    if let Some(cursor) = cursor.as_ref() {
+    if let Some(cursor) = timestamp_cursor.as_ref() {
         query.push(" AND (");
         query.push("threads.");
         query.push(sort_column);
@@ -162,6 +198,19 @@ pub(super) async fn list_threads(
             query.push(sort_column);
             query.push(" = ");
             query.push_bind(cursor.timestamp);
+            query.push(format!(" AND threads.thread_id {operator} "));
+            query.push_bind(thread_id.to_string());
+            query.push(")");
+        }
+        query.push(")");
+    }
+    if let Some(cursor) = section_cursor.as_ref() {
+        query.push(" AND (threads.section_position ");
+        query.push(format!("{operator} "));
+        query.push_bind(cursor.position);
+        if let Some(thread_id) = cursor.thread_id {
+            query.push(" OR (threads.section_position = ");
+            query.push_bind(cursor.position);
             query.push(format!(" AND threads.thread_id {operator} "));
             query.push_bind(thread_id.to_string());
             query.push(")");
@@ -201,12 +250,21 @@ pub(super) async fn list_threads(
                         }
                     })?);
             }
-            let sort_at = row
-                .try_get("sort_at")
-                .map_err(|error| database_error("list threads", error))?;
-            Ok((thread, sort_at))
+            let sort_value = match params.sort_key {
+                ThreadSortKey::CreatedAt | ThreadSortKey::UpdatedAt | ThreadSortKey::RecencyAt => {
+                    ListSortValue::Timestamp(
+                        row.try_get("sort_at")
+                            .map_err(|error| database_error("list threads", error))?,
+                    )
+                }
+                ThreadSortKey::SectionPosition => ListSortValue::SectionPosition(
+                    row.try_get("sort_at")
+                        .map_err(|error| database_error("list threads", error))?,
+                ),
+            };
+            Ok((thread, sort_value))
         })
-        .collect::<ThreadStoreResult<Vec<(StoredThread, DateTime<Utc>)>>>()?;
+        .collect::<ThreadStoreResult<Vec<(StoredThread, ListSortValue)>>>()?;
     let has_more = items.len() > params.page_size;
     if has_more {
         items.pop();
@@ -214,11 +272,40 @@ pub(super) async fn list_threads(
     let next_cursor = has_more
         .then(|| items.last())
         .flatten()
-        .map(|(thread, timestamp)| format_cursor(*timestamp, Some(thread.thread_id)));
+        .map(|(thread, sort_value)| match sort_value {
+            ListSortValue::Timestamp(timestamp) => {
+                format_cursor(*timestamp, Some(thread.thread_id))
+            }
+            ListSortValue::SectionPosition(position) => {
+                format_section_cursor(*position, Some(thread.thread_id))
+            }
+        });
     Ok(ThreadPage {
         items: items.into_iter().map(|(thread, _)| thread).collect(),
         next_cursor,
     })
+}
+
+fn parse_section_cursor(cursor: &str) -> ThreadStoreResult<SectionCursor> {
+    let (position, thread_id) = match cursor.rsplit_once('|') {
+        Some((position, thread_id)) => (
+            position,
+            Some(ThreadId::from_string(thread_id).map_err(|_| invalid_cursor(cursor))?),
+        ),
+        None => (cursor, None),
+    };
+    let position = position.parse().map_err(|_| invalid_cursor(cursor))?;
+    Ok(SectionCursor {
+        position,
+        thread_id,
+    })
+}
+
+fn format_section_cursor(position: i64, thread_id: Option<ThreadId>) -> String {
+    match thread_id {
+        Some(thread_id) => format!("{position}|{thread_id}"),
+        None => position.to_string(),
+    }
 }
 
 pub(super) fn parse_cursor(cursor: &str) -> ThreadStoreResult<ListCursor> {

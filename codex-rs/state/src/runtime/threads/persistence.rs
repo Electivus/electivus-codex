@@ -82,13 +82,15 @@ INSERT INTO threads (
     first_user_message,
     archived,
     archived_at,
-    is_pinned,
+    thread_section_id,
+    section_position,
+    section_entered_at_ms,
     git_sha,
     git_branch,
     git_origin_url,
     repository_identity,
     memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     rollout_path = excluded.rollout_path,
     created_at = excluded.created_at,
@@ -170,7 +172,9 @@ ON CONFLICT(id) DO UPDATE SET
         .bind(metadata.first_user_message.as_deref().unwrap_or_default())
         .bind(metadata.archived_at.is_some())
         .bind(metadata.archived_at.map(datetime_to_epoch_seconds))
-        .bind(metadata.is_pinned)
+        .bind(metadata.section.as_ref().map(|section| section.id.as_str()))
+        .bind(metadata.section_position)
+        .bind(metadata.section_entered_at.map(datetime_to_epoch_millis))
         .bind(metadata.git_sha.as_deref())
         .bind(metadata.git_branch.as_deref())
         .bind(metadata.git_origin_url.as_deref())

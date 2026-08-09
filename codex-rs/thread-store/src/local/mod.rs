@@ -5,6 +5,7 @@ mod helpers;
 mod list_threads;
 mod live_writer;
 mod model_context;
+mod move_thread_to_section;
 mod paginated_fork;
 mod project_scope_repair;
 mod read_thread;
@@ -48,6 +49,7 @@ use crate::ListItemsParams;
 use crate::ListThreadsParams;
 use crate::ListTurnsParams;
 use crate::LoadThreadHistoryParams;
+use crate::MoveThreadToSectionParams;
 use crate::PrepareForkParams;
 use crate::PreparedFork;
 use crate::ReadThreadByRolloutPathParams;
@@ -208,6 +210,11 @@ impl LocalThreadStore {
     }
 
     async fn thread_history_db(&self) -> ThreadStoreResult<&sqlx::SqlitePool> {
+        if self.state_db.is_none() {
+            return Err(ThreadStoreError::Unsupported {
+                operation: "paginated_history",
+            });
+        }
         self.thread_history_db
             .get_or_try_init(|| async {
                 codex_state::open_thread_history_db(&self.config.sqlite).await
@@ -453,7 +460,7 @@ impl ThreadStore for LocalThreadStore {
     }
 
     fn supports_paginated_history_lists(&self) -> bool {
-        true
+        self.state_db.is_some()
     }
 
     fn list_turns(&self, params: ListTurnsParams) -> ThreadStoreFuture<'_, TurnPage> {
@@ -483,6 +490,13 @@ impl ThreadStore for LocalThreadStore {
         params: UpdateThreadMetadataParams,
     ) -> ThreadStoreFuture<'_, StoredThread> {
         Box::pin(async move { update_thread_metadata::update_thread_metadata(self, params).await })
+    }
+
+    fn move_thread_to_section(
+        &self,
+        params: MoveThreadToSectionParams,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move { move_thread_to_section::move_thread_to_section(self, params).await })
     }
 
     fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {

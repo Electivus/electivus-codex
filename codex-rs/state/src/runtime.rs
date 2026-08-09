@@ -82,6 +82,7 @@ mod remote_control;
 pub(crate) mod remote_control_contract_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
+mod thread_section_order;
 mod threads;
 
 pub use backend::RuntimeStateBackendConfig;
