@@ -1,7 +1,7 @@
 version = 1
 
 [postgres_contracts]
-database_count = 110
+database_count = 111
 process_count = 2
 packages = [
     "codex-app-server",
@@ -109,6 +109,7 @@ packages = [
 'codex-rs/rmcp-client/tests/streamable_http_oauth_startup.rs::oauth_startup_child::ignore="spawned by refreshes_expired_persisted_token_before_initialize"' = "helper-process"
 'codex-rs/rmcp-client/tests/streamable_http_oauth_startup.rs::persisted_credentials_auth_status_child::ignore="spawned by reports_auth_status_for_persisted_credentials"' = "helper-process"
 'codex-rs/rmcp-client/tests/streamable_http_oauth_store_pinning.rs::auto_store_remains_pinned_across_session_recovery_child::ignore="spawned by auto_store_remains_pinned_across_session_recovery"' = "helper-process"
+'codex-rs/state/src/migration_destination_tests.rs::postgres_contract_destination_emptiness_accepts_only_builtin_thread_section::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/state/src/migration_destination_tests.rs::postgres_contract_preflight_does_not_create_an_absent_destination_schema::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/state/src/migration_destination_tests.rs::postgres_contract_preflight_rejects_incompatible_version_without_writes::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/state/src/migration_destination_tests.rs::postgres_contract_preflight_rejects_nonempty_destination_without_writes::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
