@@ -49,7 +49,7 @@ async fn lookup_name(
         ),
         ThreadParamsMode::Embedded,
     );
-    let target = lookup(&mut app_server, config, name).await?;
+    let target = lookup(&mut app_server, config, name, /*project_cwd*/ None).await?;
     app_server.shutdown().await?;
     Ok(target)
 }

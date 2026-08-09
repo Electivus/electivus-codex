@@ -9,7 +9,7 @@ use codex_protocol::protocol::SessionSource as CoreSessionSource;
 use codex_protocol::protocol::SubAgentSource as CoreSubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode as CoreThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource as CoreThreadSource;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 #[cfg(test)]
 use schemars::r#gen::SchemaGenerator;
 #[cfg(test)]
@@ -197,6 +197,9 @@ pub struct Thread {
     pub preview: String,
     /// Whether the thread is ephemeral and should not be materialized on disk.
     pub ephemeral: bool,
+    /// Whether the thread belongs to the built-in Pinned section.
+    #[serde(default)]
+    pub is_pinned: bool,
     /// The independently persisted section selected for this thread, if any.
     #[serde(default)]
     pub section: Option<ThreadSection>,
@@ -223,8 +226,8 @@ pub struct Thread {
     pub status: ThreadStatus,
     /// [UNSTABLE] Path to the thread on disk.
     pub path: Option<PathBuf>,
-    /// Working directory captured for the thread.
-    pub cwd: AbsolutePathBuf,
+    /// Source-native Recorded Working Directory captured for the thread.
+    pub cwd: LegacyAppPathString,
     /// Version of the CLI that created the thread.
     pub cli_version: String,
     /// Origin of the thread (CLI, VSCode, codex exec, codex app-server, etc.).

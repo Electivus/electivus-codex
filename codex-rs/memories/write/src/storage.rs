@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::ensure_layout;
 use crate::raw_memories_file;
+use crate::repository::RepositoryIdentity;
 use crate::rollout_summaries_dir;
 
 /// Rebuild `raw_memories.md` from DB-backed stage-1 outputs.
@@ -64,6 +65,10 @@ async fn rebuild_raw_memories_file(
         )
         .map_err(raw_memories_format_error)?;
         writeln!(body, "cwd: {}", memory.cwd.display()).map_err(raw_memories_format_error)?;
+        if let Some(repository) = repository_identity(memory) {
+            writeln!(body, "repository: {}", repository.as_str())
+                .map_err(raw_memories_format_error)?;
+        }
         writeln!(body, "rollout_path: {}", memory.rollout_path.display())
             .map_err(raw_memories_format_error)?;
         let rollout_summary_file = format!("{}.md", rollout_summary_file_stem(memory));
@@ -125,6 +130,10 @@ async fn write_rollout_summary_for_thread(
     writeln!(body, "rollout_path: {}", memory.rollout_path.display())
         .map_err(rollout_summary_format_error)?;
     writeln!(body, "cwd: {}", memory.cwd.display()).map_err(rollout_summary_format_error)?;
+    if let Some(repository) = repository_identity(memory) {
+        writeln!(body, "repository: {}", repository.as_str())
+            .map_err(rollout_summary_format_error)?;
+    }
     if let Some(git_branch) = memory.git_branch.as_deref() {
         writeln!(body, "git_branch: {git_branch}").map_err(rollout_summary_format_error)?;
     }
@@ -133,6 +142,10 @@ async fn write_rollout_summary_for_thread(
     body.push('\n');
 
     tokio::fs::write(path, body).await
+}
+
+fn repository_identity(memory: &Stage1Output) -> Option<RepositoryIdentity> {
+    RepositoryIdentity::from_git_origin_url(memory.git_origin_url.as_deref())
 }
 
 fn retained_memories(

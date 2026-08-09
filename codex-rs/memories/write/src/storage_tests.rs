@@ -25,6 +25,7 @@ fn stage1_output_with_slug(thread_id: ThreadId, rollout_slug: Option<&str>) -> S
         rollout_path: PathBuf::from("/tmp/rollout.jsonl"),
         cwd: PathBuf::from("/tmp/workspace"),
         git_branch: None,
+        git_origin_url: None,
         generated_at: Utc.timestamp_opt(124, 0).single().expect("timestamp"),
     }
 }
@@ -94,6 +95,7 @@ async fn sync_rollout_summaries_and_raw_memories_file_keeps_latest_memories_only
         rollout_path: PathBuf::from("/tmp/rollout-100.jsonl"),
         cwd: PathBuf::from("/tmp/workspace"),
         git_branch: None,
+        git_origin_url: None,
         generated_at: Utc.timestamp_opt(101, 0).single().expect("timestamp"),
     }];
 

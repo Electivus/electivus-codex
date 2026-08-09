@@ -43,6 +43,10 @@ impl codex_rollout::RolloutConfigView for Config {
     fn generate_memories(&self) -> bool {
         self.memories.generate_memories
     }
+
+    fn runtime_state_backend(&self) -> Option<&codex_state::RuntimeStateBackendConfig> {
+        Some(&self.runtime_state_backend)
+    }
 }
 
 pub(crate) mod list {

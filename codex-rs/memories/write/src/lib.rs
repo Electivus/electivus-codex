@@ -10,7 +10,9 @@ mod guard;
 mod metrics;
 mod phase1;
 mod phase2;
+mod phase2_completion;
 mod prompts;
+mod repository;
 mod runtime;
 mod start;
 mod storage;
@@ -21,6 +23,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 pub use control::clear_memory_roots_contents;
+pub use control::reset_memories;
 pub use extensions::prune_old_extension_resources;
 pub use prompts::build_consolidation_prompt;
 pub use prompts::build_stage_one_input_message;
@@ -28,6 +31,7 @@ pub use start::start_memories_startup_task;
 pub use storage::rebuild_raw_memories_file_from_memories;
 pub use storage::rollout_summary_file_stem;
 pub use storage::sync_rollout_summaries_from_memories;
+pub use workspace_materialization::prepare_memory_workspace_from_store;
 
 #[cfg(test)]
 mod startup_tests;
@@ -80,6 +84,7 @@ mod stage_one {
         codex_protocol::openai_models::ReasoningEffort::Low;
     pub(super) const CONCURRENCY_LIMIT: usize = 8;
     pub(super) const JOB_LEASE_SECONDS: i64 = 3_600;
+    pub(super) const JOB_HEARTBEAT_SECONDS: u64 = 90;
     pub(super) const JOB_RETRY_DELAY_SECONDS: i64 = 3_600;
     pub(super) const THREAD_SCAN_LIMIT: usize = 5_000;
     pub(super) const PRUNE_BATCH_SIZE: usize = 200;
@@ -112,6 +117,10 @@ mod workspace_diff {
     pub(super) const FILENAME: &str = "phase2_workspace_diff.md";
     pub(super) const MAX_BYTES: usize = 4 * 1024 * 1024;
 }
+
+mod workspace_artifacts;
+mod workspace_materialization;
+pub(crate) use workspace_artifacts::collect_memory_artifacts;
 
 pub fn memory_root(codex_home: &AbsolutePathBuf) -> AbsolutePathBuf {
     codex_home.join("memories")

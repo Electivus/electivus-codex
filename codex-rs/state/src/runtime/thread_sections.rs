@@ -3,6 +3,8 @@ use crate::PINNED_THREAD_SECTION_ID;
 use crate::ThreadSection;
 use uuid::Uuid;
 
+mod postgres;
+
 impl StateRuntime {
     /// Create a custom thread section with a stable, server-assigned UUIDv7.
     pub async fn create_thread_section(&self, name: &str) -> anyhow::Result<ThreadSection> {
@@ -11,10 +13,14 @@ impl StateRuntime {
             name: name.to_string(),
         };
 
+        if let Some((pool, schema)) = self.postgres_connection() {
+            return postgres::create_thread_section(&pool, &schema, section).await;
+        }
+
         sqlx::query("INSERT INTO thread_sections (id, name) VALUES (?, ?)")
             .bind(&section.id)
             .bind(&section.name)
-            .execute(self.pool.as_ref())
+            .execute(self.sqlite_pool()?)
             .await?;
 
         Ok(section)
@@ -30,12 +36,16 @@ impl StateRuntime {
             anyhow::bail!("built-in pinned thread section cannot be renamed");
         }
 
+        if let Some((pool, schema)) = self.postgres_connection() {
+            return postgres::rename_thread_section(&pool, &schema, id, name).await;
+        }
+
         let section = sqlx::query_as::<_, (String, String)>(
             "UPDATE thread_sections SET name = ? WHERE id = ? RETURNING id, name",
         )
         .bind(name)
         .bind(id)
-        .fetch_optional(self.pool.as_ref())
+        .fetch_optional(self.sqlite_pool()?)
         .await?;
 
         Ok(section.map(|(id, name)| ThreadSection { id, name }))
@@ -47,7 +57,11 @@ impl StateRuntime {
             anyhow::bail!("built-in pinned thread section cannot be deleted");
         }
 
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some((pool, schema)) = self.postgres_connection() {
+            return postgres::delete_thread_section(&pool, &schema, id).await;
+        }
+
+        let mut tx = self.sqlite_pool()?.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "UPDATE threads SET section_position = NULL, section_entered_at_ms = NULL WHERE thread_section_id = ?",
         )

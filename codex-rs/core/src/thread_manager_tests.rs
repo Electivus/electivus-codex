@@ -236,6 +236,34 @@ async fn child_session_inherits_client_mcp_extensions() {
     );
 }
 
+#[tokio::test]
+async fn postgresql_thread_store_construction_reports_missing_runtime_without_panicking() {
+    let mut config = test_config().await;
+    let namespace = codex_state::PostgresNamespaceConfig::new(
+        "CODEX_TEST_MISSING_POSTGRES_URL".to_string(),
+        "missing_runtime".to_string(),
+        codex_state::PostgresPoolConfig::default(),
+    )
+    .expect("test namespace config should be valid");
+    config.runtime_state_backend = codex_state::RuntimeStateBackendConfig::Postgresql {
+        codex_home: config.codex_home.clone(),
+        namespace,
+    };
+
+    let construction = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        thread_store_from_config(&config, /*state_db*/ None)
+    }));
+    let result = construction.expect("missing PostgreSQL state must not panic");
+    let error = match result {
+        Ok(_) => panic!("missing PostgreSQL state must be a typed error"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.to_string(),
+        "PostgreSQL Runtime State was not initialized before Thread Store construction"
+    );
+}
+
 struct FakeAgentGraphStore {
     root_thread_id: ThreadId,
     descendant_thread_ids: Vec<ThreadId>,
@@ -743,7 +771,8 @@ async fn mcp_invalidation_refreshes_threads_that_are_still_starting() {
         Arc::new(extensions.build()),
         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
-        thread_store_from_config(&config, /*state_db*/ None),
+        thread_store_from_config(&config, /*state_db*/ None)
+            .expect("thread store should initialize"),
         /*agent_graph_store*/ None,
         TEST_INSTALLATION_ID.to_string(),
         /*attestation_provider*/ None,
@@ -925,7 +954,8 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
         Arc::new(extensions.build()),
         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
-        thread_store_from_config(&config, /*state_db*/ None),
+        thread_store_from_config(&config, /*state_db*/ None)
+            .expect("thread store should initialize"),
         /*agent_graph_store*/ None,
         TEST_INSTALLATION_ID.to_string(),
         /*attestation_provider*/ None,
@@ -1130,7 +1160,8 @@ async fn resume_and_fork_do_not_restore_thread_environments_from_rollout() {
         empty_extension_registry(),
         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
-        thread_store_from_config(&config, /*state_db*/ None),
+        thread_store_from_config(&config, /*state_db*/ None)
+            .expect("thread store should initialize"),
         /*agent_graph_store*/ None,
         TEST_INSTALLATION_ID.to_string(),
         /*attestation_provider*/ None,
@@ -1252,7 +1283,8 @@ async fn explicit_installation_id_skips_codex_home_file() {
         AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
     let installation_id = uuid::Uuid::new_v4().to_string();
     let state_db = init_state_db(&config).await;
-    let thread_store = thread_store_from_config(&config, state_db.clone());
+    let thread_store = thread_store_from_config(&config, state_db.clone())
+        .expect("thread store should initialize");
     let manager = ThreadManager::new(
         &config,
         auth_manager.clone(),
@@ -1306,7 +1338,8 @@ async fn resume_active_thread_from_rollout_returns_running_thread() {
         empty_extension_registry(),
         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
-        thread_store_from_config(&config, /*state_db*/ None),
+        thread_store_from_config(&config, /*state_db*/ None)
+            .expect("thread store should initialize"),
         /*agent_graph_store*/ None,
         TEST_INSTALLATION_ID.to_string(),
         /*attestation_provider*/ None,
@@ -1368,7 +1401,8 @@ async fn resume_stopped_thread_from_rollout_spawns_new_thread() {
         empty_extension_registry(),
         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
-        thread_store_from_config(&config, /*state_db*/ None),
+        thread_store_from_config(&config, /*state_db*/ None)
+            .expect("thread store should initialize"),
         /*agent_graph_store*/ None,
         TEST_INSTALLATION_ID.to_string(),
         /*attestation_provider*/ None,
@@ -1426,7 +1460,8 @@ async fn resume_stopped_thread_from_rollout_preserves_thread_source() {
     let auth_manager =
         AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
     let state_db = init_state_db(&config).await;
-    let thread_store = thread_store_from_config(&config, state_db.clone());
+    let thread_store = thread_store_from_config(&config, state_db.clone())
+        .expect("thread store should initialize");
     let manager = ThreadManager::new(
         &config,
         auth_manager.clone(),
@@ -1522,7 +1557,8 @@ async fn subtree_listing_uses_injected_graph_store_without_state_db() {
         empty_extension_registry(),
         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
-        thread_store_from_config(&config, /*state_db*/ None),
+        thread_store_from_config(&config, /*state_db*/ None)
+            .expect("thread store should initialize"),
         Some(agent_graph_store),
         TEST_INSTALLATION_ID.to_string(),
         /*attestation_provider*/ None,
@@ -1554,7 +1590,8 @@ async fn rollout_path_resume_and_fork_read_history_through_thread_store() {
     let auth_manager =
         AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
     let state_db = init_state_db(&config).await;
-    let thread_store = thread_store_from_config(&config, state_db.clone());
+    let thread_store = thread_store_from_config(&config, state_db.clone())
+        .expect("thread store should initialize");
     let in_memory_store = thread_store
         .as_any()
         .downcast_ref::<InMemoryThreadStore>()
@@ -1676,7 +1713,8 @@ async fn new_uses_active_provider_for_model_refresh() {
         empty_extension_registry(),
         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
-        thread_store_from_config(&config, /*state_db*/ None),
+        thread_store_from_config(&config, /*state_db*/ None)
+            .expect("thread store should initialize"),
         /*agent_graph_store*/ None,
         TEST_INSTALLATION_ID.to_string(),
         /*attestation_provider*/ None,
@@ -1723,7 +1761,8 @@ async fn injected_models_manager_controls_refresh_policy() {
         empty_extension_registry(),
         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
-        thread_store_from_config(&config, /*state_db*/ None),
+        thread_store_from_config(&config, /*state_db*/ None)
+            .expect("thread store should initialize"),
         /*agent_graph_store*/ None,
         TEST_INSTALLATION_ID.to_string(),
         /*attestation_provider*/ None,
@@ -1973,7 +2012,8 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
         empty_extension_registry(),
         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
-        thread_store_from_config(&config, state_db.clone()),
+        thread_store_from_config(&config, state_db.clone())
+            .expect("thread store should initialize"),
         local_agent_graph_store_from_state_db(state_db.as_ref()),
         TEST_INSTALLATION_ID.to_string(),
         /*attestation_provider*/ None,
@@ -2086,7 +2126,8 @@ async fn interrupted_fork_snapshot_preserves_explicit_turn_id() {
         empty_extension_registry(),
         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
-        thread_store_from_config(&config, state_db.clone()),
+        thread_store_from_config(&config, state_db.clone())
+            .expect("thread store should initialize"),
         local_agent_graph_store_from_state_db(state_db.as_ref()),
         TEST_INSTALLATION_ID.to_string(),
         /*attestation_provider*/ None,
@@ -2189,7 +2230,8 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
         empty_extension_registry(),
         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
-        thread_store_from_config(&config, state_db.clone()),
+        thread_store_from_config(&config, state_db.clone())
+            .expect("thread store should initialize"),
         local_agent_graph_store_from_state_db(state_db.as_ref()),
         TEST_INSTALLATION_ID.to_string(),
         /*attestation_provider*/ None,

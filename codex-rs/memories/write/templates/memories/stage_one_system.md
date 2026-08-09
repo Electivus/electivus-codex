@@ -408,6 +408,7 @@ task: <primary_task_signature>
 task_group: <cwd_or_workflow_bucket>
 task_outcome: <success|partial|fail|uncertain>
 cwd: <single best primary working directory for this raw memory; use `unknown` only when none is identifiable>
+repository: <optional canonical Repository identity from rollout_context, such as github.com/openai/codex; omit when rollout_context does not provide it>
 keywords: k1, k2, k3, ... <searchable handles (tool names, error names, repo concepts, contracts)>
 ---
 

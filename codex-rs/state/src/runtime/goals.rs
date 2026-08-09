@@ -1,47 +1,87 @@
 use super::*;
 use crate::model::ThreadGoalRow;
+use sqlx::PgPool;
 use uuid::Uuid;
+
+mod accounting;
+mod continuation;
+mod error;
+#[path = "goals/postgres.rs"]
+mod postgres;
+mod update;
+
+pub use accounting::GoalAccountingMode;
+pub use accounting::GoalAccountingOutcome;
+pub use accounting::GoalAccountingRequest;
+pub use accounting::GoalAccountingTarget;
+pub use error::GoalStoreError;
+pub use error::GoalStoreErrorKind;
+pub use error::GoalStoreOperation;
+pub use error::GoalStoreResult;
+use error::public_goal_store_result;
+use postgres::PostgresGoalStore;
+pub use update::GoalUpdate;
 
 #[derive(Clone)]
 pub struct GoalStore {
-    pool: Arc<SqlitePool>,
+    backend: GoalStoreBackend,
+}
+
+#[derive(Clone)]
+enum GoalStoreBackend {
+    Postgres(PostgresGoalStore),
+    Sqlite(Arc<SqlitePool>),
 }
 
 impl GoalStore {
     pub(crate) fn new(pool: Arc<SqlitePool>) -> Self {
-        Self { pool }
+        Self {
+            backend: GoalStoreBackend::Sqlite(pool),
+        }
+    }
+
+    pub(crate) fn from_postgres(pool: PgPool, schema: String) -> Self {
+        Self {
+            backend: GoalStoreBackend::Postgres(PostgresGoalStore::new(pool, schema)),
+        }
+    }
+
+    fn sqlite_pool(&self) -> anyhow::Result<&Arc<SqlitePool>> {
+        match &self.backend {
+            GoalStoreBackend::Postgres(_) => {
+                anyhow::bail!("SQLite goal pool requested for a PostgreSQL goal store")
+            }
+            GoalStoreBackend::Sqlite(pool) => Ok(pool),
+        }
     }
 
     pub(crate) async fn close(&self) {
-        self.pool.close().await;
+        match &self.backend {
+            GoalStoreBackend::Postgres(store) => store.close().await,
+            GoalStoreBackend::Sqlite(pool) => pool.close().await,
+        }
     }
-}
-
-pub struct GoalUpdate {
-    pub objective: Option<String>,
-    pub status: Option<crate::ThreadGoalStatus>,
-    pub token_budget: Option<Option<i64>>,
-    pub expected_goal_id: Option<String>,
-}
-
-pub enum GoalAccountingOutcome {
-    Unchanged(Option<crate::ThreadGoal>),
-    Updated(crate::ThreadGoal),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GoalAccountingMode {
-    ActiveStatusOnly,
-    ActiveOnly,
-    ActiveOrComplete,
-    ActiveOrStopped,
 }
 
 impl GoalStore {
     pub async fn get_thread_goal(
         &self,
         thread_id: ThreadId,
+    ) -> GoalStoreResult<Option<crate::ThreadGoal>> {
+        public_goal_store_result(
+            GoalStoreOperation::GetThreadGoal,
+            self.get_thread_goal_inner(thread_id).await,
+        )
+    }
+
+    async fn get_thread_goal_inner(
+        &self,
+        thread_id: ThreadId,
     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+        if let GoalStoreBackend::Postgres(store) = &self.backend {
+            return store.get_thread_goal(thread_id).await;
+        }
+        let pool = self.sqlite_pool()?;
         let row = sqlx::query(
             r#"
 SELECT
@@ -59,98 +99,10 @@ WHERE thread_id = ?
             "#,
         )
         .bind(thread_id.to_string())
-        .fetch_optional(self.pool.as_ref())
+        .fetch_optional(pool.as_ref())
         .await?;
 
         row.map(|row| thread_goal_from_row(&row)).transpose()
-    }
-
-    pub async fn replace_thread_goal_snapshot(
-        &self,
-        goal: &crate::ThreadGoal,
-    ) -> anyhow::Result<()> {
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query(
-            r#"
-INSERT INTO thread_goals (
-    thread_id,
-    goal_id,
-    objective,
-    status,
-    token_budget,
-    tokens_used,
-    time_used_seconds,
-    created_at_ms,
-    updated_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(thread_id) DO UPDATE SET
-    goal_id = excluded.goal_id,
-    objective = excluded.objective,
-    status = excluded.status,
-    token_budget = excluded.token_budget,
-    tokens_used = excluded.tokens_used,
-    time_used_seconds = excluded.time_used_seconds,
-    created_at_ms = excluded.created_at_ms,
-    updated_at_ms = excluded.updated_at_ms
-            "#,
-        )
-        .bind(goal.thread_id.to_string())
-        .bind(&goal.goal_id)
-        .bind(&goal.objective)
-        .bind(goal.status.as_str())
-        .bind(goal.token_budget)
-        .bind(goal.tokens_used)
-        .bind(goal.time_used_seconds)
-        .bind(datetime_to_epoch_millis(goal.created_at))
-        .bind(datetime_to_epoch_millis(goal.updated_at))
-        .execute(&mut *transaction)
-        .await?;
-
-        sqlx::query(
-            r#"
-INSERT INTO thread_goal_continuation_deferrals (thread_id)
-VALUES (?)
-ON CONFLICT(thread_id) DO NOTHING
-            "#,
-        )
-        .bind(goal.thread_id.to_string())
-        .execute(&mut *transaction)
-        .await?;
-
-        transaction.commit().await?;
-
-        Ok(())
-    }
-
-    pub async fn has_thread_goal_continuation_deferral(
-        &self,
-        thread_id: ThreadId,
-    ) -> anyhow::Result<bool> {
-        sqlx::query_scalar(
-            r#"
-SELECT EXISTS(
-    SELECT 1
-    FROM thread_goal_continuation_deferrals
-    WHERE thread_id = ?
-)
-            "#,
-        )
-        .bind(thread_id.to_string())
-        .fetch_one(self.pool.as_ref())
-        .await
-        .map_err(Into::into)
-    }
-
-    pub async fn clear_thread_goal_continuation_deferral(
-        &self,
-        thread_id: ThreadId,
-    ) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM thread_goal_continuation_deferrals WHERE thread_id = ?")
-            .bind(thread_id.to_string())
-            .execute(self.pool.as_ref())
-            .await?;
-
-        Ok(())
     }
 
     pub async fn replace_thread_goal(
@@ -159,7 +111,27 @@ SELECT EXISTS(
         objective: &str,
         status: crate::ThreadGoalStatus,
         token_budget: Option<i64>,
+    ) -> GoalStoreResult<crate::ThreadGoal> {
+        public_goal_store_result(
+            GoalStoreOperation::ReplaceThreadGoal,
+            self.replace_thread_goal_inner(thread_id, objective, status, token_budget)
+                .await,
+        )
+    }
+
+    async fn replace_thread_goal_inner(
+        &self,
+        thread_id: ThreadId,
+        objective: &str,
+        status: crate::ThreadGoalStatus,
+        token_budget: Option<i64>,
     ) -> anyhow::Result<crate::ThreadGoal> {
+        if let GoalStoreBackend::Postgres(store) = &self.backend {
+            return store
+                .replace_thread_goal(thread_id, objective, status, token_budget)
+                .await;
+        }
+        let pool = self.sqlite_pool()?;
         let goal_id = Uuid::new_v4().to_string();
         let now_ms = datetime_to_epoch_millis(Utc::now());
         let status = status_after_budget_limit(status, /*tokens_used*/ 0, token_budget);
@@ -204,7 +176,7 @@ RETURNING
         .bind(token_budget)
         .bind(now_ms)
         .bind(now_ms)
-        .fetch_one(self.pool.as_ref())
+        .fetch_one(pool.as_ref())
         .await?;
 
         thread_goal_from_row(&row)
@@ -216,7 +188,26 @@ RETURNING
         objective: &str,
         status: crate::ThreadGoalStatus,
         token_budget: Option<i64>,
+    ) -> GoalStoreResult<Option<crate::ThreadGoal>> {
+        public_goal_store_result(
+            GoalStoreOperation::InsertThreadGoal,
+            self.insert_thread_goal_inner(thread_id, objective, status, token_budget)
+                .await,
+        )
+    }
+
+    async fn insert_thread_goal_inner(
+        &self,
+        thread_id: ThreadId,
+        objective: &str,
+        status: crate::ThreadGoalStatus,
+        token_budget: Option<i64>,
     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+        if let GoalStoreBackend::Postgres(store) = &self.backend {
+            return store
+                .insert_thread_goal(thread_id, objective, status, token_budget)
+                .await;
+        }
         let goal_id = Uuid::new_v4().to_string();
         let now_ms = datetime_to_epoch_millis(Utc::now());
         let status = status_after_budget_limit(status, /*tokens_used*/ 0, token_budget);
@@ -262,217 +253,29 @@ RETURNING
         .bind(token_budget)
         .bind(now_ms)
         .bind(now_ms)
-        .fetch_optional(self.pool.as_ref())
+        .fetch_optional(self.sqlite_pool()?.as_ref())
         .await?;
 
         row.map(|row| thread_goal_from_row(&row)).transpose()
     }
 
-    pub async fn update_thread_goal(
-        &self,
-        thread_id: ThreadId,
-        update: GoalUpdate,
-    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
-        let GoalUpdate {
-            objective,
-            status,
-            token_budget,
-            expected_goal_id,
-        } = update;
-        let objective = objective.as_deref();
-        let expected_goal_id = expected_goal_id.as_deref();
-        let now_ms = datetime_to_epoch_millis(Utc::now());
-        let result = match (status, token_budget) {
-            (Some(status), Some(token_budget)) => {
-                sqlx::query(
-                    r#"
-UPDATE thread_goals
-SET
-    objective = COALESCE(?, objective),
-    status = CASE
-        WHEN status = ? AND ? IN (?, ?) THEN status
-        WHEN ? = 'active' AND ? IS NOT NULL AND tokens_used >= ? THEN ?
-        ELSE ?
-    END,
-    token_budget = ?,
-    updated_at_ms = ?
-WHERE thread_id = ?
-  AND (? IS NULL OR goal_id = ?)
-            "#,
-                )
-                .bind(objective)
-                .bind(crate::ThreadGoalStatus::BudgetLimited.as_str())
-                .bind(status.as_str())
-                .bind(crate::ThreadGoalStatus::Paused.as_str())
-                .bind(crate::ThreadGoalStatus::Blocked.as_str())
-                .bind(status.as_str())
-                .bind(token_budget)
-                .bind(token_budget)
-                .bind(crate::ThreadGoalStatus::BudgetLimited.as_str())
-                .bind(status.as_str())
-                .bind(token_budget)
-                .bind(now_ms)
-                .bind(thread_id.to_string())
-                .bind(expected_goal_id)
-                .bind(expected_goal_id)
-                .execute(self.pool.as_ref())
-                .await?
-            }
-            (Some(status), None) => {
-                sqlx::query(
-                    r#"
-UPDATE thread_goals
-SET
-    objective = COALESCE(?, objective),
-    status = CASE
-        WHEN status = ? AND ? IN (?, ?) THEN status
-        WHEN ? = 'active' AND token_budget IS NOT NULL AND tokens_used >= token_budget THEN ?
-        ELSE ?
-    END,
-    updated_at_ms = ?
-WHERE thread_id = ?
-  AND (? IS NULL OR goal_id = ?)
-            "#,
-                )
-                .bind(objective)
-                .bind(crate::ThreadGoalStatus::BudgetLimited.as_str())
-                .bind(status.as_str())
-                .bind(crate::ThreadGoalStatus::Paused.as_str())
-                .bind(crate::ThreadGoalStatus::Blocked.as_str())
-                .bind(status.as_str())
-                .bind(crate::ThreadGoalStatus::BudgetLimited.as_str())
-                .bind(status.as_str())
-                .bind(now_ms)
-                .bind(thread_id.to_string())
-                .bind(expected_goal_id)
-                .bind(expected_goal_id)
-                .execute(self.pool.as_ref())
-                .await?
-            }
-            (None, Some(token_budget)) => {
-                sqlx::query(
-                    r#"
-UPDATE thread_goals
-SET
-    objective = COALESCE(?, objective),
-    token_budget = ?,
-    status = CASE
-        WHEN status = 'active' AND ? IS NOT NULL AND tokens_used >= ? THEN ?
-        ELSE status
-    END,
-    updated_at_ms = ?
-WHERE thread_id = ?
-  AND (? IS NULL OR goal_id = ?)
-            "#,
-                )
-                .bind(objective)
-                .bind(token_budget)
-                .bind(token_budget)
-                .bind(token_budget)
-                .bind(crate::ThreadGoalStatus::BudgetLimited.as_str())
-                .bind(now_ms)
-                .bind(thread_id.to_string())
-                .bind(expected_goal_id)
-                .bind(expected_goal_id)
-                .execute(self.pool.as_ref())
-                .await?
-            }
-            (None, None) => {
-                if let Some(objective) = objective {
-                    sqlx::query(
-                        r#"
-UPDATE thread_goals
-SET
-    objective = ?,
-    updated_at_ms = ?
-WHERE thread_id = ?
-  AND (? IS NULL OR goal_id = ?)
-            "#,
-                    )
-                    .bind(objective)
-                    .bind(now_ms)
-                    .bind(thread_id.to_string())
-                    .bind(expected_goal_id)
-                    .bind(expected_goal_id)
-                    .execute(self.pool.as_ref())
-                    .await?
-                } else {
-                    let goal = self.get_thread_goal(thread_id).await?;
-                    return Ok(match (goal, expected_goal_id) {
-                        (Some(goal), Some(expected_goal_id))
-                            if goal.goal_id != expected_goal_id =>
-                        {
-                            None
-                        }
-                        (goal, _) => goal,
-                    });
-                }
-            }
-        };
-
-        if result.rows_affected() == 0 {
-            return Ok(None);
-        }
-
-        self.get_thread_goal(thread_id).await
-    }
-
-    pub async fn pause_active_thread_goal(
-        &self,
-        thread_id: ThreadId,
-    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
-        self.update_active_thread_goal_status(thread_id, crate::ThreadGoalStatus::Paused)
-            .await
-    }
-
-    pub async fn usage_limit_active_thread_goal(
-        &self,
-        thread_id: ThreadId,
-    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
-        self.update_active_thread_goal_status(thread_id, crate::ThreadGoalStatus::UsageLimited)
-            .await
-    }
-
-    async fn update_active_thread_goal_status(
-        &self,
-        thread_id: ThreadId,
-        status: crate::ThreadGoalStatus,
-    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
-        let now_ms = datetime_to_epoch_millis(Utc::now());
-        let result = sqlx::query(
-            r#"
-UPDATE thread_goals
-SET
-    status = ?,
-    updated_at_ms = ?
-WHERE thread_id = ?
-  AND (
-      status = 'active'
-      OR (
-          ? = 'usage_limited'
-          AND status = 'budget_limited'
-      )
-  )
-            "#,
-        )
-        .bind(status.as_str())
-        .bind(now_ms)
-        .bind(thread_id.to_string())
-        .bind(status.as_str())
-        .execute(self.pool.as_ref())
-        .await?;
-
-        if result.rows_affected() == 0 {
-            return Ok(None);
-        }
-
-        self.get_thread_goal(thread_id).await
-    }
-
     pub async fn delete_thread_goal(
         &self,
         thread_id: ThreadId,
+    ) -> GoalStoreResult<Option<crate::ThreadGoal>> {
+        public_goal_store_result(
+            GoalStoreOperation::DeleteThreadGoal,
+            self.delete_thread_goal_inner(thread_id).await,
+        )
+    }
+
+    async fn delete_thread_goal_inner(
+        &self,
+        thread_id: ThreadId,
     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+        if let GoalStoreBackend::Postgres(store) = &self.backend {
+            return store.delete_thread_goal(thread_id).await;
+        }
         let row = sqlx::query(
             r#"
 DELETE FROM thread_goals
@@ -490,124 +293,10 @@ RETURNING
             "#,
         )
         .bind(thread_id.to_string())
-        .fetch_optional(self.pool.as_ref())
+        .fetch_optional(self.sqlite_pool()?.as_ref())
         .await?;
 
         row.map(|row| thread_goal_from_row(&row)).transpose()
-    }
-
-    pub async fn account_thread_goal_usage(
-        &self,
-        thread_id: ThreadId,
-        time_delta_seconds: i64,
-        token_delta: i64,
-        mode: GoalAccountingMode,
-        expected_goal_id: Option<&str>,
-    ) -> anyhow::Result<GoalAccountingOutcome> {
-        let time_delta_seconds = time_delta_seconds.max(0);
-        let token_delta = token_delta.max(0);
-        if time_delta_seconds == 0 && token_delta == 0 {
-            return Ok(GoalAccountingOutcome::Unchanged(
-                self.get_thread_goal(thread_id).await?,
-            ));
-        }
-
-        let now_ms = datetime_to_epoch_millis(Utc::now());
-        let active_or_stopped_status_filter =
-            "status IN ('active', 'paused', 'blocked', 'usage_limited', 'budget_limited')";
-        let status_filter = match mode {
-            GoalAccountingMode::ActiveStatusOnly => "status = 'active'",
-            GoalAccountingMode::ActiveOnly => "status IN ('active', 'budget_limited')",
-            GoalAccountingMode::ActiveOrComplete => {
-                "status IN ('active', 'budget_limited', 'complete')"
-            }
-            GoalAccountingMode::ActiveOrStopped => active_or_stopped_status_filter,
-        };
-        let budget_limit_status_filter = match mode {
-            GoalAccountingMode::ActiveStatusOnly
-            | GoalAccountingMode::ActiveOnly
-            | GoalAccountingMode::ActiveOrComplete => "status = 'active'",
-            GoalAccountingMode::ActiveOrStopped => active_or_stopped_status_filter,
-        };
-        let mut builder = QueryBuilder::<Sqlite>::new(
-            r#"
-UPDATE thread_goals
-SET
-    time_used_seconds = time_used_seconds +
-            "#,
-        );
-        builder.push_bind(time_delta_seconds);
-        builder.push(
-            r#",
-    tokens_used = tokens_used +
-            "#,
-        );
-        builder.push_bind(token_delta);
-        builder.push(
-            r#",
-    status = CASE
-        WHEN
-            "#,
-        );
-        builder.push(budget_limit_status_filter);
-        builder.push(
-            r#"
-            AND token_budget IS NOT NULL
-            AND tokens_used +
-            "#,
-        );
-        builder.push_bind(token_delta);
-        builder.push(
-            r#"
-                >= token_budget
-            THEN
-            "#,
-        );
-        builder.push_bind(crate::ThreadGoalStatus::BudgetLimited.as_str());
-        builder.push(
-            r#"
-        ELSE status
-    END,
-    updated_at_ms =
-            "#,
-        );
-        builder.push_bind(now_ms);
-        builder.push(
-            r#"
-WHERE thread_id =
-            "#,
-        );
-        builder.push_bind(thread_id.to_string());
-        builder.push(" AND ");
-        builder.push(status_filter);
-        if let Some(expected_goal_id) = expected_goal_id {
-            builder.push(" AND goal_id = ").push_bind(expected_goal_id);
-        }
-        builder.push(
-            r#"
-RETURNING
-    thread_id,
-    goal_id,
-    objective,
-    status,
-    token_budget,
-    tokens_used,
-    time_used_seconds,
-    created_at_ms,
-    updated_at_ms
-            "#,
-        );
-
-        let row = builder.build().fetch_optional(self.pool.as_ref()).await?;
-
-        let Some(row) = row else {
-            return Ok(GoalAccountingOutcome::Unchanged(
-                self.get_thread_goal(thread_id).await?,
-            ));
-        };
-
-        let updated = thread_goal_from_row(&row)?;
-        Ok(GoalAccountingOutcome::Updated(updated))
     }
 }
 
@@ -648,6 +337,34 @@ mod tests {
 
     fn test_thread_id() -> ThreadId {
         ThreadId::from_string("00000000-0000-0000-0000-000000000123").expect("valid thread id")
+    }
+
+    fn accounting(
+        event_id: &str,
+        time_delta_seconds: i64,
+        token_delta: i64,
+        mode: GoalAccountingMode,
+    ) -> GoalAccountingRequest<'_> {
+        GoalAccountingRequest {
+            event_id,
+            time_delta_seconds,
+            token_delta,
+            mode,
+            target: GoalAccountingTarget::CurrentGoal,
+        }
+    }
+
+    fn active_accounting(
+        event_id: &str,
+        time_delta_seconds: i64,
+        token_delta: i64,
+    ) -> GoalAccountingRequest<'_> {
+        accounting(
+            event_id,
+            time_delta_seconds,
+            token_delta,
+            GoalAccountingMode::ActiveOnly,
+        )
     }
 
     async fn upsert_test_thread(runtime: &StateRuntime, thread_id: ThreadId) {
@@ -940,10 +657,13 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                /*time_delta_seconds*/ 5,
-                /*token_delta*/ 5,
-                GoalAccountingMode::ActiveOnly,
-                Some(original.goal_id.as_str()),
+                GoalAccountingRequest {
+                    event_id: "stale-goal-accounting",
+                    time_delta_seconds: 5,
+                    token_delta: 5,
+                    mode: GoalAccountingMode::ActiveOnly,
+                    target: GoalAccountingTarget::GoalId(original.goal_id.as_str()),
+                },
             )
             .await
             .expect("usage accounting should succeed");
@@ -978,10 +698,11 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                /*time_delta_seconds*/ 12,
-                /*token_delta*/ 30,
-                GoalAccountingMode::ActiveOnly,
-                /*expected_goal_id*/ None,
+                active_accounting(
+                    "objective-accounting",
+                    /*time_delta_seconds*/ 12,
+                    /*token_delta*/ 30,
+                ),
             )
             .await
             .expect("usage accounting should succeed");
@@ -1200,10 +921,11 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                /*time_delta_seconds*/ 7,
-                /*token_delta*/ 5,
-                GoalAccountingMode::ActiveOnly,
-                /*expected_goal_id*/ None,
+                active_accounting(
+                    "active-accounting",
+                    /*time_delta_seconds*/ 7,
+                    /*token_delta*/ 5,
+                ),
             )
             .await
             .expect("usage accounting should succeed");
@@ -1218,10 +940,11 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                /*time_delta_seconds*/ 3,
-                /*token_delta*/ 15,
-                GoalAccountingMode::ActiveOnly,
-                /*expected_goal_id*/ None,
+                active_accounting(
+                    "budget-crossing-accounting",
+                    /*time_delta_seconds*/ 3,
+                    /*token_delta*/ 15,
+                ),
             )
             .await
             .expect("usage accounting should succeed");
@@ -1236,10 +959,11 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                /*time_delta_seconds*/ 5,
-                /*token_delta*/ 5,
-                GoalAccountingMode::ActiveOnly,
-                /*expected_goal_id*/ None,
+                active_accounting(
+                    "budget-limited-accounting",
+                    /*time_delta_seconds*/ 5,
+                    /*token_delta*/ 5,
+                ),
             )
             .await
             .expect("usage accounting should succeed");
@@ -1271,10 +995,12 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                /*time_delta_seconds*/ 5,
-                /*token_delta*/ 5,
-                GoalAccountingMode::ActiveStatusOnly,
-                /*expected_goal_id*/ None,
+                accounting(
+                    "active-status-accounting",
+                    /*time_delta_seconds*/ 5,
+                    /*token_delta*/ 5,
+                    GoalAccountingMode::ActiveStatusOnly,
+                ),
             )
             .await
             .expect("usage accounting should succeed");
@@ -1319,10 +1045,12 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                /*time_delta_seconds*/ 3,
-                /*token_delta*/ 25,
-                GoalAccountingMode::ActiveOrStopped,
-                /*expected_goal_id*/ None,
+                accounting(
+                    "stopped-accounting",
+                    /*time_delta_seconds*/ 3,
+                    /*token_delta*/ 25,
+                    GoalAccountingMode::ActiveOrStopped,
+                ),
             )
             .await
             .expect("usage accounting should succeed");
@@ -1353,10 +1081,11 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                /*time_delta_seconds*/ 1,
-                /*token_delta*/ 50,
-                GoalAccountingMode::ActiveOnly,
-                /*expected_goal_id*/ None,
+                active_accounting(
+                    "budget-accounting",
+                    /*time_delta_seconds*/ 1,
+                    /*token_delta*/ 50,
+                ),
             )
             .await
             .expect("usage accounting should succeed");
@@ -1400,10 +1129,11 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                /*time_delta_seconds*/ 1,
-                /*token_delta*/ 50,
-                GoalAccountingMode::ActiveOnly,
-                /*expected_goal_id*/ None,
+                active_accounting(
+                    "budget-accounting",
+                    /*time_delta_seconds*/ 1,
+                    /*token_delta*/ 50,
+                ),
             )
             .await
             .expect("usage accounting should succeed");
@@ -1451,10 +1181,11 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                /*time_delta_seconds*/ 1,
-                /*token_delta*/ 50,
-                GoalAccountingMode::ActiveOnly,
-                /*expected_goal_id*/ None,
+                active_accounting(
+                    "budget-accounting",
+                    /*time_delta_seconds*/ 1,
+                    /*token_delta*/ 50,
+                ),
             )
             .await
             .expect("usage accounting should succeed");
@@ -1498,10 +1229,11 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                /*time_delta_seconds*/ 1,
-                /*token_delta*/ 50,
-                GoalAccountingMode::ActiveOnly,
-                /*expected_goal_id*/ None,
+                active_accounting(
+                    "budget-accounting",
+                    /*time_delta_seconds*/ 1,
+                    /*token_delta*/ 50,
+                ),
             )
             .await
             .expect("usage accounting should succeed");
@@ -1551,10 +1283,11 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                /*time_delta_seconds*/ 30,
-                /*token_delta*/ 200,
-                GoalAccountingMode::ActiveOnly,
-                /*expected_goal_id*/ None,
+                active_accounting(
+                    "completed-active-only",
+                    /*time_delta_seconds*/ 30,
+                    /*token_delta*/ 200,
+                ),
             )
             .await
             .expect("usage accounting should succeed");
@@ -1569,10 +1302,12 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                /*time_delta_seconds*/ 30,
-                /*token_delta*/ 200,
-                GoalAccountingMode::ActiveOrComplete,
-                /*expected_goal_id*/ None,
+                accounting(
+                    "completed-final-accounting",
+                    /*time_delta_seconds*/ 30,
+                    /*token_delta*/ 200,
+                    GoalAccountingMode::ActiveOrComplete,
+                ),
             )
             .await
             .expect("usage accounting should succeed");
@@ -1618,10 +1353,11 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                /*time_delta_seconds*/ 30,
-                /*token_delta*/ 200,
-                GoalAccountingMode::ActiveOnly,
-                /*expected_goal_id*/ None,
+                active_accounting(
+                    "stopped-active-only",
+                    /*time_delta_seconds*/ 30,
+                    /*token_delta*/ 200,
+                ),
             )
             .await
             .expect("usage accounting should succeed");
@@ -1636,10 +1372,12 @@ mod tests {
             .thread_goals()
             .account_thread_goal_usage(
                 thread_id,
-                /*time_delta_seconds*/ 30,
-                /*token_delta*/ 200,
-                GoalAccountingMode::ActiveOrStopped,
-                /*expected_goal_id*/ None,
+                accounting(
+                    "stopped-final-accounting",
+                    /*time_delta_seconds*/ 30,
+                    /*token_delta*/ 200,
+                    GoalAccountingMode::ActiveOrStopped,
+                ),
             )
             .await
             .expect("usage accounting should succeed");
@@ -1669,17 +1407,19 @@ mod tests {
 
         let first = runtime.thread_goals().account_thread_goal_usage(
             thread_id,
-            /*time_delta_seconds*/ 4,
-            /*token_delta*/ 40,
-            GoalAccountingMode::ActiveOnly,
-            /*expected_goal_id*/ None,
+            active_accounting(
+                "concurrent-accounting-1",
+                /*time_delta_seconds*/ 4,
+                /*token_delta*/ 40,
+            ),
         );
         let second = runtime.thread_goals().account_thread_goal_usage(
             thread_id,
-            /*time_delta_seconds*/ 6,
-            /*token_delta*/ 60,
-            GoalAccountingMode::ActiveOnly,
-            /*expected_goal_id*/ None,
+            active_accounting(
+                "concurrent-accounting-2",
+                /*time_delta_seconds*/ 6,
+                /*token_delta*/ 60,
+            ),
         );
         let (first, second) = tokio::join!(first, second);
         first.expect("first usage accounting should succeed");

@@ -4,6 +4,7 @@ use std::sync::LazyLock;
 
 use codex_protocol::protocol::SessionSource;
 
+mod backfill_lease;
 pub(crate) mod compression;
 pub(crate) mod config;
 pub(crate) mod list;
@@ -88,6 +89,8 @@ pub use rollout_reference_index::RolloutReferenceIndex;
 pub use search::first_rollout_content_match_snippet;
 pub use search::search_rollout_matches;
 pub use search::search_rollout_paths;
+pub use search::thread_search_match_snippet;
+pub use search::thread_searchable_content;
 pub use session_index::append_thread_name;
 pub use session_index::find_thread_meta_by_name_str;
 pub use session_index::find_thread_meta_candidates_by_name_str;
@@ -96,6 +99,45 @@ pub use session_index::find_thread_names_by_ids;
 pub use session_index::remove_thread_name_entries;
 pub use state_db::StateDbHandle;
 pub use state_db::sqlite_telemetry_recorder;
+
+/// Reads complete rollout history for a runtime-state migration snapshot.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CanonicalRolloutHistoryReader;
+
+impl codex_state::CanonicalThreadHistoryReader for CanonicalRolloutHistoryReader {
+    async fn read(
+        &self,
+        path: &std::path::Path,
+        maximum_source_bytes: u64,
+    ) -> anyhow::Result<(Vec<codex_protocol::protocol::RolloutLine>, usize, u64)> {
+        let (lines, _thread_id, rejected_line_count, source_bytes) =
+            RolloutRecorder::load_rollout_lines_bounded(path, maximum_source_bytes).await?;
+        Ok((lines, rejected_line_count, source_bytes))
+    }
+
+    async fn extract_metadata(
+        &self,
+        path: &std::path::Path,
+        lines: &[codex_protocol::protocol::RolloutLine],
+        rejected_line_count: usize,
+    ) -> anyhow::Result<codex_state::ExtractionOutcome> {
+        metadata::extract_metadata_from_items(
+            path,
+            lines.iter().map(|line| &line.item),
+            rejected_line_count,
+            "",
+        )
+        .await
+    }
+
+    async fn find_thread_names(
+        &self,
+        source_home: &std::path::Path,
+        thread_ids: &std::collections::HashSet<codex_protocol::ThreadId>,
+    ) -> anyhow::Result<std::collections::HashMap<codex_protocol::ThreadId, String>> {
+        Ok(find_thread_names_by_ids(source_home, thread_ids).await?)
+    }
+}
 
 #[cfg(test)]
 mod tests;

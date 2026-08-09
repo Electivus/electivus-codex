@@ -33,6 +33,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 zstd = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 codex-utils-absolute-path = { workspace = true }

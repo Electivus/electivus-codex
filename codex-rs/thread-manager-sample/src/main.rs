@@ -43,6 +43,7 @@ use codex_core_api::Permissions;
 use codex_core_api::ProjectConfig;
 use codex_core_api::RealtimeAudioConfig;
 use codex_core_api::RealtimeConfig;
+use codex_core_api::RuntimeStateBackendConfig;
 use codex_core_api::SessionPickerViewMode;
 use codex_core_api::SessionSource;
 use codex_core_api::SqliteConfig;
@@ -113,7 +114,11 @@ async fn run_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
     };
 
     let config = new_config(args.model, arg0_paths)?;
-    let state_db = init_state_db(&config).await;
+    let state_db = if config.runtime_state_backend.is_postgresql() {
+        Some(codex_core_api::try_init_state_db(&config).await?)
+    } else {
+        init_state_db(&config).await
+    };
 
     let auth_manager =
         AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
@@ -121,7 +126,7 @@ async fn run_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
         config.codex_self_exe.clone(),
         config.codex_linux_sandbox_exe.clone(),
     )?;
-    let thread_store = thread_store_from_config(&config, state_db.clone());
+    let thread_store = thread_store_from_config(&config, state_db.clone())?;
     let environment_manager = Arc::new(
         EnvironmentManager::from_codex_home(
             config.codex_home.clone(),
@@ -259,6 +264,9 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         agent_roles: BTreeMap::new(),
         memories: MemoriesConfig::default(),
         sqlite: SqliteConfig::from_sqlite_home(codex_home.clone()),
+        runtime_state_backend: RuntimeStateBackendConfig::Sqlite(SqliteConfig::from_sqlite_home(
+            codex_home.clone(),
+        )),
         log_dir: codex_home.join("log").to_path_buf(),
         config_lock_export_dir: None,
         config_lock_allow_codex_version_mismatch: false,
@@ -300,7 +308,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         tool_registry: Default::default(),
         code_mode: Default::default(),
         use_experimental_unified_exec_tool: false,
-        background_terminal_max_timeout: 300_000,
+        tool_execution: Default::default(),
         ghost_snapshot: GhostSnapshotConfig::default(),
         multi_agent_v2: MultiAgentV2Config::default(),
         token_budget: None,

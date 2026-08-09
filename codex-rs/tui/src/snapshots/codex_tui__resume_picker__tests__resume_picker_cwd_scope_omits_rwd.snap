@@ -1,0 +1,6 @@
+---
+source: tui/src/resume_picker.rs
+expression: "comfortable_scope_row_snapshot(SessionFilterMode::Cwd)"
+---
+❯ Continue cross-platform session
+  15m ago        feature/project-scope

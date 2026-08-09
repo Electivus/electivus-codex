@@ -114,13 +114,14 @@ pub(super) async fn load_export_transcript(
         }
     }
     let mut cells: Vec<Arc<dyn HistoryCell>> = Vec::new();
+    let cwd = std::path::PathBuf::from(thread.cwd.render_for_ui());
     for item in visible_export_items(thread.turns) {
         if let Some(cell) = export_activity_cell(&item) {
             cells.push(Arc::new(cell));
         } else {
             cells.extend(thread_items_to_transcript_cells(
                 Some(thread_id),
-                &thread.cwd,
+                &cwd,
                 [item],
                 visibility,
                 codex_home,

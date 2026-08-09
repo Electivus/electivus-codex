@@ -19,7 +19,7 @@ WHERE migration_id = ?
             "#,
         )
         .bind(migration_id)
-        .fetch_optional(self.pool.as_ref())
+        .fetch_optional(self.sqlite_pool()?)
         .await?;
         row.as_ref()
             .map(crate::RolloutMigrationState::try_from_row)
@@ -70,7 +70,7 @@ WHERE excluded.last_checked_thread_created_at IS NOT NULL
         .bind(thread_created_at)
         .bind(thread_id)
         .bind(now)
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         Ok(())
     }
@@ -87,7 +87,7 @@ WHERE migration_id = ?
             "#,
         )
         .bind(migration_id)
-        .fetch_all(self.pool.as_ref())
+        .fetch_all(self.sqlite_pool()?)
         .await?;
         rows.iter()
             .map(crate::RolloutMigrationSkippedRollout::try_from_row)
@@ -124,7 +124,7 @@ ON CONFLICT(migration_id, rollout_path) DO UPDATE SET
         .bind(skipped_rollout.rollout_modified_at_ns)
         .bind(skipped_rollout.skip_reason.as_str())
         .bind(now)
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         Ok(())
     }
@@ -142,7 +142,7 @@ WHERE migration_id = ? AND rollout_path = ?
         )
         .bind(migration_id)
         .bind(rollout_path)
-        .execute(self.pool.as_ref())
+        .execute(self.sqlite_pool()?)
         .await?;
         Ok(())
     }

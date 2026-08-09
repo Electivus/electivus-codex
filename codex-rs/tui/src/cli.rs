@@ -28,12 +28,12 @@ pub struct Cli {
     #[clap(skip)]
     pub resume_last: bool,
 
-    /// Internal: resume a specific recorded session by id (UUID). Set by the
-    /// top-level `codex resume <SESSION_ID>` wrapper; not exposed as a public flag.
+    /// Internal: session id (UUID) or session name to resume. UUIDs take precedence if it parses.
+    /// Set by the top-level `codex resume <SESSION_ID>` wrapper; not exposed as a public flag.
     #[clap(skip)]
     pub resume_session_id: Option<String>,
 
-    /// Internal: show all sessions (disables cwd filtering and shows CWD column).
+    /// Internal: show all sessions (bypasses Project Session Scope and shows CWD column).
     #[clap(skip)]
     pub resume_show_all: bool,
 
@@ -49,12 +49,12 @@ pub struct Cli {
     #[clap(skip)]
     pub fork_last: bool,
 
-    /// Internal: fork a specific recorded session by id (UUID). Set by the
-    /// top-level `codex fork <SESSION_ID>` wrapper; not exposed as a public flag.
+    /// Internal: session id (UUID) or session name to fork. UUIDs take precedence if it parses.
+    /// Set by the top-level `codex fork <SESSION_ID>` wrapper; not exposed as a public flag.
     #[clap(skip)]
     pub fork_session_id: Option<String>,
 
-    /// Internal: show all sessions (disables cwd filtering and shows CWD column).
+    /// Internal: show all sessions (bypasses Project Session Scope and shows CWD column).
     #[clap(skip)]
     pub fork_show_all: bool,
 

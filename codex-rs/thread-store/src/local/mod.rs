@@ -7,6 +7,7 @@ mod live_writer;
 mod model_context;
 mod move_thread_to_section;
 mod paginated_fork;
+mod project_scope_repair;
 mod read_thread;
 mod rollout_migration;
 // This lands before the reader PRs that consume the shared lineage resolver.

@@ -48,12 +48,17 @@ pub struct LocalQueueStore {
 }
 
 impl LocalQueueStore {
-    pub fn new(state_db: StateDbHandle) -> Self {
-        Self { state_db }
+    pub fn new(state_db: StateDbHandle) -> Option<Self> {
+        state_db
+            .thread_queue()
+            .is_some()
+            .then_some(Self { state_db })
     }
 
     fn queue(&self) -> &SqliteQueueStore {
-        self.state_db.thread_queue()
+        self.state_db
+            .thread_queue()
+            .expect("LocalQueueStore is only constructed for SQLite Runtime State")
     }
 }
 

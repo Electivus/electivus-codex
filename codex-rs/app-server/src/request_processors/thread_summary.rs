@@ -4,6 +4,8 @@ use chrono::DateTime;
 #[cfg(test)]
 use chrono::Utc;
 use codex_protocol::config_types::MultiAgentMode;
+#[cfg(test)]
+use codex_utils_path_uri::LegacyAppPathString;
 
 #[cfg(test)]
 pub(crate) async fn read_summary_from_rollout(
@@ -263,10 +265,7 @@ pub(super) fn thread_started_notification(mut thread: Thread) -> ThreadStartedNo
 }
 
 #[cfg(test)]
-pub(crate) fn summary_to_thread(
-    summary: ConversationSummary,
-    fallback_cwd: &AbsolutePathBuf,
-) -> Thread {
+pub(crate) fn summary_to_thread(summary: ConversationSummary) -> Thread {
     let ConversationSummary {
         conversation_id,
         path,
@@ -287,16 +286,7 @@ pub(crate) fn summary_to_thread(
         branch: info.branch,
         origin_url: info.origin_url,
     });
-    let cwd =
-        AbsolutePathBuf::relative_to_current_dir(path_utils::normalize_for_native_workdir(cwd))
-            .unwrap_or_else(|err| {
-                warn!(
-                    conversation_id = %conversation_id,
-                    path = %path.display(),
-                    "failed to normalize thread cwd while summarizing thread: {err}"
-                );
-                fallback_cwd.clone()
-            });
+    let cwd = LegacyAppPathString::from_path(&cwd);
 
     let thread_id = conversation_id.to_string();
     Thread {
@@ -307,6 +297,7 @@ pub(crate) fn summary_to_thread(
         parent_thread_id: None,
         preview,
         ephemeral: false,
+        is_pinned: false,
         section: None,
         section_entered_at: None,
         history_mode: ThreadHistoryMode::Legacy,

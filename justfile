@@ -90,6 +90,7 @@ test *args:
 [no-cd]
 test-github-scripts:
     {{ python }} -m unittest discover -s {{ justfile_directory() }}/.github/scripts -p 'test_*.py'
+    {{ python }} -m unittest discover -s {{ justfile_directory() }}/scripts -p 'test_generate_references.py'
 
 # Run explicit workspace benchmark targets.
 bench *args:
@@ -173,7 +174,7 @@ write-config-schema:
 
 # Regenerate vendored app-server protocol schema artifacts.
 write-app-server-schema *args:
-    cargo run -p codex-app-server-protocol --bin write_schema_fixtures -- {args}
+    {{ python }} app-server-protocol/scripts/write_schema_fixtures.py {args}
 
 [no-cd]
 write-hooks-schema:

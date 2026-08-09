@@ -303,9 +303,10 @@ fn rendered_history_rows(
     } else {
         HistoryRenderMode::Rich
     };
+    let cwd = std::path::PathBuf::from(thread.cwd.render_for_ui());
     thread_items_to_transcript_cells(
         Some(thread_id),
-        &thread.cwd,
+        &cwd,
         items,
         visibility,
         Some(config.codex_home.as_path()),

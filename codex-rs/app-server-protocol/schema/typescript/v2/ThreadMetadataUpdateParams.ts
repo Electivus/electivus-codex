@@ -9,4 +9,8 @@ export type ThreadMetadataUpdateParams = { threadId: string,
  * Omit a field to leave it unchanged, set it to `null` to clear it, or
  * provide a string to replace the stored value.
  */
-gitInfo?: ThreadMetadataGitInfoUpdateParams | null, };
+gitInfo?: ThreadMetadataGitInfoUpdateParams | null,
+/**
+ * Compatibility patch for membership in the built-in Pinned section.
+ */
+isPinned?: boolean | null, };

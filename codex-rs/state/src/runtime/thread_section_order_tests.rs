@@ -105,7 +105,7 @@ async fn thread_sections_paginate_and_require_registered_identities() {
         sqlx::query("INSERT INTO thread_sections (id, name) VALUES (?, ?)")
             .bind(&section.id)
             .bind(&section.name)
-            .execute(runtime.pool.as_ref())
+            .execute(runtime.sqlite_pool().expect("SQLite runtime"))
             .await
             .expect("custom test sections should be explicitly registered");
     }
@@ -372,7 +372,7 @@ async fn concurrent_section_moves_preserve_unique_positions() -> Result<()> {
         "SELECT section_position FROM threads WHERE thread_section_id = ? ORDER BY section_position, id",
     )
     .bind(crate::PINNED_THREAD_SECTION_ID)
-    .fetch_all(runtime.pool.as_ref())
+    .fetch_all(runtime.sqlite_pool().expect("SQLite runtime"))
     .await?;
     assert_eq!(
         initial_positions,
@@ -399,7 +399,7 @@ async fn concurrent_section_moves_preserve_unique_positions() -> Result<()> {
         "SELECT id, section_position FROM threads WHERE thread_section_id = ? ORDER BY section_position, id",
     )
     .bind(crate::PINNED_THREAD_SECTION_ID)
-    .fetch_all(runtime.pool.as_ref())
+    .fetch_all(runtime.sqlite_pool().expect("SQLite runtime"))
     .await?;
     assert_eq!(ordered_threads.len(), 5);
     assert!(
@@ -443,7 +443,7 @@ async fn section_moves_preserve_entry_order_and_renumber_exhausted_ranks() {
         sqlx::query("INSERT INTO thread_sections (id, name) VALUES (?, ?)")
             .bind(section_id)
             .bind(section_name)
-            .execute(runtime.pool.as_ref())
+            .execute(runtime.sqlite_pool().expect("SQLite runtime"))
             .await
             .expect("custom test sections should be explicitly registered");
     }
@@ -527,7 +527,7 @@ async fn section_moves_preserve_entry_order_and_renumber_exhausted_ranks() {
         sqlx::query("UPDATE threads SET section_position = ? WHERE id = ?")
             .bind(position)
             .bind(thread_id.to_string())
-            .execute(runtime.pool.as_ref())
+            .execute(runtime.sqlite_pool().expect("SQLite runtime"))
             .await
             .unwrap();
     }
@@ -539,7 +539,7 @@ async fn section_moves_preserve_entry_order_and_renumber_exhausted_ranks() {
         "SELECT id FROM threads WHERE thread_section_id = ? ORDER BY section_position, id",
     )
     .bind(CUSTOM_THREAD_SECTION_ID)
-    .fetch_all(runtime.pool.as_ref())
+    .fetch_all(runtime.sqlite_pool().expect("SQLite runtime"))
     .await
     .unwrap();
     assert_eq!(
@@ -577,7 +577,7 @@ async fn section_moves_preserve_entry_order_and_renumber_exhausted_ranks() {
     sqlx::query("UPDATE threads SET section_entered_at_ms = ? WHERE id = ?")
         .bind(1_i64)
         .bind(third.to_string())
-        .execute(runtime.pool.as_ref())
+        .execute(runtime.sqlite_pool().expect("SQLite runtime"))
         .await
         .unwrap();
     runtime

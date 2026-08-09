@@ -1079,10 +1079,10 @@
         "cwd": {
           "allOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             }
           ],
-          "description": "Working directory captured for the thread."
+          "description": "Source-native Recorded Working Directory captured for the thread."
         },
         "ephemeral": {
           "description": "Whether the thread is ephemeral and should not be materialized on disk.",
@@ -1109,6 +1109,11 @@
         "id": {
           "description": "Identifier for this thread. Codex-generated thread IDs are UUIDv7.",
           "type": "string"
+        },
+        "isPinned": {
+          "default": false,
+          "description": "Whether the thread belongs to the built-in Pinned section.",
+          "type": "boolean"
         },
         "modelProvider": {
           "description": "Model provider used for this thread (for example, 'openai').",
