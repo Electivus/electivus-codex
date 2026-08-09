@@ -18,6 +18,11 @@ use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
+use codex_app_server_protocol::ThreadSection;
+use codex_app_server_protocol::ThreadSectionListParams;
+use codex_app_server_protocol::ThreadSectionListResponse;
+use codex_app_server_protocol::ThreadSectionMoveParams;
+use codex_app_server_protocol::ThreadSectionMoveResponse;
 use codex_app_server_protocol::ThreadSortKey;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
@@ -28,6 +33,8 @@ use codex_git_utils::GitSha;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::GitInfo as RolloutGitInfo;
 use codex_rollout::state_db::reconcile_rollout;
+use codex_state::PINNED_THREAD_SECTION_ID;
+use codex_state::PINNED_THREAD_SECTION_NAME;
 use codex_state::StateRuntime;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
@@ -40,9 +47,10 @@ use tokio::time::timeout;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
+const INVALID_PARAMS_ERROR_CODE: i64 = -32602;
 
 #[tokio::test]
-async fn thread_metadata_update_pins_and_unpins_with_filtered_recency_pagination() -> Result<()> {
+async fn legacy_is_pinned_maps_to_the_pinned_section_and_filtered_pagination() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     mock_responses_config(&server.uri()).write(codex_home.path())?;
@@ -50,6 +58,11 @@ async fn thread_metadata_update_pins_and_unpins_with_filtered_recency_pagination
 
     let mut thread_ids = Vec::new();
     for (filename_timestamp, timestamp, preview) in [
+        (
+            "2025-01-06T07-00-00",
+            "2025-01-06T07:00:00Z",
+            "Oldest unpinned",
+        ),
         (
             "2025-01-06T08-00-00",
             "2025-01-06T08:00:00Z",
@@ -82,8 +95,14 @@ async fn thread_metadata_update_pins_and_unpins_with_filtered_recency_pagination
         .await;
         thread_ids.push(thread_id);
     }
-    let [older_pinned, initially_unpinned, newer_pinned] = thread_ids.as_slice() else {
-        unreachable!("three fake rollouts were created");
+    let [
+        oldest_unpinned,
+        older_pinned,
+        initially_unpinned,
+        newer_pinned,
+    ] = thread_ids.as_slice()
+    else {
+        unreachable!("four fake rollouts were created");
     };
 
     let mut mcp = TestAppServer::builder()
@@ -91,6 +110,82 @@ async fn thread_metadata_update_pins_and_unpins_with_filtered_recency_pagination
         .build()
         .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let pinned_section = ThreadSection {
+        id: PINNED_THREAD_SECTION_ID.to_string(),
+        name: PINNED_THREAD_SECTION_NAME.to_string(),
+    };
+    let section_list_id = mcp
+        .send_raw_request(
+            "threadSection/list",
+            Some(serde_json::to_value(ThreadSectionListParams {
+                cursor: None,
+                limit: Some(1),
+            })?),
+        )
+        .await?;
+    let empty_membership_sections: ThreadSectionListResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(section_list_id)).await??;
+    assert_eq!(empty_membership_sections.data, vec![pinned_section.clone()]);
+    assert_eq!(empty_membership_sections.next_cursor, None);
+
+    let unknown_section_id = "01984de2-8f74-7c91-a3b2-5c5e937cf319";
+    let unknown_section_request_id = mcp
+        .send_thread_section_move_request(ThreadSectionMoveParams {
+            thread_id: initially_unpinned.clone(),
+            section_id: Some(unknown_section_id.to_string()),
+            before_thread_id: None,
+        })
+        .await?;
+    let unknown_section_error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(unknown_section_request_id)),
+    )
+    .await??;
+    assert_eq!(unknown_section_error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert_eq!(
+        unknown_section_error.error.message,
+        format!("section {unknown_section_id} does not exist")
+    );
+
+    let custom_section = ThreadSection {
+        id: "01984de2-8f74-7c91-a3b2-5c5e937cf317".to_string(),
+        name: "Custom section".to_string(),
+    };
+    let sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
+    let sqlite_pool = sqlite.open_read_write_pool(&sqlite.state_db_path()).await?;
+    sqlx::query("INSERT INTO thread_sections (id, name) VALUES (?, ?)")
+        .bind(&custom_section.id)
+        .bind(&custom_section.name)
+        .execute(&sqlite_pool)
+        .await?;
+    sqlite_pool.close().await;
+    let custom_section_move_id = mcp
+        .send_thread_section_move_request(ThreadSectionMoveParams {
+            thread_id: initially_unpinned.clone(),
+            section_id: Some(custom_section.id.clone()),
+            before_thread_id: None,
+        })
+        .await?;
+    let custom_section_move: ThreadSectionMoveResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_response(custom_section_move_id),
+    )
+    .await??;
+    assert_eq!(custom_section_move, ThreadSectionMoveResponse {});
+
+    let custom_unpin_id = mcp
+        .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
+            thread_id: initially_unpinned.clone(),
+            git_info: None,
+            is_pinned: Some(false),
+        })
+        .await?;
+    let ThreadMetadataUpdateResponse {
+        thread: custom_unpinned,
+    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(custom_unpin_id)).await??;
+    assert!(!custom_unpinned.is_pinned);
+    assert_eq!(custom_unpinned.section, Some(custom_section.clone()));
 
     for thread_id in [older_pinned, newer_pinned] {
         let request_id = mcp
@@ -111,10 +206,49 @@ async fn thread_metadata_update_pins_and_unpins_with_filtered_recency_pagination
             .and_then(|thread| thread.get("isPinned"))
             .and_then(Value::as_bool);
         let ThreadMetadataUpdateResponse { thread } = to_response(response)?;
-        assert_eq!(thread.id, *thread_id);
         assert!(thread.is_pinned);
+        assert_eq!(thread.section, Some(pinned_section.clone()));
         assert_eq!(wire_is_pinned, Some(true));
+        let thread = state_db
+            .get_thread(ThreadId::from_string(thread_id)?)
+            .await?
+            .expect("pinned thread should remain persisted");
+        assert_eq!(
+            thread.section,
+            Some(codex_state::ThreadSection {
+                id: pinned_section.id.clone(),
+                name: pinned_section.name.clone(),
+            })
+        );
     }
+
+    let older_pinned_id = ThreadId::from_string(older_pinned)?;
+    let older_before = state_db
+        .get_thread(older_pinned_id)
+        .await?
+        .expect("pinned thread should remain persisted");
+    let original_order = (
+        older_before.section_position,
+        older_before.section_entered_at,
+    );
+    let repin_id = mcp
+        .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
+            thread_id: older_pinned.clone(),
+            git_info: None,
+            is_pinned: Some(true),
+        })
+        .await?;
+    let ThreadMetadataUpdateResponse { thread: repinned } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(repin_id)).await??;
+    assert!(repinned.is_pinned);
+    let older_after = state_db
+        .get_thread(older_pinned_id)
+        .await?
+        .expect("re-pinned thread should remain persisted");
+    assert_eq!(
+        (older_after.section_position, older_after.section_entered_at),
+        original_order
+    );
 
     let list_params = ThreadListParams {
         cursor: None,
@@ -125,12 +259,13 @@ async fn thread_metadata_update_pins_and_unpins_with_filtered_recency_pagination
         source_kinds: None,
         archived: None,
         is_pinned: Some(true),
+        section_id: None,
         cwd: None,
+        project_cwd: None,
         use_state_db_only: false,
         search_term: None,
         parent_thread_id: None,
         ancestor_thread_id: None,
-        project_cwd: None,
     };
     let request_id = mcp.send_thread_list_request(list_params.clone()).await?;
     let response = timeout(
@@ -142,6 +277,25 @@ async fn thread_metadata_update_pins_and_unpins_with_filtered_recency_pagination
     assert_eq!(first_page.data.len(), 1);
     assert_eq!(first_page.data[0].id, *newer_pinned);
     assert!(first_page.data[0].is_pinned);
+    assert_eq!(first_page.data[0].section, Some(pinned_section.clone()));
+
+    let invalid_filter_id = mcp
+        .send_thread_list_request(ThreadListParams {
+            is_pinned: Some(true),
+            section_id: Some(Some(PINNED_THREAD_SECTION_ID.to_string())),
+            ..list_params.clone()
+        })
+        .await?;
+    let invalid_filter_error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(invalid_filter_id)),
+    )
+    .await??;
+    assert_eq!(invalid_filter_error.error.code, INVALID_PARAMS_ERROR_CODE);
+    assert_eq!(
+        invalid_filter_error.error.message,
+        "isPinned and sectionId are mutually exclusive thread/list filters"
+    );
 
     let request_id = mcp
         .send_thread_list_request(ThreadListParams {
@@ -158,6 +312,34 @@ async fn thread_metadata_update_pins_and_unpins_with_filtered_recency_pagination
     assert_eq!(second_page.data.len(), 1);
     assert_eq!(second_page.data[0].id, *older_pinned);
     assert!(second_page.data[0].is_pinned);
+    assert_eq!(second_page.data[0].section, Some(pinned_section.clone()));
+
+    let unpinned_params = ThreadListParams {
+        is_pinned: Some(false),
+        ..list_params.clone()
+    };
+    let request_id = mcp
+        .send_thread_list_request(unpinned_params.clone())
+        .await?;
+    let first_unpinned: ThreadListResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
+    assert_eq!(first_unpinned.data.len(), 1);
+    assert_eq!(first_unpinned.data[0].id, *initially_unpinned);
+    assert!(!first_unpinned.data[0].is_pinned);
+    assert_eq!(first_unpinned.data[0].section, Some(custom_section.clone()));
+    let request_id = mcp
+        .send_thread_list_request(ThreadListParams {
+            cursor: first_unpinned.next_cursor,
+            ..unpinned_params
+        })
+        .await?;
+    let second_unpinned: ThreadListResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
+    assert_eq!(second_unpinned.data.len(), 1);
+    assert_eq!(second_unpinned.data[0].id, *oldest_unpinned);
+    assert!(!second_unpinned.data[0].is_pinned);
+    assert_eq!(second_unpinned.data[0].section, None);
+    assert_eq!(second_unpinned.next_cursor, None);
 
     let request_id = mcp
         .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
@@ -173,11 +355,25 @@ async fn thread_metadata_update_pins_and_unpins_with_filtered_recency_pagination
     .await??;
     let ThreadMetadataUpdateResponse { thread } = to_response(response)?;
     assert!(!thread.is_pinned);
+    assert_eq!(thread.section, None);
+    let thread = state_db
+        .get_thread(ThreadId::from_string(newer_pinned)?)
+        .await?
+        .expect("unpinned thread should remain persisted");
+    assert_eq!(
+        (
+            thread.section,
+            thread.section_position,
+            thread.section_entered_at,
+        ),
+        (None, None, None)
+    );
 
     let request_id = mcp
         .send_thread_list_request(ThreadListParams {
             limit: Some(10),
             is_pinned: Some(false),
+            section_id: None,
             ..list_params
         })
         .await?;
@@ -186,16 +382,217 @@ async fn thread_metadata_update_pins_and_unpins_with_filtered_recency_pagination
         mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
     )
     .await??;
-    let unpinned_page: ThreadListResponse = to_response(response)?;
+    let unsectioned_page: ThreadListResponse = to_response(response)?;
     assert_eq!(
-        unpinned_page
+        unsectioned_page
+            .data
+            .iter()
+            .map(|thread| (thread.id.as_str(), thread.section.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (newer_pinned.as_str(), None),
+            (initially_unpinned.as_str(), Some(custom_section.clone())),
+            (oldest_unpinned.as_str(), None),
+        ]
+    );
+    assert!(unsectioned_page.data.iter().all(|thread| !thread.is_pinned));
+
+    let section_list_id = mcp
+        .send_raw_request(
+            "threadSection/list",
+            Some(serde_json::to_value(ThreadSectionListParams {
+                cursor: None,
+                limit: Some(10),
+            })?),
+        )
+        .await?;
+    let sections_after_clear: ThreadSectionListResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(section_list_id)).await??;
+    assert_eq!(
+        sections_after_clear.data,
+        vec![custom_section, pinned_section]
+    );
+    assert_eq!(sections_after_clear.next_cursor, None);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_sections_preserve_server_owned_manual_order_across_moves_and_restarts() -> Result<()>
+{
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    let state_db = init_state_db(codex_home.path()).await?;
+
+    let mut thread_ids = Vec::new();
+    for (filename_timestamp, timestamp, preview) in [
+        (
+            "2025-01-06T08-00-00",
+            "2025-01-06T08:00:00Z",
+            "First pinned",
+        ),
+        (
+            "2025-01-06T09-00-00",
+            "2025-01-06T09:00:00Z",
+            "Second pinned",
+        ),
+        (
+            "2025-01-06T10-00-00",
+            "2025-01-06T10:00:00Z",
+            "Third pinned",
+        ),
+    ] {
+        let thread_id = create_fake_rollout(
+            codex_home.path(),
+            filename_timestamp,
+            timestamp,
+            preview,
+            Some("mock_provider"),
+            /*git_info*/ None,
+        )?;
+        reconcile_rollout(
+            Some(&state_db),
+            rollout_path(codex_home.path(), filename_timestamp, &thread_id).as_path(),
+            "mock_provider",
+            /*builder*/ None,
+            &[],
+            /*archived_only*/ None,
+            /*new_thread_memory_mode*/ None,
+        )
+        .await;
+        thread_ids.push(thread_id);
+    }
+    let [first_pinned, second_pinned, third_pinned] = thread_ids.as_slice() else {
+        unreachable!("three fake rollouts were created");
+    };
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+
+    for thread_id in [first_pinned, second_pinned, third_pinned] {
+        let request_id = mcp
+            .send_thread_section_move_request(ThreadSectionMoveParams {
+                thread_id: thread_id.clone(),
+                section_id: Some(PINNED_THREAD_SECTION_ID.to_string()),
+                before_thread_id: None,
+            })
+            .await?;
+        let response = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+        )
+        .await??;
+        assert_eq!(
+            to_response::<ThreadSectionMoveResponse>(response)?,
+            ThreadSectionMoveResponse {}
+        );
+    }
+
+    let list_params = ThreadListParams {
+        cursor: None,
+        limit: Some(10),
+        sort_key: Some(ThreadSortKey::SectionPosition),
+        sort_direction: None,
+        model_providers: None,
+        source_kinds: None,
+        archived: None,
+        is_pinned: None,
+        section_id: Some(Some(PINNED_THREAD_SECTION_ID.to_string())),
+        cwd: None,
+        project_cwd: None,
+        use_state_db_only: false,
+        search_term: None,
+        parent_thread_id: None,
+        ancestor_thread_id: None,
+    };
+    let request_id = mcp.send_thread_list_request(list_params.clone()).await?;
+    let response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let initial: ThreadListResponse = to_response(response)?;
+    assert_eq!(
+        initial
             .data
             .iter()
             .map(|thread| thread.id.as_str())
             .collect::<Vec<_>>(),
-        [newer_pinned.as_str(), initially_unpinned.as_str()]
+        [
+            first_pinned.as_str(),
+            second_pinned.as_str(),
+            third_pinned.as_str(),
+        ]
     );
-    assert!(unpinned_page.data.iter().all(|thread| !thread.is_pinned));
+    let third_entered_at = initial.data[2].section_entered_at;
+    assert!(third_entered_at.is_some());
+
+    let request_id = mcp
+        .send_thread_section_move_request(ThreadSectionMoveParams {
+            thread_id: third_pinned.clone(),
+            section_id: Some(PINNED_THREAD_SECTION_ID.to_string()),
+            before_thread_id: Some(first_pinned.clone()),
+        })
+        .await?;
+    let response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(
+        to_response::<ThreadSectionMoveResponse>(response)?,
+        ThreadSectionMoveResponse {}
+    );
+
+    let request_id = mcp.send_thread_list_request(list_params.clone()).await?;
+    let response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let reordered: ThreadListResponse = to_response(response)?;
+    assert_eq!(
+        reordered
+            .data
+            .iter()
+            .map(|thread| thread.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            third_pinned.as_str(),
+            first_pinned.as_str(),
+            second_pinned.as_str()
+        ]
+    );
+    assert_eq!(reordered.data[0].section_entered_at, third_entered_at);
+
+    drop(mcp);
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let request_id = mcp.send_thread_list_request(list_params).await?;
+    let response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let persisted: ThreadListResponse = to_response(response)?;
+    assert_eq!(
+        persisted
+            .data
+            .iter()
+            .map(|thread| thread.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            third_pinned.as_str(),
+            first_pinned.as_str(),
+            second_pinned.as_str()
+        ]
+    );
+    assert_eq!(persisted.data[0].section_entered_at, third_entered_at);
 
     Ok(())
 }
@@ -228,12 +625,12 @@ async fn thread_metadata_update_patches_git_branch_and_returns_updated_thread() 
     let update_id = mcp
         .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
             thread_id: thread.id.clone(),
-            is_pinned: None,
             git_info: Some(ThreadMetadataGitInfoUpdateParams {
                 sha: None,
                 branch: Some(Some("feature/sidebar-pr".to_string())),
                 origin_url: None,
             }),
+            is_pinned: None,
         })
         .await?;
     let update_resp: JSONRPCResponse = timeout(
@@ -327,12 +724,12 @@ async fn thread_metadata_update_rejects_empty_git_info_patch() -> Result<()> {
     let update_id = mcp
         .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
             thread_id: thread.id,
-            is_pinned: None,
             git_info: Some(ThreadMetadataGitInfoUpdateParams {
                 sha: None,
                 branch: None,
                 origin_url: None,
             }),
+            is_pinned: None,
         })
         .await?;
     let update_err: JSONRPCError = timeout(
@@ -378,12 +775,12 @@ async fn thread_metadata_update_rejects_ephemeral_thread() -> Result<()> {
     let update_id = mcp
         .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
             thread_id: thread.id.clone(),
-            is_pinned: None,
             git_info: Some(ThreadMetadataGitInfoUpdateParams {
                 sha: None,
                 branch: Some(Some("feature/ephemeral".to_string())),
                 origin_url: None,
             }),
+            is_pinned: None,
         })
         .await?;
     let update_err: JSONRPCError = timeout(
@@ -397,6 +794,28 @@ async fn thread_metadata_update_rejects_ephemeral_thread() -> Result<()> {
         update_err.error.message,
         format!(
             "ephemeral thread does not support metadata updates: {}",
+            thread.id
+        )
+    );
+
+    let clear_section_id = mcp
+        .send_thread_section_move_request(ThreadSectionMoveParams {
+            thread_id: thread.id.clone(),
+            section_id: None,
+            before_thread_id: None,
+        })
+        .await?;
+    let clear_section_err: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(clear_section_id)),
+    )
+    .await??;
+
+    assert_eq!(clear_section_err.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert_eq!(
+        clear_section_err.error.message,
+        format!(
+            "ephemeral thread does not support section moves: {}",
             thread.id
         )
     );
@@ -431,12 +850,12 @@ async fn thread_metadata_update_repairs_missing_sqlite_row_for_stored_thread() -
     let update_id = mcp
         .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
             thread_id: thread_id.clone(),
-            is_pinned: None,
             git_info: Some(ThreadMetadataGitInfoUpdateParams {
                 sha: None,
                 branch: Some(Some("feature/stored-thread".to_string())),
                 origin_url: None,
             }),
+            is_pinned: None,
         })
         .await?;
     let update_resp: JSONRPCResponse = timeout(
@@ -516,12 +935,12 @@ async fn thread_metadata_update_repairs_loaded_thread_without_resetting_summary(
     let update_id = mcp
         .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
             thread_id: thread_id.clone(),
-            is_pinned: None,
             git_info: Some(ThreadMetadataGitInfoUpdateParams {
                 sha: None,
                 branch: Some(Some("feature/loaded-thread".to_string())),
                 origin_url: None,
             }),
+            is_pinned: None,
         })
         .await?;
     let update_resp: JSONRPCResponse = timeout(
@@ -584,12 +1003,12 @@ async fn thread_metadata_update_repairs_missing_sqlite_row_for_archived_thread()
     let update_id = mcp
         .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
             thread_id: thread_id.clone(),
-            is_pinned: None,
             git_info: Some(ThreadMetadataGitInfoUpdateParams {
                 sha: None,
                 branch: Some(Some("feature/archived-thread".to_string())),
                 origin_url: None,
             }),
+            is_pinned: None,
         })
         .await?;
     let update_resp: JSONRPCResponse = timeout(
@@ -645,12 +1064,12 @@ async fn thread_metadata_update_can_clear_stored_git_fields() -> Result<()> {
     let update_id = mcp
         .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
             thread_id: thread_id.clone(),
-            is_pinned: None,
             git_info: Some(ThreadMetadataGitInfoUpdateParams {
                 sha: Some(None),
                 branch: Some(None),
                 origin_url: Some(None),
             }),
+            is_pinned: None,
         })
         .await?;
     let update_resp: JSONRPCResponse = timeout(

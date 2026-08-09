@@ -28,7 +28,8 @@
       "enum": [
         "created_at",
         "updated_at",
-        "recency_at"
+        "recency_at",
+        "section_position"
       ],
       "type": "string"
     },
@@ -75,7 +76,7 @@
       "description": "Optional cwd filter or filters; when set, only threads whose session cwd exactly matches one of these paths are returned."
     },
     "isPinned": {
-      "description": "Optional pinned filter; when set, only threads matching this value are returned.",
+      "description": "Compatibility filter for membership in the built-in Pinned section. This cannot be combined with `sectionId`.",
       "type": [
         "boolean",
         "null"
@@ -102,6 +103,13 @@
     },
     "searchTerm": {
       "description": "Optional substring filter for the extracted thread title.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "sectionId": {
+      "description": "Omit to include every section, set to `null` for unsectioned threads, or provide a section ID to return only threads in that section.",
       "type": [
         "string",
         "null"

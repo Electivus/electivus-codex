@@ -99,6 +99,7 @@ async fn records_completion_by_import_id() -> anyhow::Result<()> {
                 cwd: None,
                 source: Some("settings.json".to_string()),
                 target: Some("config.toml".to_string()),
+                title: None,
             }],
             &[],
         )
@@ -113,12 +114,14 @@ async fn records_completion_by_import_id() -> anyhow::Result<()> {
                     cwd: None,
                     source: Some("settings.json".to_string()),
                     target: Some("config.toml".to_string()),
+                    title: None,
                 },
                 ExternalAgentConfigImportSuccessRecord {
                     item_type: "MCP_SERVER_CONFIG".to_string(),
                     cwd: None,
                     source: Some("github".to_string()),
                     target: Some("github".to_string()),
+                    title: None,
                 },
             ],
             &[ExternalAgentConfigImportFailureRecord {
@@ -144,12 +147,14 @@ async fn records_completion_by_import_id() -> anyhow::Result<()> {
                     cwd: None,
                     source: Some("settings.json".to_string()),
                     target: Some("config.toml".to_string()),
+                    title: None,
                 },
                 ExternalAgentConfigImportSuccessRecord {
                     item_type: "MCP_SERVER_CONFIG".to_string(),
                     cwd: None,
                     source: Some("github".to_string()),
                     target: Some("github".to_string()),
+                    title: None,
                 }
             ],
             failures: vec![ExternalAgentConfigImportFailureRecord {
@@ -185,12 +190,14 @@ async fn records_completion_by_import_id() -> anyhow::Result<()> {
                     cwd: None,
                     source: Some("settings.json".to_string()),
                     target: Some("config.toml".to_string()),
+                    title: None,
                 },
                 ExternalAgentConfigImportSuccessRecord {
                     item_type: "MCP_SERVER_CONFIG".to_string(),
                     cwd: None,
                     source: Some("github".to_string()),
                     target: Some("github".to_string()),
+                    title: None,
                 }
             ],
             vec![ExternalAgentConfigImportFailureRecord {

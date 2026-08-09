@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "PostgreSQL tests connect only to PostgreSQL pools"
+)]
+
 use anyhow::Result;
 use codex_goal_extension::GoalObjectiveUpdate;
 use codex_goal_extension::GoalPreviewUpdate;

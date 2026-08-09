@@ -1,7 +1,9 @@
+use super::destination_validation;
 use super::preflight_runtime_state_migration;
 use super::test_support;
 use crate::PostgresNamespaceAction;
 use crate::SqliteConfig;
+use crate::postgres::MAXIMUM_COMPATIBLE_SCHEMA_VERSION;
 use crate::postgres::qualified_table;
 use crate::postgres::quote_identifier;
 use crate::postgres::test_support::PostgresContractFixture;
@@ -9,6 +11,61 @@ use crate::postgres::test_support::test_database_url;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
+use sqlx::Connection;
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_destination_emptiness_accepts_only_builtin_thread_section()
+-> anyhow::Result<()> {
+    let database_url = test_database_url()?;
+    let mut destination = PostgresContractFixture::new(database_url, "empty_sections")?;
+    destination.manage(PostgresNamespaceAction::Migrate).await?;
+    let pool = destination.connect_pool().await?;
+    let mut connection = pool.acquire().await?;
+
+    destination_validation::ensure_empty(&mut connection, destination.schema()).await?;
+
+    let sections = qualified_table(destination.schema(), "thread_sections");
+    let non_baseline_cases = [
+        (
+            "an additional custom thread section",
+            format!("INSERT INTO {sections} (id, name) VALUES ('custom-section', 'Custom')"),
+        ),
+        (
+            "a missing built-in thread section",
+            format!("DELETE FROM {sections}"),
+        ),
+        (
+            "a replacement custom thread section",
+            format!("UPDATE {sections} SET id = 'custom-section'"),
+        ),
+        (
+            "a renamed built-in thread section",
+            format!("UPDATE {sections} SET name = 'Renamed'"),
+        ),
+    ];
+    for (case, mutation) in non_baseline_cases {
+        let mut transaction = connection.begin().await?;
+        sqlx::query(AssertSqlSafe(mutation))
+            .execute(transaction.as_mut())
+            .await?;
+        let error =
+            destination_validation::ensure_empty(transaction.as_mut(), destination.schema())
+                .await
+                .expect_err(case);
+        assert!(
+            error
+                .to_string()
+                .contains("non-baseline coordination state"),
+            "{case}: {error:#}"
+        );
+        transaction.rollback().await?;
+    }
+    drop(connection);
+    pool.close().await;
+    destination.cleanup().await?;
+    Ok(())
+}
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
@@ -66,8 +123,9 @@ async fn postgres_contract_preflight_rejects_incompatible_version_without_writes
     let pool = destination.connect_pool().await?;
     let migrations = qualified_table(destination.schema(), "_codex_runtime_state_migrations");
     sqlx::query(AssertSqlSafe(format!(
-        "DELETE FROM {migrations} WHERE version = 21"
+        "DELETE FROM {migrations} WHERE version = $1"
     )))
+    .bind(MAXIMUM_COMPATIBLE_SCHEMA_VERSION)
     .execute(&pool)
     .await?;
     pool.close().await;
@@ -82,7 +140,12 @@ async fn postgres_contract_preflight_rejects_incompatible_version_without_writes
     .expect_err("outdated destination must be rejected");
 
     let rendered = format!("{error:?} {error:#}");
-    assert!(rendered.contains("current version 21"), "{rendered}");
+    assert!(
+        rendered.contains(&format!(
+            "current version {MAXIMUM_COMPATIBLE_SCHEMA_VERSION}"
+        )),
+        "{rendered}"
+    );
     assert!(!rendered.contains(&database_url));
     assert_eq!(test_support::snapshot_source(&source)?, source_before);
     assert_eq!(
@@ -91,8 +154,9 @@ async fn postgres_contract_preflight_rejects_incompatible_version_without_writes
     );
     let pool = destination.connect_pool().await?;
     sqlx::query(AssertSqlSafe(format!(
-        "INSERT INTO {migrations} (version) VALUES (21)"
+        "INSERT INTO {migrations} (version) VALUES ($1)"
     )))
+    .bind(MAXIMUM_COMPATIBLE_SCHEMA_VERSION)
     .execute(&pool)
     .await?;
     let logs = qualified_table(destination.schema(), "logs");

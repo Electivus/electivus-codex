@@ -9,7 +9,7 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
-const STATE_TABLES: &str = "_sqlx_migrations,backfill_state,external_agent_config_imports,remote_control_enrollments,thread_dynamic_tools,thread_spawn_edges,threads";
+const STATE_TABLES: &str = "_sqlx_migrations,backfill_state,external_agent_config_imports,remote_control_enrollments,thread_dynamic_tools,thread_sections,thread_spawn_edges,threads";
 const GOALS_TABLES: &str = "_sqlx_migrations,thread_goal_accounting_events,thread_goal_continuation_deferrals,thread_goals";
 const THREAD_HISTORY_TABLES: &str =
     "_sqlx_migrations,thread_history_projection_state,thread_items,thread_turns";
@@ -21,7 +21,7 @@ pub(super) async fn validate_database_schema(
     tables: &[String],
 ) -> anyhow::Result<()> {
     let (version, required_tables) = match label {
-        "state DB" => (46, STATE_TABLES),
+        "state DB" => (49, STATE_TABLES),
         "log DB" => (2, "_sqlx_migrations,logs"),
         "goals DB" => (3, GOALS_TABLES),
         "memories DB" => (1, "_sqlx_migrations,jobs,stage1_outputs"),

@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "PostgreSQL tests connect only to PostgreSQL pools"
+)]
+
 use anyhow::Context;
 use anyhow::Result;
 use codex_state::PostgresNamespaceConfig;

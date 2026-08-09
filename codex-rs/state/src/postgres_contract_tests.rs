@@ -1,3 +1,4 @@
+use super::MAXIMUM_COMPATIBLE_SCHEMA_VERSION;
 use super::MigrationHistory;
 use super::PostgresNamespaceAction;
 use super::PostgresRuntimeStatePool;
@@ -29,11 +30,16 @@ use crate::runtime::memory_store_startup_contract_tests::run_postgres_stage1_sta
 use crate::runtime::remote_control_contract_tests::run_remote_control_enrollment_contract;
 use anyhow::Context;
 use anyhow::Result;
+use chrono::DateTime;
+use chrono::Utc;
 use codex_protocol::ThreadId;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
+use std::collections::HashMap;
 use std::time::Duration;
+
+const REPOSITORY_IDENTITY_MIGRATION_VERSION: i64 = 21;
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
@@ -113,6 +119,173 @@ async fn postgres_contract_runtime_reads_resume_metadata_and_deletes_integrally(
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_thread_sections_move_order_and_project_atomically() -> Result<()> {
+    let database_url = test_database_url()?;
+    let mut fixture = PostgresContractFixture::new(database_url, "thread_sections")?;
+    fixture.manage(PostgresNamespaceAction::Migrate).await?;
+    fixture.mark_runtime_ready_for_tests().await?;
+    let pool = fixture.connect_pool().await?;
+    let threads = super::qualified_table(fixture.schema(), "threads");
+    let first = ThreadId::new();
+    let second = ThreadId::new();
+    for thread_id in [first, second] {
+        sqlx::query(AssertSqlSafe(format!(
+            "INSERT INTO {threads} (thread_id, projection, stream_version, fencing_token, \
+             writer_id, writer_lease_expires_at, created_at, updated_at, recency_at) \
+             VALUES ($1, '{{}}', 0, 1, 'section-contract', CURRENT_TIMESTAMP, \
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )))
+        .bind(thread_id.to_string())
+        .execute(&pool)
+        .await?;
+    }
+
+    let codex_home = crate::runtime::test_support::unique_temp_dir();
+    let runtime = crate::StateRuntime::init_with_backend(
+        crate::RuntimeStateBackendConfig::Postgresql {
+            codex_home: AbsolutePathBuf::try_from(codex_home)?,
+            namespace: fixture.config_for_tests(),
+        },
+        "test-provider".to_string(),
+    )
+    .await?;
+    let pinned = crate::ThreadSection {
+        id: crate::PINNED_THREAD_SECTION_ID.to_string(),
+        name: crate::PINNED_THREAD_SECTION_NAME.to_string(),
+    };
+    assert_eq!(
+        runtime.get_thread_section(&pinned.id).await?,
+        Some(pinned.clone())
+    );
+    assert_eq!(
+        runtime
+            .list_thread_sections(/*cursor*/ None, /*limit*/ 1)
+            .await?,
+        crate::ThreadSectionsPage {
+            sections: vec![pinned.clone()],
+            next_cursor: None,
+        }
+    );
+
+    assert!(
+        runtime
+            .move_thread_to_section(first, Some(&pinned.id), /*before_thread_id*/ None,)
+            .await?
+    );
+    assert!(
+        runtime
+            .move_thread_to_section(
+                second,
+                Some(&pinned.id),
+                /*before_thread_id*/ Some(first),
+            )
+            .await?
+    );
+
+    let ordering = runtime
+        .get_thread_section_ordering(&[first, second])
+        .await?;
+    let first_entered_at = ordering
+        .get(&first)
+        .and_then(|(_, entered_at)| *entered_at)
+        .expect("first section entry time should be recorded");
+    let second_entered_at = ordering
+        .get(&second)
+        .and_then(|(_, entered_at)| *entered_at)
+        .expect("second section entry time should be recorded");
+    assert_eq!(
+        ordering,
+        HashMap::from([
+            (first, (Some(1_000_000), Some(first_entered_at))),
+            (second, (Some(500_000), Some(second_entered_at))),
+        ])
+    );
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<DateTime<Utc>>,
+            Option<String>,
+            Option<i64>,
+            Option<DateTime<Utc>>,
+        ),
+    >(AssertSqlSafe(format!(
+        "SELECT thread_id, thread_section_id, section_position, section_entered_at, \
+         projection -> 'section' ->> 'id', \
+         (projection ->> 'section_position')::BIGINT, \
+         (projection ->> 'section_entered_at')::TIMESTAMPTZ \
+         FROM {threads} ORDER BY section_position, thread_id"
+    )))
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        rows,
+        vec![
+            (
+                second.to_string(),
+                Some(pinned.id.clone()),
+                Some(500_000),
+                Some(second_entered_at),
+                Some(pinned.id.clone()),
+                Some(500_000),
+                Some(second_entered_at),
+            ),
+            (
+                first.to_string(),
+                Some(pinned.id),
+                Some(1_000_000),
+                Some(first_entered_at),
+                Some(crate::PINNED_THREAD_SECTION_ID.to_string()),
+                Some(1_000_000),
+                Some(first_entered_at),
+            ),
+        ]
+    );
+
+    assert!(
+        runtime
+            .move_thread_to_section(first, /*section*/ None, /*before_thread_id*/ None)
+            .await?
+    );
+    let cleared = sqlx::query_as::<
+        _,
+        (
+            Option<String>,
+            Option<i64>,
+            Option<DateTime<Utc>>,
+            serde_json::Value,
+            serde_json::Value,
+            serde_json::Value,
+        ),
+    >(AssertSqlSafe(format!(
+        "SELECT thread_section_id, section_position, section_entered_at, \
+         projection -> 'section', projection -> 'section_position', \
+         projection -> 'section_entered_at' FROM {threads} WHERE thread_id = $1"
+    )))
+    .bind(first.to_string())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        cleared,
+        (
+            None,
+            None,
+            None,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        )
+    );
+
+    runtime.close().await;
+    pool.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
 async fn postgres_contract_repository_identity_migration_preserves_projection_and_is_replica_visible()
 -> Result<()> {
     let database_url = test_database_url()?;
@@ -122,6 +295,8 @@ async fn postgres_contract_repository_identity_migration_preserves_projection_an
     let threads = super::qualified_table(fixture.schema(), "threads");
     let migrations = super::qualified_migration_table(fixture.schema());
     for index in [
+        "threads_section_position_idx",
+        "threads_section_recency_idx",
         "threads_repository_identity_created_idx",
         "threads_repository_identity_updated_idx",
         "threads_repository_identity_recency_idx",
@@ -132,13 +307,22 @@ async fn postgres_contract_repository_identity_migration_preserves_projection_an
             .await?;
     }
     sqlx::query(AssertSqlSafe(format!(
-        "ALTER TABLE {threads} DROP COLUMN repository_identity"
+        "ALTER TABLE {threads} DROP COLUMN section_position, \
+         DROP COLUMN section_entered_at, DROP COLUMN thread_section_id, \
+         DROP COLUMN repository_identity"
     )))
     .execute(&pool)
     .await?;
     sqlx::query(AssertSqlSafe(format!(
-        "DELETE FROM {migrations} WHERE version = 21"
+        "DROP TABLE {}",
+        super::qualified_table(fixture.schema(), "thread_sections")
     )))
+    .execute(&pool)
+    .await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "DELETE FROM {migrations} WHERE version >= $1"
+    )))
+    .bind(REPOSITORY_IDENTITY_MIGRATION_VERSION)
     .execute(&pool)
     .await?;
 
@@ -176,7 +360,9 @@ async fn postgres_contract_repository_identity_migration_preserves_projection_an
     let replica = fixture.connect_pool().await?;
     let rows: Vec<(String, serde_json::Value, Option<String>)> =
         sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT thread_id, projection, repository_identity FROM {threads} ORDER BY thread_id"
+            "SELECT thread_id, \
+             projection - 'section' - 'section_position' - 'section_entered_at', \
+             repository_identity FROM {threads} ORDER BY thread_id"
         )))
         .fetch_all(&replica)
         .await?;
@@ -903,7 +1089,7 @@ async fn postgres_contract_creates_migrates_validates_and_cleans_up_namespace() 
 
     assert_eq!(validated, migrated);
     assert_eq!(migrated.schema(), fixture.schema());
-    assert_eq!(migrated.version(), 21);
+    assert_eq!(migrated.version(), MAXIMUM_COMPATIBLE_SCHEMA_VERSION);
 
     fixture.cleanup().await?;
     assert!(!fixture.schema_exists().await?);
@@ -924,8 +1110,8 @@ async fn postgres_contract_migration_is_idempotent() -> Result<()> {
         fixture.migration_history().await?,
         MigrationHistory {
             minimum: Some(1),
-            maximum: Some(21),
-            count: 21,
+            maximum: Some(MAXIMUM_COMPATIBLE_SCHEMA_VERSION),
+            count: MAXIMUM_COMPATIBLE_SCHEMA_VERSION,
         }
     );
     fixture.cleanup().await?;
@@ -1062,8 +1248,8 @@ async fn postgres_contract_migration_uses_namespace_advisory_lock() -> Result<()
         fixture.migration_history().await?,
         MigrationHistory {
             minimum: Some(1),
-            maximum: Some(21),
-            count: 21,
+            maximum: Some(MAXIMUM_COMPATIBLE_SCHEMA_VERSION),
+            count: MAXIMUM_COMPATIBLE_SCHEMA_VERSION,
         }
     );
     drop(contending_migration);

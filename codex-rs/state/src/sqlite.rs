@@ -1,5 +1,10 @@
 //! Shared SQLite connection configuration.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "this is the centralized SQLite connection shim"
+)]
+
 use crate::DbTelemetry;
 use crate::migrations::repair_legacy_state_migration_versions;
 use crate::runtime::RuntimeDbInitError;

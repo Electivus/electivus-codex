@@ -1,4 +1,6 @@
 use super::progress::inspect_existing_progress;
+use crate::PINNED_THREAD_SECTION_ID;
+use crate::PINNED_THREAD_SECTION_NAME;
 use crate::PostgresNamespaceAction;
 use crate::PostgresNamespaceConfig;
 use crate::postgres::MAXIMUM_COMPATIBLE_SCHEMA_VERSION;
@@ -10,7 +12,7 @@ use crate::postgres::qualified_table;
 use sqlx::AssertSqlSafe;
 use sqlx::Connection;
 
-const EXPECTED_SCHEMA_FINGERPRINT: &str = "36027aa9a94e574038e8e0e784059b20";
+const EXPECTED_SCHEMA_FINGERPRINT: &str = "6335d742dddaad2ad7c136ce329bf398";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct DestinationState {
@@ -117,8 +119,17 @@ pub(crate) async fn ensure_empty(
     .fetch_one(&mut *connection)
     .await
     .map_err(|error| map_sql_error(schema, "inspect destination memory state", error))?;
+    let thread_sections = qualified_table(schema, "thread_sections");
+    let thread_sections_are_baseline: bool = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT COUNT(*) = 1 AND BOOL_AND(id = $1 AND name = $2) FROM {thread_sections}"
+    )))
+    .bind(PINNED_THREAD_SECTION_ID)
+    .bind(PINNED_THREAD_SECTION_NAME)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|error| map_sql_error(schema, "inspect destination thread sections", error))?;
     anyhow::ensure!(
-        backfill_is_baseline && generation_is_baseline,
+        backfill_is_baseline && generation_is_baseline && thread_sections_are_baseline,
         "PostgreSQL Runtime State Namespace `{schema}` contains non-baseline coordination state; provision an empty migrated namespace and retry"
     );
     let tables = sqlx::query_scalar::<_, String>(
@@ -135,7 +146,10 @@ pub(crate) async fn ensure_empty(
     for table in tables {
         if matches!(
             table.as_str(),
-            "_codex_runtime_state_migrations" | "backfill_state" | "memory_generation_state"
+            "_codex_runtime_state_migrations"
+                | "backfill_state"
+                | "memory_generation_state"
+                | "thread_sections"
         ) {
             continue;
         }

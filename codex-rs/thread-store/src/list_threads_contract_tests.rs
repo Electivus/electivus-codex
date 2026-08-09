@@ -11,6 +11,7 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
+use sqlx::AssertSqlSafe;
 use tempfile::TempDir;
 
 use crate::AppendThreadItemsParams;
@@ -19,6 +20,7 @@ use crate::CreateThreadParams;
 use crate::ListThreadsParams;
 use crate::LocalThreadStore;
 use crate::LocalThreadStoreConfig;
+use crate::MoveThreadToSectionParams;
 use crate::PostgresThreadStore;
 use crate::SortDirection;
 use crate::ThreadLocationFilter;
@@ -99,6 +101,132 @@ async fn postgres_contract_list_threads_matches_public_store_contract()
     .await?;
     pool.close().await;
     reader_pool.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_section_position_pages_migrated_legacy_pins()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = PostgresThreadStoreFixture::new("legacy_pin_section_order")?;
+    fixture.migrate().await?;
+    let pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
+    let older = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f401")?;
+    let unpinned = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f402")?;
+    let newer = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f403")?;
+    for (thread_id, timestamp) in [
+        (older, "2030-01-01T00:00:00Z"),
+        (unpinned, "2030-01-02T00:00:00Z"),
+        (newer, "2030-01-03T00:00:00Z"),
+    ] {
+        create_listed_thread(
+            &store,
+            ListedThread {
+                thread_id,
+                cwd: Path::new("/legacy-pin-section-order"),
+                timestamp,
+                source: SessionSource::Exec,
+                model_provider: "postgres-test-provider",
+                parent_thread_id: None,
+                preview: "legacy pin migration",
+                name: None,
+                history_mode: ThreadHistoryMode::Legacy,
+                items: Vec::new(),
+            },
+        )
+        .await?;
+    }
+
+    let schema = &fixture.schema;
+    let threads = format!("\"{schema}\".threads");
+    for index in [
+        "threads_section_position_idx",
+        "threads_section_recency_idx",
+    ] {
+        sqlx::query(AssertSqlSafe(format!("DROP INDEX \"{schema}\".{index}")))
+            .execute(&pool)
+            .await?;
+    }
+    sqlx::query(AssertSqlSafe(format!(
+        "ALTER TABLE {threads} DROP COLUMN section_position, \
+         DROP COLUMN section_entered_at, DROP COLUMN thread_section_id"
+    )))
+    .execute(&pool)
+    .await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "DROP TABLE \"{schema}\".thread_sections"
+    )))
+    .execute(&pool)
+    .await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "UPDATE {threads} SET is_pinned = thread_id <> $1, \
+         projection = (projection - 'section' - 'section_position' - 'section_entered_at') \
+         || jsonb_build_object('is_pinned', thread_id <> $1)"
+    )))
+    .bind(unpinned.to_string())
+    .execute(&pool)
+    .await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "DELETE FROM \"{schema}\"._codex_runtime_state_migrations WHERE version >= 22"
+    )))
+    .execute(&pool)
+    .await?;
+    drop(store);
+    pool.close().await;
+
+    fixture.migrate().await?;
+    let pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
+    let mut params = list_params(
+        /*page_size*/ 1,
+        /*cursor*/ None,
+        ThreadSortKey::SectionPosition,
+        SortDirection::Asc,
+    );
+    params.section = Some(Some(codex_state::PINNED_THREAD_SECTION_ID.to_string()));
+    let first = store.list_threads(params.clone()).await?;
+    params.cursor = Some(
+        first
+            .next_cursor
+            .clone()
+            .expect("first migrated pin page should have a cursor"),
+    );
+    let second = store.list_threads(params).await?;
+    assert_eq!(second.next_cursor, None);
+    let pinned = codex_state::ThreadSection {
+        id: codex_state::PINNED_THREAD_SECTION_ID.to_string(),
+        name: codex_state::PINNED_THREAD_SECTION_NAME.to_string(),
+    };
+    assert_eq!(
+        first
+            .items
+            .into_iter()
+            .chain(second.items)
+            .map(|thread| (
+                thread.thread_id,
+                thread.section,
+                thread.section_position,
+                thread.section_entered_at,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                newer,
+                Some(pinned.clone()),
+                Some(1_000_000),
+                Some(DateTime::parse_from_rfc3339("2030-01-03T00:00:00Z")?.with_timezone(&Utc)),
+            ),
+            (
+                older,
+                Some(pinned),
+                Some(2_000_000),
+                Some(DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")?.with_timezone(&Utc)),
+            ),
+        ]
+    );
+
+    pool.close().await;
     fixture.cleanup().await
 }
 
@@ -326,33 +454,63 @@ async fn assert_list_threads_contract(
     combined.location_filter = ThreadLocationFilter::ExactCwds(Vec::new());
     assert!(store.list_threads(combined).await?.items.is_empty());
 
-    let pinned = store
-        .update_thread_metadata(UpdateThreadMetadataParams {
+    store
+        .move_thread_to_section(MoveThreadToSectionParams {
             thread_id: thread_ids[0],
-            patch: ThreadMetadataPatch {
-                is_pinned: Some(true),
-                ..Default::default()
-            },
-            include_archived: false,
+            section: Some(codex_state::PINNED_THREAD_SECTION_ID.to_string()),
+            before_thread_id: None,
         })
         .await?;
-    assert!(pinned.is_pinned);
     let mut pin_filter = list_params(
         /*page_size*/ 10,
         /*cursor*/ None,
         ThreadSortKey::CreatedAt,
         SortDirection::Desc,
     );
-    pin_filter.is_pinned = Some(true);
+    pin_filter.section = Some(Some(codex_state::PINNED_THREAD_SECTION_ID.to_string()));
     assert_eq!(
         thread_ids_from_page(&store.list_threads(pin_filter.clone()).await?),
         vec![thread_ids[0]]
     );
-    pin_filter.is_pinned = Some(false);
+    pin_filter.section = Some(None);
     assert_eq!(
         thread_ids_from_page(&store.list_threads(pin_filter).await?),
         vec![thread_ids[2], thread_ids[1]]
     );
+
+    store
+        .move_thread_to_section(MoveThreadToSectionParams {
+            thread_id: thread_ids[1],
+            section: Some(codex_state::PINNED_THREAD_SECTION_ID.to_string()),
+            before_thread_id: None,
+        })
+        .await?;
+    store
+        .move_thread_to_section(MoveThreadToSectionParams {
+            thread_id: thread_ids[2],
+            section: Some(codex_state::PINNED_THREAD_SECTION_ID.to_string()),
+            before_thread_id: Some(thread_ids[1]),
+        })
+        .await?;
+    let mut section_order = list_params(
+        /*page_size*/ 2,
+        /*cursor*/ None,
+        ThreadSortKey::SectionPosition,
+        SortDirection::Asc,
+    );
+    section_order.section = Some(Some(codex_state::PINNED_THREAD_SECTION_ID.to_string()));
+    let first_section_page = store.list_threads(section_order.clone()).await?;
+    assert_eq!(
+        thread_ids_from_page(&first_section_page),
+        vec![thread_ids[0], thread_ids[2]]
+    );
+    section_order.cursor = first_section_page.next_cursor;
+    let second_section_page = store.list_threads(section_order).await?;
+    assert_eq!(
+        thread_ids_from_page(&second_section_page),
+        vec![thread_ids[1]]
+    );
+    assert_eq!(second_section_page.next_cursor, None);
 
     store
         .archive_thread(ArchiveThreadParams {
@@ -409,6 +567,19 @@ async fn assert_list_threads_contract(
         .await?;
     assert_eq!(thread_ids_from_page(&empty_page), Vec::new());
     assert_eq!(empty_page.next_cursor, None);
+
+    let section_sort_without_filter = store
+        .list_threads(list_params(
+            /*page_size*/ 10,
+            /*cursor*/ None,
+            ThreadSortKey::SectionPosition,
+            SortDirection::Asc,
+        ))
+        .await;
+    assert!(matches!(
+        section_sort_without_filter,
+        Err(ThreadStoreError::InvalidRequest { .. })
+    ));
 
     let invalid_cursor = store
         .list_threads(ListThreadsParams {
@@ -625,22 +796,19 @@ async fn assert_project_session_scope_contract(
     );
 
     store
-        .update_thread_metadata(UpdateThreadMetadataParams {
+        .move_thread_to_section(MoveThreadToSectionParams {
             thread_id: exact_id,
-            patch: ThreadMetadataPatch {
-                is_pinned: Some(true),
-                ..Default::default()
-            },
-            include_archived: false,
+            section: Some(codex_state::PINNED_THREAD_SECTION_ID.to_string()),
+            before_thread_id: None,
         })
         .await?;
     exact.allowed_sources.clear();
-    exact.is_pinned = Some(true);
+    exact.section = Some(Some(codex_state::PINNED_THREAD_SECTION_ID.to_string()));
     assert_eq!(
         thread_ids_from_page(&store.list_threads(exact.clone()).await?),
         vec![exact_id]
     );
-    exact.is_pinned = None;
+    exact.section = None;
     exact.relation_filter = Some(ThreadRelationFilter::DirectChildrenOf(exact_id));
     assert_eq!(
         thread_ids_from_page(&store.list_threads(exact.clone()).await?),
@@ -891,7 +1059,7 @@ fn list_params(
         allowed_sources: Vec::new(),
         model_providers: Some(Vec::new()),
         location_filter: crate::ThreadLocationFilter::Unrestricted,
-        is_pinned: None,
+        section: None,
         archived: false,
         search_term: None,
         relation_filter: None,

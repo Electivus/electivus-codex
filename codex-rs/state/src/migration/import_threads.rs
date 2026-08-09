@@ -252,8 +252,9 @@ async fn write_thread(
     sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO {threads} (thread_id, projection, stream_version, history_projection_version, \
          history_projection_start_ordinal, fencing_token, writer_id, writer_lease_expires_at, \
-         created_at, updated_at, recency_at, archived_at, repository_identity) \
-         VALUES ($1, $2, $3, NULL, $4, 1, 'runtime-state-migration', '-infinity', $5, $6, $7, $8, $9)"
+         created_at, updated_at, recency_at, archived_at, repository_identity, thread_section_id, \
+         section_position, section_entered_at) VALUES ($1, $2, $3, NULL, $4, 1, \
+         'runtime-state-migration', '-infinity', $5, $6, $7, $8, $9, $10, $11, $12)"
     )))
     .bind(metadata.id.to_string())
     .bind(projection)
@@ -269,6 +270,9 @@ async fn write_thread(
             .as_deref()
             .and_then(codex_git_utils::canonicalize_git_remote_url),
     )
+    .bind(metadata.section.as_ref().map(|section| section.id.as_str()))
+    .bind(metadata.section_position)
+    .bind(metadata.section_entered_at)
     .execute(&mut *connection)
     .await
     .map_err(|error| map_sql_error(schema, "import thread metadata", error))?;
@@ -342,6 +346,9 @@ pub(super) fn thread_projection(
         "updated_at": metadata.updated_at,
         "recency_at": metadata.recency_at,
         "archived_at": metadata.archived_at,
+        "section": metadata.section,
+        "section_position": metadata.section_position,
+        "section_entered_at": metadata.section_entered_at,
         "cwd": metadata.cwd,
         "cli_version": metadata.cli_version,
         "source": source,

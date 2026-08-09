@@ -472,7 +472,7 @@ impl RolloutRecorder {
                 /*repository_identity*/ None,
                 /*relation_filter*/ None,
                 archived,
-                /*is_pinned*/ None,
+                /*section*/ None,
                 search_term,
             )
             .await
@@ -583,7 +583,7 @@ impl RolloutRecorder {
             /*repository_identity*/ None,
             /*relation_filter*/ None,
             archived,
-            /*is_pinned*/ None,
+            /*section*/ None,
             search_term,
         )
         .await;
@@ -614,7 +614,7 @@ impl RolloutRecorder {
                     /*repository_identity*/ None,
                     /*relation_filter*/ None,
                     archived,
-                    /*is_pinned*/ None,
+                    /*section*/ None,
                     search_term,
                 )
                 .await
@@ -656,7 +656,7 @@ impl RolloutRecorder {
                         /*repository_identity*/ None,
                         /*relation_filter*/ None,
                         archived,
-                        /*is_pinned*/ None,
+                        /*section*/ None,
                         search_term,
                     )
                     .await
@@ -737,7 +737,7 @@ impl RolloutRecorder {
                     /*repository_identity*/ None,
                     /*relation_filter*/ None,
                     /*archived*/ false,
-                    /*is_pinned*/ None,
+                    /*section*/ None,
                     /*search_term*/ None,
                 )
                 .await
@@ -1223,7 +1223,7 @@ fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadIt
         thread_id: _state_thread_id,
         first_user_message,
         preview,
-        is_pinned,
+        section,
         cwd,
         git_branch,
         git_sha,
@@ -1246,7 +1246,7 @@ fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadIt
     if item.preview.is_none() {
         item.preview = preview;
     }
-    item.is_pinned = is_pinned;
+    item.section = section;
     if item.cwd.is_none() {
         item.cwd = cwd;
     }
@@ -1977,7 +1977,7 @@ fn thread_item_from_state_metadata(
         thread_id: Some(item.id),
         first_user_message: item.first_user_message,
         preview: item.preview,
-        is_pinned: item.is_pinned,
+        section: item.section,
         cwd: Some(item.cwd),
         git_branch: item.git_branch,
         git_sha: item.git_sha,

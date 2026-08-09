@@ -31,7 +31,14 @@ SELECT
     threads.tokens_used,
     threads.first_user_message,
     threads.archived_at,
-    threads.is_pinned,
+    threads.thread_section_id AS section,
+    (
+        SELECT thread_sections.name
+        FROM thread_sections
+        WHERE thread_sections.id = threads.thread_section_id
+    ) AS section_name,
+    threads.section_position,
+    threads.section_entered_at_ms,
     threads.git_sha,
     threads.git_branch,
     threads.git_origin_url,
@@ -48,7 +55,7 @@ pub struct ThreadFilterOptions<'a> {
     pub model_providers: Option<&'a [String]>,
     pub cwd_filters: Option<&'a [PathBuf]>,
     pub repository_identity: Option<&'a str>,
-    pub is_pinned: Option<bool>,
+    pub section: Option<Option<&'a str>>,
     pub anchor: Option<&'a crate::Anchor>,
     pub sort_key: SortKey,
     pub sort_direction: SortDirection,
@@ -80,7 +87,7 @@ pub(super) fn push_thread_filters_with_preview<'a>(
         model_providers,
         cwd_filters,
         repository_identity,
-        is_pinned,
+        section,
         anchor,
         sort_key,
         sort_direction,
@@ -95,9 +102,15 @@ pub(super) fn push_thread_filters_with_preview<'a>(
     if !include_empty_preview {
         builder.push(" AND threads.preview <> ''");
     }
-    if let Some(is_pinned) = is_pinned {
-        builder.push(" AND threads.is_pinned = ");
-        builder.push_bind(is_pinned);
+    match section {
+        Some(Some(section)) => {
+            builder.push(" AND threads.thread_section_id = ");
+            builder.push_bind(section);
+        }
+        Some(None) => {
+            builder.push(" AND threads.thread_section_id IS NULL");
+        }
+        None => {}
     }
     if !allowed_sources.is_empty() {
         builder.push(" AND threads.source IN (");
@@ -160,6 +173,7 @@ pub(super) fn push_thread_filters_with_preview<'a>(
             SortKey::CreatedAt => "threads.created_at_ms",
             SortKey::UpdatedAt => "threads.updated_at_ms",
             SortKey::RecencyAt => "threads.recency_at_ms",
+            SortKey::SectionPosition => "threads.section_position",
         };
         let operator = match sort_direction {
             SortDirection::Asc => ">",
@@ -208,6 +222,7 @@ pub(super) fn push_thread_order_and_limit(
         SortKey::CreatedAt => "threads.created_at_ms",
         SortKey::UpdatedAt => "threads.updated_at_ms",
         SortKey::RecencyAt => "threads.recency_at_ms",
+        SortKey::SectionPosition => "threads.section_position",
     };
     let order_direction = match sort_direction {
         SortDirection::Asc => "ASC",

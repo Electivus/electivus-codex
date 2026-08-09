@@ -138,6 +138,7 @@ impl ThreadListQuery {
             source_kinds: Some(self.source_kinds),
             archived: Some(false),
             is_pinned: None,
+            section_id: None,
             cwd,
             project_cwd,
             use_state_db_only: false,

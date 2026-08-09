@@ -50,6 +50,7 @@ async fn postgres_contract_external_agent_memory_import_is_atomic_and_idempotent
         cwd: None,
         source: Some("project-a".to_string()),
         target: Some("memories/extensions/external_agent_import/resources".to_string()),
+        title: None,
     }];
     let project_a = imported_memory("project-a", "MEMORY.md", b"alpha")?;
 

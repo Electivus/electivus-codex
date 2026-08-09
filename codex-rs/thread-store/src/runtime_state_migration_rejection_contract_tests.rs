@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "PostgreSQL tests connect only to PostgreSQL pools"
+)]
+
 use crate::PostgresThreadProjectionMaterializer;
 use crate::PostgresThreadStore;
 use crate::ThreadStore;

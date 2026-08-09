@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "PostgreSQL tests connect only to PostgreSQL pools"
+)]
+
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -118,18 +123,20 @@ plugins = false
             let Some(event) = client.next_event().await else {
                 anyhow::bail!("app-server stopped before the command started");
             };
-            match event {
-                InProcessServerEvent::ServerNotification(api::ServerNotification::Warning(
-                    warning,
-                )) if warning.message.contains("writer no longer owns") => {
-                    anyhow::bail!(warning.message);
+            if let InProcessServerEvent::ServerNotification(notification) = event {
+                match *notification {
+                    api::ServerNotification::Warning(warning)
+                        if warning.message.contains("writer no longer owns") =>
+                    {
+                        anyhow::bail!(warning.message);
+                    }
+                    api::ServerNotification::ItemStarted(item)
+                        if matches!(item.item, api::ThreadItem::CommandExecution { .. }) =>
+                    {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                    _ => {}
                 }
-                InProcessServerEvent::ServerNotification(api::ServerNotification::ItemStarted(
-                    item,
-                )) if matches!(item.item, api::ThreadItem::CommandExecution { .. }) => {
-                    return Ok::<(), anyhow::Error>(());
-                }
-                _ => {}
             }
         }
     })
@@ -151,18 +158,20 @@ plugins = false
             let Some(event) = client.next_event().await else {
                 anyhow::bail!("app-server stopped before turn/completed");
             };
-            match event {
-                InProcessServerEvent::ServerNotification(api::ServerNotification::Warning(
-                    warning,
-                )) if warning.message.contains("writer no longer owns") => {
-                    anyhow::bail!(warning.message);
+            if let InProcessServerEvent::ServerNotification(notification) = event {
+                match *notification {
+                    api::ServerNotification::Warning(warning)
+                        if warning.message.contains("writer no longer owns") =>
+                    {
+                        anyhow::bail!(warning.message);
+                    }
+                    api::ServerNotification::TurnCompleted(completed)
+                        if completed.thread_id == started.thread.id =>
+                    {
+                        return Ok::<_, anyhow::Error>(completed);
+                    }
+                    _ => {}
                 }
-                InProcessServerEvent::ServerNotification(
-                    api::ServerNotification::TurnCompleted(completed),
-                ) if completed.thread_id == started.thread.id => {
-                    return Ok::<_, anyhow::Error>(completed);
-                }
-                _ => {}
             }
         }
     })

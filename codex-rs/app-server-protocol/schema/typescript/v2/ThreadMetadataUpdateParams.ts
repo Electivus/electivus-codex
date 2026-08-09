@@ -11,6 +11,6 @@ export type ThreadMetadataUpdateParams = { threadId: string,
  */
 gitInfo?: ThreadMetadataGitInfoUpdateParams | null,
 /**
- * Patch whether this thread is pinned. Omit to leave the stored value unchanged.
+ * Compatibility patch for membership in the built-in Pinned section.
  */
 isPinned?: boolean | null, };

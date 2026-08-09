@@ -278,7 +278,9 @@ async fn snapshot(
          recency_at_ms AS recency_at, source, history_mode, thread_source, agent_nickname, \
          agent_role, agent_path, model_provider, model, reasoning_effort, cwd, cli_version, title, \
          name, preview, sandbox_policy, approval_mode, tokens_used, first_user_message, archived_at, \
-         is_pinned, git_sha, git_branch, git_origin_url, repository_identity, \
+         thread_section_id AS section, (SELECT name FROM thread_sections \
+         WHERE thread_sections.id = threads.thread_section_id) AS section_name, \
+         section_position, section_entered_at_ms, git_sha, git_branch, git_origin_url, repository_identity, \
          git_origin_url_is_explicit, memory_mode \
          FROM threads ORDER BY id",
     )

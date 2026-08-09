@@ -182,6 +182,8 @@ pub struct Submission {
     pub client_user_message_id: Option<String>,
     /// Optional W3C trace carrier propagated across async submission handoffs.
     pub trace: Option<W3cTraceContext>,
+    /// Core-provided ID of the parent turn that directly initiated this submission.
+    pub parent_turn_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
@@ -3768,6 +3770,7 @@ pub struct McpStartupFailure {
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
 pub enum McpAuthStatus {
+    Unknown,
     Unsupported,
     NotLoggedIn,
     BearerToken,
@@ -3777,6 +3780,7 @@ pub enum McpAuthStatus {
 impl fmt::Display for McpAuthStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {
+            McpAuthStatus::Unknown => "Unknown",
             McpAuthStatus::Unsupported => "Unsupported",
             McpAuthStatus::NotLoggedIn => "Not logged in",
             McpAuthStatus::BearerToken => "Bearer token",

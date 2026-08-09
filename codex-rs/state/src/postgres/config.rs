@@ -86,6 +86,10 @@ pub(crate) async fn connect_pool(config: &PostgresNamespaceConfig) -> anyhow::Re
     connect_pool_with_url(config, &resolved_url).await
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "this helper constructs a PostgreSQL pool, not a SQLite pool"
+)]
 pub(super) async fn connect_pool_with_url(
     config: &PostgresNamespaceConfig,
     resolved_url: &ResolvedUrl,

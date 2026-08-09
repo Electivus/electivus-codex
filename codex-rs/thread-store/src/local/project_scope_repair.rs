@@ -79,9 +79,9 @@ async fn list_threads_with_limits(
         });
     };
 
-    // Relation and pin filters are DB-owned. They historically bypassed file listing, and
+    // Relation and section filters are DB-owned. They bypass file listing, and
     // repairing first would both expand this feature's scope and reject otherwise queryable rows.
-    if params.use_state_db_only || params.relation_filter.is_some() || params.is_pinned.is_some() {
+    if params.use_state_db_only || params.relation_filter.is_some() || params.section.is_some() {
         return query_project_threads(
             state_db.as_deref(),
             config,
@@ -294,7 +294,7 @@ async fn query_project_threads(
         Some(repository_identity),
         relation_filter,
         params.archived,
-        params.is_pinned,
+        params.section.as_ref().map(Option::as_deref),
         params.search_term.as_deref(),
     )
     .await
@@ -315,7 +315,7 @@ async fn fallback_to_exact_cwd(
     // Legacy Asc and search listing may rescan from the root. Keep the strict Project Scope
     // fallback bounded by allowing only a single Desc page without search.
     if params.relation_filter.is_some()
-        || params.is_pinned.is_some()
+        || params.section.is_some()
         || matches!(sort_direction, codex_rollout::SortDirection::Asc)
         || params.search_term.is_some()
     {

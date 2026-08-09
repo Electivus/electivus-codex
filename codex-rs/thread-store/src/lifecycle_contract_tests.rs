@@ -718,10 +718,18 @@ impl PostgresLifecycleFixture {
         Ok(())
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this helper connects only to a PostgreSQL pool"
+    )]
     async fn connect_pool(&self) -> Result<sqlx::PgPool, Box<dyn std::error::Error>> {
         Ok(sqlx::PgPool::connect(&self.database_url).await?)
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this helper connects only to a PostgreSQL pool"
+    )]
     async fn cleanup(&self) -> Result<(), Box<dyn std::error::Error>> {
         let pool = sqlx::PgPool::connect(&self.database_url).await?;
         let schema = &self.schema;

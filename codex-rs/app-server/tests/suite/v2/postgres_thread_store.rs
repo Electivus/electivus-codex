@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "PostgreSQL tests connect only to PostgreSQL pools"
+)]
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -77,6 +82,7 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
                 source_kinds: Some(vec![api::ThreadSourceKind::Exec]),
                 archived: Some(false),
                 is_pinned: None,
+                section_id: None,
                 cwd: None,
                 use_state_db_only: true,
                 search_term: None,
@@ -154,7 +160,7 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
             params: api::ThreadSearchParams {
                 cursor: None,
                 limit: Some(1),
-                sort_key: Some(api::ThreadSortKey::CreatedAt),
+                sort_key: Some(api::ThreadSearchSortKey::CreatedAt),
                 sort_direction: Some(api::SortDirection::Asc),
                 source_kinds: Some(vec![api::ThreadSourceKind::Exec]),
                 archived: Some(false),
@@ -487,6 +493,7 @@ plugins = false
                 source_kinds: Some(vec![api::ThreadSourceKind::Exec]),
                 archived: Some(false),
                 is_pinned: None,
+                section_id: None,
                 cwd: None,
                 use_state_db_only: true,
                 search_term: None,
@@ -628,9 +635,8 @@ plugins = false
             let Some(event) = reader_client.next_event().await else {
                 anyhow::bail!("reader replica stopped before turn/completed");
             };
-            if let InProcessServerEvent::ServerNotification(api::ServerNotification::TurnCompleted(
-                completed,
-            )) = event
+            if let InProcessServerEvent::ServerNotification(notification) = event
+                && let api::ServerNotification::TurnCompleted(completed) = *notification
                 && completed.thread_id == thread_id.to_string()
             {
                 return Ok::<(), anyhow::Error>(());

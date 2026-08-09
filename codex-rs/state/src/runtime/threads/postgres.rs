@@ -52,26 +52,6 @@ pub(super) async fn set_thread_preview_if_empty(
     Ok(result.rows_affected() > 0)
 }
 
-pub(super) async fn update_thread_pin(
-    pool: &PgPool,
-    schema: &str,
-    thread_id: ThreadId,
-    is_pinned: bool,
-) -> anyhow::Result<bool> {
-    let threads = qualified_table(schema, "threads");
-    let result = sqlx::query(AssertSqlSafe(format!(
-        "UPDATE {threads} SET is_pinned = $1, \
-         projection = jsonb_set(projection, '{{is_pinned}}', to_jsonb($1), TRUE) \
-         WHERE thread_id = $2"
-    )))
-    .bind(is_pinned)
-    .bind(thread_id.to_string())
-    .execute(pool)
-    .await
-    .map_err(|error| map_sql_error(schema, "update thread pin", error))?;
-    Ok(result.rows_affected() > 0)
-}
-
 pub(super) async fn upsert_thread_spawn_edge(
     pool: &PgPool,
     schema: &str,

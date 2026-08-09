@@ -143,6 +143,8 @@ mod tests {
             preview: String::new(),
             ephemeral: false,
             is_pinned: false,
+            section: None,
+            section_entered_at: None,
             history_mode: Default::default(),
             model_provider: "openai".to_string(),
             created_at: 0,

@@ -61,7 +61,14 @@ SELECT
     threads.tokens_used,
     threads.first_user_message,
     threads.archived_at,
-    threads.is_pinned,
+    threads.thread_section_id AS section,
+    (
+        SELECT thread_sections.name
+        FROM thread_sections
+        WHERE thread_sections.id = threads.thread_section_id
+    ) AS section_name,
+    threads.section_position,
+    threads.section_entered_at_ms,
     threads.git_sha,
     threads.git_branch,
     threads.git_origin_url,
@@ -157,13 +164,15 @@ INSERT INTO threads (
     first_user_message,
     archived,
     archived_at,
-    is_pinned,
+    thread_section_id,
+    section_position,
+    section_entered_at_ms,
     git_sha,
     git_branch,
     git_origin_url,
     repository_identity,
     memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO NOTHING
             "#,
         )
@@ -205,7 +214,9 @@ ON CONFLICT(id) DO NOTHING
         .bind(metadata.first_user_message.as_deref().unwrap_or_default())
         .bind(metadata.archived_at.is_some())
         .bind(metadata.archived_at.map(datetime_to_epoch_seconds))
-        .bind(metadata.is_pinned)
+        .bind(metadata.section.as_ref().map(|section| section.id.as_str()))
+        .bind(metadata.section_position)
+        .bind(metadata.section_entered_at.map(datetime_to_epoch_millis))
         .bind(metadata.git_sha.as_deref())
         .bind(metadata.git_branch.as_deref())
         .bind(metadata.git_origin_url.as_deref())
@@ -219,23 +230,6 @@ ON CONFLICT(id) DO NOTHING
         .execute(self.sqlite_pool()?)
         .await?;
         self.insert_thread_spawn_edge_from_source_if_absent(metadata.id, metadata.source.as_str())
-            .await?;
-        Ok(result.rows_affected() > 0)
-    }
-
-    /// Update pinned state without changing rollout-derived metadata.
-    pub async fn update_thread_pin(
-        &self,
-        thread_id: ThreadId,
-        is_pinned: bool,
-    ) -> anyhow::Result<bool> {
-        if let Some((pool, schema)) = self.postgres_connection() {
-            return postgres::update_thread_pin(&pool, &schema, thread_id, is_pinned).await;
-        }
-        let result = sqlx::query("UPDATE threads SET is_pinned = ? WHERE id = ?")
-            .bind(is_pinned)
-            .bind(thread_id.to_string())
-            .execute(self.sqlite_pool()?)
             .await?;
         Ok(result.rows_affected() > 0)
     }

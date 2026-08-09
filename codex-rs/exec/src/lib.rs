@@ -1000,9 +1000,10 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
 
         match server_event {
             InProcessServerEvent::ServerRequest(request) => {
-                handle_server_request(&client, request, &mut error_seen).await;
+                handle_server_request(&client, *request, &mut error_seen).await;
             }
-            InProcessServerEvent::ServerNotification(mut notification) => {
+            InProcessServerEvent::ServerNotification(notification) => {
+                let mut notification = *notification;
                 if let ServerNotification::Error(payload) = &notification {
                     if payload.thread_id == primary_thread_id_for_requests
                         && payload.turn_id == task_id
@@ -1457,12 +1458,13 @@ async fn resolve_resume_thread_id(
                     source_kinds: Some(all_thread_source_kinds()),
                     archived: Some(false),
                     is_pinned: None,
+                    section_id: None,
                     parent_thread_id: None,
                     ancestor_thread_id: None,
                     cwd: None,
+                    project_cwd,
                     use_state_db_only: false,
                     search_term: None,
-                    project_cwd,
                 },
             },
             "thread/list",
@@ -1494,6 +1496,7 @@ async fn resolve_resume_thread_id(
                     source_kinds: Some(all_thread_source_kinds()),
                     archived: Some(false),
                     is_pinned: None,
+                    section_id: None,
                     parent_thread_id: None,
                     ancestor_thread_id: None,
                     cwd: None,
