@@ -15,6 +15,7 @@ packages = [
 # Exact identities make every added, changed, duplicated, or removed ignore auditable.
 # Categories are intentionally narrow; their boundaries are documented in workflows/README.md.
 [ignores]
+'codex-rs/app-server-protocol/src/schema_fixtures_tests.rs::write_schema_fixtures_from_env::ignore="invoked by `just write-app-server-schema`"' = "schema-generation"
 'codex-rs/app-server-transport/src/transport/remote_control/tests.rs::postgres_contract_replicas_share_enrollment_with_websocket_preference_resolution::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/app-server/tests/suite/v2/postgres_goal_service.rs::postgres_contract_goal_service_is_backend_neutral_across_replicas::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/app-server/tests/suite/v2/postgres_runtime_state.rs::postgres_contract_app_server_fails_closed_and_redacts_unavailable_url::ignore="requires the PostgreSQL Runtime State process contract environment"' = "specialized-environment"
@@ -32,11 +33,9 @@ packages = [
 'codex-rs/app-server/tests/suite/v2/turn_start.rs::command_execution_notifications_include_trusted_plugin_id::cfg_attr(windows,ignore="plugin attribution fixture is Unix-only")' = "out-of-boundary-platform"
 'codex-rs/cli/tests/state_initialize.rs::state_initialize_process_creates_empty_runtime_ready_postgres_without_sqlite::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/cli/tests/state_migration.rs::state_migrate_process_runs_the_complete_offline_migration::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
-'codex-rs/core-skills/src/service_tests.rs::disabled_paths_for_skills_allows_name_selector_to_override_path_selector::cfg_attr(windows,ignore)' = "out-of-boundary-platform"
-'codex-rs/core-skills/src/service_tests.rs::disabled_paths_for_skills_allows_session_flags_to_disable_user_enabled_skill::cfg_attr(windows,ignore)' = "out-of-boundary-platform"
-'codex-rs/core-skills/src/service_tests.rs::disabled_paths_for_skills_allows_session_flags_to_override_user_layer::cfg_attr(windows,ignore)' = "out-of-boundary-platform"
-'codex-rs/core-skills/src/service_tests.rs::disabled_paths_for_skills_disables_matching_name_selectors::cfg_attr(windows,ignore)' = "out-of-boundary-platform"
-'codex-rs/core-skills/src/service_tests.rs::skills_for_config_ignores_cwd_cache_when_session_flags_reenable_skill::cfg_attr(windows,ignore)' = "out-of-boundary-platform"
+'codex-rs/config/src/skills_config_tests.rs::preserves_order_across_path_and_name_selectors::cfg_attr(windows,ignore)' = "out-of-boundary-platform"
+'codex-rs/config/src/skills_config_tests.rs::session_flags_can_disable_user_enabled_path::cfg_attr(windows,ignore)' = "out-of-boundary-platform"
+'codex-rs/config/src/skills_config_tests.rs::session_flags_can_reenable_user_disabled_path::cfg_attr(windows,ignore)' = "out-of-boundary-platform"
 'codex-rs/core/src/agent/role_tests.rs::apply_role_skills_config_disables_skill_for_spawned_agent::cfg_attr(windows,ignore)' = "out-of-boundary-platform"
 'codex-rs/core/src/session/tests.rs::new_default_turn_uses_config_aware_skills_for_role_overrides::cfg_attr(windows,ignore)' = "out-of-boundary-platform"
 'codex-rs/core/src/shell_snapshot_tests.rs::windows_powershell_snapshot_includes_sections::ignore' = "schema-generation"
@@ -102,6 +101,7 @@ packages = [
 'codex-rs/exec-server/tests/exec_process.rs::exec_process_write_then_read_without_tty::cfg_attr(not(unix),ignore="Unix-only exec-server process test")' = "out-of-boundary-platform"
 'codex-rs/exec-server/tests/exec_process.rs::remote_exec_process_recovers_after_transport_disconnect::cfg_attr(not(unix),ignore="Unix-only exec-server process test")' = "out-of-boundary-platform"
 'codex-rs/exec-server/tests/exec_process.rs::remote_windows_sandbox_process_accepts_process_write::cfg_attr(not(windows),ignore="Windows-only exec-server sandbox process test")' = "out-of-boundary-platform"
+'codex-rs/ext/skills/src/host_service_tests.rs::skills_for_config_ignores_cwd_cache_when_session_flags_reenable_skill::cfg_attr(windows,ignore)' = "out-of-boundary-platform"
 'codex-rs/memories/write/src/startup_tests.rs::postgres_contract_memories_startup_phase1_loads_pathless_canonical_thread_history::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/memories/write/src/workspace_materialization_postgres_tests.rs::postgres_contract_replica_materializes_generation_and_reset_clears_workspaces::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/rmcp-client/src/oauth/tests/store_lock_tests.rs::store_lock_is_released_when_holder_process_exits_child::ignore="child process for store_lock_is_released_when_holder_process_exits"' = "helper-process"
@@ -219,6 +219,7 @@ packages = [
 'codex-rs/tui/src/history_cell/tests.rs::session_header_indicates_yolo_mode::cfg_attr(target_os="windows",ignore="snapshot path rendering differs on Windows")' = "out-of-boundary-platform"
 'codex-rs/tui/src/history_cell/tests.rs::session_info_availability_nux_tooltip_snapshot::cfg_attr(target_os="windows",ignore="snapshot path rendering differs on Windows")' = "out-of-boundary-platform"
 'codex-rs/tui/tests/suite/resize_reflow.rs::tmux_repeated_resizes_do_not_push_composer_down::ignore="requires tmux and a locally built codex binary; run with --ignored for manual resize smoke"' = "manual-smoke"
+'codex-rs/tui/tests/suite/resize_reflow.rs::tmux_scrolled_composer_resize_preserves_visible_draft_text::ignore="requires tmux and a locally built codex binary; run with --ignored for manual resize smoke"' = "manual-smoke"
 'codex-rs/tui/tests/suite/resize_reflow.rs::tmux_split_preserves_fresh_session_composer_row_after_resize_reflow::ignore="requires tmux and a locally built codex binary; run with --ignored for manual resize smoke"' = "manual-smoke"
 'codex-rs/tui/tests/suite/resize_reflow.rs::tmux_width_resize_restore_keeps_visible_content_anchored::ignore="requires tmux and a locally built codex binary; run with --ignored for manual resize smoke"' = "manual-smoke"
 'codex-rs/utils/absolute-path/src/lib.rs::from_absolute_path_with_removed_current_dir_child::ignore' = "helper-process"
