@@ -236,6 +236,9 @@ pub(super) async fn apply_history_projections(
             apply_turn_projection(tables, connection, thread_id, rollout_ordinal, change).await?;
         }
         for change in changes.changed_items {
+            let created_at_ms = change
+                .started_at_ms
+                .unwrap_or_else(|| recorded_at.timestamp_millis());
             let item_id = change.item.id().to_string();
             let item = serde_json::to_value(change.item).map_err(serialization_error)?;
             sqlx::query(AssertSqlSafe(format!(
@@ -250,7 +253,7 @@ pub(super) async fn apply_history_projections(
             .bind(change.turn_id)
             .bind(item_id)
             .bind(rollout_ordinal)
-            .bind(recorded_at.timestamp_millis())
+            .bind(created_at_ms)
             .bind(item)
             .execute(&mut *connection)
             .await

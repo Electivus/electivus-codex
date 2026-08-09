@@ -43,6 +43,23 @@ pub fn cargo_bin(name: &str) -> Result<PathBuf, CargoBinError> {
             return resolve_bin_from_env(key, value);
         }
     }
+    if runfiles_available() {
+        return Err(CargoBinError::NotFound {
+            name: name.to_owned(),
+            env_keys,
+            fallback: "assert_cmd fallback is only available under Cargo".to_owned(),
+        });
+    }
+    let legacy_path = legacy_cargo_bin_path(name)?;
+    if !legacy_path.exists() {
+        return Err(CargoBinError::NotFound {
+            name: name.to_owned(),
+            env_keys,
+            fallback: format!(
+                "legacy Cargo target path {legacy_path:?} does not exist"
+            ),
+        });
+    }
     match assert_cmd::Command::cargo_bin(name) {
         Ok(cmd) => {
             let mut path = PathBuf::from(cmd.get_program());
@@ -66,6 +83,16 @@ pub fn cargo_bin(name: &str) -> Result<PathBuf, CargoBinError> {
             fallback: format!("assert_cmd fallback failed: {err}"),
         }),
     }
+}
+
+fn legacy_cargo_bin_path(name: &str) -> Result<PathBuf, CargoBinError> {
+    let mut path = std::env::current_exe()
+        .map_err(|source| CargoBinError::CurrentExe { source })?;
+    let _ = path.pop();
+    if path.ends_with("deps") {
+        let _ = path.pop();
+    }
+    Ok(path.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
 }
 
 fn cargo_bin_env_keys(name: &str) -> Vec<String> {

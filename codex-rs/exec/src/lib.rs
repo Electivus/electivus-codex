@@ -19,6 +19,7 @@ use codex_app_server_client::ExecServerRuntimePaths;
 use codex_app_server_client::InProcessAppServerClient;
 use codex_app_server_client::InProcessClientStartArgs;
 use codex_app_server_client::InProcessServerEvent;
+use codex_app_server_client::resolve_project_repository_identity;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
@@ -59,6 +60,7 @@ use codex_config::ConfigLoadError;
 use codex_config::ConfigLoadOptions;
 use codex_config::LoaderOverrides;
 use codex_config::format_config_error_with_source;
+use codex_core::StateDbHandle;
 use codex_core::check_execpolicy_for_warnings;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
@@ -70,6 +72,8 @@ use codex_core::config::load_config_toml_with_layer_stack;
 use codex_core::config::resolve_oss_provider;
 use codex_core::config::resolve_profile_v2_config_path;
 use codex_core::format_exec_policy_error_with_source;
+use codex_core::path_utils;
+use codex_core::read_session_meta_line;
 use codex_feedback::CodexFeedback;
 use codex_git_utils::get_git_repo_root;
 use codex_login::default_client::set_default_client_residency_requirement;
@@ -801,6 +805,8 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     }
 
     let mut request_ids = RequestIdSequencer::new();
+    let state_db = in_process_start_args.state_db.clone();
+    let environment_manager = in_process_start_args.environment_manager.clone();
     let mut client = InProcessAppServerClient::start(in_process_start_args)
         .await
         .map_err(|err| {
@@ -811,7 +817,16 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let (primary_thread_id, fallback_session_configured) = if let Some(ExecCommand::Resume(args)) =
         command.as_ref()
     {
-        if let Some(thread_id) = resolve_resume_thread_id(&client, &config, args).await? {
+        if let Some(thread_id) =
+            resolve_resume_thread_id(
+                &client,
+                &config,
+                state_db.as_ref(),
+                environment_manager.as_ref(),
+                args,
+            )
+            .await?
+        {
             let response: ThreadResumeResponse = send_request_with_response(
                 &client,
                 ClientRequest::ThreadResume {
@@ -854,9 +869,15 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             images: Vec::new(),
             prompt: None,
         };
-        let source_thread_id = resolve_resume_thread_id(&client, &config, &source_args)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.session_id))?;
+        let source_thread_id = resolve_resume_thread_id(
+            &client,
+            &config,
+            state_db.as_ref(),
+            environment_manager.as_ref(),
+            &source_args,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.session_id))?;
         let permissions = permissions_selection_from_config(&config);
         let sandbox = permissions.is_none().then(|| {
             sandbox_mode_from_permission_profile(
@@ -1518,39 +1539,93 @@ fn all_thread_source_kinds() -> Vec<ThreadSourceKind> {
 async fn resolve_resume_thread_id(
     client: &InProcessAppServerClient,
     config: &Config,
+    state_db: Option<&StateDbHandle>,
+    environment_manager: &EnvironmentManager,
     args: &crate::cli::ResumeArgs,
 ) -> anyhow::Result<Option<String>> {
     let model_providers = resume_lookup_model_providers(config, args);
     let project_cwd = (!args.all).then(|| LegacyAppPathString::from_abs_path(&config.cwd));
+    let validate_local_rollout_project = state_db
+        .is_some_and(|state_db| state_db.uses_local_rollout_history())
+        && project_cwd.is_some();
+    let project_repository_identity = match (validate_local_rollout_project, project_cwd.clone()) {
+        (true, Some(project_cwd)) => {
+            resolve_project_repository_identity(environment_manager, project_cwd).await
+        }
+        (true, None) | (false, _) => None,
+    };
 
     if args.last {
-        let response: ThreadListResponse = send_request_with_response(
-            client,
-            ClientRequest::ThreadList {
-                request_id: RequestId::Integer(0),
-                params: ThreadListParams {
-                    cursor: None,
-                    limit: Some(1),
-                    sort_key: Some(ThreadSortKey::UpdatedAt),
-                    sort_direction: None,
-                    model_providers,
-                    source_kinds: Some(all_thread_source_kinds()),
-                    archived: Some(false),
-                    is_pinned: None,
-                    section_id: None,
-                    parent_thread_id: None,
-                    ancestor_thread_id: None,
-                    cwd: None,
-                    project_cwd,
-                    use_state_db_only: false,
-                    search_term: None,
+        let mut use_state_db_only = state_db.is_some();
+        let mut cursor = None;
+        loop {
+            let response: ThreadListResponse = send_request_with_response(
+                client,
+                ClientRequest::ThreadList {
+                    request_id: RequestId::Integer(0),
+                    params: ThreadListParams {
+                        cursor,
+                        limit: Some(100),
+                        sort_key: Some(ThreadSortKey::UpdatedAt),
+                        sort_direction: None,
+                        model_providers: model_providers.clone(),
+                        source_kinds: Some(all_thread_source_kinds()),
+                        archived: Some(false),
+                        is_pinned: None,
+                        section_id: None,
+                        parent_thread_id: None,
+                        ancestor_thread_id: None,
+                        cwd: None,
+                        project_cwd: project_cwd.clone(),
+                        use_state_db_only,
+                        search_term: None,
+                    },
                 },
-            },
-            "thread/list",
-        )
-        .await
-        .map_err(anyhow::Error::msg)?;
-        return Ok(response.data.into_iter().next().map(|thread| thread.id));
+                "thread/list",
+            )
+            .await
+            .map_err(anyhow::Error::msg)?;
+            for thread in response.data {
+                if use_state_db_only && let Some(path) = thread.path.as_deref() {
+                    let Ok(session_meta) = read_session_meta_line(path).await else {
+                        continue;
+                    };
+                    if session_meta.meta.id.to_string() != thread.id {
+                        continue;
+                    }
+                    if validate_local_rollout_project {
+                        let cwd_matches = path_utils::paths_match_after_normalization(
+                            config.cwd.as_path(),
+                            session_meta.meta.cwd.as_path(),
+                        );
+                        let repository_matches = project_repository_identity.as_deref().is_some_and(
+                            |expected_identity| {
+                                thread
+                                    .git_info
+                                    .as_ref()
+                                    .and_then(|git_info| git_info.origin_url.as_deref())
+                                    .and_then(codex_git_utils::canonicalize_git_remote_url)
+                                    .as_deref()
+                                    == Some(expected_identity)
+                            },
+                        );
+                        if !cwd_matches && !repository_matches {
+                            continue;
+                        }
+                    }
+                }
+                return Ok(Some(thread.id));
+            }
+            let Some(next_cursor) = response.next_cursor else {
+                if use_state_db_only {
+                    use_state_db_only = false;
+                    cursor = None;
+                    continue;
+                }
+                return Ok(None);
+            };
+            cursor = Some(next_cursor);
+        }
     }
 
     let Some(session_id) = args.session_id.as_deref() else {

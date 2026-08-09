@@ -443,6 +443,9 @@ jobs:
             --extract-to "${extract_dir}"
             --workspace-remap "${workspace_root}"
             --partition "hash:${{ matrix.shard }}/4"
+            # Workspace feature unification enables V8 sandboxing through codex-code-mode-runtime.
+            # Dedicated V8 workflows test this feature contract with each intended variant.
+            --filterset 'not (package(=codex-v8-poc) & test(=tests::sandbox_feature_matches_linked_v8))'
           )
           if [[ "${{ inputs.test_threads }}" != "0" ]]; then
             nextest_args+=(--test-threads "${{ inputs.test_threads }}")

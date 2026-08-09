@@ -538,7 +538,7 @@ mod marketplace_processor;
 mod mcp_processor;
 mod plugins;
 mod process_exec_processor;
-mod project_session_scope;
+pub(crate) mod project_session_scope;
 mod recorded_working_directory;
 mod remote_control_processor;
 mod search;
