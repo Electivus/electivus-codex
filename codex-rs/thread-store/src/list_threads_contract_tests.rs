@@ -11,6 +11,7 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
+use sqlx::AssertSqlSafe;
 use tempfile::TempDir;
 
 use crate::AppendThreadItemsParams;
@@ -100,6 +101,132 @@ async fn postgres_contract_list_threads_matches_public_store_contract()
     .await?;
     pool.close().await;
     reader_pool.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_section_position_pages_migrated_legacy_pins()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = PostgresThreadStoreFixture::new("legacy_pin_section_order")?;
+    fixture.migrate().await?;
+    let pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
+    let older = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f401")?;
+    let unpinned = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f402")?;
+    let newer = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f403")?;
+    for (thread_id, timestamp) in [
+        (older, "2030-01-01T00:00:00Z"),
+        (unpinned, "2030-01-02T00:00:00Z"),
+        (newer, "2030-01-03T00:00:00Z"),
+    ] {
+        create_listed_thread(
+            &store,
+            ListedThread {
+                thread_id,
+                cwd: Path::new("/legacy-pin-section-order"),
+                timestamp,
+                source: SessionSource::Exec,
+                model_provider: "postgres-test-provider",
+                parent_thread_id: None,
+                preview: "legacy pin migration",
+                name: None,
+                history_mode: ThreadHistoryMode::Legacy,
+                items: Vec::new(),
+            },
+        )
+        .await?;
+    }
+
+    let schema = &fixture.schema;
+    let threads = format!("\"{schema}\".threads");
+    for index in [
+        "threads_section_position_idx",
+        "threads_section_recency_idx",
+    ] {
+        sqlx::query(AssertSqlSafe(format!("DROP INDEX \"{schema}\".{index}")))
+            .execute(&pool)
+            .await?;
+    }
+    sqlx::query(AssertSqlSafe(format!(
+        "ALTER TABLE {threads} DROP COLUMN section_position, \
+         DROP COLUMN section_entered_at, DROP COLUMN thread_section_id"
+    )))
+    .execute(&pool)
+    .await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "DROP TABLE \"{schema}\".thread_sections"
+    )))
+    .execute(&pool)
+    .await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "UPDATE {threads} SET is_pinned = thread_id <> $1, \
+         projection = (projection - 'section' - 'section_position' - 'section_entered_at') \
+         || jsonb_build_object('is_pinned', thread_id <> $1)"
+    )))
+    .bind(unpinned.to_string())
+    .execute(&pool)
+    .await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "DELETE FROM \"{schema}\"._codex_runtime_state_migrations WHERE version >= 22"
+    )))
+    .execute(&pool)
+    .await?;
+    drop(store);
+    pool.close().await;
+
+    fixture.migrate().await?;
+    let pool = fixture.connect_pool().await?;
+    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
+    let mut params = list_params(
+        /*page_size*/ 1,
+        /*cursor*/ None,
+        ThreadSortKey::SectionPosition,
+        SortDirection::Asc,
+    );
+    params.section = Some(Some(codex_state::PINNED_THREAD_SECTION_ID.to_string()));
+    let first = store.list_threads(params.clone()).await?;
+    params.cursor = Some(
+        first
+            .next_cursor
+            .clone()
+            .expect("first migrated pin page should have a cursor"),
+    );
+    let second = store.list_threads(params).await?;
+    assert_eq!(second.next_cursor, None);
+    let pinned = codex_state::ThreadSection {
+        id: codex_state::PINNED_THREAD_SECTION_ID.to_string(),
+        name: codex_state::PINNED_THREAD_SECTION_NAME.to_string(),
+    };
+    assert_eq!(
+        first
+            .items
+            .into_iter()
+            .chain(second.items)
+            .map(|thread| (
+                thread.thread_id,
+                thread.section,
+                thread.section_position,
+                thread.section_entered_at,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                newer,
+                Some(pinned.clone()),
+                Some(1_000_000),
+                Some(DateTime::parse_from_rfc3339("2030-01-03T00:00:00Z")?.with_timezone(&Utc)),
+            ),
+            (
+                older,
+                Some(pinned),
+                Some(2_000_000),
+                Some(DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")?.with_timezone(&Utc)),
+            ),
+        ]
+    );
+
+    pool.close().await;
     fixture.cleanup().await
 }
 
