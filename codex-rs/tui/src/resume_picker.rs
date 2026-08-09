@@ -631,21 +631,14 @@ fn spawn_app_server_page_loader(
         while let Some(request) = request_rx.recv().await {
             match request {
                 PickerLoadRequest::Page(request) => {
-                    let cursor = request.cursor.map(|PageCursor::AppServer(cursor)| cursor);
-                    let page = load_app_server_page(
-                        &mut app_server,
-                        cursor,
-                        request.location_filter,
-                        request.status,
-                        request.provider_filter,
-                        request.sort_key,
-                        include_non_interactive,
-                        request.mode,
-                    )
-                    .await;
+                    let request_token = request.request_token;
+                    let search_token = request.search_token;
+                    let page =
+                        load_app_server_page(&mut app_server, request, include_non_interactive)
+                            .await;
                     let _ = bg_tx.send(BackgroundEvent::Page {
-                        request_token: request.request_token,
-                        search_token: request.search_token,
+                        request_token,
+                        search_token,
                         page,
                     });
                 }
@@ -831,28 +824,24 @@ enum LoadTrigger {
 
 async fn load_app_server_page(
     app_server: &mut AppServerSession,
-    cursor: Option<String>,
-    location_filter: SessionLocationFilter,
-    status: SessionStatus,
-    provider_filter: ProviderFilter,
-    sort_key: ThreadSortKey,
+    request: PageLoadRequest,
     include_non_interactive: bool,
-    mode: PageLoadMode,
 ) -> std::io::Result<PickerPage> {
+    let cursor = request.cursor.map(|PageCursor::AppServer(cursor)| cursor);
     let response = app_server
         .thread_list(
             ThreadListQuery {
                 cursor,
                 limit: PAGE_SIZE as u32,
-                sort_key,
-                model_providers: match provider_filter {
+                sort_key: request.sort_key,
+                model_providers: match request.provider_filter {
                     ProviderFilter::Any => None,
                     ProviderFilter::MatchDefault(default_provider) => Some(vec![default_provider]),
                 },
                 source_kinds: crate::resume_source_kinds(include_non_interactive),
-                location_filter,
-                archived: status == SessionStatus::Archived,
-                use_state_db_only: mode == PageLoadMode::StateDbOnly,
+                location_filter: request.location_filter,
+                archived: request.status == SessionStatus::Archived,
+                use_state_db_only: request.mode == PageLoadMode::StateDbOnly,
             }
             .into_params(),
         )

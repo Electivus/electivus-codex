@@ -754,7 +754,7 @@ async fn postgres_contract_memories_startup_phase1_loads_pathless_canonical_thre
             parent_trace: None,
             environments: Some(environments),
             thread_extension_init: Default::default(),
-            supports_openai_form_elicitation: false,
+            client_mcp_extensions: Default::default(),
         })
         .await?;
     candidate

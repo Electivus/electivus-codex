@@ -209,7 +209,7 @@ The allowed ignore categories have these narrow boundaries:
 | `helper-process`           | Subprocess entry point invoked by another test.              |
 | `live-external-api`        | Two opt-in tests calling the real OpenAI API.                |
 | `manual-smoke`             | Tmux/local-binary resize checks run by an operator.          |
-| `schema-generation`        | Only two inherited Windows shell-snapshot generation cases.  |
+| `schema-generation`        | Explicit app-server fixture generation and inherited Windows shell-snapshot cases. |
 | `out-of-boundary-platform` | Conditionally inapplicable product-platform case.            |
 | `specialized-environment`  | PostgreSQL 18 or another named process-contract environment. |
 | `pending-behavior-change`  | Only two inherited compaction follow-up expectations.        |
