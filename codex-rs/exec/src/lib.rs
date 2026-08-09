@@ -817,15 +817,14 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let (primary_thread_id, fallback_session_configured) = if let Some(ExecCommand::Resume(args)) =
         command.as_ref()
     {
-        if let Some(thread_id) =
-            resolve_resume_thread_id(
-                &client,
-                &config,
-                state_db.as_ref(),
-                environment_manager.as_ref(),
-                args,
-            )
-            .await?
+        if let Some(thread_id) = resolve_resume_thread_id(
+            &client,
+            &config,
+            state_db.as_ref(),
+            environment_manager.as_ref(),
+            args,
+        )
+        .await?
         {
             let response: ThreadResumeResponse = send_request_with_response(
                 &client,
@@ -1598,8 +1597,9 @@ async fn resolve_resume_thread_id(
                             config.cwd.as_path(),
                             session_meta.meta.cwd.as_path(),
                         );
-                        let repository_matches = project_repository_identity.as_deref().is_some_and(
-                            |expected_identity| {
+                        let repository_matches = project_repository_identity
+                            .as_deref()
+                            .is_some_and(|expected_identity| {
                                 thread
                                     .git_info
                                     .as_ref()
@@ -1607,8 +1607,7 @@ async fn resolve_resume_thread_id(
                                     .and_then(codex_git_utils::canonicalize_git_remote_url)
                                     .as_deref()
                                     == Some(expected_identity)
-                            },
-                        );
+                            });
                         if !cwd_matches && !repository_matches {
                             continue;
                         }

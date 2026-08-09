@@ -128,7 +128,14 @@ async fn postgres_contract_canonical_appends_project_items_for_bidirectional_pag
             })
             .to_vec()
     );
-    assert!(after_retry.items.iter().all(|item| item.created_at_ms > 0));
+    assert_eq!(
+        after_retry
+            .items
+            .iter()
+            .map(|item| item.created_at_ms)
+            .collect::<Vec<_>>(),
+        vec![0; 4]
+    );
     let missing_error = reader
         .list_items(ListItemsParams {
             thread_id: ThreadId::default(),

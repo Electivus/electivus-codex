@@ -55,9 +55,7 @@ pub fn cargo_bin(name: &str) -> Result<PathBuf, CargoBinError> {
         return Err(CargoBinError::NotFound {
             name: name.to_owned(),
             env_keys,
-            fallback: format!(
-                "legacy Cargo target path {legacy_path:?} does not exist"
-            ),
+            fallback: format!("legacy Cargo target path {legacy_path:?} does not exist"),
         });
     }
     match assert_cmd::Command::cargo_bin(name) {
@@ -86,8 +84,8 @@ pub fn cargo_bin(name: &str) -> Result<PathBuf, CargoBinError> {
 }
 
 fn legacy_cargo_bin_path(name: &str) -> Result<PathBuf, CargoBinError> {
-    let mut path = std::env::current_exe()
-        .map_err(|source| CargoBinError::CurrentExe { source })?;
+    let mut path =
+        std::env::current_exe().map_err(|source| CargoBinError::CurrentExe { source })?;
     let _ = path.pop();
     if path.ends_with("deps") {
         let _ = path.pop();
