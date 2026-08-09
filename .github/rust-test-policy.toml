@@ -1,7 +1,7 @@
 version = 1
 
 [postgres_contracts]
-database_count = 108
+database_count = 110
 process_count = 2
 packages = [
     "codex-app-server",
@@ -73,6 +73,7 @@ packages = [
 'codex-rs/core/tests/suite/network_approval.rs::allowing_network_policy_amendment_persists_context_and_bypasses_prompt::cfg_attr(not(target_os="linux"),ignore="requires the trusted Linux proxy bridge")' = "out-of-boundary-platform"
 'codex-rs/core/tests/suite/network_approval.rs::ambiguous_unattributed_network_request_is_not_assigned_to_active_calls::cfg_attr(not(target_os="linux"),ignore="requires the trusted Linux proxy bridge")' = "out-of-boundary-platform"
 'codex-rs/core/tests/suite/network_approval.rs::cancelled_guardian_network_review_fails_closed_without_rewriting_turn_state::cfg_attr(not(target_os="linux"),ignore="requires the trusted Linux proxy bridge")' = "out-of-boundary-platform"
+'codex-rs/core/tests/suite/network_approval.rs::failed_network_policy_amendment_denies_request_and_does_not_approve_host::cfg_attr(not(target_os="linux"),ignore="requires the trusted Linux proxy bridge")' = "out-of-boundary-platform"
 'codex-rs/core/tests/suite/network_approval.rs::guardian_network_approval_preserves_action_and_outcome_routing::cfg_attr(not(target_os="linux"),ignore="requires the trusted Linux proxy bridge")' = "out-of-boundary-platform"
 'codex-rs/core/tests/suite/network_approval.rs::guardian_receives_exact_trigger_for_single_network_request::cfg_attr(not(target_os="linux"),ignore="requires the trusted Linux proxy bridge")' = "out-of-boundary-platform"
 'codex-rs/core/tests/suite/network_approval.rs::guardian_receives_exact_triggers_for_concurrent_network_requests::cfg_attr(not(target_os="linux"),ignore="requires the trusted Linux proxy bridge")' = "out-of-boundary-platform"
@@ -149,6 +150,7 @@ packages = [
 'codex-rs/state/src/postgres_contract_tests.rs::postgres_contract_stage1_output_data_matches_sqlite::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/state/src/postgres_contract_tests.rs::postgres_contract_stage1_startup_matches_sqlite_across_replicas::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/state/src/postgres_contract_tests.rs::postgres_contract_stale_thread_log_does_not_poison_mixed_batch::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
+'codex-rs/state/src/postgres_contract_tests.rs::postgres_contract_thread_sections_move_order_and_project_atomically::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/state/src/postgres_contract_tests.rs::postgres_contract_validation_is_read_only::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/state/src/postgres_external_agent_memory_import_contract_tests.rs::postgres_contract_concurrent_memory_imports_merge_at_generation_boundary::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/state/src/postgres_external_agent_memory_import_contract_tests.rs::postgres_contract_external_agent_memory_import_is_atomic_and_idempotent::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
@@ -168,6 +170,7 @@ packages = [
 'codex-rs/thread-store/src/lifecycle_contract_tests.rs::postgres_contract_subtree_delete_includes_a_concurrently_created_child::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/thread-store/src/list_threads_contract_tests.rs::postgres_contract_list_threads_matches_public_store_contract::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/thread-store/src/list_threads_contract_tests.rs::postgres_contract_project_list_keeps_tied_cursor_stable_across_replicas::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
+'codex-rs/thread-store/src/list_threads_contract_tests.rs::postgres_contract_section_position_pages_migrated_legacy_pins::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/thread-store/src/metadata_contract_tests.rs::postgres_contract_metadata_matches_public_thread_store_semantics::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/thread-store/src/model_context_contract_tests.rs::postgres_contract_latest_model_context_matches_public_store_contract::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/thread-store/src/model_context_contract_tests.rs::postgres_contract_model_context_rejects_decoded_item_over_token_cap::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
