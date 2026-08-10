@@ -17,6 +17,55 @@ remain the fallback.
   inherited jobs and widening matrices after their standard-runner paths are
   certified.
 
+## Electivus Linux And Windows Release
+
+`electivus-release.yml` publishes the fork's Linux and Windows GitHub Releases
+without invoking OpenAI-owned signing, package registries, R2, WinGet, or
+deployment environments. It builds these targets on standard GitHub-hosted
+runners:
+
+- `x86_64-unknown-linux-musl`
+- `aarch64-unknown-linux-musl`
+- `x86_64-pc-windows-msvc`
+- `aarch64-pc-windows-msvc`
+
+Linux binaries receive keyless Sigstore bundles. Windows binaries are unsigned
+and can display an unverified-publisher warning. macOS is intentionally outside
+this release boundary. Public binary and package filenames remain compatible
+with upstream names such as `codex-x86_64-unknown-linux-musl.zst`; only the Git
+tag and GitHub Release identity use the Electivus prefix.
+
+Keep `workspace.package.version` at `0.0.0` on normal development branches.
+Create a release-only commit from the exact merged source commit that changes
+only that version in `codex-rs/Cargo.toml`. Leave `codex-rs/Cargo.lock`
+unchanged and do not merge the release commit into the normal branch:
+
+```bash
+git switch --detach <source-commit>
+# Change only workspace.package.version in codex-rs/Cargo.toml to 0.1.0.
+git add codex-rs/Cargo.toml
+git commit -m "Release 0.1.0"
+git tag -a electivus-v0.1.0 -m "Release 0.1.0"
+git push origin electivus-v0.1.0
+```
+
+The tag push starts `electivus-release.yml`. Its `electivus-v` version must
+match the workspace version, and the tagged commit must be a one-parent
+release-only commit whose parent still reports `0.0.0`. A version containing a
+suffix, such as `0.148.0-alpha.5`, is published as a GitHub prerelease and never
+changes the repository's latest stable release. A version without a suffix is
+published as the latest stable release.
+
+Use the release commit message as the release notes. For an upstream
+synchronization release, record at least the immutable upstream commit, its
+`rust-v` release, the synchronization pull request, the merged fork source
+commit, and a comparison URL. The workflow appends the exact release commit
+and the Linux/Windows signing boundary.
+
+The terminal verification job checks the stable/prerelease classification,
+the absence of macOS assets, and required Linux and Windows package and binary
+assets before the workflow is considered successful.
+
 ## Manual Unsigned Windows Release
 
 `rust-release-windows-unsigned.yml` builds the Windows x64 and ARM64 release
@@ -56,8 +105,10 @@ inherited full-release workflow, which owns the upstream `rust-v*` tag family.
 
 The default stores unsigned target archives and Python runtime wheels as
 workflow artifacts for 30 days. Set `publish_release=true` only when those
-assets should also be attached to a public GitHub prerelease; the workflow
-never marks an unsigned release as latest.
+assets should also be attached to a public Windows-only GitHub prerelease; the
+workflow never marks an unsigned release as latest. The combined Electivus
+release calls this workflow with `publish_release=false` and publishes the
+Windows output together with Linux assets in one release.
 
 ## Merge Gate
 
