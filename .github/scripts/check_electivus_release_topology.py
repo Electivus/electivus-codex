@@ -48,6 +48,13 @@ def validate_topology(release: str, windows: str, documentation: str) -> list[st
             in windows,
         ),
         (
+            "Windows pinned rusty_v8 artifacts",
+            "uses: ./.github/actions/setup-rusty-v8" in windows
+            and "target: ${{ matrix.target }}" in windows
+            and windows.index("uses: ./.github/actions/setup-rusty-v8")
+            < windows.index("- name: Cargo build"),
+        ),
+        (
             "release-only source invariant",
             'source_version}" != "0.0.0"' in release
             and 'changed_files[0]}" != "codex-rs/Cargo.toml"' in release

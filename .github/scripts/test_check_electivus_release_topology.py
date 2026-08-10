@@ -39,6 +39,15 @@ class ElectivusReleaseTopologyTests(unittest.TestCase):
                 release.replace("publish_release: false", "publish_release: true", 1),
             ),
             (
+                "Windows pinned rusty_v8 artifacts",
+                1,
+                windows.replace(
+                    "uses: ./.github/actions/setup-rusty-v8",
+                    "uses: ./missing-setup-rusty-v8",
+                    1,
+                ),
+            ),
+            (
                 "upstream-compatible public filenames",
                 0,
                 release.replace(
