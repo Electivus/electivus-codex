@@ -1,10 +1,20 @@
 name: rust-release-windows-unsigned
 
 on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Existing windows-v* or electivus-v* tag whose commit should be built.
+        required: true
+        type: string
+      publish_release:
+        description: Attach the unsigned Windows assets to a GitHub prerelease.
+        required: true
+        type: boolean
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing windows-v* tag whose commit should be built.
+        description: Existing windows-v* or electivus-v* tag whose commit should be built.
         required: true
         type: string
       publish_release:
@@ -16,7 +26,9 @@ on:
 permissions: {}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.release_tag }}
+  # Keep this distinct from callers such as electivus-release to avoid a
+  # reusable-workflow concurrency collision.
+  group: rust-release-windows-unsigned-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 env:
@@ -46,12 +58,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ ! "$RELEASE_TAG" =~ ^windows-v[0-9]+\.[0-9]+\.[0-9]+(-(alpha(\.[0-9]+){0,2}|beta(\.[0-9]+)?))?$ ]]; then
-            echo "Release tag '$RELEASE_TAG' does not match the supported windows-v* format" >&2
+          if [[ ! "$RELEASE_TAG" =~ ^(windows|electivus)-v[0-9]+\.[0-9]+\.[0-9]+(-(alpha(\.[0-9]+){0,2}|beta(\.[0-9]+)?))?$ ]]; then
+            echo "Release tag '$RELEASE_TAG' does not match a supported windows-v* or electivus-v* format" >&2
             exit 1
           fi
 
-          version="${RELEASE_TAG#windows-v}"
+          version="${RELEASE_TAG#*-v}"
           cargo_version="$(sed -nE 's/^version = "([^"]+)"/\1/p' codex-rs/Cargo.toml | head -n1)"
           if [[ "$version" != "$cargo_version" ]]; then
             echo "Release tag version $version does not match Cargo version $cargo_version" >&2
@@ -292,6 +304,7 @@ jobs:
           target="${{ matrix.target }}"
           export dest repo_root target
 
+          # shellcheck disable=SC2016
           printf '%s\0' "$dest"/*.exe |
             xargs -0 -n1 -P2 bash -c '
             set -euo pipefail
