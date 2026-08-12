@@ -549,22 +549,24 @@ static ORIGINAL_IMAGE_ESTIMATE_CACHE: LazyLock<BlockingLruCache<[u8; 20], Option
 
 fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
     match item {
-        ResponseItem::Reasoning {
+        item @ ResponseItem::Reasoning {
             encrypted_content: Some(content),
             ..
         }
-        | ResponseItem::Compaction {
+        | item @ ResponseItem::Compaction {
             encrypted_content: content,
             ..
         }
-        | ResponseItem::ContextCompaction {
+        | item @ ResponseItem::ContextCompaction {
             encrypted_content: Some(content),
             ..
-        } => i64::try_from(estimate_reasoning_length(content.len())).unwrap_or(i64::MAX),
+        } => serialized_response_item_bytes(item)
+            .saturating_sub(i64::try_from(content.len()).unwrap_or(i64::MAX))
+            .saturating_add(
+                i64::try_from(estimate_reasoning_length(content.len())).unwrap_or(i64::MAX),
+            ),
         item => {
-            let raw = serde_json::to_string(item)
-                .map(|serialized| i64::try_from(serialized.len()).unwrap_or(i64::MAX))
-                .unwrap_or_default();
+            let raw = serialized_response_item_bytes(item);
             let (image_payload_bytes, image_replacement_bytes) =
                 image_data_url_estimate_adjustment(item);
             let (audio_payload_bytes, audio_replacement_bytes) =
@@ -583,6 +585,12 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
                 .saturating_add(encrypted_replacement_bytes)
         }
     }
+}
+
+fn serialized_response_item_bytes(item: &ResponseItem) -> i64 {
+    serde_json::to_string(item)
+        .map(|serialized| i64::try_from(serialized.len()).unwrap_or(i64::MAX))
+        .unwrap_or(i64::MAX)
 }
 
 /// Returns the base64 payload byte length for inline image data URLs that are

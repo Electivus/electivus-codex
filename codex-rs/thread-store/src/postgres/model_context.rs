@@ -1,6 +1,5 @@
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::ThreadHistoryMode;
-use codex_protocol::protocol::TruncationPolicy;
 use codex_rollout::ModelContextScan;
 use codex_rollout::ModelContextScanProgress;
 use futures::TryStreamExt;
@@ -20,11 +19,6 @@ use crate::ThreadStoreResult;
 
 const MAX_MODEL_CONTEXT_ITEMS: usize = 10_000;
 const MAX_MODEL_CONTEXT_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_MODEL_CONTEXT_ITEM_TOKENS: usize = 10_000;
-
-fn max_model_context_item_bytes() -> usize {
-    TruncationPolicy::Tokens(MAX_MODEL_CONTEXT_ITEM_TOKENS).byte_budget()
-}
 
 struct ModelContextBudget {
     thread_id: codex_protocol::ThreadId,
@@ -85,11 +79,7 @@ fn bounded_item_from_row(
     let item: Option<Value> = row
         .try_get("item")
         .map_err(|error| database_error("load latest model context", error))?;
-    let item = item.ok_or_else(|| {
-        budget.limit_error(&format!(
-            "an individual history item exceeds {MAX_MODEL_CONTEXT_ITEM_TOKENS} estimated tokens"
-        ))
-    })?;
+    let item = item.ok_or_else(|| budget.limit_error("an individual history item is too large"))?;
     serde_json::from_value(item).map_err(serialization_error)
 }
 
@@ -130,7 +120,7 @@ pub(super) async fn load_latest_model_context(
         store.tables.history
     )))
     .bind(params.thread_id.to_string())
-    .bind(i64::try_from(max_model_context_item_bytes()).unwrap_or(i64::MAX))
+    .bind(i64::try_from(MAX_MODEL_CONTEXT_BYTES).unwrap_or(i64::MAX))
     .fetch_optional(transaction.as_mut())
     .await
     .map_err(|error| database_error("load latest model context", error))?
@@ -159,63 +149,59 @@ pub(super) async fn load_latest_model_context(
 
     let items = if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Paginated) {
         let mut scan = ModelContextScan::default();
+        let mut reached_bounded_cutoff = false;
         let mut rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT ordinal, CASE WHEN octet_length(item::text) <= $3 THEN item END AS item, \
              octet_length(item::text)::bigint AS item_bytes \
-             FROM {} WHERE thread_id = $1 ORDER BY ordinal DESC LIMIT $2",
+             FROM {} WHERE thread_id = $1 AND ordinal > 0 ORDER BY ordinal DESC LIMIT $2",
             store.tables.history
         )))
         .bind(params.thread_id.to_string())
-        .bind(i64::try_from(MAX_MODEL_CONTEXT_ITEMS + 1).unwrap_or(i64::MAX))
-        .bind(i64::try_from(max_model_context_item_bytes()).unwrap_or(i64::MAX))
+        .bind(i64::try_from(MAX_MODEL_CONTEXT_ITEMS).unwrap_or(i64::MAX))
+        .bind(i64::try_from(MAX_MODEL_CONTEXT_BYTES).unwrap_or(i64::MAX))
         .fetch(transaction.as_mut());
         while let Some(row) = rows
             .try_next()
             .await
             .map_err(|error| database_error("load latest model context", error))?
         {
-            let ordinal: i64 = row
-                .try_get("ordinal")
+            let item_bytes: i64 = row
+                .try_get("item_bytes")
                 .map_err(|error| database_error("load latest model context", error))?;
-            if ordinal != 0 {
-                let item_bytes: i64 = row
-                    .try_get("item_bytes")
-                    .map_err(|error| database_error("load latest model context", error))?;
-                budget.account_item(item_bytes)?;
-            }
+            budget.account_item(item_bytes)?;
             let item = bounded_item_from_row(&row, &budget)?;
             if matches!(scan.push(item), ModelContextScanProgress::Complete) {
+                reached_bounded_cutoff = true;
                 break;
             }
         }
         drop(rows);
-        scan.finish(session_meta)
+        let mut items = scan.finish(session_meta.clone());
+        if !reached_bounded_cutoff {
+            items.insert(0, RolloutItem::SessionMeta(session_meta));
+        }
+        items
     } else {
         let mut rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT ordinal, CASE WHEN octet_length(item::text) <= $3 THEN item END AS item, \
              octet_length(item::text)::bigint AS item_bytes \
-             FROM {} WHERE thread_id = $1 ORDER BY ordinal ASC LIMIT $2",
+             FROM {} WHERE thread_id = $1 AND ordinal > 0 ORDER BY ordinal ASC LIMIT $2",
             store.tables.history
         )))
         .bind(params.thread_id.to_string())
-        .bind(i64::try_from(MAX_MODEL_CONTEXT_ITEMS + 1).unwrap_or(i64::MAX))
-        .bind(i64::try_from(max_model_context_item_bytes()).unwrap_or(i64::MAX))
+        .bind(i64::try_from(MAX_MODEL_CONTEXT_ITEMS).unwrap_or(i64::MAX))
+        .bind(i64::try_from(MAX_MODEL_CONTEXT_BYTES).unwrap_or(i64::MAX))
         .fetch(transaction.as_mut());
-        let mut items = Vec::new();
+        let mut items = vec![RolloutItem::SessionMeta(session_meta)];
         while let Some(row) = rows
             .try_next()
             .await
             .map_err(|error| database_error("load latest model context", error))?
         {
-            let ordinal: i64 = row
-                .try_get("ordinal")
+            let item_bytes: i64 = row
+                .try_get("item_bytes")
                 .map_err(|error| database_error("load latest model context", error))?;
-            if ordinal != 0 {
-                let item_bytes: i64 = row
-                    .try_get("item_bytes")
-                    .map_err(|error| database_error("load latest model context", error))?;
-                budget.account_item(item_bytes)?;
-            }
+            budget.account_item(item_bytes)?;
             items.push(bounded_item_from_row(&row, &budget)?);
         }
         drop(rows);

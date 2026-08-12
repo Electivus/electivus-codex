@@ -2046,7 +2046,9 @@ async fn resume_candidate_matches_cwd(
             | RolloutItem::EventMsg(_) => None,
         })
     {
-        return cwd_matches(latest_turn_context_cwd.as_path(), cwd);
+        return latest_turn_context_cwd
+            .to_abs_path()
+            .is_ok_and(|turn_context_cwd| cwd_matches(turn_context_cwd.as_path(), cwd));
     }
 
     metadata::extract_metadata_from_rollout(rollout_path, default_provider)

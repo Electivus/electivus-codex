@@ -116,6 +116,7 @@ use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
 use crate::feedback_tags;
+use crate::model_request_limits::validate_model_request;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::subagent_header_value;
 use crate::util::emit_feedback_auth_recovery_tags;
@@ -940,6 +941,12 @@ impl ModelClient {
             text,
             client_metadata: Some(responses_metadata.client_metadata()),
         };
+        let model_visible_tools = if model_info.use_responses_lite {
+            &[]
+        } else {
+            prompt.tools.as_slice()
+        };
+        validate_model_request(&request, model_visible_tools)?;
         Ok(request)
     }
 

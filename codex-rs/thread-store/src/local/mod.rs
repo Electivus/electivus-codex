@@ -583,6 +583,7 @@ mod tests {
     use codex_protocol::protocol::TurnContextItem;
     use codex_protocol::protocol::TurnStartedEvent;
     use codex_protocol::protocol::UserMessageEvent;
+    use codex_utils_path_uri::PathUri;
     use tempfile::TempDir;
 
     use super::*;
@@ -815,13 +816,13 @@ mod tests {
         let turn_context = |model: &str, approval_policy| {
             RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
-                cwd: serde_json::from_value(serde_json::json!(cwd)).expect("absolute cwd"),
+                cwd: PathUri::from_host_native_path(&cwd).expect("absolute cwd"),
                 workspace_roots: None,
                 current_date: None,
                 timezone: None,
                 approval_policy,
                 approvals_reviewer: None,
-                sandbox_policy: SandboxPolicy::DangerFullAccess,
+                sandbox_policy: SandboxPolicy::DangerFullAccess.into(),
                 permission_profile: None,
                 network: None,
                 file_system_sandbox_policy: None,

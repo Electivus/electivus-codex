@@ -407,19 +407,22 @@ impl TurnContext {
     pub(crate) fn to_turn_context_item(&self) -> TurnContextItem {
         let workspace_roots = self.config.effective_workspace_roots();
         #[allow(deprecated)]
-        let cwd = self.cwd.clone();
+        let cwd = PathUri::from_abs_path(&self.cwd);
         TurnContextItem {
             turn_id: Some(self.sub_id.clone()),
             cwd,
-            workspace_roots: (!workspace_roots.is_empty()).then_some(workspace_roots),
+            workspace_roots: (!workspace_roots.is_empty())
+                .then(|| workspace_roots.iter().map(PathUri::from_abs_path).collect()),
             current_date: self.current_date.clone(),
             timezone: self.timezone.clone(),
             approval_policy: self.approval_policy(),
             approvals_reviewer: Some(self.config.approvals_reviewer),
-            sandbox_policy: self.sandbox_policy(),
-            permission_profile: Some(self.permission_profile()),
+            sandbox_policy: self.sandbox_policy().into(),
+            permission_profile: Some(self.permission_profile().into()),
             network: self.turn_context_network_item(),
-            file_system_sandbox_policy: self.non_legacy_file_system_sandbox_policy(),
+            file_system_sandbox_policy: self
+                .non_legacy_file_system_sandbox_policy()
+                .map(Into::into),
             model: self.model_info.slug.clone(),
             comp_hash: self.model_info.comp_hash.clone(),
             personality: self.personality,

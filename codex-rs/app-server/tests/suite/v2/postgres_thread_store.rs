@@ -27,6 +27,7 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::user_input::UserInput;
 use codex_state::PostgresNamespaceAction;
@@ -62,6 +63,9 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
     let writer = store::PostgresThreadStore::from_runtime(Arc::clone(&writer_runtime))?;
     let thread_id = ThreadId::new();
     seed_thread(&writer, thread_id, codex_home.path(), "openai").await?;
+    let foreign_cwd = fixture
+        .append_foreign_host_context(thread_id, codex_home.path(), &writer)
+        .await?;
 
     let thread_store: Arc<dyn store::ThreadStore> = Arc::new(
         store::PostgresThreadStore::from_runtime(Arc::clone(&reader_runtime))?,
@@ -116,6 +120,7 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
     .await?;
     assert_eq!(read.thread.id, thread_id);
     assert_eq!(read.thread.preview, "database native needle");
+    assert_eq!(read.thread.cwd.as_str(), foreign_cwd);
 
     let first_turn: api::ThreadTurnsListResponse = request(
         &client,
@@ -326,7 +331,7 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
     );
     assert_eq!(persisted_fork.preview, "database native needle");
     assert_eq!(persisted_fork.rollout_path, None);
-    assert_eq!(persisted_fork.cwd, codex_home.path());
+    assert_eq!(persisted_fork.cwd, Path::new(forked.thread.cwd.as_str()));
     assert_eq!(persisted_fork.model_provider, "openai");
     assert_eq!(
         persisted_fork.history_mode,
@@ -335,6 +340,43 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
     let persisted_history = persisted_fork
         .history
         .expect("persistent fork should expose canonical PostgreSQL history");
+    let fork_context = verifier
+        .load_latest_model_context(store::LoadThreadHistoryParams {
+            thread_id: forked_thread_id,
+            include_archived: false,
+        })
+        .await?;
+    assert!(matches!(
+        fork_context.items.first(),
+        Some(RolloutItem::SessionMeta(meta)) if meta.meta.id == forked_thread_id
+    ));
+    let foreign_context = persisted_history
+        .items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::TurnContext(context) => Some(context),
+            _ => None,
+        })
+        .context("foreign turn context must survive public resume and fork")?;
+    let serialized_context = serde_json::to_value(foreign_context)?;
+    assert_eq!(serialized_context["cwd"], json!(foreign_cwd));
+    assert_eq!(serialized_context["workspace_roots"][0], json!(foreign_cwd));
+    assert_eq!(
+        serialized_context["sandbox_policy"]["writable_roots"][0],
+        json!(foreign_cwd)
+    );
+    assert_eq!(
+        serialized_context["permission_profile"]["file_system"]["entries"][0]["path"]["path"],
+        json!(foreign_cwd)
+    );
+    assert_eq!(
+        serialized_context["file_system_sandbox_policy"]["entries"][0]["path"]["path"],
+        json!(foreign_cwd)
+    );
+    assert_eq!(
+        foreign_context.permission_profile(),
+        codex_protocol::models::PermissionProfile::read_only()
+    );
     assert_dynamic_tools(&persisted_history.items);
     assert_eq!(
         persisted_history
@@ -1119,6 +1161,130 @@ impl PostgresFixture {
         transaction.commit().await?;
         pool.close().await;
         Ok(())
+    }
+
+    async fn append_foreign_host_context(
+        &self,
+        thread_id: ThreadId,
+        cwd: &Path,
+        writer: &store::PostgresThreadStore,
+    ) -> Result<&'static str> {
+        let foreign_cwd = if cfg!(windows) {
+            "/home/k3/git/scrape-golden"
+        } else {
+            r"C:\Users\msilvane\git\scrape-golden"
+        };
+        let template = TurnContextItem {
+            turn_id: Some("foreign-host-context".to_string()),
+            cwd: AbsolutePathBuf::try_from(cwd.to_path_buf())?.into(),
+            workspace_roots: None,
+            current_date: None,
+            timezone: None,
+            approval_policy: codex_protocol::protocol::AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess.into(),
+            permission_profile: None,
+            network: None,
+            file_system_sandbox_policy: None,
+            model: "mock-model".to_string(),
+            comp_hash: None,
+            personality: None,
+            collaboration_mode: None,
+            multi_agent_version: None,
+            multi_agent_mode: None,
+            realtime_active: None,
+            effort: None,
+            summary: codex_protocol::config_types::ReasoningSummary::Auto,
+        };
+        writer
+            .resume_thread(store::ResumeThreadParams {
+                thread_id,
+                rollout_path: None,
+                history: None,
+                include_archived: false,
+                metadata: store::ThreadPersistenceMetadata {
+                    cwd: Some(cwd.to_path_buf()),
+                    model_provider: "openai".to_string(),
+                    memory_mode: ThreadMemoryMode::Enabled,
+                },
+            })
+            .await?;
+        writer
+            .append_items(store::AppendThreadItemsParams {
+                thread_id,
+                items: vec![RolloutItem::TurnContext(template)],
+            })
+            .await?;
+        writer.shutdown_thread(thread_id).await?;
+        let foreign_context = json!({
+            "type": "turn_context",
+            "payload": {
+                "turn_id": "foreign-host-context",
+                "cwd": foreign_cwd,
+                "workspace_roots": [foreign_cwd],
+                "approval_policy": "never",
+                "sandbox_policy": {
+                    "type": "workspace-write",
+                    "writable_roots": [foreign_cwd],
+                    "network_access": false,
+                    "exclude_tmpdir_env_var": false,
+                    "exclude_slash_tmp": false
+                },
+                "permission_profile": {
+                    "type": "managed",
+                    "file_system": {
+                        "type": "restricted",
+                        "entries": [{
+                            "path": { "type": "path", "path": foreign_cwd },
+                            "access": "write"
+                        }]
+                    },
+                    "network": "restricted"
+                },
+                "file_system_sandbox_policy": {
+                    "kind": "restricted",
+                    "entries": [{
+                        "path": { "type": "path", "path": foreign_cwd },
+                        "access": "write"
+                    }]
+                },
+                "model": "mock-model",
+                "summary": "auto"
+            }
+        });
+        let pool = sqlx::PgPool::connect(&self.database_url).await?;
+        let schema = &self.schema;
+        sqlx::query(AssertSqlSafe(format!(
+            "UPDATE \"{schema}\".thread_history \
+             SET item = $2 \
+             WHERE thread_id = $1 \
+               AND item ->> 'type' = 'turn_context' \
+               AND item #>> '{{payload,turn_id}}' = 'foreign-host-context'"
+        )))
+        .bind(thread_id.to_string())
+        .bind(foreign_context)
+        .execute(&pool)
+        .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "UPDATE \"{schema}\".thread_history \
+             SET item = jsonb_set(item, '{{payload,cwd}}', to_jsonb($2::text), false) \
+             WHERE thread_id = $1 AND ordinal = 0"
+        )))
+        .bind(thread_id.to_string())
+        .bind(foreign_cwd)
+        .execute(&pool)
+        .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "UPDATE \"{schema}\".threads \
+             SET projection = jsonb_set(projection, '{{cwd}}', to_jsonb($2::text), false) \
+             WHERE thread_id = $1"
+        )))
+        .bind(thread_id.to_string())
+        .bind(foreign_cwd)
+        .execute(&pool)
+        .await?;
+        pool.close().await;
+        Ok(foreign_cwd)
     }
 
     pub(super) async fn cleanup(&self) -> Result<()> {

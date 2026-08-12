@@ -15,6 +15,7 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::TurnContextItem;
 use codex_utils_absolute_path::test_support::PathExt;
+use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
@@ -81,13 +82,13 @@ async fn postgres_contract_metadata_matches_public_thread_store_semantics()
             thread_id: cwd_thread_id,
             items: vec![RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("latest-turn".to_string()),
-                cwd: latest_cwd.clone().try_into()?,
+                cwd: PathUri::from_host_native_path(&latest_cwd)?,
                 workspace_roots: None,
                 current_date: None,
                 timezone: None,
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: None,
-                sandbox_policy: SandboxPolicy::DangerFullAccess,
+                sandbox_policy: SandboxPolicy::DangerFullAccess.into(),
                 permission_profile: None,
                 network: None,
                 file_system_sandbox_policy: None,

@@ -198,7 +198,7 @@ pub(crate) fn thread_settings_from_config_snapshot(
 
 pub(crate) fn thread_settings_from_core_snapshot(
     snapshot: codex_protocol::protocol::ThreadSettingsSnapshot,
-) -> ThreadSettings {
+) -> std::io::Result<ThreadSettings> {
     let codex_protocol::protocol::ThreadSettingsSnapshot {
         model,
         model_provider_id,
@@ -213,12 +213,16 @@ pub(crate) fn thread_settings_from_core_snapshot(
         personality,
         collaboration_mode,
     } = snapshot;
+    let cwd = cwd.to_abs_path()?;
+    let permission_profile = permission_profile
+        .to_native()
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
     let sandbox_policy = codex_sandboxing::compatibility_sandbox_policy_for_permission_profile(
         &permission_profile,
         cwd.as_path(),
     )
     .into();
-    ThreadSettings {
+    Ok(ThreadSettings {
         sandbox_policy,
         cwd,
         approval_policy: approval_policy.into(),
@@ -234,7 +238,7 @@ pub(crate) fn thread_settings_from_core_snapshot(
         collaboration_mode,
         multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
         personality,
-    }
+    })
 }
 
 #[cfg(test)]

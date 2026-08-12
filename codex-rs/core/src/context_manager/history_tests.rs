@@ -246,13 +246,14 @@ fn reference_context_item() -> TurnContextItem {
                 .expect("current directory")
                 .join("reference-cwd"),
         )
-        .expect("absolute reference cwd"),
+        .expect("absolute reference cwd")
+        .into(),
         workspace_roots: None,
         current_date: Some("2026-03-23".to_string()),
         timezone: Some("America/Los_Angeles".to_string()),
         approval_policy: AskForApproval::OnRequest,
         approvals_reviewer: None,
-        sandbox_policy: SandboxPolicy::new_read_only_policy(),
+        sandbox_policy: SandboxPolicy::new_read_only_policy().into(),
         permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,
@@ -381,17 +382,19 @@ fn non_last_reasoning_tokens_return_zero_when_no_user_messages() {
 
 #[test]
 fn non_last_reasoning_tokens_ignore_entries_after_last_user() {
+    let first_reasoning = reasoning_with_encrypted_content(/*len*/ 900);
+    let second_reasoning = reasoning_with_encrypted_content(/*len*/ 1_000);
     let history = create_history_with_items(vec![
-        reasoning_with_encrypted_content(/*len*/ 900),
+        first_reasoning.clone(),
         user_msg("first"),
-        reasoning_with_encrypted_content(/*len*/ 1_000),
+        second_reasoning.clone(),
         user_msg("second"),
         reasoning_with_encrypted_content(/*len*/ 2_000),
     ]);
-    // first: (900 * 0.75 - 650) / 4 = 6.25 tokens
-    // second: (1000 * 0.75 - 650) / 4 = 25 tokens
-    // first + second = 62.5
-    assert_eq!(history.get_non_last_reasoning_items_tokens(), 32);
+    let expected = estimate_item_token_count(&first_reasoning)
+        .saturating_add(estimate_item_token_count(&second_reasoning));
+
+    assert_eq!(history.get_non_last_reasoning_items_tokens(), expected);
 }
 
 #[test]

@@ -1190,7 +1190,13 @@ pub(crate) async fn apply_bespoke_event_handling(
         EventMsg::ThreadQueueChanged(_) => {}
         EventMsg::ThreadSettingsApplied(thread_settings_event) => {
             let thread_settings =
-                thread_settings_from_core_snapshot(thread_settings_event.thread_settings);
+                match thread_settings_from_core_snapshot(thread_settings_event.thread_settings) {
+                    Ok(thread_settings) => thread_settings,
+                    Err(err) => {
+                        tracing::warn!(%err, "ignored thread settings event with a foreign cwd");
+                        return;
+                    }
+                };
             let changed = {
                 let mut state = thread_state.lock().await;
                 state.note_thread_settings(thread_settings.clone())

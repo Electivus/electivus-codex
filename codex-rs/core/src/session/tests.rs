@@ -3441,13 +3441,13 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
         #[allow(deprecated)]
-        cwd: turn_context.cwd.clone(),
+        cwd: turn_context.cwd.clone().into(),
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
-        sandbox_policy: turn_context.sandbox_policy(),
+        sandbox_policy: turn_context.sandbox_policy().into(),
         permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,
@@ -9467,7 +9467,7 @@ async fn turn_context_item_stores_local_cwd() {
 
     #[allow(deprecated)]
     let local_cwd = turn_context.cwd.clone();
-    assert_eq!(turn_context.to_turn_context_item().cwd, local_cwd);
+    assert_eq!(turn_context.to_turn_context_item().cwd, local_cwd.into());
 }
 
 #[tokio::test]
@@ -9479,7 +9479,7 @@ async fn turn_context_item_omits_legacy_equivalent_file_system_sandbox_policy() 
     assert_eq!(item.file_system_sandbox_policy, None);
     assert_eq!(
         item.permission_profile,
-        Some(turn_context.permission_profile())
+        Some(turn_context.permission_profile().into())
     );
 }
 
@@ -9501,11 +9501,11 @@ async fn turn_context_item_stores_split_file_system_sandbox_policy_when_differen
 
     assert_eq!(
         item.file_system_sandbox_policy,
-        Some(file_system_sandbox_policy)
+        Some(file_system_sandbox_policy.into())
     );
     assert_eq!(
         item.permission_profile,
-        Some(turn_context.permission_profile())
+        Some(turn_context.permission_profile().into())
     );
 }
 
@@ -9686,7 +9686,7 @@ async fn record_context_updates_and_set_reference_context_item_persists_split_fi
     });
     assert_eq!(
         persisted_file_system_sandbox_policy,
-        Some(file_system_sandbox_policy)
+        Some(file_system_sandbox_policy.into())
     );
 }
 
