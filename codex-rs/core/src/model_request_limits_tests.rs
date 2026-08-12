@@ -57,7 +57,7 @@ fn accepts_bounded_final_request_items() {
     let request = request(
         vec![message("hello".to_string())],
         "bounded instructions",
-        None,
+        /*text*/ None,
     );
     validate_model_request(
         &request,
@@ -71,7 +71,7 @@ fn rejects_oversized_final_history_item() {
     let request = request(
         vec![message("x".repeat(max_model_request_item_bytes()))],
         "",
-        None,
+        /*text*/ None,
     );
     let error = validate_model_request(&request, &[])
         .expect_err("message envelope must remain below the item limit");
@@ -91,7 +91,7 @@ fn rejects_oversized_visible_summary_with_encrypted_reasoning() {
         internal_chat_message_metadata_passthrough: None,
     };
 
-    let error = validate_model_request(&request(vec![reasoning], "", None), &[])
+    let error = validate_model_request(&request(vec![reasoning], "", /*text*/ None), &[])
         .expect_err("visible reasoning fields must remain below the item limit");
 
     assert!(error.to_string().contains("individual history item"));
@@ -109,7 +109,7 @@ fn rejects_oversized_final_namespace_tool() {
         ],
     });
 
-    let error = validate_model_request(&request(Vec::new(), "", None), &[namespace])
+    let error = validate_model_request(&request(Vec::new(), "", /*text*/ None), &[namespace])
         .expect_err("merged namespace must remain below the item limit");
 
     assert!(error.to_string().contains("individual tool definition"));
@@ -128,7 +128,7 @@ fn rejects_oversized_responses_lite_tools_envelope() {
         })],
     };
 
-    let error = validate_model_request(&request(vec![input], "", None), &[])
+    let error = validate_model_request(&request(vec![input], "", /*text*/ None), &[])
         .expect_err("Responses Lite tools share one model-visible input item");
 
     assert!(error.to_string().contains("individual history item"));
@@ -138,7 +138,7 @@ fn rejects_oversized_responses_lite_tools_envelope() {
 fn rejects_excessive_final_item_count() {
     let items = vec![message(String::new()); MAX_MODEL_REQUEST_ITEMS + 1];
 
-    let error = validate_model_request(&request(items, "", None), &[])
+    let error = validate_model_request(&request(items, "", /*text*/ None), &[])
         .expect_err("request cardinality must remain bounded");
 
     assert!(
@@ -164,19 +164,19 @@ fn accepts_model_sized_image_despite_large_inline_payload() {
         internal_chat_message_metadata_passthrough: None,
     };
 
-    validate_model_request(&request(vec![image], "", None), &[])
+    validate_model_request(&request(vec![image], "", /*text*/ None), &[])
         .expect("image payload uses its model-visible token estimate");
 }
 
 #[test]
 fn rejects_oversized_output_schema() {
     let text = codex_api::create_text_param_for_request(
-        None,
+        /*verbosity*/ None,
         &Some(json!({
             "type": "object",
             "description": "x".repeat(max_model_request_item_bytes())
         })),
-        true,
+        /*output_schema_strict*/ true,
     );
 
     let error = validate_model_request(&request(Vec::new(), "", text), &[])
@@ -189,7 +189,7 @@ fn rejects_oversized_output_schema() {
 fn rejects_oversized_serialized_request() {
     let items = (0..500).map(|_| message("x".repeat(35_000))).collect();
 
-    let error = validate_model_request(&request(items, "", None), &[])
+    let error = validate_model_request(&request(items, "", /*text*/ None), &[])
         .expect_err("serialized request must remain below the total byte limit");
 
     assert!(
