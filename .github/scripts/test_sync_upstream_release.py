@@ -41,7 +41,6 @@ class RecordingPullRequests:
     def __init__(self, pull_requests: list[PullRequest] | None = None) -> None:
         self.created: list[PullRequestIntent] = []
         self.pull_requests = pull_requests or []
-        self.reopened: list[int] = []
 
     def open_synchronization(self):
         return next(
@@ -49,16 +48,6 @@ class RecordingPullRequests:
                 pull_request
                 for pull_request in self.pull_requests
                 if pull_request.state == "open"
-            ),
-            None,
-        )
-
-    def closed_synchronization(self):
-        return next(
-            (
-                pull_request
-                for pull_request in self.pull_requests
-                if pull_request.state == "closed" and not pull_request.merged
             ),
             None,
         )
@@ -77,17 +66,19 @@ class RecordingPullRequests:
         self.created.append(intent)
         return 1, "https://example.test/pull/1"
 
-    def reopen(self, number: int):
-        self.reopened.append(number)
-        return number, f"https://example.test/pull/{number}"
-
 
 class SyncUpstreamReleaseTest(unittest.TestCase):
-    def test_clean_sync_selects_latest_publication_and_preserves_topology(self) -> None:
+    def test_clean_sync_selects_greatest_semantic_version_and_preserves_topology(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))
-            older = fixture.release("rust-v9.0.0", "9.0.0", "older")
-            selected = fixture.release("rust-v2.0.0-alpha.1", "2.0.0", "selected")
+            published_later = fixture.release(
+                "rust-v0.147.0-alpha.6.6", "0.147.0", "published later"
+            )
+            selected = fixture.release(
+                "rust-v0.148.0-alpha.6", "0.148.0", "selected"
+            )
             fork_head = fixture.fork_head
             pull_requests = RecordingPullRequests()
 
@@ -102,14 +93,14 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                             url="https://example.test/draft",
                         ),
                         Release(
-                            tag=older.tag,
-                            published_at="2026-07-23T00:00:00Z",
+                            tag=published_later.tag,
+                            published_at="2026-08-10T21:52:42Z",
                             draft=False,
-                            url=older.url,
+                            url=published_later.url,
                         ),
                         Release(
                             tag=selected.tag,
-                            published_at="2026-07-24T00:00:00Z",
+                            published_at="2026-08-10T10:17:08Z",
                             draft=False,
                             url=selected.url,
                             prerelease=True,
@@ -170,6 +161,84 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             self.assertIn("0.0.0", intent.body)
             self.assertIn("maintainer approval", intent.body)
 
+    def test_automatic_selection_ignores_invalid_semantic_version_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            selected = fixture.release("rust-v1.0.0", "1.0.0", "selected")
+            invalid = fixture.release("rust-v-channel", "2.0.0", "invalid")
+            pull_requests = RecordingPullRequests()
+
+            result = synchronize(
+                fixture.config(),
+                FixtureReleases(
+                    [
+                        Release(
+                            selected.tag,
+                            "2026-07-20T00:00:00Z",
+                            False,
+                            selected.url,
+                        ),
+                        Release(
+                            invalid.tag,
+                            "2026-07-21T00:00:00Z",
+                            False,
+                            invalid.url,
+                        ),
+                    ]
+                ),
+                pull_requests,
+            )
+
+            self.assertEqual(
+                result,
+                SyncResult(
+                    outcome="pr-created-clean",
+                    tag=selected.tag,
+                    release_commit=selected.commit,
+                    branch=f"automation/upstream-sync/{selected.commit}",
+                    preparation_mode="clean",
+                    pr_number=1,
+                    pr_url="https://example.test/pull/1",
+                ),
+            )
+
+    def test_automatic_selection_uses_semantic_version_prerelease_precedence(
+        self,
+    ) -> None:
+        cases = (
+            ("rust-v1.0.0-alpha.9", "rust-v1.0.0-alpha.10"),
+            ("rust-v1.0.0-alpha.10", "rust-v1.0.0-alpha.beta"),
+            ("rust-v1.0.0-alpha", "rust-v1.0.0"),
+        )
+        for lower_tag, selected_tag in cases:
+            with (
+                self.subTest(lower_tag=lower_tag, selected_tag=selected_tag),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                fixture = GitFixture(Path(temp_dir))
+                lower = fixture.release(lower_tag, "1.0.0", "lower")
+                selected = fixture.release(selected_tag, "1.0.0", "selected")
+                pull_requests = RecordingPullRequests()
+
+                result = synchronize(
+                    fixture.config(),
+                    FixtureReleases.published(lower, selected),
+                    pull_requests,
+                )
+
+                self.assertEqual(
+                    result,
+                    SyncResult(
+                        outcome="pr-created-clean",
+                        tag=selected.tag,
+                        release_commit=selected.commit,
+                        branch=f"automation/upstream-sync/{selected.commit}",
+                        preparation_mode="clean",
+                        pr_number=1,
+                        pr_url="https://example.test/pull/1",
+                    ),
+                )
+
     def test_manual_override_is_validated_before_fetch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))
@@ -210,6 +279,32 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     tag=valid.tag,
                     release_commit=valid.commit,
                     branch=f"automation/upstream-sync/{valid.commit}",
+                    preparation_mode="clean",
+                    pr_number=1,
+                    pr_url="https://example.test/pull/1",
+                ),
+            )
+            self.assertIn("Selection: manual", pull_requests.created[0].body)
+
+    def test_manual_override_accepts_exact_published_non_semver_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            selected = fixture.release("rust-v-channel", "1.0.0", "selected")
+            pull_requests = RecordingPullRequests()
+
+            result = synchronize(
+                fixture.config(manual_tag=selected.tag),
+                FixtureReleases.published(selected),
+                pull_requests,
+            )
+
+            self.assertEqual(
+                result,
+                SyncResult(
+                    outcome="pr-created-clean",
+                    tag=selected.tag,
+                    release_commit=selected.commit,
+                    branch=f"automation/upstream-sync/{selected.commit}",
                     preparation_mode="clean",
                     pr_number=1,
                     pr_url="https://example.test/pull/1",
@@ -339,39 +434,50 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             ),
         )
 
-    def test_closed_pr_preserves_existing_branch_and_reopens_same_pr(self) -> None:
+    def test_closed_pr_does_not_block_a_newer_release(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))
-            selected = fixture.release("rust-v4.0.0", "4.0.0", "release")
-            branch = f"automation/upstream-sync/{selected.commit}"
-            fixture.git("push", "origin", f"{fixture.fork_head}:refs/heads/{branch}")
-            existing_head = fixture.remote_branch_head(branch)
-            pull_requests = RecordingPullRequests(
-                [closed_pull_request(23, branch, existing_head, selected)]
+            abandoned = fixture.release("rust-v4.0.0", "4.0.0", "abandoned")
+            abandoned_branch = f"automation/upstream-sync/{abandoned.commit}"
+            fixture.git(
+                "push", "origin", f"{fixture.fork_head}:refs/heads/{abandoned_branch}"
             )
-            fixture.release("rust-v4.1.0", "4.1.0", "newer")
+            abandoned_head = fixture.remote_branch_head(abandoned_branch)
+            pull_requests = RecordingPullRequests(
+                [
+                    closed_pull_request(
+                        23, abandoned_branch, abandoned_head, abandoned
+                    )
+                ]
+            )
+            selected = fixture.release("rust-v4.1.0", "4.1.0", "selected")
 
             result = synchronize(
                 fixture.config(),
-                FailingReleases(),
+                FixtureReleases.published(abandoned, selected),
                 pull_requests,
             )
 
+            branch = f"automation/upstream-sync/{selected.commit}"
             self.assertEqual(
                 result,
                 SyncResult(
-                    outcome="closed-pr-reopened",
+                    outcome="pr-created-clean",
                     tag=selected.tag,
                     release_commit=selected.commit,
                     branch=branch,
-                    pr_number=23,
-                    pr_url="https://example.test/pull/23",
+                    preparation_mode="clean",
+                    pr_number=1,
+                    pr_url="https://example.test/pull/1",
                 ),
             )
-            self.assertEqual(pull_requests.reopened, [23])
-            self.assertEqual(fixture.remote_branch_head(branch), existing_head)
+            self.assertEqual(
+                fixture.remote_branch_head(abandoned_branch), abandoned_head
+            )
+            self.assertEqual(len(pull_requests.created), 1)
+            self.assertIn(selected.tag, pull_requests.created[0].title)
 
-    def test_missing_closed_pr_branch_is_reconstructed_before_reopen(self) -> None:
+    def test_closed_pr_for_selected_release_is_abandoned(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))
             selected = fixture.release("rust-v5.0.0", "5.0.0", "release")
@@ -382,24 +488,23 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
 
             result = synchronize(
                 fixture.config(),
-                FailingReleases(),
+                FixtureReleases.published(selected),
                 pull_requests,
             )
 
             self.assertEqual(
                 result,
                 SyncResult(
-                    outcome="closed-pr-reopened",
+                    outcome="closed-pr-abandoned",
                     tag=selected.tag,
                     release_commit=selected.commit,
                     branch=branch,
-                    preparation_mode="clean",
                     pr_number=29,
                     pr_url="https://example.test/pull/29",
                 ),
             )
-            self.assertEqual(pull_requests.reopened, [29])
-            self.assertTrue(fixture.remote_branch_head(branch))
+            self.assertEqual(pull_requests.created, [])
+            self.assertIsNone(fixture.remote_branch_head(branch))
 
     def test_merged_baseline_allows_a_later_release_on_a_distinct_branch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -670,7 +775,9 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
         for name, manifest in manifests.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir:
                 fixture = GitFixture(Path(temp_dir))
-                selected = fixture.release_with_manifest(f"rust-v-{name}", manifest)
+                selected = fixture.release_with_manifest(
+                    f"rust-v7.0.0-{name}", manifest
+                )
                 branch = f"automation/upstream-sync/{selected.commit}"
                 pull_requests = RecordingPullRequests()
 
@@ -806,7 +913,7 @@ class GitFixture:
         self.fork_head = self.git("rev-parse", "HEAD")
         for index in range(count):
             (self.upstream / f"conflict-{index:02}.txt").write_text("upstream\n")
-        return self.release("rust-v-conflicts", "6.0.0", "release")
+        return self.release("rust-v6.0.0", "6.0.0", "release")
 
     def integrate(self, release: CreatedRelease) -> None:
         self.git("fetch", str(self.upstream), f"refs/tags/{release.tag}")

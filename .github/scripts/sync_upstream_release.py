@@ -17,6 +17,13 @@ from typing import Protocol
 
 SYNC_BRANCH_PREFIX = "automation/upstream-sync/"
 MAX_CONFLICTS_SHOWN = 20
+RELEASE_TAG_PATTERN = re.compile(
+    r"^rust-v(?P<major>0|[1-9]\d*)\."
+    r"(?P<minor>0|[1-9]\d*)\."
+    r"(?P<patch>0|[1-9]\d*)"
+    r"(?:-(?P<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
 
 
 @dataclass(frozen=True)
@@ -26,6 +33,27 @@ class Release:
     draft: bool
     url: str
     prerelease: bool = False
+
+
+@dataclass(frozen=True, order=True)
+class _PrereleaseIdentifier:
+    is_non_numeric: bool
+    value: int | str
+
+
+@dataclass(frozen=True, order=True)
+class _SemanticVersion:
+    major: int
+    minor: int
+    patch: int
+    is_stable: bool
+    prerelease_identifiers: tuple[_PrereleaseIdentifier, ...]
+
+
+@dataclass(frozen=True)
+class _VersionedRelease:
+    release: Release
+    version: _SemanticVersion
 
 
 @dataclass(frozen=True)
@@ -78,13 +106,9 @@ class ReleaseClient(Protocol):
 class PullRequestService(Protocol):
     def open_synchronization(self) -> PullRequest | None: ...
 
-    def closed_synchronization(self) -> PullRequest | None: ...
-
     def for_branch(self, branch: str) -> PullRequest | None: ...
 
     def create(self, intent: PullRequestIntent) -> tuple[int, str]: ...
-
-    def reopen(self, number: int) -> tuple[int, str]: ...
 
 
 class SyncError(RuntimeError):
@@ -128,16 +152,6 @@ class GitHubClient:
         ]
         return self._only_pull_request(matches, branch)
 
-    def closed_synchronization(self) -> PullRequest | None:
-        matches = [
-            pull_request
-            for pull_request in self._pull_requests("closed")
-            if not pull_request.merged
-            and pull_request.head_repository == self.repository
-            and pull_request.head.startswith(SYNC_BRANCH_PREFIX)
-        ]
-        return self._only_pull_request(matches, "closed Synchronization")
-
     def create(self, intent: PullRequestIntent) -> tuple[int, str]:
         result = self._request(
             f"/repos/{self.repository}/pulls",
@@ -149,14 +163,6 @@ class GitHubClient:
                 "body": intent.body,
                 "draft": intent.draft,
             },
-        )
-        return result["number"], result["html_url"]
-
-    def reopen(self, number: int) -> tuple[int, str]:
-        result = self._request(
-            f"/repos/{self.repository}/pulls/{number}",
-            method="PATCH",
-            body={"state": "open"},
         )
         return result["number"], result["html_url"]
 
@@ -240,18 +246,6 @@ def synchronize(
             pr_url=frozen.url,
         )
 
-    closed = pull_requests.closed_synchronization()
-    if closed is not None:
-        if config.manual_tag is not None:
-            manual_release, _ = _select_release(
-                releases.list_releases(), config.manual_tag
-            )
-            if manual_release.tag != _tag_from_title(closed.title):
-                raise SyncError(
-                    "manual release tag does not match the closed Synchronization PR"
-                )
-        return _reopen_closed(config, closed, pull_requests)
-
     release, selection_mode = _select_release(
         releases.list_releases(), config.manual_tag
     )
@@ -286,7 +280,14 @@ def synchronize(
             pr_url=existing.url,
         )
     if existing is not None:
-        return _reopen_closed(config, existing, pull_requests)
+        return SyncResult(
+            outcome="closed-pr-abandoned",
+            tag=release.tag,
+            release_commit=release_commit,
+            branch=branch,
+            pr_number=existing.number,
+            pr_url=existing.url,
+        )
 
     if _remote_branch_exists(config.repo_root, branch):
         prepared = _inspect_prepared_branch(config, fork_head, release_commit, branch)
@@ -335,61 +336,6 @@ class _MergeProbe:
     conflicts: tuple[str, ...]
 
 
-def _reopen_closed(
-    config: SyncConfig,
-    pull_request: PullRequest,
-    pull_requests: PullRequestService,
-) -> SyncResult:
-    tag = _tag_from_title(pull_request.title)
-    release_commit = _commit_from_body(pull_request.body)
-    branch_commit = pull_request.head.removeprefix(SYNC_BRANCH_PREFIX)
-    if not tag or not re.fullmatch(r"[0-9a-f]{40}", release_commit):
-        raise SyncError("closed Synchronization PR has invalid baseline metadata")
-    if release_commit != branch_commit:
-        raise SyncError("closed Synchronization PR branch does not match its baseline")
-
-    fork_head = _default_head(config)
-    if _commit_exists(config.repo_root, release_commit) and _is_ancestor(
-        config.repo_root, release_commit, fork_head
-    ):
-        return SyncResult(
-            outcome="already-integrated",
-            tag=tag,
-            release_commit=release_commit,
-        )
-
-    if _remote_branch_exists(config.repo_root, pull_request.head):
-        prepared = _PreparedBranch(mode="", conflicts=())
-    else:
-        fetched_commit = _fetch_release(config, tag)
-        if fetched_commit != release_commit:
-            raise SyncError(f"release tag {tag} no longer resolves to {release_commit}")
-        prepared = _prepare_branch(
-            config,
-            fork_head,
-            release_commit,
-            pull_request.head,
-        )
-    number, url = pull_requests.reopen(pull_request.number)
-    return SyncResult(
-        outcome="closed-pr-reopened",
-        tag=tag,
-        release_commit=release_commit,
-        branch=pull_request.head,
-        preparation_mode=prepared.mode,
-        pr_number=number,
-        pr_url=url,
-        conflict_count=len(prepared.conflicts),
-        conflicts=prepared.conflicts[:MAX_CONFLICTS_SHOWN],
-    )
-
-
-def _commit_exists(repo: Path, commit: str) -> bool:
-    return (
-        _run_git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}").returncode == 0
-    )
-
-
 def _select_release(
     releases: list[Release], manual_tag: str | None
 ) -> tuple[Release, str]:
@@ -409,9 +355,42 @@ def _select_release(
                 f"{manual_tag!r} is not a published, non-draft Codex CLI release"
             )
         return selected, "manual"
-    if not eligible:
-        raise SyncError("no published Codex CLI release is available")
-    return max(eligible, key=lambda release: release.published_at or ""), "automatic"
+    automatic = [
+        _VersionedRelease(release, version)
+        for release in eligible
+        if (version := _semantic_version(release.tag)) is not None
+    ]
+    if not automatic:
+        raise SyncError("no published Codex CLI release with a valid version is available")
+    return max(automatic, key=lambda candidate: candidate.version).release, "automatic"
+
+
+def _semantic_version(
+    tag: str,
+) -> _SemanticVersion | None:
+    match = RELEASE_TAG_PATTERN.fullmatch(tag)
+    if match is None:
+        return None
+    prerelease = match.group("prerelease")
+    if prerelease is not None and any(
+        identifier.isdigit() and len(identifier) > 1 and identifier.startswith("0")
+        for identifier in prerelease.split(".")
+    ):
+        return None
+    identifiers = tuple(
+        _PrereleaseIdentifier(
+            is_non_numeric=not identifier.isdigit(),
+            value=identifier if not identifier.isdigit() else int(identifier),
+        )
+        for identifier in prerelease.split(".")
+    ) if prerelease is not None else ()
+    return _SemanticVersion(
+        major=int(match.group("major")),
+        minor=int(match.group("minor")),
+        patch=int(match.group("patch")),
+        is_stable=prerelease is None,
+        prerelease_identifiers=identifiers,
+    )
 
 
 def _fetch_release(config: SyncConfig, tag: str) -> str:
