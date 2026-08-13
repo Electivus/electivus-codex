@@ -155,7 +155,12 @@ impl ContextManager {
     /// normalization and drops un-suited items. Unsupported image and audio content
     /// is stripped from messages and tool outputs according to `input_modalities`.
     pub(crate) fn for_prompt(mut self, input_modalities: &[InputModality]) -> Vec<ResponseItem> {
+        let contains_only_replay =
+            self.replayed_history && self.replay_prefix_items >= self.items.len();
         self.normalize_history(input_modalities);
+        if contains_only_replay {
+            enforce_replay_limits(Arc::make_mut(&mut self.items));
+        }
         Arc::unwrap_or_clone(self.items)
     }
 

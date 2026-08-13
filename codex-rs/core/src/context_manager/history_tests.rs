@@ -1519,7 +1519,7 @@ fn installed_replay_does_not_apply_replay_limits_to_new_items() {
     let replay = replay.for_prompt(&default_input_modalities());
     let oversized_live_item = user_msg(&"new live item".repeat(10_000));
     let mut installed = ContextManager::new();
-    installed.replace(replay);
+    installed.replace_replayed(replay);
     installed.record_items([&oversized_live_item], TruncationPolicy::Tokens(100_000));
 
     let prompt = installed.for_prompt(&default_input_modalities());
