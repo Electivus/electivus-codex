@@ -124,6 +124,7 @@ pub(crate) struct SessionConfiguration {
     /// Effective originator used for this thread's Responses requests and analytics events.
     pub(super) originator: String,
     pub(super) dynamic_tools: Vec<DynamicToolSpec>,
+    pub(super) replayed_dynamic_tools: bool,
     pub(super) user_shell_override: Option<shell::Shell>,
 }
 

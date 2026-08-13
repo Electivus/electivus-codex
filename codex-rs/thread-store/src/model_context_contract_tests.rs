@@ -22,12 +22,13 @@ use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
-use codex_protocol::protocol::TruncationPolicy;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::test_support::PathExt;
+use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
@@ -89,60 +90,146 @@ async fn postgres_contract_latest_model_context_matches_public_store_contract()
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_contract_model_context_rejects_decoded_item_over_token_cap()
+async fn postgres_contract_model_context_accepts_large_presentation_rows_only()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("model_context_item_cap")?;
     fixture.migrate().await?;
     let pool = fixture.connect_pool().await?;
     let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f038")?;
-    let item_byte_limit = TruncationPolicy::Tokens(/*tokens*/ 10_000).byte_budget();
+    let cwd = std::env::current_dir()?.join("model-context-item-cap");
+    let large_presentation_item = RolloutItem::EventMsg(EventMsg::Warning(WarningEvent {
+        message: "x".repeat(50_000),
+    }));
     store
         .create_thread(create_thread_params(
             thread_id,
-            Path::new("/model-context-item-cap"),
+            &cwd,
             ThreadHistoryMode::Legacy,
         ))
         .await?;
-    store
-        .append_items(AppendThreadItemsParams {
-            thread_id,
-            items: vec![RolloutItem::ResponseItem(ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: "x".repeat(item_byte_limit + 1),
-                }],
-                phase: None,
-                internal_chat_message_metadata_passthrough: None,
-            })],
-        })
-        .await?;
     store.shutdown_thread(thread_id).await?;
 
-    let stored_bytes: i32 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT pg_column_size(item) FROM {} WHERE thread_id = $1 AND ordinal = 1",
+    // Runtime-state migration preserves legacy presentation events even though new appends filter
+    // them. Reproduce that durable shape directly so this remains a loader contract test.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO {} (thread_id, ordinal, item, recorded_at) \
+         VALUES ($1, 1, $2, CURRENT_TIMESTAMP)",
+        store.tables.history
+    )))
+    .bind(thread_id.to_string())
+    .bind(serde_json::to_value(&large_presentation_item)?)
+    .execute(&pool)
+    .await?;
+    let decoded_bytes: i32 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT octet_length(item::text) FROM {} WHERE thread_id = $1 AND ordinal = 1",
         store.tables.history
     )))
     .bind(thread_id.to_string())
     .fetch_one(&pool)
     .await?;
     assert!(
-        usize::try_from(stored_bytes)? < item_byte_limit,
-        "fixture must exercise a compressed JSONB value"
+        usize::try_from(decoded_bytes)? > 40_000,
+        "fixture must exceed the former per-item decoded-size limit"
     );
-    let error = store
+    let context = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id,
             include_archived: false,
         })
+        .await?;
+    assert_eq!(context.items.len(), 2);
+    assert!(matches!(
+        &context.items[1],
+        RolloutItem::EventMsg(EventMsg::Warning(WarningEvent { message }))
+            if message.len() == 50_000
+    ));
+
+    let oversized_model_thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f039")?;
+    store
+        .create_thread(create_thread_params(
+            oversized_model_thread_id,
+            &cwd,
+            ThreadHistoryMode::Legacy,
+        ))
+        .await?;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id: oversized_model_thread_id,
+            items: vec![RolloutItem::ResponseItem(ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "x".repeat(50_000),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            })],
+        })
+        .await?;
+    let oversized_model_error = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id: oversized_model_thread_id,
+            include_archived: false,
+        })
         .await
-        .expect_err("decoded item above the token cap must be rejected");
-    assert_eq!(
-        error.to_string(),
-        format!(
-            "invalid thread-store request: model context for thread {thread_id} cannot be loaded safely: an individual history item exceeds 10000 estimated tokens (limit: 10000 items or 16777216 bytes)"
-        )
+        .expect_err("oversized model-visible message must be rejected");
+    assert!(
+        oversized_model_error
+            .to_string()
+            .contains("an individual model-visible history item exceeds 10000 estimated tokens")
+    );
+
+    let oversized_session_meta_thread_id =
+        ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f040")?;
+    let mut oversized_session_meta_params = create_thread_params(
+        oversized_session_meta_thread_id,
+        &cwd,
+        ThreadHistoryMode::Legacy,
+    );
+    oversized_session_meta_params.base_instructions = BaseInstructions {
+        text: "x".repeat(50_000),
+        provenance: None,
+    };
+    store.create_thread(oversized_session_meta_params).await?;
+    let oversized_session_meta_error = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id: oversized_session_meta_thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect_err("oversized base instructions must be rejected");
+    assert!(
+        oversized_session_meta_error
+            .to_string()
+            .contains("an individual model-visible history item exceeds 10000 estimated tokens")
+    );
+
+    let many_tools_thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f041")?;
+    let mut many_tools_params =
+        create_thread_params(many_tools_thread_id, &cwd, ThreadHistoryMode::Legacy);
+    many_tools_params.dynamic_tools = (0..6_000)
+        .map(|index| {
+            DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                name: format!("tool_{index}"),
+                description: String::new(),
+                input_schema: json!({ "type": "object" }),
+                defer_loading: false,
+            })
+        })
+        .collect();
+    store.create_thread(many_tools_params).await?;
+    let many_tools_error = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id: many_tools_thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect_err("oversized dynamic tool metadata must be rejected");
+    assert!(
+        many_tools_error
+            .to_string()
+            .contains("an individual model-visible history item exceeds 10000 estimated tokens")
     );
 
     pool.close().await;
@@ -477,13 +564,13 @@ fn completed_user_message(thread_id: ThreadId, turn_id: &str) -> RolloutItem {
 fn turn_context(cwd: &Path, turn_id: &str) -> RolloutItem {
     RolloutItem::TurnContext(TurnContextItem {
         turn_id: Some(turn_id.to_string()),
-        cwd: serde_json::from_value(serde_json::json!(cwd)).expect("absolute contract cwd"),
+        cwd: PathUri::from_host_native_path(cwd).expect("absolute contract cwd"),
         workspace_roots: None,
         current_date: None,
         timezone: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: None,
-        sandbox_policy: SandboxPolicy::new_read_only_policy(),
+        sandbox_policy: SandboxPolicy::new_read_only_policy().into(),
         permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,

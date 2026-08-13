@@ -8,6 +8,7 @@ use codex_git_utils::collect_git_info;
 use codex_git_utils::get_git_repo_root;
 use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::GitInfo;
 use codex_protocol::protocol::RolloutItem;
@@ -272,7 +273,7 @@ impl ThreadMetadataSync {
                 }
                 RolloutItem::TurnContext(turn_ctx) => {
                     self.cwd_seen = true;
-                    update.cwd = Some(turn_ctx.cwd.clone().into_path_buf());
+                    update.cwd = Some(turn_ctx.cwd.to_path_buf());
                     update.model = Some(turn_ctx.model.clone());
                     update.reasoning_effort = Some(turn_ctx.effort.clone());
                     update.approval_mode = Some(turn_ctx.approval_policy);
@@ -309,9 +310,14 @@ impl ThreadMetadataSync {
                     update.model = Some(settings.model.clone());
                     update.model_provider = Some(settings.model_provider_id.clone());
                     update.reasoning_effort = Some(settings.reasoning_effort.clone());
-                    update.cwd = Some(settings.cwd.clone().into_path_buf());
+                    update.cwd = Some(settings.cwd.to_path_buf());
                     update.approval_mode = Some(settings.approval_policy);
-                    update.permission_profile = Some(settings.permission_profile.clone());
+                    update.permission_profile = Some(
+                        settings
+                            .permission_profile
+                            .to_native()
+                            .unwrap_or_else(|_| PermissionProfile::read_only()),
+                    );
                 }
                 RolloutItem::SessionMeta(_)
                 | RolloutItem::EventMsg(_)
@@ -442,6 +448,7 @@ mod tests {
     use codex_protocol::protocol::TurnStartedEvent;
     use codex_protocol::protocol::UserMessageEvent;
     use codex_protocol::user_input::UserInput;
+    use codex_utils_path_uri::PathUri;
     use pretty_assertions::assert_eq;
 
     use super::*;
@@ -649,9 +656,9 @@ mod tests {
                     service_tier: None,
                     approval_policy: AskForApproval::Never,
                     approvals_reviewer: ApprovalsReviewer::User,
-                    permission_profile: permission_profile.clone(),
+                    permission_profile: permission_profile.clone().into(),
                     active_permission_profile: None,
-                    cwd: cwd.clone().try_into().expect("absolute settings cwd"),
+                    cwd: PathUri::from_host_native_path(&cwd).expect("absolute settings cwd"),
                     reasoning_effort: Some(ReasoningEffort::Ultra),
                     reasoning_summary: Some(ReasoningSummary::Auto),
                     personality: None,
@@ -695,9 +702,38 @@ mod tests {
             .reasoning_effort = None;
 
         let update = sync
-            .observe_appended_items(&[item])
+            .observe_appended_items(std::slice::from_ref(&item))
             .expect("thread settings clear metadata update");
         assert_eq!(update.patch.reasoning_effort, Some(None));
+
+        let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut item else {
+            panic!("thread settings applied item");
+        };
+        let foreign_path = if cfg!(windows) {
+            "/home/k3/git/scrape-golden"
+        } else {
+            r"C:\Users\msilvane\git\scrape-golden"
+        };
+        event.thread_settings.permission_profile = serde_json::from_value(serde_json::json!({
+            "type": "managed",
+            "file_system": {
+                "type": "restricted",
+                "entries": [{
+                    "path": { "type": "path", "path": foreign_path },
+                    "access": "write"
+                }]
+            },
+            "network": "restricted"
+        }))
+        .expect("foreign permission profile should remain durable");
+
+        let update = sync
+            .observe_appended_items(&[item])
+            .expect("foreign settings metadata update");
+        assert_eq!(
+            update.patch.permission_profile,
+            Some(PermissionProfile::read_only())
+        );
     }
 
     #[test]
@@ -811,13 +847,13 @@ mod tests {
     fn turn_context(cwd: PathBuf, turn_id: &str) -> RolloutItem {
         RolloutItem::TurnContext(TurnContextItem {
             turn_id: Some(turn_id.to_string()),
-            cwd: cwd.try_into().expect("absolute cwd"),
+            cwd: PathUri::from_host_native_path(&cwd).expect("absolute cwd"),
             workspace_roots: None,
             current_date: None,
             timezone: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
-            sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
+            sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess.into(),
             permission_profile: None,
             network: None,
             file_system_sandbox_policy: None,

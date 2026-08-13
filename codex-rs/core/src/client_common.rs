@@ -19,6 +19,17 @@ pub struct Prompt {
     /// Conversation context input items.
     pub input: Vec<ResponseItem>,
 
+    /// Number of leading input items restored from durable history. Only this prefix may be
+    /// trimmed to satisfy resume-time request budgets.
+    pub(crate) replay_prefix_items: usize,
+
+    /// Whether this prompt belongs to a reconstructed durable session even when the replay prefix
+    /// is empty after filtering or rollback.
+    pub(crate) replayed_history: bool,
+
+    /// Whether the resumed session contributes persisted dynamic tools to the request tool plan.
+    pub(crate) replayed_dynamic_tools: bool,
+
     /// Tools available to the model, including additional tools sourced from
     /// external MCP servers.
     pub(crate) tools: Vec<ToolSpec>,
@@ -39,6 +50,9 @@ impl Default for Prompt {
     fn default() -> Self {
         Self {
             input: Vec::new(),
+            replay_prefix_items: 0,
+            replayed_history: false,
+            replayed_dynamic_tools: false,
             tools: Vec::new(),
             parallel_tool_calls: false,
             base_instructions: BaseInstructions::default(),

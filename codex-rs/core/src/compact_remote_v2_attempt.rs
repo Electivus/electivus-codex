@@ -66,11 +66,16 @@ pub(super) async fn run_remote_compact_v2_attempt(
     let trace_input_history = compaction_trace
         .is_enabled()
         .then(|| history.raw_items().to_vec());
+    let replay_prefix_items = history.replay_prefix_items();
+    let replayed_history = history.is_replayed_history();
     let mut input = history.for_prompt(&turn_context.model_info.input_modalities);
     let tool_router = &step_context.tool_router;
     input.push(ResponseItem::CompactionTrigger {});
     let prompt = Prompt {
         input,
+        replay_prefix_items,
+        replayed_history,
+        replayed_dynamic_tools: replayed_history && turn_context.replayed_dynamic_tools,
         tools: tool_router.model_visible_specs(),
         parallel_tool_calls: turn_context.model_info.supports_parallel_tool_calls,
         base_instructions,

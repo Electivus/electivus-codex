@@ -702,8 +702,11 @@ impl Session {
             .unwrap_or_else(|| model_info.get_model_instructions(config.personality));
 
         // Dynamic tools are defined at thread start and persisted in rollout session metadata.
+        let persisted_dynamic_tools = conversation_history.get_dynamic_tools().unwrap_or_default();
+        let replayed_dynamic_tools =
+            dynamic_tools.is_empty() && !persisted_dynamic_tools.is_empty();
         let dynamic_tools = if dynamic_tools.is_empty() {
-            conversation_history.get_dynamic_tools().unwrap_or_default()
+            persisted_dynamic_tools
         } else {
             dynamic_tools
         };
@@ -759,6 +762,7 @@ impl Session {
             thread_source,
             originator,
             dynamic_tools,
+            replayed_dynamic_tools,
             user_shell_override,
         };
         session_configuration
@@ -1502,9 +1506,12 @@ impl Session {
             ImageResizeNoticeMode::Disabled,
         );
         prepare_audio_response_items(&mut history);
+        let mut replay_history = ContextManager::new();
+        replay_history.replace_replayed(history);
+        let history = replay_history.prepare_replayed_history();
         {
             let mut state = self.state.lock().await;
-            state.replace_history(history, reference_context_item);
+            state.replace_replayed_history(history, reference_context_item);
             if let Some(world_state) = world_state_baseline {
                 state.history.set_world_state_baseline(world_state);
             }

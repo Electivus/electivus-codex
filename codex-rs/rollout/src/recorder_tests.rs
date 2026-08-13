@@ -1731,14 +1731,13 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
         ordinal: None,
         item: RolloutItem::TurnContext(TurnContextItem {
             turn_id: Some("turn-1".to_string()),
-            cwd: serde_json::from_value(serde_json::json!(&latest_cwd))
-                .expect("absolute latest cwd"),
+            cwd: latest_cwd.abs().into(),
             workspace_roots: None,
             current_date: None,
             timezone: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            sandbox_policy: SandboxPolicy::new_read_only_policy().into(),
             permission_profile: None,
             network: None,
             file_system_sandbox_policy: None,

@@ -116,6 +116,7 @@ use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
 use crate::feedback_tags;
+use crate::model_request_limits::bound_replayed_model_request;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::subagent_header_value;
 use crate::util::emit_feedback_auth_recovery_tags;
@@ -923,7 +924,7 @@ impl ModelClient {
         );
         let prompt_cache_key = Some(self.prompt_cache_key(responses_metadata));
         let service_tier = model_info.service_tier_for_request(service_tier);
-        let request = ResponsesApiRequest {
+        let mut request = ResponsesApiRequest {
             model: model_info.slug.clone(),
             instructions,
             input,
@@ -940,6 +941,21 @@ impl ModelClient {
             text,
             client_metadata: Some(responses_metadata.client_metadata()),
         };
+        let replay_prefix_items = prompt.replay_prefix_items.min(prompt.input.len());
+        if prompt.replayed_history {
+            let lite_prefix_items = request.input.len().saturating_sub(prompt.input.len());
+            let model_visible_tools = if model_info.use_responses_lite {
+                &[]
+            } else {
+                prompt.tools.as_slice()
+            };
+            bound_replayed_model_request(
+                &mut request,
+                model_visible_tools,
+                lite_prefix_items..lite_prefix_items.saturating_add(replay_prefix_items),
+                prompt.replayed_dynamic_tools,
+            )?;
+        }
         Ok(request)
     }
 

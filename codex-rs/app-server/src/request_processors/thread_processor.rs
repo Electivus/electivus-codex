@@ -5301,7 +5301,8 @@ pub(crate) fn thread_from_stored_thread(
         branch: info.branch,
         origin_url: info.repository_url,
     });
-    let cwd = LegacyAppPathString::from_path(&thread.cwd);
+    let cwd = path_utils::normalize_for_native_workdir(&thread.cwd);
+    let cwd = LegacyAppPathString::from_path(&cwd);
     let source = with_thread_spawn_agent_metadata(
         thread.source,
         thread.agent_nickname.clone(),
@@ -5531,6 +5532,7 @@ fn build_thread_from_snapshot(
     path: Option<PathBuf>,
 ) -> Thread {
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let cwd = path_utils::normalize_for_native_workdir(config_snapshot.cwd());
     Thread {
         id: thread_id.to_string(),
         extra: None,
@@ -5549,7 +5551,7 @@ fn build_thread_from_snapshot(
         recency_at: Some(now),
         status: ThreadStatus::NotLoaded,
         path,
-        cwd: LegacyAppPathString::from_abs_path(config_snapshot.cwd()),
+        cwd: LegacyAppPathString::from_path(&cwd),
         cli_version: env!("CARGO_PKG_VERSION").to_string(),
         agent_nickname: config_snapshot.session_source.get_nickname(),
         agent_role: config_snapshot.session_source.get_agent_role(),
