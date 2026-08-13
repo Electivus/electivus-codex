@@ -35,6 +35,27 @@ class Release:
     prerelease: bool = False
 
 
+@dataclass(frozen=True, order=True)
+class _PrereleaseIdentifier:
+    is_non_numeric: bool
+    value: int | str
+
+
+@dataclass(frozen=True, order=True)
+class _SemanticVersion:
+    major: int
+    minor: int
+    patch: int
+    is_stable: bool
+    prerelease_identifiers: tuple[_PrereleaseIdentifier, ...]
+
+
+@dataclass(frozen=True)
+class _VersionedRelease:
+    release: Release
+    version: _SemanticVersion
+
+
 @dataclass(frozen=True)
 class PullRequest:
     number: int
@@ -335,18 +356,18 @@ def _select_release(
             )
         return selected, "manual"
     automatic = [
-        (release, version)
+        _VersionedRelease(release, version)
         for release in eligible
         if (version := _semantic_version(release.tag)) is not None
     ]
     if not automatic:
         raise SyncError("no published Codex CLI release with a valid version is available")
-    return max(automatic, key=lambda candidate: candidate[1])[0], "automatic"
+    return max(automatic, key=lambda candidate: candidate.version).release, "automatic"
 
 
 def _semantic_version(
     tag: str,
-) -> tuple[int, int, int, bool, tuple[tuple[int, int | str], ...]] | None:
+) -> _SemanticVersion | None:
     match = RELEASE_TAG_PATTERN.fullmatch(tag)
     if match is None:
         return None
@@ -357,15 +378,18 @@ def _semantic_version(
     ):
         return None
     identifiers = tuple(
-        (0, int(identifier)) if identifier.isdigit() else (1, identifier)
+        _PrereleaseIdentifier(
+            is_non_numeric=not identifier.isdigit(),
+            value=identifier if not identifier.isdigit() else int(identifier),
+        )
         for identifier in prerelease.split(".")
     ) if prerelease is not None else ()
-    return (
-        int(match.group("major")),
-        int(match.group("minor")),
-        int(match.group("patch")),
-        prerelease is None,
-        identifiers,
+    return _SemanticVersion(
+        major=int(match.group("major")),
+        minor=int(match.group("minor")),
+        patch=int(match.group("patch")),
+        is_stable=prerelease is None,
+        prerelease_identifiers=identifiers,
     )
 
 

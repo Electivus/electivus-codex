@@ -202,6 +202,43 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                 ),
             )
 
+    def test_automatic_selection_uses_semantic_version_prerelease_precedence(
+        self,
+    ) -> None:
+        cases = (
+            ("rust-v1.0.0-alpha.9", "rust-v1.0.0-alpha.10"),
+            ("rust-v1.0.0-alpha.10", "rust-v1.0.0-alpha.beta"),
+            ("rust-v1.0.0-alpha", "rust-v1.0.0"),
+        )
+        for lower_tag, selected_tag in cases:
+            with (
+                self.subTest(lower_tag=lower_tag, selected_tag=selected_tag),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                fixture = GitFixture(Path(temp_dir))
+                lower = fixture.release(lower_tag, "1.0.0", "lower")
+                selected = fixture.release(selected_tag, "1.0.0", "selected")
+                pull_requests = RecordingPullRequests()
+
+                result = synchronize(
+                    fixture.config(),
+                    FixtureReleases.published(lower, selected),
+                    pull_requests,
+                )
+
+                self.assertEqual(
+                    result,
+                    SyncResult(
+                        outcome="pr-created-clean",
+                        tag=selected.tag,
+                        release_commit=selected.commit,
+                        branch=f"automation/upstream-sync/{selected.commit}",
+                        preparation_mode="clean",
+                        pr_number=1,
+                        pr_url="https://example.test/pull/1",
+                    ),
+                )
+
     def test_manual_override_is_validated_before_fetch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))
@@ -242,6 +279,32 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     tag=valid.tag,
                     release_commit=valid.commit,
                     branch=f"automation/upstream-sync/{valid.commit}",
+                    preparation_mode="clean",
+                    pr_number=1,
+                    pr_url="https://example.test/pull/1",
+                ),
+            )
+            self.assertIn("Selection: manual", pull_requests.created[0].body)
+
+    def test_manual_override_accepts_exact_published_non_semver_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            selected = fixture.release("rust-v-channel", "1.0.0", "selected")
+            pull_requests = RecordingPullRequests()
+
+            result = synchronize(
+                fixture.config(manual_tag=selected.tag),
+                FixtureReleases.published(selected),
+                pull_requests,
+            )
+
+            self.assertEqual(
+                result,
+                SyncResult(
+                    outcome="pr-created-clean",
+                    tag=selected.tag,
+                    release_commit=selected.commit,
+                    branch=f"automation/upstream-sync/{selected.commit}",
                     preparation_mode="clean",
                     pr_number=1,
                     pr_url="https://example.test/pull/1",
