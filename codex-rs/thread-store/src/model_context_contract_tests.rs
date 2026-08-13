@@ -90,7 +90,7 @@ async fn postgres_contract_latest_model_context_matches_public_store_contract()
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_contract_model_context_accepts_large_rows_within_total_budget()
+async fn postgres_contract_model_context_accepts_large_presentation_rows_only()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("model_context_item_cap")?;
     fixture.migrate().await?;
@@ -167,17 +167,18 @@ async fn postgres_contract_model_context_accepts_large_rows_within_total_budget(
             })],
         })
         .await?;
-    let oversized_model_context = store
+    let oversized_model_error = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id: oversized_model_thread_id,
             include_archived: false,
         })
-        .await?;
-    assert!(matches!(
-        &oversized_model_context.items[1],
-        RolloutItem::ResponseItem(ResponseItem::Message { content, .. })
-            if matches!(content.as_slice(), [ContentItem::InputText { text }] if text.len() == 50_000)
-    ));
+        .await
+        .expect_err("oversized model-visible message must be rejected");
+    assert!(
+        oversized_model_error
+            .to_string()
+            .contains("an individual model-visible history item exceeds 10000 estimated tokens")
+    );
 
     let oversized_session_meta_thread_id =
         ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f040")?;
@@ -191,17 +192,18 @@ async fn postgres_contract_model_context_accepts_large_rows_within_total_budget(
         provenance: None,
     };
     store.create_thread(oversized_session_meta_params).await?;
-    let oversized_session_meta_context = store
+    let oversized_session_meta_error = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id: oversized_session_meta_thread_id,
             include_archived: false,
         })
-        .await?;
-    assert!(matches!(
-        oversized_session_meta_context.items.first(),
-        Some(RolloutItem::SessionMeta(meta))
-            if meta.meta.base_instructions.as_ref().is_some_and(|instructions| instructions.text.len() == 50_000)
-    ));
+        .await
+        .expect_err("oversized base instructions must be rejected");
+    assert!(
+        oversized_session_meta_error
+            .to_string()
+            .contains("an individual model-visible history item exceeds 10000 estimated tokens")
+    );
 
     let many_tools_thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f041")?;
     let mut many_tools_params =
@@ -217,18 +219,17 @@ async fn postgres_contract_model_context_accepts_large_rows_within_total_budget(
         })
         .collect();
     store.create_thread(many_tools_params).await?;
-    let many_tools_context = store
+    let many_tools_error = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id: many_tools_thread_id,
             include_archived: false,
         })
-        .await?;
-    let Some(RolloutItem::SessionMeta(many_tools_meta)) = many_tools_context.items.first() else {
-        panic!("model context should start with canonical session metadata");
-    };
-    assert_eq!(
-        many_tools_meta.meta.dynamic_tools.as_ref().map(Vec::len),
-        Some(6_000)
+        .await
+        .expect_err("oversized dynamic tool metadata must be rejected");
+    assert!(
+        many_tools_error
+            .to_string()
+            .contains("an individual model-visible history item exceeds 10000 estimated tokens")
     );
 
     pool.close().await;

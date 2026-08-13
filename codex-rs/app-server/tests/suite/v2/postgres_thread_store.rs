@@ -57,12 +57,36 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Result<()> {
     let fixture = PostgresFixture::new()?;
     fixture.migrate().await?;
+    let model_server =
+        create_mock_responses_server_repeating_assistant("after cross-host resume answer").await;
     let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        format!(
+            r#"
+model = "mock-model"
+model_provider = "mock_provider"
+approval_policy = "never"
+sandbox_mode = "read-only"
+
+[model_providers.mock_provider]
+name = "Mock provider"
+base_url = "{}/v1"
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+
+[features]
+plugins = false
+"#,
+            model_server.uri()
+        ),
+    )?;
     let writer_runtime = fixture.runtime(codex_home.path()).await?;
     let reader_runtime = fixture.runtime(codex_home.path()).await?;
     let writer = store::PostgresThreadStore::from_runtime(Arc::clone(&writer_runtime))?;
     let thread_id = ThreadId::new();
-    seed_thread(&writer, thread_id, codex_home.path(), "openai").await?;
+    seed_thread(&writer, thread_id, codex_home.path(), "mock_provider").await?;
     let foreign_cwd = fixture
         .append_foreign_host_context(thread_id, codex_home.path(), &writer)
         .await?;
@@ -70,7 +94,8 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
     let thread_store: Arc<dyn store::ThreadStore> = Arc::new(
         store::PostgresThreadStore::from_runtime(Arc::clone(&reader_runtime))?,
     );
-    let client = start_in_process_server_with_thread_store(codex_home.path(), thread_store).await?;
+    let mut client =
+        start_in_process_server_with_thread_store(codex_home.path(), thread_store).await?;
     let thread_id = thread_id.to_string();
 
     let list: api::ThreadListResponse = request(
@@ -332,7 +357,7 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
     assert_eq!(persisted_fork.preview, "database native needle");
     assert_eq!(persisted_fork.rollout_path, None);
     assert_eq!(persisted_fork.cwd, Path::new(forked.thread.cwd.as_str()));
-    assert_eq!(persisted_fork.model_provider, "openai");
+    assert_eq!(persisted_fork.model_provider, "mock_provider");
     assert_eq!(
         persisted_fork.history_mode,
         codex_protocol::protocol::ThreadHistoryMode::Paginated
@@ -406,6 +431,55 @@ async fn postgres_contract_store_serves_database_native_v2_history_flows() -> Re
         api::ThreadHistoryMode::Paginated
     );
     assert_eq!(started.thread.path, None);
+
+    let continued: api::TurnStartResponse = request(
+        &client,
+        api::ClientRequest::TurnStart {
+            request_id: request_id(/*id*/ 17),
+            params: api::TurnStartParams {
+                thread_id: thread_id.clone(),
+                input: vec![api::UserInput::Text {
+                    text: "after cross-host resume".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let Some(event) = client.next_event().await else {
+                anyhow::bail!("cross-host replica stopped before turn/completed");
+            };
+            if let InProcessServerEvent::ServerNotification(notification) = event
+                && let api::ServerNotification::TurnCompleted(completed) = *notification
+                && completed.thread_id == thread_id
+                && completed.turn.id == continued.turn.id
+            {
+                return Ok::<(), anyhow::Error>(());
+            }
+        }
+    })
+    .await??;
+    let requests = model_server
+        .received_requests()
+        .await
+        .context("failed to read cross-host mock model requests")?;
+    let model_request = requests
+        .iter()
+        .rev()
+        .find(|request| request.url.path().ends_with("/responses"))
+        .context("missing post-resume model request")?
+        .body_json::<Value>()?;
+    let model_input = model_request
+        .get("input")
+        .and_then(Value::as_array)
+        .context("post-resume model request must contain input")?;
+    let serialized_input = serde_json::to_string(model_input)?;
+    assert!(serialized_input.contains("database native needle"));
+    assert!(serialized_input.contains("after cross-host resume"));
+    assert!(!serialized_input.contains("presentation-only"));
 
     client.shutdown().await?;
     writer_runtime.close().await;
@@ -1253,7 +1327,31 @@ impl PostgresFixture {
             }
         });
         let pool = sqlx::PgPool::connect(&self.database_url).await?;
+        let mut transaction = pool.begin().await?;
         let schema = &self.schema;
+        let large_presentation_item =
+            RolloutItem::EventMsg(EventMsg::Warning(codex_protocol::protocol::WarningEvent {
+                message: "presentation-only".repeat(20_000),
+            }));
+        let presentation_bytes: i32 = sqlx::query_scalar(AssertSqlSafe(format!(
+            "INSERT INTO \"{schema}\".thread_history (thread_id, ordinal, item) \
+             SELECT $1, COALESCE(MAX(ordinal), -1) + 1, $2 \
+             FROM \"{schema}\".thread_history WHERE thread_id = $1 \
+             RETURNING octet_length(item::text)"
+        )))
+        .bind(thread_id.to_string())
+        .bind(serde_json::to_value(large_presentation_item)?)
+        .fetch_one(transaction.as_mut())
+        .await?;
+        assert!(presentation_bytes > 40_000);
+        sqlx::query(AssertSqlSafe(format!(
+            "UPDATE \"{schema}\".threads \
+             SET stream_version = stream_version + 1, history_projection_version = NULL \
+             WHERE thread_id = $1"
+        )))
+        .bind(thread_id.to_string())
+        .execute(transaction.as_mut())
+        .await?;
         sqlx::query(AssertSqlSafe(format!(
             "UPDATE \"{schema}\".thread_history \
              SET item = $2 \
@@ -1263,7 +1361,7 @@ impl PostgresFixture {
         )))
         .bind(thread_id.to_string())
         .bind(foreign_context)
-        .execute(&pool)
+        .execute(transaction.as_mut())
         .await?;
         sqlx::query(AssertSqlSafe(format!(
             "UPDATE \"{schema}\".thread_history \
@@ -1272,7 +1370,7 @@ impl PostgresFixture {
         )))
         .bind(thread_id.to_string())
         .bind(foreign_cwd)
-        .execute(&pool)
+        .execute(transaction.as_mut())
         .await?;
         sqlx::query(AssertSqlSafe(format!(
             "UPDATE \"{schema}\".threads \
@@ -1281,8 +1379,9 @@ impl PostgresFixture {
         )))
         .bind(thread_id.to_string())
         .bind(foreign_cwd)
-        .execute(&pool)
+        .execute(transaction.as_mut())
         .await?;
+        transaction.commit().await?;
         pool.close().await;
         Ok(foreign_cwd)
     }

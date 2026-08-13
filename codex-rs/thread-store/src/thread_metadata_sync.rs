@@ -8,6 +8,7 @@ use codex_git_utils::collect_git_info;
 use codex_git_utils::get_git_repo_root;
 use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::GitInfo;
 use codex_protocol::protocol::RolloutItem;
@@ -311,9 +312,12 @@ impl ThreadMetadataSync {
                     update.reasoning_effort = Some(settings.reasoning_effort.clone());
                     update.cwd = Some(settings.cwd.to_path_buf());
                     update.approval_mode = Some(settings.approval_policy);
-                    if let Ok(permission_profile) = settings.permission_profile.to_native() {
-                        update.permission_profile = Some(permission_profile);
-                    }
+                    update.permission_profile = Some(
+                        settings
+                            .permission_profile
+                            .to_native()
+                            .unwrap_or_else(|_| PermissionProfile::read_only()),
+                    );
                 }
                 RolloutItem::SessionMeta(_)
                 | RolloutItem::EventMsg(_)
@@ -698,9 +702,38 @@ mod tests {
             .reasoning_effort = None;
 
         let update = sync
-            .observe_appended_items(&[item])
+            .observe_appended_items(std::slice::from_ref(&item))
             .expect("thread settings clear metadata update");
         assert_eq!(update.patch.reasoning_effort, Some(None));
+
+        let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut item else {
+            panic!("thread settings applied item");
+        };
+        let foreign_path = if cfg!(windows) {
+            "/home/k3/git/scrape-golden"
+        } else {
+            r"C:\Users\msilvane\git\scrape-golden"
+        };
+        event.thread_settings.permission_profile = serde_json::from_value(serde_json::json!({
+            "type": "managed",
+            "file_system": {
+                "type": "restricted",
+                "entries": [{
+                    "path": { "type": "path", "path": foreign_path },
+                    "access": "write"
+                }]
+            },
+            "network": "restricted"
+        }))
+        .expect("foreign permission profile should remain durable");
+
+        let update = sync
+            .observe_appended_items(&[item])
+            .expect("foreign settings metadata update");
+        assert_eq!(
+            update.patch.permission_profile,
+            Some(PermissionProfile::read_only())
+        );
     }
 
     #[test]

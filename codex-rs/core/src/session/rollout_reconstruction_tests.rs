@@ -2,9 +2,11 @@ use super::*;
 
 use super::tests::build_world_state_from_turn_context;
 use super::tests::make_session_and_context;
+use crate::context_manager::estimate_item_token_count;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::InitialHistory;
@@ -128,6 +130,55 @@ async fn reconstruct_history_discards_oversized_item_superseded_by_compaction() 
         .await;
 
     assert_eq!(reconstructed.history, vec![replacement]);
+}
+
+#[tokio::test]
+async fn reconstruct_history_bounds_large_output_in_compaction_replacement() {
+    let (session, turn_context) = make_session_and_context().await;
+    let call_id = "large-compacted-output";
+    let rollout_items = vec![RolloutItem::Compacted(CompactedItem {
+        message: String::new(),
+        replacement_history: Some(vec![
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "shell_command".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                encrypted_function_args: None,
+                call_id: call_id.to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: call_id.to_string(),
+                output: FunctionCallOutputPayload::from_text("historical output ".repeat(30_000)),
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ]),
+        window_number: Some(1),
+        first_window_id: None,
+        previous_window_id: None,
+        window_id: None,
+    })];
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await;
+
+    let output = reconstructed
+        .history
+        .iter()
+        .find(|item| matches!(item, ResponseItem::FunctionCallOutput { .. }))
+        .expect("compaction replacement should retain the paired output");
+    assert!(estimate_item_token_count(output) <= 10_000);
+    let ResponseItem::FunctionCallOutput { output, .. } = output else {
+        unreachable!("filtered for function output")
+    };
+    assert!(
+        output
+            .text_content()
+            .is_some_and(|text| text.contains("truncated"))
+    );
 }
 
 #[tokio::test]

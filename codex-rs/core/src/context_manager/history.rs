@@ -3,6 +3,10 @@ use crate::context::ModelSwitchInstructions;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::normalize;
+use crate::context_manager::replay::MAX_REPLAY_HISTORY_BYTES;
+use crate::context_manager::replay::MAX_REPLAY_HISTORY_ITEMS;
+use crate::context_manager::replay::process_replayed_item;
+use crate::context_manager::replay::truncate_output_item;
 use crate::event_mapping::has_non_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_user_message_content;
@@ -59,6 +63,12 @@ pub(crate) struct ContextManager {
     reference_context_item: Option<TurnContextItem>,
     /// World state most recently appended to model-visible history.
     world_state_baseline: Option<WorldStateSnapshot>,
+    /// Number of leading items restored from durable replay. Request construction may trim only
+    /// this prefix when later model-visible request components consume the remaining budget.
+    replay_prefix_items: usize,
+    /// Whether this history was reconstructed from durable storage, including an empty model-
+    /// visible replay whose metadata must still be bounded at request construction.
+    replayed_history: bool,
 }
 
 impl ContextManager {
@@ -71,6 +81,8 @@ impl ContextManager {
             ),
             reference_context_item: None,
             world_state_baseline: None,
+            replay_prefix_items: 0,
+            replayed_history: false,
         }
     }
 
@@ -147,6 +159,14 @@ impl ContextManager {
         Arc::unwrap_or_clone(self.items)
     }
 
+    pub(crate) fn replay_prefix_items(&self) -> usize {
+        self.replay_prefix_items.min(self.items.len())
+    }
+
+    pub(crate) fn is_replayed_history(&self) -> bool {
+        self.replayed_history
+    }
+
     /// Returns raw items in the history.
     pub(crate) fn raw_items(&self) -> &[ResponseItem] {
         &self.items
@@ -198,7 +218,9 @@ impl ContextManager {
             // If the removed item participates in a call/output pair, also remove
             // its corresponding counterpart to keep the invariants intact without
             // running a full normalization pass.
-            normalize::remove_corresponding_for(items, &removed);
+            let removed_items =
+                1 + usize::from(normalize::remove_corresponding_for(items, &removed).is_some());
+            self.replay_prefix_items = self.replay_prefix_items.saturating_sub(removed_items);
             self.world_state_baseline = None;
         }
     }
@@ -207,6 +229,44 @@ impl ContextManager {
         self.items = Arc::new(items);
         self.history_version = self.history_version.saturating_add(1);
         self.world_state_baseline = None;
+        self.replay_prefix_items = 0;
+        self.replayed_history = false;
+    }
+
+    pub(crate) fn replace_replayed(&mut self, items: Vec<ResponseItem>) {
+        self.replace(items);
+        self.replay_prefix_items = self.items.len();
+        self.replayed_history = true;
+    }
+
+    pub(crate) fn replace_with_policy(&mut self, items: &[ResponseItem], policy: TruncationPolicy) {
+        let start = items.len().saturating_sub(MAX_REPLAY_HISTORY_ITEMS);
+        let processed = items
+            .get(start..)
+            .unwrap_or_default()
+            .iter()
+            .filter(|item| is_api_message(item))
+            .filter_map(|item| process_replayed_item(item, policy))
+            .collect();
+        self.replace(processed);
+        self.replay_prefix_items = self.items.len();
+        self.replayed_history = true;
+    }
+
+    pub(crate) fn record_replayed_items<'a>(
+        &mut self,
+        items: impl IntoIterator<Item = &'a ResponseItem>,
+        policy: TruncationPolicy,
+    ) {
+        let remaining = MAX_REPLAY_HISTORY_ITEMS.saturating_sub(self.items.len());
+        let processed_items = items
+            .into_iter()
+            .filter(|item| is_api_message(item))
+            .filter_map(|item| process_replayed_item(item, policy))
+            .take(remaining);
+        Arc::make_mut(&mut self.items).extend(processed_items);
+        self.replay_prefix_items = self.items.len();
+        self.replayed_history = true;
     }
 
     /// Drop the last `num_turns` instruction turns from this history.
@@ -231,9 +291,13 @@ impl ContextManager {
         }
 
         let snapshot = self.items.clone();
+        let replay_prefix_items = self.replay_prefix_items;
+        let replayed_history = self.replayed_history;
         let user_positions = user_message_positions(&snapshot);
         let Some(&first_instruction_turn_idx) = user_positions.first() else {
             self.replace(Arc::unwrap_or_clone(snapshot));
+            self.replay_prefix_items = replay_prefix_items.min(self.items.len());
+            self.replayed_history = replayed_history;
             return;
         };
 
@@ -270,7 +334,10 @@ impl ContextManager {
             });
         }
 
+        let retained_replay_items = replay_prefix_items.min(retained_items.len());
         self.replace(retained_items);
+        self.replay_prefix_items = retained_replay_items;
+        self.replayed_history = replayed_history;
     }
 
     pub(crate) fn update_token_info(
@@ -367,33 +434,20 @@ impl ContextManager {
         normalize::strip_audio_when_unsupported(input_modalities, items);
     }
 
+    pub(crate) fn prepare_replayed_history(mut self) -> Vec<ResponseItem> {
+        let items = Arc::make_mut(&mut self.items);
+        normalize::ensure_call_outputs_present(items);
+        normalize::remove_orphan_outputs(items);
+        enforce_replay_limits(items);
+        Arc::unwrap_or_clone(self.items)
+    }
+
     fn process_item(item: &ResponseItem, policy: TruncationPolicy) -> ResponseItem {
         let policy_with_serialization_budget = policy * 1.2;
         match item {
-            ResponseItem::FunctionCallOutput {
-                id,
-                call_id,
-                output,
-                internal_chat_message_metadata_passthrough: metadata,
-            } => ResponseItem::FunctionCallOutput {
-                id: id.clone(),
-                call_id: call_id.clone(),
-                output: truncate_function_output_payload(output, policy_with_serialization_budget),
-                internal_chat_message_metadata_passthrough: metadata.clone(),
-            },
-            ResponseItem::CustomToolCallOutput {
-                id,
-                call_id,
-                name,
-                output,
-                internal_chat_message_metadata_passthrough: metadata,
-            } => ResponseItem::CustomToolCallOutput {
-                id: id.clone(),
-                call_id: call_id.clone(),
-                name: name.clone(),
-                output: truncate_function_output_payload(output, policy_with_serialization_budget),
-                internal_chat_message_metadata_passthrough: metadata.clone(),
-            },
+            ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. } => {
+                truncate_output_item(item, policy_with_serialization_budget)
+            }
             ResponseItem::AdditionalTools { .. }
             | ResponseItem::Message { .. }
             | ResponseItem::AgentMessage { .. }
@@ -458,6 +512,33 @@ impl ContextManager {
         }
         cut_idx
     }
+}
+
+fn enforce_replay_limits(items: &mut Vec<ResponseItem>) {
+    while let Some(index) = items
+        .iter()
+        .position(|item| estimate_item_token_count(item) > 10_000)
+    {
+        let removed = items.remove(index);
+        normalize::remove_corresponding_for(items, &removed);
+    }
+
+    let mut serialized_bytes = items.iter().fold(0u64, |total, item| {
+        total.saturating_add(serialized_response_item_bytes_u64(item))
+    });
+    while items.len() > MAX_REPLAY_HISTORY_ITEMS || serialized_bytes > MAX_REPLAY_HISTORY_BYTES {
+        let removed = items.remove(0);
+        serialized_bytes =
+            serialized_bytes.saturating_sub(serialized_response_item_bytes_u64(&removed));
+        if let Some(corresponding) = normalize::remove_corresponding_for(items, &removed) {
+            serialized_bytes =
+                serialized_bytes.saturating_sub(serialized_response_item_bytes_u64(&corresponding));
+        }
+    }
+}
+
+fn serialized_response_item_bytes_u64(item: &ResponseItem) -> u64 {
+    u64::try_from(serialized_response_item_bytes(item)).unwrap_or(u64::MAX)
 }
 
 pub(crate) fn truncate_function_output_payload(

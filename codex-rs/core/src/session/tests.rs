@@ -4141,6 +4141,7 @@ async fn set_rate_limits_retains_previous_credits() {
         thread_source: None,
         originator: "test_originator".to_string(),
         dynamic_tools: Vec::new(),
+        replayed_dynamic_tools: false,
         user_shell_override: None,
     };
 
@@ -4251,6 +4252,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         thread_source: None,
         originator: "test_originator".to_string(),
         dynamic_tools: Vec::new(),
+        replayed_dynamic_tools: false,
         user_shell_override: None,
     };
 
@@ -4798,6 +4800,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         thread_source: None,
         originator: "test_originator".to_string(),
         dynamic_tools: Vec::new(),
+        replayed_dynamic_tools: false,
         user_shell_override: None,
     }
 }
@@ -5594,6 +5597,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         thread_source: None,
         originator: "test_originator".to_string(),
         dynamic_tools: Vec::new(),
+        replayed_dynamic_tools: false,
         user_shell_override: None,
     };
 
@@ -5736,6 +5740,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         thread_source: None,
         originator: "test_originator".to_string(),
         dynamic_tools: Vec::new(),
+        replayed_dynamic_tools: false,
         user_shell_override: None,
     };
     let per_turn_config =
@@ -6008,6 +6013,7 @@ async fn make_session_with_config_and_rx(
         thread_source: None,
         originator: "test_originator".to_string(),
         dynamic_tools: Vec::new(),
+        replayed_dynamic_tools: false,
         user_shell_override: None,
     };
 
@@ -6123,6 +6129,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         thread_source: None,
         originator: "test_originator".to_string(),
         dynamic_tools: Vec::new(),
+        replayed_dynamic_tools: false,
         user_shell_override: None,
     };
 
@@ -7956,6 +7963,7 @@ where
         thread_source: None,
         originator: "test_originator".to_string(),
         dynamic_tools,
+        replayed_dynamic_tools: false,
         user_shell_override: None,
     };
     let per_turn_config =

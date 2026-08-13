@@ -80,8 +80,10 @@ mod native_workdir {
 }
 
 mod path_comparison {
+    #[cfg(windows)]
     use super::super::normalize_for_path_comparison;
     use super::super::paths_match_after_normalization;
+    #[cfg(windows)]
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
 
