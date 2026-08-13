@@ -94,9 +94,9 @@ preserving fork-owned behavior and validation.
 _Avoid_: Fork reset, upstream replacement, automatic update
 
 **Release baseline**:
-The most recently published non-draft GitHub Release from `openai/codex`, whether stable or
-pre-release, selected as the target of an Upstream synchronization.
-_Avoid_: Upstream main, latest stable, newest semantic version
+The published non-draft GitHub Release from `openai/codex` with the greatest valid Semantic
+Version, whether stable or pre-release, selected as the target of an Upstream synchronization.
+_Avoid_: Upstream main, latest stable, latest publication timestamp
 
 **Fork development version**:
 The `0.0.0` Rust workspace version that identifies Electivus source builds independently of the
@@ -110,8 +110,9 @@ _Avoid_: Sync branch, upstream alert, direct sync
 
 **Synchronization baseline**:
 The Release baseline fixed when a Synchronization PR is created and retained unchanged until that
-PR is merged or closed.
-_Avoid_: Rolling release target, latest available release
+PR is merged or closed. Closing without merge abandons that attempt; automation preserves it as
+history and does not reopen it.
+_Avoid_: Rolling release target, latest available release, automatic retry
 
 **Validation PR**:
 A draft pull request used to prove a compatibility patch on real fork infrastructure before its
