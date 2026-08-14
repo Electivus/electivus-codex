@@ -12,7 +12,7 @@ use crate::postgres::qualified_table;
 use sqlx::AssertSqlSafe;
 use sqlx::Connection;
 
-const EXPECTED_SCHEMA_FINGERPRINT: &str = "6335d742dddaad2ad7c136ce329bf398";
+const EXPECTED_SCHEMA_FINGERPRINT: &str = "74edb309c41cdce7ff9e5ad745025a7c";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct DestinationState {
