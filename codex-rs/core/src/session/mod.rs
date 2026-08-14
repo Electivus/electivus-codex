@@ -1831,7 +1831,6 @@ impl Session {
                 user_config_paths
             }
         };
-
         let mut reloaded_user_configs = Vec::with_capacity(config_toml_paths.len());
         for config_toml_path in config_toml_paths {
             let user_config = match std::fs::read_to_string(&config_toml_path) {

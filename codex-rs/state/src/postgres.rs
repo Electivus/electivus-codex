@@ -23,7 +23,7 @@ pub use initialize::initialize_postgres_runtime_state;
 const MIGRATION_TABLE: &str = "_codex_runtime_state_migrations";
 const MINIMUM_POSTGRES_MAJOR_VERSION: i32 = 18;
 const MINIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
-pub(crate) const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 23;
+pub(crate) const MAXIMUM_COMPATIBLE_SCHEMA_VERSION: i64 = 24;
 const BASELINE_SCHEMA_VERSION: i64 = 1;
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (

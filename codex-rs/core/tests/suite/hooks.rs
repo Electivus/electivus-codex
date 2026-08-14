@@ -1724,12 +1724,10 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn() -> Result<()>
         .await
         .context("timed out waiting for the async hook to start")?;
 
-    fs::write(
-        test.codex_home_path()
-            .join("async_user_prompt_submit_release"),
-        "ready",
-    )
-    .context("release gated async hook")?;
+    let release_path = test
+        .codex_home_path()
+        .join("async_user_prompt_submit_release");
+    fs::write(&release_path, "ready").context("release gated async hook")?;
 
     let finished_path = test
         .codex_home_path()
@@ -1737,6 +1735,7 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn() -> Result<()>
     fs_wait::wait_for_path_exists(finished_path, Duration::from_secs(5))
         .await
         .context("timed out waiting for the async hook to finish")?;
+    fs::remove_file(release_path).context("re-arm the gated async hook for the next turn")?;
 
     assert!(
         timeout(Duration::from_millis(150), test.codex.next_event())
