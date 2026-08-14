@@ -2961,7 +2961,6 @@ dependencies = [
  "codex-core",
  "codex-feedback",
  "codex-git-utils",
- "codex-history",
  "codex-login",
  "codex-model-provider-info",
  "codex-otel",
