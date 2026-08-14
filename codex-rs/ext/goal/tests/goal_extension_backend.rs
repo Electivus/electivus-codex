@@ -1252,7 +1252,8 @@ async fn goal_service_enforces_maximum_token_budget_on_creation_and_updates() ->
 
     let goal = service
         .set_thread_goal(
-            runtime.as_ref(),
+            runtime.thread_goals(),
+            GoalPreviewUpdate::FillIfEmpty(runtime.as_ref()),
             GoalSetRequest {
                 thread_id,
                 objective: GoalObjectiveUpdate::Set("bounded goal"),
@@ -1266,7 +1267,8 @@ async fn goal_service_enforces_maximum_token_budget_on_creation_and_updates() ->
 
     let error = service
         .set_thread_goal(
-            runtime.as_ref(),
+            runtime.thread_goals(),
+            GoalPreviewUpdate::FillIfEmpty(runtime.as_ref()),
             GoalSetRequest {
                 thread_id,
                 objective: GoalObjectiveUpdate::Keep,
@@ -1283,7 +1285,7 @@ async fn goal_service_enforces_maximum_token_budget_on_creation_and_updates() ->
     );
     assert_eq!(
         service
-            .get_thread_goal(runtime.as_ref(), thread_id)
+            .get_thread_goal(runtime.thread_goals(), thread_id)
             .await?
             .expect("goal should remain unchanged")
             .token_budget,
@@ -1292,7 +1294,8 @@ async fn goal_service_enforces_maximum_token_budget_on_creation_and_updates() ->
 
     let goal = service
         .set_thread_goal(
-            runtime.as_ref(),
+            runtime.thread_goals(),
+            GoalPreviewUpdate::FillIfEmpty(runtime.as_ref()),
             GoalSetRequest {
                 thread_id,
                 objective: GoalObjectiveUpdate::Keep,
@@ -1306,7 +1309,8 @@ async fn goal_service_enforces_maximum_token_budget_on_creation_and_updates() ->
 
     let goal = service
         .set_thread_goal(
-            runtime.as_ref(),
+            runtime.thread_goals(),
+            GoalPreviewUpdate::FillIfEmpty(runtime.as_ref()),
             GoalSetRequest {
                 thread_id,
                 objective: GoalObjectiveUpdate::Keep,

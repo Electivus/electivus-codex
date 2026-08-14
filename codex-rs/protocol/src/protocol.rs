@@ -5783,6 +5783,13 @@ mod tests {
 
     #[test]
     fn durable_context_paths_preserve_foreign_native_spelling() -> Result<()> {
+        #[derive(serde::Deserialize, serde::Serialize)]
+        #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+        enum DurableContextItem {
+            TurnContext(TurnContextItem),
+            EventMsg(EventMsg),
+        }
+
         let foreign_cwd = if cfg!(windows) {
             "/home/codex/project"
         } else {
@@ -5839,11 +5846,12 @@ mod tests {
                 }
             }
         });
-        let turn_context_item: RolloutItem = serde_json::from_value(turn_context.clone())?;
+        let turn_context_item: DurableContextItem = serde_json::from_value(turn_context.clone())?;
         assert_eq!(serde_json::to_value(&turn_context_item)?, turn_context);
-        let thread_settings_item: RolloutItem = serde_json::from_value(thread_settings.clone())?;
+        let thread_settings_item: DurableContextItem =
+            serde_json::from_value(thread_settings.clone())?;
         assert_eq!(serde_json::to_value(thread_settings_item)?, thread_settings);
-        let RolloutItem::TurnContext(turn_context_item) = turn_context_item else {
+        let DurableContextItem::TurnContext(turn_context_item) = turn_context_item else {
             unreachable!("serialized turn context must remain a turn context")
         };
         assert_eq!(
@@ -5861,13 +5869,13 @@ mod tests {
                 "summary": "auto"
             }
         });
-        let foreign_legacy_item: RolloutItem =
+        let foreign_legacy_item: DurableContextItem =
             serde_json::from_value(foreign_legacy_sandbox.clone())?;
         assert_eq!(
             serde_json::to_value(&foreign_legacy_item)?,
             foreign_legacy_sandbox
         );
-        let RolloutItem::TurnContext(foreign_legacy_item) = foreign_legacy_item else {
+        let DurableContextItem::TurnContext(foreign_legacy_item) = foreign_legacy_item else {
             unreachable!("serialized legacy sandbox must remain a turn context")
         };
         assert_eq!(
@@ -5894,9 +5902,9 @@ mod tests {
                 "summary": "auto"
             }
         });
-        let legacy_item: RolloutItem = serde_json::from_value(legacy_turn_context.clone())?;
+        let legacy_item: DurableContextItem = serde_json::from_value(legacy_turn_context.clone())?;
         assert_eq!(serde_json::to_value(&legacy_item)?, legacy_turn_context);
-        let RolloutItem::TurnContext(legacy_item) = legacy_item else {
+        let DurableContextItem::TurnContext(legacy_item) = legacy_item else {
             unreachable!("serialized legacy turn context must remain a turn context")
         };
         assert_eq!(
@@ -5921,13 +5929,13 @@ mod tests {
                 "summary": "auto"
             }
         });
-        let file_system_item: RolloutItem =
+        let file_system_item: DurableContextItem =
             serde_json::from_value(foreign_file_system_policy.clone())?;
         assert_eq!(
             serde_json::to_value(&file_system_item)?,
             foreign_file_system_policy
         );
-        let RolloutItem::TurnContext(file_system_item) = file_system_item else {
+        let DurableContextItem::TurnContext(file_system_item) = file_system_item else {
             unreachable!("serialized filesystem context must remain a turn context")
         };
         assert_eq!(
