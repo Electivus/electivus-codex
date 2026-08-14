@@ -270,12 +270,17 @@ async fn run_compact_task_inner_impl(
 
     loop {
         // Clone is required because of the loop
+        let replay_prefix_items = history.replay_prefix_items();
+        let replayed_history = history.is_replayed_history();
         let turn_input = history
             .clone()
             .for_prompt(&turn_context.model_info.input_modalities);
         let turn_input_len = turn_input.len();
         let prompt = Prompt {
             input: turn_input,
+            replay_prefix_items,
+            replayed_history,
+            replayed_dynamic_tools: replayed_history && turn_context.replayed_dynamic_tools,
             base_instructions: sess.get_base_instructions().await,
             ..Default::default()
         };

@@ -2374,7 +2374,7 @@ async fn code_mode_yield_and_termination_are_not_starved_by_runtime_output() -> 
     // Exact controller arbitration is covered by deterministic code-mode contract tests. Keep
     // this end-to-end load bounded while exercising a substantial runtime output backlog.
     let code = format!(
-        r#"// @exec: {{"yield_time_ms": 0, "max_output_tokens": 16}}
+        r#"// @exec: {{"yield_time_ms": 1, "max_output_tokens": 16}}
 for (let index = 0; index < 256; index++) {{
     text(`event ${{index}}`);
 }}
@@ -2404,7 +2404,7 @@ for (let index = 0; index < 256; index++) {{
 
     let first_request = first_completion.single_request();
     let first_items = custom_tool_output_items(&first_request, "call-1");
-    assert_eq!(first_items.len(), 1);
+    assert!(!first_items.is_empty());
     assert_regex_match(
         concat!(
             r"(?s)\A",

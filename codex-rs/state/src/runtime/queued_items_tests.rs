@@ -18,21 +18,27 @@ async fn runtime_with_thread() -> (Arc<StateRuntime>, ThreadId) {
     (runtime, thread_id)
 }
 
+fn queue(runtime: &StateRuntime) -> &SqliteQueueStore {
+    runtime
+        .thread_queue()
+        .expect("test runtime should use SQLite queues")
+}
+
 #[tokio::test]
 async fn competing_runtimes_preserve_fifo_queue_order() {
     let (runtime, thread_id) = runtime_with_thread().await;
     let other = StateRuntime::init(runtime.sqlite().clone(), "test-provider".to_string())
         .await
         .unwrap();
-    let queue = runtime.thread_queue();
-    let other_queue = other.thread_queue();
+    let queue_store = queue(&runtime);
+    let other_queue_store = queue(&other);
     let (first, second) = tokio::join!(
-        queue.enqueue(thread_id, r#"{"first":true}"#),
-        other_queue.enqueue(thread_id, r#"{"second":true}"#),
+        queue_store.enqueue(thread_id, r#"{"first":true}"#),
+        other_queue_store.enqueue(thread_id, r#"{"second":true}"#),
     );
     let mut expected = vec![first.unwrap(), second.unwrap()];
     expected.sort_by(|first, second| first.id.cmp(&second.id));
-    let mut actual = queue
+    let mut actual = queue_store
         .list_page(thread_id, /*offset*/ 0, /*limit*/ 2)
         .await
         .unwrap();
@@ -43,7 +49,7 @@ async fn competing_runtimes_preserve_fifo_queue_order() {
 #[tokio::test]
 async fn fifo_dispatch_preserves_edits_reordering_and_pagination() {
     let (runtime, thread_id) = runtime_with_thread().await;
-    let queue = runtime.thread_queue();
+    let queue = queue(&runtime);
     let first = queue.enqueue(thread_id, r#"{"n":1}"#).await.unwrap();
     let second = queue.enqueue(thread_id, r#"{"n":2}"#).await.unwrap();
     let third = queue.enqueue(thread_id, r#"{"n":3}"#).await.unwrap();
@@ -92,7 +98,7 @@ async fn fifo_dispatch_preserves_edits_reordering_and_pagination() {
 #[tokio::test]
 async fn queue_operations_cannot_mutate_another_threads_messages() {
     let (runtime, thread_id) = runtime_with_thread().await;
-    let queue = runtime.thread_queue();
+    let queue = queue(&runtime);
     let first = queue.enqueue(thread_id, r#"{"n":1}"#).await.unwrap();
     let other_thread_id = ThreadId::new();
     let other = queue.enqueue(other_thread_id, r#"{"n":2}"#).await.unwrap();
@@ -127,6 +133,7 @@ async fn deleting_a_thread_removes_its_queue() {
     let (runtime, thread_id) = runtime_with_thread().await;
     runtime
         .thread_queue()
+        .expect("test runtime should use SQLite queues")
         .enqueue(thread_id, r#"{"n":1}"#)
         .await
         .unwrap();
@@ -135,6 +142,7 @@ async fn deleting_a_thread_removes_its_queue() {
     assert!(
         runtime
             .thread_queue()
+            .expect("test runtime should use SQLite queues")
             .list_page(thread_id, /*offset*/ 0, /*limit*/ 1)
             .await
             .unwrap()
@@ -152,19 +160,21 @@ async fn concurrent_inserts_enforce_the_queue_limit() {
     for _ in 0..MAX_QUEUE_ITEMS - 1 {
         runtime
             .thread_queue()
+            .expect("test runtime should use SQLite queues")
             .enqueue(thread_id, r#"{"n":1}"#)
             .await
             .unwrap();
     }
     let (first, second) = tokio::join!(
-        runtime.thread_queue().enqueue(thread_id, r#"{"n":2}"#),
-        other.thread_queue().enqueue(thread_id, r#"{"n":3}"#),
+        queue(&runtime).enqueue(thread_id, r#"{"n":2}"#),
+        queue(&other).enqueue(thread_id, r#"{"n":3}"#),
     );
     assert_ne!(first.is_ok(), second.is_ok());
     assert_eq!(
         MAX_QUEUE_ITEMS,
         runtime
             .thread_queue()
+            .expect("test runtime should use SQLite queues")
             .list_page(thread_id, /*offset*/ 0, /*limit*/ MAX_QUEUE_ITEMS)
             .await
             .unwrap()

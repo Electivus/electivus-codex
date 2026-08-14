@@ -130,7 +130,7 @@ async fn wait_for_recorded_user_input(thread: &crate::CodexThread, expected: &[U
 fn thread_manager() -> ThreadManager {
     ThreadManager::with_models_provider_for_tests(
         CodexAuth::from_api_key("dummy"),
-        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone(),
+        built_in_model_providers(/*openai_base_url*/ None)["openai"].clone(),
     )
 }
 
@@ -290,8 +290,7 @@ async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
     let mut config = (*turn.config).clone();
-    let provider_info =
-        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["ollama"].clone();
+    let provider_info = built_in_model_providers(/*openai_base_url*/ None)["ollama"].clone();
     config.model_provider_id = "ollama".to_string();
     config.model_provider = provider_info.clone();
     config
@@ -4255,7 +4254,8 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
         empty_extension_registry(),
         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
-        thread_store_from_config(&config, state_db.clone()),
+        thread_store_from_config(&config, state_db.clone())
+            .expect("thread store should initialize"),
         local_agent_graph_store_from_state_db(state_db.as_ref()),
         "11111111-1111-4111-8111-111111111111".to_string(),
         /*attestation_provider*/ None,

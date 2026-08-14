@@ -36,6 +36,7 @@ runs:
           build \
           --config=argument-comment-lint \
           --keep_going \
+          --skip_incompatible_explicit_targets \
           --build_metadata=COMMIT_SHA=${GITHUB_SHA} \
           -- \
           ${bazel_targets}

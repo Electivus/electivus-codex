@@ -35,7 +35,6 @@ use codex_app_server_protocol::Account as AppServerAccount;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::Thread as AppServerThread;
-use codex_app_server_protocol::ThreadListCwdFilter;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadSortKey as AppServerThreadSortKey;
 use codex_app_server_protocol::ThreadSourceKind;
@@ -161,6 +160,7 @@ pub(crate) mod public_widgets;
 mod render;
 mod resize_reflow_cap;
 mod resume_picker;
+mod resume_picker_scope;
 mod selection_list;
 mod service_tier_resolution;
 mod session_archive_commands;
@@ -301,6 +301,14 @@ async fn init_state_db_for_app_server_target(
 ) -> std::io::Result<Option<StateDbHandle>> {
     match app_server_target {
         AppServerTarget::Embedded => state_db::try_init(config).await.map(Some).map_err(|err| {
+            if matches!(
+                &config.runtime_state_backend,
+                codex_state::RuntimeStateBackendConfig::Postgresql { .. }
+            ) {
+                return std::io::Error::other(format!(
+                    "failed to initialize PostgreSQL Runtime State Backend: {err:#}"
+                ));
+            }
             let database_path = codex_state::runtime_db_path_for_corruption_error(&err)
                 .unwrap_or_else(|| config.sqlite_config().state_db_path());
             std::io::Error::other(LocalStateDbStartupError::new(
@@ -627,6 +635,7 @@ async fn lookup_session_target_with_app_server(
     app_server: &mut AppServerSession,
     config: &Config,
     id_or_name: &str,
+    project_cwd: Option<&Path>,
 ) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
     if Uuid::parse_str(id_or_name).is_ok() {
         let thread_id = match ThreadId::from_string(id_or_name) {
@@ -656,13 +665,13 @@ async fn lookup_session_target_with_app_server(
         };
     }
 
-    named_session_lookup::lookup(app_server, config, id_or_name).await
+    named_session_lookup::lookup(app_server, config, id_or_name, project_cwd).await
 }
 
 async fn lookup_latest_session_target_with_app_server(
     app_server: &mut AppServerSession,
     config: &Config,
-    cwd_filter: Option<&Path>,
+    project_cwd: Option<&Path>,
     include_non_interactive: bool,
 ) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
     let uses_remote_workspace = app_server.uses_remote_workspace();
@@ -674,7 +683,7 @@ async fn lookup_latest_session_target_with_app_server(
             .thread_list(latest_session_lookup_params(
                 uses_remote_workspace,
                 config,
-                cwd_filter,
+                project_cwd,
                 include_non_interactive,
                 lookup_mode,
             ))
@@ -684,7 +693,7 @@ async fn lookup_latest_session_target_with_app_server(
             .into_iter()
             .find_map(session_target_from_app_server_thread);
         if target.as_ref().is_some_and(|target| {
-            uses_remote_workspace || target.path.as_deref().is_some_and(std::path::Path::exists)
+            uses_remote_workspace || target.path.as_deref().is_none_or(std::path::Path::exists)
         }) {
             return Ok(target);
         }
@@ -701,7 +710,7 @@ enum LatestSessionLookupMode {
 fn latest_session_lookup_params(
     uses_remote_workspace: bool,
     config: &Config,
-    cwd_filter: Option<&Path>,
+    project_cwd: Option<&Path>,
     include_non_interactive: bool,
     lookup_mode: LatestSessionLookupMode,
 ) -> ThreadListParams {
@@ -717,10 +726,12 @@ fn latest_session_lookup_params(
         },
         source_kinds: Some(resume_source_kinds(include_non_interactive)),
         archived: Some(false),
+        is_pinned: None,
         section_id: None,
         parent_thread_id: None,
         ancestor_thread_id: None,
-        cwd: cwd_filter.map(|cwd| ThreadListCwdFilter::One(cwd.to_string_lossy().to_string())),
+        cwd: None,
+        project_cwd: project_cwd.map(codex_utils_path_uri::LegacyAppPathString::from_path),
         use_state_db_only: match lookup_mode {
             LatestSessionLookupMode::StateDbOnly => true,
             LatestSessionLookupMode::ScanAndRepair => false,
@@ -813,7 +824,7 @@ fn should_load_configured_environments(
     !loader_overrides.ignore_user_config && !app_server_target.uses_remote_workspace()
 }
 
-fn latest_session_cwd_filter<'a>(
+fn contextual_session_project_cwd<'a>(
     uses_remote_workspace: bool,
     remote_cwd_override: Option<&'a Path>,
     config: &'a Config,
@@ -1480,7 +1491,19 @@ async fn run_ratatui_app(
             let Some(startup_app_server) = app_server.as_mut() else {
                 unreachable!("app server should be initialized for --fork <id>");
             };
-            match lookup_session_target_with_app_server(startup_app_server, &config, id_str).await?
+            let project_cwd = contextual_session_project_cwd(
+                uses_remote_workspace,
+                remote_cwd_override.as_deref(),
+                &config,
+                cli.fork_show_all,
+            );
+            match lookup_session_target_with_app_server(
+                startup_app_server,
+                &config,
+                id_str,
+                project_cwd,
+            )
+            .await?
             {
                 Some(target_session) => resume_picker::SessionSelection::Fork(target_session),
                 None => {
@@ -1489,7 +1512,7 @@ async fn run_ratatui_app(
                 }
             }
         } else if cli.fork_last {
-            let filter_cwd = latest_session_cwd_filter(
+            let project_cwd = contextual_session_project_cwd(
                 uses_remote_workspace,
                 remote_cwd_override.as_deref(),
                 &config,
@@ -1499,7 +1522,10 @@ async fn run_ratatui_app(
                 unreachable!("app server should be initialized for --fork --last");
             };
             match lookup_latest_session_target_with_app_server(
-                app_server, &config, filter_cwd, /*include_non_interactive*/ false,
+                app_server,
+                &config,
+                project_cwd,
+                /*include_non_interactive*/ false,
             )
             .await?
             {
@@ -1538,7 +1564,20 @@ async fn run_ratatui_app(
         let Some(startup_app_server) = app_server.as_mut() else {
             unreachable!("app server should be initialized for --resume <id>");
         };
-        match lookup_session_target_with_app_server(startup_app_server, &config, id_str).await? {
+        let project_cwd = contextual_session_project_cwd(
+            uses_remote_workspace,
+            remote_cwd_override.as_deref(),
+            &config,
+            cli.resume_show_all,
+        );
+        match lookup_session_target_with_app_server(
+            startup_app_server,
+            &config,
+            id_str,
+            project_cwd,
+        )
+        .await?
+        {
             Some(target_session) => resume_picker::SessionSelection::Resume(target_session),
             None => {
                 shutdown_app_server_if_present(app_server.take()).await;
@@ -1546,7 +1585,7 @@ async fn run_ratatui_app(
             }
         }
     } else if cli.resume_last {
-        let filter_cwd = latest_session_cwd_filter(
+        let project_cwd = contextual_session_project_cwd(
             uses_remote_workspace,
             remote_cwd_override.as_deref(),
             &config,
@@ -1558,7 +1597,7 @@ async fn run_ratatui_app(
         match lookup_latest_session_target_with_app_server(
             app_server,
             &config,
-            filter_cwd,
+            project_cwd,
             cli.resume_include_non_interactive,
         )
         .await?
@@ -1993,6 +2032,8 @@ mod tests {
     use codex_app_server_protocol::AskForApproval;
     use codex_app_server_protocol::ClientRequest;
     use codex_app_server_protocol::RequestId;
+    use codex_app_server_protocol::ThreadListParams;
+    use codex_app_server_protocol::ThreadListResponse;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
     use codex_config::config_toml::ProjectConfig;
@@ -2015,6 +2056,7 @@ mod tests {
         preview: &str,
         model_provider: &str,
         cwd: &Path,
+        git_origin: Option<&str>,
     ) -> color_eyre::Result<ThreadId> {
         let uuid = Uuid::new_v4();
         let uuid_str = uuid.to_string();
@@ -2046,7 +2088,11 @@ mod tests {
         };
         let session_meta = serde_json::to_value(codex_protocol::protocol::SessionMetaLine {
             meta: session_meta,
-            git: None,
+            git: git_origin.map(|repository_url| codex_protocol::protocol::GitInfo {
+                commit_hash: None,
+                branch: None,
+                repository_url: Some(repository_url.to_string()),
+            }),
         })?;
         let lines = [
             serde_json::json!({
@@ -2234,6 +2280,7 @@ mod tests {
                 "Saved user message",
                 &config.model_provider_id,
                 &session_cwd,
+                /*git_origin*/ None,
             )?;
             let rollout_path = codex_home
                 .join("sessions/2025/01/05")
@@ -2624,7 +2671,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn latest_session_lookup_params_keep_local_filters_for_embedded_sessions()
+    async fn latest_session_lookup_params_use_project_scope_for_embedded_sessions()
     -> std::io::Result<()> {
         let temp_dir = TempDir::new()?;
         let config = build_config(&temp_dir).await?;
@@ -2643,9 +2690,10 @@ mod tests {
             Some(vec![config.model_provider_id.clone()])
         );
         assert_eq!(
-            params.cwd,
-            Some(ThreadListCwdFilter::One(cwd.to_string_lossy().to_string()))
+            params.project_cwd,
+            Some(codex_utils_path_uri::LegacyAppPathString::from_path(&cwd))
         );
+        assert_eq!(params.cwd, None);
         assert!(params.use_state_db_only);
 
         let scan_params = latest_session_lookup_params(
@@ -2660,7 +2708,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn latest_session_lookup_params_keep_local_filters_for_local_daemon_sessions()
+    async fn latest_session_lookup_params_use_project_scope_for_local_daemon_sessions()
     -> color_eyre::Result<()> {
         let temp_dir = TempDir::new()?;
         let config = build_config(&temp_dir).await?;
@@ -2681,9 +2729,10 @@ mod tests {
 
         assert_eq!(params.model_providers, Some(vec![config.model_provider_id]));
         assert_eq!(
-            params.cwd,
-            Some(ThreadListCwdFilter::One(cwd.to_string_lossy().to_string()))
+            params.project_cwd,
+            Some(codex_utils_path_uri::LegacyAppPathString::from_path(&cwd))
         );
+        assert_eq!(params.cwd, None);
         Ok(())
     }
 
@@ -2696,13 +2745,14 @@ mod tests {
         let params = latest_session_lookup_params(
             /*uses_remote_workspace*/ true,
             &config,
-            /*cwd_filter*/ None,
+            /*project_cwd*/ None,
             /*include_non_interactive*/ false,
             LatestSessionLookupMode::StateDbOnly,
         );
 
         assert_eq!(params.model_providers, None);
         assert_eq!(params.cwd, None);
+        assert_eq!(params.project_cwd, None);
         Ok(())
     }
 
@@ -2715,7 +2765,7 @@ mod tests {
         let params = latest_session_lookup_params(
             /*uses_remote_workspace*/ true,
             &config,
-            /*cwd_filter*/ None,
+            /*project_cwd*/ None,
             /*include_non_interactive*/ true,
             LatestSessionLookupMode::StateDbOnly,
         );
@@ -2733,7 +2783,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn latest_session_lookup_params_keep_explicit_cwd_filter_for_remote_sessions()
+    async fn latest_session_lookup_params_keep_explicit_project_scope_for_remote_sessions()
     -> std::io::Result<()> {
         let temp_dir = TempDir::new()?;
         let config = build_config(&temp_dir).await?;
@@ -2749,27 +2799,28 @@ mod tests {
 
         assert_eq!(params.model_providers, None);
         assert_eq!(
-            params.cwd,
-            Some(ThreadListCwdFilter::One(String::from("repo/on/server")))
+            params.project_cwd,
+            Some(codex_utils_path_uri::LegacyAppPathString::from_path(cwd))
         );
+        assert_eq!(params.cwd, None);
         Ok(())
     }
 
     #[tokio::test]
-    async fn latest_session_cwd_filter_respects_scope_options() -> std::io::Result<()> {
+    async fn contextual_session_project_cwd_respects_scope_options() -> std::io::Result<()> {
         let temp_dir = TempDir::new()?;
         let config = build_config(&temp_dir).await?;
         let remote_cwd = Path::new("repo/on/server");
 
-        let local_filter = latest_session_cwd_filter(
+        let local_filter = contextual_session_project_cwd(
             /*uses_remote_workspace*/ false, /*remote_cwd_override*/ None, &config,
             /*show_all*/ false,
         );
-        let show_all_filter = latest_session_cwd_filter(
+        let show_all_filter = contextual_session_project_cwd(
             /*uses_remote_workspace*/ false, /*remote_cwd_override*/ None, &config,
             /*show_all*/ true,
         );
-        let remote_filter = latest_session_cwd_filter(
+        let remote_filter = contextual_session_project_cwd(
             /*uses_remote_workspace*/ true,
             Some(remote_cwd),
             &config,
@@ -2783,12 +2834,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fork_last_filters_latest_session_by_cwd_unless_show_all() -> color_eyre::Result<()> {
+    async fn fork_last_uses_project_session_scope_unless_show_all() -> color_eyre::Result<()> {
         let temp_dir = TempDir::new()?;
         let project_cwd = temp_dir.path().join("project");
+        let repository_cwd = temp_dir.path().join("project-worktree");
         let other_cwd = temp_dir.path().join("other-project");
         std::fs::create_dir_all(&project_cwd)?;
+        std::fs::create_dir_all(&repository_cwd)?;
         std::fs::create_dir_all(&other_cwd)?;
+        for (cwd, origin) in [
+            (&project_cwd, "https://example.com/acme/project.git"),
+            (&repository_cwd, "git@example.com:acme/project.git"),
+            (&other_cwd, "https://example.com/acme/unrelated.git"),
+        ] {
+            let init = std::process::Command::new("git")
+                .arg("init")
+                .arg(cwd)
+                .output()?;
+            color_eyre::eyre::ensure!(
+                init.status.success(),
+                "git init failed: {}",
+                String::from_utf8_lossy(&init.stderr)
+            );
+            let remote = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(["remote", "add", "origin", origin])
+                .output()?;
+            color_eyre::eyre::ensure!(
+                remote.status.success(),
+                "git remote add failed: {}",
+                String::from_utf8_lossy(&remote.stderr)
+            );
+        }
 
         let config = ConfigBuilder::default()
             .codex_home(temp_dir.path().to_path_buf())
@@ -2806,14 +2884,25 @@ mod tests {
             "older project session",
             model_provider,
             &project_cwd,
+            /*git_origin*/ None,
         )?;
-        let other_thread_id = write_session_rollout(
+        let repository_thread_id = write_session_rollout(
             temp_dir.path(),
             "2025-01-02T12-00-00",
             "2025-01-02T12:00:00Z",
+            "newer same repository session",
+            model_provider,
+            &repository_cwd,
+            Some("git@example.com:acme/project.git"),
+        )?;
+        let other_thread_id = write_session_rollout(
+            temp_dir.path(),
+            "2025-01-02T14-00-00",
+            "2025-01-02T14:00:00Z",
             "newer other project session",
             model_provider,
             &other_cwd,
+            Some("https://example.com/acme/unrelated.git"),
         )?;
 
         let mut app_server = AppServerSession::new(
@@ -2822,33 +2911,34 @@ mod tests {
             ),
             ThreadParamsMode::Embedded,
         );
-        let filter_cwd = latest_session_cwd_filter(
+        let project_cwd = contextual_session_project_cwd(
             /*uses_remote_workspace*/ false, /*remote_cwd_override*/ None, &config,
             /*show_all*/ false,
         );
         let scoped_target = lookup_latest_session_target_with_app_server(
             &mut app_server,
             &config,
-            filter_cwd,
+            project_cwd,
             /*include_non_interactive*/ false,
         )
         .await?
         .expect("expected project-scoped fork --last target");
-        let show_all_filter_cwd = latest_session_cwd_filter(
+        let show_all_project_cwd = contextual_session_project_cwd(
             /*uses_remote_workspace*/ false, /*remote_cwd_override*/ None, &config,
             /*show_all*/ true,
         );
         let show_all_target = lookup_latest_session_target_with_app_server(
             &mut app_server,
             &config,
-            show_all_filter_cwd,
+            show_all_project_cwd,
             /*include_non_interactive*/ false,
         )
         .await?
         .expect("expected global fork --last target");
         app_server.shutdown().await?;
 
-        assert_eq!(scoped_target.thread_id, project_thread_id);
+        assert_ne!(project_thread_id, repository_thread_id);
+        assert_eq!(scoped_target.thread_id, repository_thread_id);
         assert_eq!(show_all_target.thread_id, other_thread_id);
         Ok(())
     }
@@ -2882,6 +2972,7 @@ mod tests {
             "legacy writer session",
             config.model_provider_id.as_str(),
             &project_cwd,
+            /*git_origin*/ None,
         )?;
 
         let target = lookup_latest_session_target_with_app_server(
@@ -3045,7 +3136,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embedded_app_server_supports_thread_start_rpc() -> color_eyre::Result<()> {
+    async fn embedded_app_server_supports_stable_and_experimental_picker_rpcs()
+    -> color_eyre::Result<()> {
         let temp_dir = TempDir::new()?;
         let config = build_config(&temp_dir).await?;
         let app_server = start_test_embedded_app_server(config).await?;
@@ -3060,6 +3152,32 @@ mod tests {
             .await
             .expect("thread/start should succeed");
         assert!(!response.thread.id.is_empty());
+
+        let _: ThreadListResponse = app_server
+            .request_typed(ClientRequest::ThreadList {
+                request_id: RequestId::Integer(2),
+                params: ThreadListParams {
+                    cursor: None,
+                    limit: Some(1),
+                    sort_key: None,
+                    sort_direction: None,
+                    model_providers: None,
+                    source_kinds: None,
+                    archived: Some(false),
+                    is_pinned: None,
+                    section_id: None,
+                    cwd: None,
+                    project_cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                        temp_dir.path(),
+                    )),
+                    use_state_db_only: false,
+                    search_term: None,
+                    parent_thread_id: None,
+                    ancestor_thread_id: None,
+                },
+            })
+            .await
+            .expect("thread/list.projectCwd should be enabled for the built-in TUI");
 
         app_server.shutdown().await?;
         Ok(())
@@ -3183,6 +3301,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lookup_session_target_by_name_excludes_unrelated_repository_collision()
+    -> color_eyre::Result<()> {
+        Box::pin(async {
+            let temp_dir = TempDir::new()?;
+            let current_cwd = temp_dir.path().join("current-checkout");
+            let repository_cwd = temp_dir.path().join("repository-checkout");
+            let unrelated_cwd = temp_dir.path().join("unrelated-checkout");
+            for cwd in [&current_cwd, &repository_cwd, &unrelated_cwd] {
+                std::fs::create_dir_all(cwd)?;
+            }
+            let init = std::process::Command::new("git")
+                .arg("init")
+                .arg(&current_cwd)
+                .output()?;
+            color_eyre::eyre::ensure!(
+                init.status.success(),
+                "git init failed: {}",
+                String::from_utf8_lossy(&init.stderr)
+            );
+            let remote = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&current_cwd)
+                .args([
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.com/acme/project.git",
+                ])
+                .output()?;
+            color_eyre::eyre::ensure!(
+                remote.status.success(),
+                "git remote add failed: {}",
+                String::from_utf8_lossy(&remote.stderr)
+            );
+            let config = ConfigBuilder::default()
+                .codex_home(temp_dir.path().to_path_buf())
+                .harness_overrides(ConfigOverrides {
+                    cwd: Some(current_cwd.clone()),
+                    ..Default::default()
+                })
+                .build()
+                .await?;
+            let repository_thread_id = write_session_rollout(
+                config.codex_home.as_path(),
+                "2025-02-01T10-00-00",
+                "2025-02-01T10:00:00Z",
+                "preview text",
+                config.model_provider_id.as_str(),
+                &repository_cwd,
+                Some("git@example.com:acme/project.git"),
+            )?;
+            let unrelated_thread_id = write_session_rollout(
+                config.codex_home.as_path(),
+                "2025-02-01T12-00-00",
+                "2025-02-01T12:00:00Z",
+                "unrelated preview",
+                config.model_provider_id.as_str(),
+                &unrelated_cwd,
+                Some("https://example.com/acme/unrelated.git"),
+            )?;
+            let rollout_dir = temp_dir.path().join("sessions/2025/02/01");
+            let repository_rollout_path = rollout_dir.join(format!(
+                "rollout-2025-02-01T10-00-00-{repository_thread_id}.jsonl"
+            ));
+            let unrelated_rollout_path = rollout_dir.join(format!(
+                "rollout-2025-02-01T12-00-00-{unrelated_thread_id}.jsonl"
+            ));
+
+            let state_runtime = codex_state::StateRuntime::init(
+                codex_state::SqliteConfig::new_for_testing(config.codex_home.as_path().abs()),
+                config.model_provider_id.clone(),
+            )
+            .await
+            .map_err(std::io::Error::other)?;
+            state_runtime
+                .mark_backfill_complete(/*last_watermark*/ None)
+                .await
+                .map_err(std::io::Error::other)?;
+
+            let created_at = chrono::DateTime::parse_from_rfc3339("2025-02-01T10:00:00Z")
+                .expect("timestamp should parse")
+                .with_timezone(&chrono::Utc);
+            let mut builder = codex_state::ThreadMetadataBuilder::new(
+                repository_thread_id,
+                repository_rollout_path.clone(),
+                created_at,
+                serde_json::from_value(serde_json::json!("cli"))
+                    .expect("cli session source should deserialize"),
+            );
+            builder.cwd = repository_cwd;
+            builder.git_origin_url = Some("git@example.com:acme/project.git".to_string());
+            let mut metadata = builder.build(config.model_provider_id.as_str());
+            metadata.title = "saved-session".to_string();
+            metadata.first_user_message = Some("preview text".to_string());
+            state_runtime
+                .upsert_thread(&metadata)
+                .await
+                .map_err(std::io::Error::other)?;
+
+            builder.id = unrelated_thread_id;
+            builder.rollout_path = unrelated_rollout_path;
+            builder.cwd = unrelated_cwd;
+            builder.updated_at = Some(
+                chrono::DateTime::parse_from_rfc3339("2025-02-01T12:00:00Z")
+                    .expect("timestamp should parse")
+                    .with_timezone(&chrono::Utc),
+            );
+            builder.git_origin_url = Some("https://example.com/acme/unrelated.git".to_string());
+            let mut unrelated_metadata = builder.build(config.model_provider_id.as_str());
+            unrelated_metadata.title = "saved-session".to_string();
+            unrelated_metadata.first_user_message = Some("unrelated preview".to_string());
+            state_runtime
+                .upsert_thread(&unrelated_metadata)
+                .await
+                .map_err(std::io::Error::other)?;
+
+            let mut app_server = AppServerSession::new(
+                codex_app_server_client::AppServerClient::InProcess(
+                    start_test_embedded_app_server(config.clone()).await?,
+                ),
+                ThreadParamsMode::Embedded,
+            );
+            let target = lookup_session_target_with_app_server(
+                &mut app_server,
+                &config,
+                "saved-session",
+                Some(current_cwd.as_path()),
+            )
+            .await?;
+            let target = target.expect("name lookup should find the saved thread");
+            assert_eq!(target.path, Some(repository_rollout_path));
+            assert_eq!(target.thread_id, repository_thread_id);
+
+            app_server.shutdown().await?;
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
     async fn embedded_app_server_start_failure_is_returned() -> color_eyre::Result<()> {
         let temp_dir = TempDir::new()?;
         let config = build_config(&temp_dir).await?;
@@ -3222,6 +3480,8 @@ mod tests {
         let sqlite =
             codex_state::SqliteConfig::new_for_testing(occupied_sqlite_home.as_path().abs());
         config.sqlite = sqlite.clone();
+        config.runtime_state_backend =
+            codex_state::RuntimeStateBackendConfig::Sqlite(sqlite.clone());
 
         let err =
             match init_state_db_for_app_server_target(&config, &AppServerTarget::Embedded).await {
@@ -3256,6 +3516,8 @@ mod tests {
         let sqlite = codex_state::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
         let logs_db_path = sqlite.logs_db_path();
         std::fs::write(&logs_db_path, "not a sqlite database")?;
+        config.runtime_state_backend =
+            codex_state::RuntimeStateBackendConfig::Sqlite(sqlite.clone());
         config.sqlite = sqlite;
 
         let err =

@@ -319,7 +319,10 @@ impl Session {
         let mut history = ContextManager::new();
         let mut saw_legacy_compaction_without_replacement_history = false;
         if let Some(base_replacement_history) = base_replacement_history {
-            history.replace_annotated(base_replacement_history.to_vec());
+            history.replace_annotated_with_policy(
+                base_replacement_history,
+                turn_context.model_info.truncation_policy.into(),
+            );
         }
         // Materialize exact history semantics from the replay-derived suffix. The eventual lazy
         // design should keep this same replay shape, but drive it from a resumable reverse source
@@ -327,14 +330,14 @@ impl Session {
         for item in rollout_suffix {
             match item {
                 RolloutItem::ResponseItem(response_item) => {
-                    history.record_annotated_items(
+                    history.record_replayed_annotated_items(
                         std::slice::from_ref(response_item),
                         turn_context.model_info.truncation_policy.into(),
                     );
                 }
                 RolloutItem::InterAgentCommunication(communication) => {
                     let response_item = communication.to_model_input_item();
-                    history.record_items(
+                    history.record_replayed_items(
                         std::iter::once(&response_item),
                         turn_context.model_info.truncation_policy.into(),
                     );
@@ -344,7 +347,10 @@ impl Session {
                     if let Some(replacement_history) = &compacted.replacement_history {
                         // This should actually never happen, because the reverse loop above (to build rollout_suffix)
                         // should stop before any compaction that has Some replacement_history
-                        history.replace_annotated(replacement_history.clone());
+                        history.replace_annotated_with_policy(
+                            replacement_history,
+                            turn_context.model_info.truncation_policy.into(),
+                        );
                     } else {
                         saw_legacy_compaction_without_replacement_history = true;
                         // Legacy rollouts without `replacement_history` should rebuild the
@@ -362,7 +368,7 @@ impl Session {
                             &user_messages,
                             &compacted.message,
                         );
-                        history.replace_annotated(rebuilt);
+                        history.replace_annotated_replayed(rebuilt);
                     }
                 }
                 RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {

@@ -7,6 +7,11 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolExecutor;
+use crate::tools::timing::TimingParameter;
+use crate::tools::timing::YieldTimingClass;
+use crate::tools::timing::adjustment_message;
+use crate::tools::timing::error_with_timing_adjustment;
+use crate::tools::timing::resolve_yield_timing;
 use crate::unified_exec::WriteStdinInteractionEvent;
 use crate::unified_exec::WriteStdinRequest;
 use codex_tools::ToolName;
@@ -22,13 +27,27 @@ struct WriteStdinArgs {
     session_id: i32,
     #[serde(default)]
     chars: String,
-    #[serde(default = "super::default_write_stdin_yield_time_ms")]
-    yield_time_ms: u64,
+    #[serde(default)]
+    yield_time_ms: Option<u64>,
     #[serde(default)]
     max_output_tokens: Option<usize>,
 }
 
-pub struct WriteStdinHandler;
+pub struct WriteStdinHandler {
+    tool_execution: codex_config::ToolExecutionPolicy,
+}
+
+impl WriteStdinHandler {
+    pub(crate) fn new(tool_execution: codex_config::ToolExecutionPolicy) -> Self {
+        Self { tool_execution }
+    }
+}
+
+impl Default for WriteStdinHandler {
+    fn default() -> Self {
+        Self::new(codex_config::ToolExecutionPolicy::default())
+    }
+}
 
 impl ToolExecutor<ToolInvocation> for WriteStdinHandler {
     fn tool_name(&self) -> ToolName {
@@ -36,7 +55,7 @@ impl ToolExecutor<ToolInvocation> for WriteStdinHandler {
     }
 
     fn spec(&self) -> ToolSpec {
-        create_write_stdin_tool()
+        create_write_stdin_tool(self.tool_execution)
     }
 
     fn supports_parallel_tool_calls(&self) -> bool {
@@ -70,13 +89,22 @@ impl WriteStdinHandler {
         };
 
         let args: WriteStdinArgs = parse_arguments(&arguments)?;
-        let response = session
+        let resolved_yield = resolve_yield_timing(
+            turn.config.tool_execution,
+            if args.chars.is_empty() {
+                YieldTimingClass::Global
+            } else {
+                YieldTimingClass::InteractiveStdin
+            },
+            args.yield_time_ms,
+        );
+        let mut response = session
             .services
             .unified_exec_manager
             .write_stdin(WriteStdinRequest {
                 process_id: args.session_id,
                 input: &args.chars,
-                yield_time_ms: args.yield_time_ms,
+                yield_time_ms: resolved_yield.effective_ms,
                 max_output_tokens: args.max_output_tokens,
                 truncation_policy: turn.model_info.truncation_policy.into(),
                 interaction_event: Some(WriteStdinInteractionEvent {
@@ -86,8 +114,13 @@ impl WriteStdinHandler {
             })
             .await
             .map_err(|err| {
-                FunctionCallError::RespondToModel(format!("write_stdin failed: {err}"))
+                FunctionCallError::RespondToModel(error_with_timing_adjustment(
+                    TimingParameter::Yield,
+                    resolved_yield,
+                    format!("write_stdin failed: {err}"),
+                ))
             })?;
+        response.timing_adjustment = adjustment_message(TimingParameter::Yield, resolved_yield);
 
         Ok(boxed_tool_output(response))
     }

@@ -198,23 +198,52 @@ pub struct RolloutLineReader {
 }
 
 enum RolloutLineReaderInner {
-    Plain(tokio::io::Lines<tokio::io::BufReader<tokio::fs::File>>),
+    Plain(tokio::io::BufReader<tokio::fs::File>),
     Blocking(Option<BlockingLineReader>),
 }
 
 impl RolloutLineReader {
     /// Reads the next JSONL record from the rollout.
     pub async fn next_line(&mut self) -> io::Result<Option<String>> {
+        Ok(self
+            .next_line_bounded(u64::MAX)
+            .await?
+            .map(|(line, _bytes)| line))
+    }
+
+    /// Reads one record without allocating more than the remaining decoded-byte budget.
+    pub(crate) async fn next_line_bounded(
+        &mut self,
+        maximum_bytes: u64,
+    ) -> io::Result<Option<(String, u64)>> {
         match &mut self.inner {
-            RolloutLineReaderInner::Plain(lines) => lines.next_line().await,
+            RolloutLineReaderInner::Plain(reader) => {
+                use tokio::io::AsyncBufReadExt;
+                use tokio::io::AsyncReadExt;
+
+                let mut line = String::new();
+                let bytes = (&mut *reader)
+                    .take(maximum_bytes.saturating_add(1))
+                    .read_line(&mut line)
+                    .await?;
+                finish_bounded_line(line, bytes, maximum_bytes)
+            }
             RolloutLineReaderInner::Blocking(slot) => {
                 let Some(mut reader) = slot.take() else {
                     return Err(io::Error::other("compressed rollout reader is busy"));
                 };
-                let (line, reader) =
-                    tokio::task::spawn_blocking(move || (reader.next().transpose(), reader))
-                        .await
-                        .map_err(io::Error::other)?;
+                let (line, reader) = tokio::task::spawn_blocking(move || {
+                    let mut line = String::new();
+                    let bytes = std::io::BufRead::read_line(
+                        &mut (&mut reader).take(maximum_bytes.saturating_add(1)),
+                        &mut line,
+                    );
+                    let line =
+                        bytes.and_then(|bytes| finish_bounded_line(line, bytes, maximum_bytes));
+                    (line, reader)
+                })
+                .await
+                .map_err(io::Error::other)?;
                 *slot = Some(reader);
                 line
             }
@@ -222,7 +251,28 @@ impl RolloutLineReader {
     }
 }
 
-type BlockingLineReader = std::io::Lines<std::io::BufReader<Box<dyn Read + Send>>>;
+type BlockingLineReader = std::io::BufReader<Box<dyn Read + Send>>;
+
+fn finish_bounded_line(
+    mut line: String,
+    bytes: usize,
+    maximum_bytes: u64,
+) -> io::Result<Option<(String, u64)>> {
+    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+    if bytes == 0 {
+        return Ok(None);
+    }
+    if bytes > maximum_bytes {
+        return Err(io::Error::other("rollout line exceeds decoded-byte budget"));
+    }
+    if line.ends_with('\n') {
+        line.pop();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+    }
+    Ok(Some((line, bytes)))
+}
 
 mod worker {
     use std::ffi::OsStr;
@@ -1029,14 +1079,12 @@ mod file_name {
 mod reader {
     use std::fs::File;
     use std::io;
-    use std::io::BufRead;
     use std::io::Read;
     use std::path::Path;
 
     use super::RolloutLineReader;
     use super::RolloutLineReaderInner;
     use super::path;
-    use tokio::io::AsyncBufReadExt;
 
     pub(super) async fn open_once(path: &Path) -> io::Result<RolloutLineReader> {
         let path = path::existing_rollout_path(path)
@@ -1046,9 +1094,7 @@ mod reader {
             let reader = tokio::task::spawn_blocking(move || {
                 let input = File::open(path.as_path())?;
                 let decoder = zstd::stream::read::Decoder::new(input)?;
-                Ok::<_, io::Error>(
-                    io::BufReader::new(Box::new(decoder) as Box<dyn Read + Send>).lines(),
-                )
+                Ok::<_, io::Error>(io::BufReader::new(Box::new(decoder) as Box<dyn Read + Send>))
             })
             .await
             .map_err(io::Error::other)??;
@@ -1058,7 +1104,7 @@ mod reader {
         }
         let file = tokio::fs::File::open(path).await?;
         Ok(RolloutLineReader {
-            inner: RolloutLineReaderInner::Plain(tokio::io::BufReader::new(file).lines()),
+            inner: RolloutLineReaderInner::Plain(tokio::io::BufReader::new(file)),
         })
     }
 }

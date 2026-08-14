@@ -30,8 +30,13 @@ mod state;
 mod strict_config;
 pub mod test_support;
 mod thread_config;
+mod tool_execution;
 mod tui_keymap;
 pub mod types;
+
+#[cfg(test)]
+#[path = "tool_execution_tests.rs"]
+mod tool_execution_tests;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 
@@ -179,3 +184,10 @@ pub use thread_config::ThreadConfigLoaderFuture;
 pub use thread_config::ThreadConfigSource;
 pub use thread_config::UserThreadConfig;
 pub use toml::Value as TomlValue;
+pub use tool_execution::ResolvedTiming;
+pub use tool_execution::TimingAdjustment;
+pub use tool_execution::TimingBound;
+pub use tool_execution::ToolExecutionPolicy;
+pub use tool_execution::ToolExecutionTimingRange;
+pub use tool_execution::ToolExecutionTimingRangeToml;
+pub use tool_execution::ToolExecutionToml;

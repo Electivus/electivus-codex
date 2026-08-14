@@ -111,8 +111,7 @@ fn code_mode_custom_tool_output_text(output_item: &Value) -> String {
 }
 
 fn non_openai_model_provider(server: &wiremock::MockServer) -> ModelProviderInfo {
-    let mut provider =
-        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
+    let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
     provider.name = "OpenAI (test)".into();
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;

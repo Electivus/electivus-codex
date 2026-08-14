@@ -10,6 +10,9 @@ use super::super::SessionStatus;
 use super::super::SessionTarget;
 use super::ArchiveState;
 use crate::key_hint::KeyBinding;
+use crate::resume_picker_scope::ScopeChangeDirection;
+use crate::resume_picker_scope::SessionLocationFilter;
+use crate::resume_picker_scope::ThreadListQuery;
 use crate::tui::FrameRequester;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::JSONRPCErrorError;
@@ -172,7 +175,7 @@ fn archived_status_preserves_directory_filter_and_hides_archive_shortcut() {
             request_sink
                 .lock()
                 .expect("page request sink")
-                .push((request.status, request.cwd_filter));
+                .push((request.status, request.location_filter));
         }
     });
     let mut state = PickerState::new(
@@ -187,15 +190,17 @@ fn archived_status_preserves_directory_filter_and_hides_archive_shortcut() {
     state.toggle_status();
 
     assert_eq!(state.status, SessionStatus::Archived);
-    let params = super::super::thread_list_params(
-        /*cursor*/ None,
-        Some(std::path::Path::new("/tmp/project")),
-        SessionStatus::Archived,
-        ProviderFilter::Any,
-        ThreadSortKey::UpdatedAt,
-        /*include_non_interactive*/ false,
-        /*use_state_db_only*/ false,
-    );
+    let params = ThreadListQuery {
+        cursor: None,
+        limit: 25,
+        sort_key: ThreadSortKey::UpdatedAt,
+        model_providers: None,
+        source_kinds: crate::resume_source_kinds(/*include_non_interactive*/ false),
+        location_filter: SessionLocationFilter::Project(PathBuf::from("/tmp/project")),
+        archived: true,
+        use_state_db_only: false,
+    }
+    .into_params();
     assert_eq!(params.archived, Some(true));
 
     set_selected_session(&mut state, ThreadId::new());
@@ -211,16 +216,22 @@ fn archived_status_preserves_directory_filter_and_hides_archive_shortcut() {
     ");
     insta::assert_snapshot!(
         super::super::toolbar_line(&state, /*compact*/ true).to_string(),
-        @"Filter:[Cwd] [Archived] Sort:[Updated]"
+        @"Filter:[Project] [Archived] Sort:[Updated]"
     );
 
-    state.toggle_filter_mode();
+    state.change_filter_mode(ScopeChangeDirection::Next);
 
     assert_eq!(
         *requested_filters.lock().unwrap(),
         vec![
-            (SessionStatus::Archived, Some(PathBuf::from("/tmp/project")),),
-            (SessionStatus::Archived, None),
+            (
+                SessionStatus::Archived,
+                SessionLocationFilter::Project(PathBuf::from("/tmp/project")),
+            ),
+            (
+                SessionStatus::Archived,
+                SessionLocationFilter::Cwd(PathBuf::from("/tmp/project")),
+            ),
         ]
     );
 }

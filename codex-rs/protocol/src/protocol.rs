@@ -27,6 +27,10 @@ use crate::config_types::MultiAgentMode;
 use crate::config_types::Personality;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use crate::config_types::WindowsSandboxLevel;
+use crate::durable_path_serde::DurableFileSystemSandboxPolicy;
+use crate::durable_path_serde::DurablePermissionProfile;
+use crate::durable_path_serde::DurableSandboxPolicy;
+use crate::durable_path_serde::legacy_native_path_uri;
 use crate::dynamic_tools::DynamicToolCallOutputContentItem;
 use crate::dynamic_tools::DynamicToolCallRequest;
 use crate::dynamic_tools::DynamicToolResponse;
@@ -2046,11 +2050,16 @@ pub struct ThreadSettingsSnapshot {
     pub service_tier: Option<String>,
     pub approval_policy: AskForApproval,
     pub approvals_reviewer: ApprovalsReviewer,
-    pub permission_profile: PermissionProfile,
+    #[schemars(with = "PermissionProfile")]
+    #[ts(as = "PermissionProfile")]
+    pub permission_profile: DurablePermissionProfile,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub active_permission_profile: Option<ActivePermissionProfile>,
-    pub cwd: AbsolutePathBuf,
+    #[serde(with = "legacy_native_path_uri")]
+    #[schemars(with = "String")]
+    #[ts(as = "PathUri")]
+    pub cwd: PathUri,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffortConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3017,11 +3026,17 @@ pub struct TurnContextNetworkItem {
 pub struct TurnContextItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
-    pub cwd: AbsolutePathBuf,
+    #[serde(with = "legacy_native_path_uri")]
+    #[schemars(with = "String")]
+    #[ts(as = "PathUri")]
+    pub cwd: PathUri,
     /// Effective workspace roots used to materialize symbolic
     /// `:workspace_roots` filesystem permissions in `permission_profile`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    #[serde(with = "legacy_native_path_uri::option_vec")]
+    #[schemars(with = "Option<Vec<String>>")]
+    #[ts(as = "Option<Vec<PathUri>>")]
+    pub workspace_roots: Option<Vec<PathUri>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_date: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3029,13 +3044,19 @@ pub struct TurnContextItem {
     pub approval_policy: AskForApproval,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approvals_reviewer: Option<ApprovalsReviewer>,
-    pub sandbox_policy: SandboxPolicy,
+    #[schemars(with = "SandboxPolicy")]
+    #[ts(as = "SandboxPolicy")]
+    pub sandbox_policy: DurableSandboxPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_profile: Option<PermissionProfile>,
+    #[schemars(with = "Option<PermissionProfile>")]
+    #[ts(as = "Option<PermissionProfile>")]
+    pub permission_profile: Option<DurablePermissionProfile>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<TurnContextNetworkItem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file_system_sandbox_policy: Option<FileSystemSandboxPolicy>,
+    #[schemars(with = "Option<FileSystemSandboxPolicy>")]
+    #[ts(as = "Option<FileSystemSandboxPolicy>")]
+    pub file_system_sandbox_policy: Option<DurableFileSystemSandboxPolicy>,
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comp_hash: Option<String>,
@@ -3061,20 +3082,35 @@ pub struct TurnContextItem {
 
 impl TurnContextItem {
     pub fn permission_profile(&self) -> PermissionProfile {
-        self.permission_profile.clone().unwrap_or_else(|| {
-            let file_system_sandbox_policy =
-                self.file_system_sandbox_policy.clone().unwrap_or_else(|| {
-                    FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
-                        &self.sandbox_policy,
-                        self.cwd.as_path(),
-                    )
-                });
-            PermissionProfile::from_runtime_permissions_with_enforcement(
-                SandboxEnforcement::from_legacy_sandbox_policy(&self.sandbox_policy),
-                &file_system_sandbox_policy,
-                NetworkSandboxPolicy::from(&self.sandbox_policy),
-            )
-        })
+        if let Some(permission_profile) = &self.permission_profile {
+            return permission_profile
+                .to_native()
+                .unwrap_or_else(|_| PermissionProfile::read_only());
+        }
+        let sandbox_policy = self
+            .sandbox_policy
+            .to_native()
+            .unwrap_or_else(|_| SandboxPolicy::new_read_only_policy());
+        let file_system_sandbox_policy = match &self.file_system_sandbox_policy {
+            Some(policy) => match policy.to_native() {
+                Ok(policy) => policy,
+                Err(_) => return PermissionProfile::read_only(),
+            },
+            None => {
+                let Ok(cwd) = self.cwd.to_abs_path() else {
+                    return PermissionProfile::read_only();
+                };
+                FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
+                    &sandbox_policy,
+                    cwd.as_path(),
+                )
+            }
+        };
+        PermissionProfile::from_runtime_permissions_with_enforcement(
+            SandboxEnforcement::from_legacy_sandbox_policy(&sandbox_policy),
+            &file_system_sandbox_policy,
+            NetworkSandboxPolicy::from(&sandbox_policy),
+        )
     }
 }
 
@@ -5746,6 +5782,162 @@ mod tests {
     }
 
     #[test]
+    fn durable_context_paths_preserve_foreign_native_spelling() -> Result<()> {
+        let foreign_cwd = if cfg!(windows) {
+            "/home/codex/project"
+        } else {
+            r"C:\Users\codex\project"
+        };
+        let permission_profile = json!({
+            "type": "managed",
+            "file_system": {
+                "type": "restricted",
+                "entries": [{
+                    "path": { "type": "path", "path": foreign_cwd },
+                    "access": "write"
+                }]
+            },
+            "network": "restricted"
+        });
+        let turn_context = json!({
+            "type": "turn_context",
+            "payload": {
+                "cwd": foreign_cwd,
+                "workspace_roots": [foreign_cwd],
+                "approval_policy": "never",
+                "sandbox_policy": {
+                    "type": "workspace-write",
+                    "writable_roots": [foreign_cwd],
+                    "network_access": false,
+                    "exclude_tmpdir_env_var": false,
+                    "exclude_slash_tmp": false
+                },
+                "permission_profile": permission_profile,
+                "model": "gpt-5",
+                "summary": "auto"
+            }
+        });
+        let thread_settings = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "thread_settings_applied",
+                "thread_settings": {
+                    "model": "gpt-5",
+                    "model_provider_id": "openai",
+                    "approval_policy": "never",
+                    "approvals_reviewer": "user",
+                    "permission_profile": permission_profile,
+                    "cwd": foreign_cwd,
+                    "collaboration_mode": {
+                        "mode": "default",
+                        "settings": {
+                            "model": "gpt-5",
+                            "reasoning_effort": null,
+                            "developer_instructions": null
+                        }
+                    }
+                }
+            }
+        });
+        let turn_context_item: RolloutItem = serde_json::from_value(turn_context.clone())?;
+        assert_eq!(serde_json::to_value(&turn_context_item)?, turn_context);
+        let thread_settings_item: RolloutItem = serde_json::from_value(thread_settings.clone())?;
+        assert_eq!(serde_json::to_value(thread_settings_item)?, thread_settings);
+        let RolloutItem::TurnContext(turn_context_item) = turn_context_item else {
+            unreachable!("serialized turn context must remain a turn context")
+        };
+        assert_eq!(
+            turn_context_item.permission_profile(),
+            PermissionProfile::read_only()
+        );
+
+        let foreign_legacy_sandbox = json!({
+            "type": "turn_context",
+            "payload": {
+                "cwd": foreign_cwd,
+                "approval_policy": "never",
+                "sandbox_policy": { "type": "danger-full-access" },
+                "model": "gpt-5",
+                "summary": "auto"
+            }
+        });
+        let foreign_legacy_item: RolloutItem =
+            serde_json::from_value(foreign_legacy_sandbox.clone())?;
+        assert_eq!(
+            serde_json::to_value(&foreign_legacy_item)?,
+            foreign_legacy_sandbox
+        );
+        let RolloutItem::TurnContext(foreign_legacy_item) = foreign_legacy_item else {
+            unreachable!("serialized legacy sandbox must remain a turn context")
+        };
+        assert_eq!(
+            foreign_legacy_item.permission_profile(),
+            PermissionProfile::read_only()
+        );
+
+        let legacy_turn_context = json!({
+            "type": "turn_context",
+            "payload": {
+                "cwd": foreign_cwd,
+                "approval_policy": "never",
+                "sandbox_policy": {
+                    "type": "danger-full-access"
+                },
+                "permission_profile": {
+                    "network": { "enabled": false },
+                    "file_system": {
+                        "read": [foreign_cwd],
+                        "write": [foreign_cwd]
+                    }
+                },
+                "model": "gpt-5",
+                "summary": "auto"
+            }
+        });
+        let legacy_item: RolloutItem = serde_json::from_value(legacy_turn_context.clone())?;
+        assert_eq!(serde_json::to_value(&legacy_item)?, legacy_turn_context);
+        let RolloutItem::TurnContext(legacy_item) = legacy_item else {
+            unreachable!("serialized legacy turn context must remain a turn context")
+        };
+        assert_eq!(
+            legacy_item.permission_profile(),
+            PermissionProfile::read_only()
+        );
+
+        let foreign_file_system_policy = json!({
+            "type": "turn_context",
+            "payload": {
+                "cwd": foreign_cwd,
+                "approval_policy": "never",
+                "sandbox_policy": { "type": "danger-full-access" },
+                "file_system_sandbox_policy": {
+                    "kind": "restricted",
+                    "entries": [{
+                        "path": { "type": "path", "path": foreign_cwd },
+                        "access": "write"
+                    }]
+                },
+                "model": "gpt-5",
+                "summary": "auto"
+            }
+        });
+        let file_system_item: RolloutItem =
+            serde_json::from_value(foreign_file_system_policy.clone())?;
+        assert_eq!(
+            serde_json::to_value(&file_system_item)?,
+            foreign_file_system_policy
+        );
+        let RolloutItem::TurnContext(file_system_item) = file_system_item else {
+            unreachable!("serialized filesystem context must remain a turn context")
+        };
+        assert_eq!(
+            file_system_item.permission_profile(),
+            PermissionProfile::read_only()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn turn_context_item_deserializes_legacy_on_failure_as_on_request() -> Result<()> {
         let item: TurnContextItem = serde_json::from_value(json!({
             "cwd": test_path_buf("/tmp"),
@@ -5763,27 +5955,28 @@ mod tests {
     fn turn_context_item_serializes_network_when_present() -> Result<()> {
         let item = TurnContextItem {
             turn_id: None,
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
             workspace_roots: None,
             current_date: None,
             timezone: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
-            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            sandbox_policy: SandboxPolicy::DangerFullAccess.into(),
             permission_profile: None,
             network: Some(TurnContextNetworkItem {
                 allowed_domains: vec!["api.example.com".to_string()],
                 denied_domains: vec!["blocked.example.com".to_string()],
             }),
-            file_system_sandbox_policy: Some(FileSystemSandboxPolicy::restricted(vec![
-                FileSystemSandboxEntry {
+            file_system_sandbox_policy: Some(
+                FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
                     path: FileSystemPath::GlobPattern {
                         pattern: "/tmp/private/**/*.txt".to_string(),
                     },
                     access: FileSystemAccessMode::Deny,
                     missing_path_behavior: None,
-                },
-            ])),
+                }])
+                .into(),
+            ),
             model: "gpt-5".to_string(),
             comp_hash: None,
             personality: None,

@@ -1,10 +1,10 @@
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
+use app_test_support::create_exec_command_sse_response;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence;
-use app_test_support::create_shell_command_sse_response;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
@@ -192,19 +192,9 @@ async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()
 }
 
 #[tokio::test]
-#[ignore = "TODO(owenlin0): flaky"]
 async fn review_start_exec_approval_item_id_matches_command_execution_item() -> Result<()> {
     let responses = vec![
-        create_shell_command_sse_response(
-            vec![
-                "git".to_string(),
-                "rev-parse".to_string(),
-                "HEAD".to_string(),
-            ],
-            /*workdir*/ None,
-            Some(5000),
-            "review-call-1",
-        )?,
+        create_exec_command_sse_response("review-call-1")?,
         create_final_assistant_message_sse_response("done")?,
     ];
     let server = create_mock_responses_server_sequence(responses).await;
@@ -214,6 +204,7 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
         .with_provider_name("Mock provider")
         .with_approval_policy("untrusted")
         .disable_feature(Feature::ShellSnapshot)
+        .enable_feature(Feature::UnifiedExec)
         .write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
@@ -226,7 +217,7 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
             request_id,
             params: ReviewStartParams {
                 thread_id,
-                delivery: Some(ReviewDelivery::Inline),
+                delivery: Some(ReviewDelivery::Detached),
                 target: ReviewTarget::Commit {
                     sha: "1234567deadbeef".to_string(),
                     title: Some("Check review approvals".to_string()),
@@ -236,17 +227,6 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
         .await?;
     let turn_id = turn.id.clone();
     assert_eq!(turn.items_view, TurnItemsView::NotLoaded);
-    assert_eq!(
-        turn.items,
-        vec![ThreadItem::UserMessage {
-            id: turn_id.clone(),
-            client_id: None,
-            content: vec![V2UserInput::Text {
-                text: "commit 1234567: Check review approvals".to_string(),
-                text_elements: Vec::new(),
-            }],
-        }]
-    );
 
     let server_req = timeout(
         DEFAULT_READ_TIMEOUT,

@@ -56,6 +56,7 @@ fn stored_thread(cwd: &str, title: &str, first_user_message: &str) -> StoredThre
         section_position: None,
         section_entered_at: None,
         cwd: PathBuf::from(cwd),
+        repository_identity: None,
         cli_version: "test".to_string(),
         source: SessionSource::Cli,
         history_mode: Default::default(),

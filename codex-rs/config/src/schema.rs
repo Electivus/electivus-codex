@@ -5,6 +5,7 @@ use codex_features::legacy_feature_keys;
 use schemars::r#gen::SchemaGenerator;
 use schemars::r#gen::SchemaSettings;
 use schemars::schema::InstanceType;
+use schemars::schema::Metadata;
 use schemars::schema::ObjectValidation;
 use schemars::schema::RootSchema;
 use schemars::schema::Schema;
@@ -41,6 +42,23 @@ pub fn features_schema(schema_gen: &mut SchemaGenerator) -> Schema {
                 schema_gen.subschema_for::<codex_features::FeatureToml<
                     codex_features::CodeModeHostConfigToml,
                 >>(),
+            );
+            continue;
+        }
+        if feature.id == codex_features::Feature::CodeModeBufferedExec {
+            validation.properties.insert(
+                feature.key.to_string(),
+                Schema::Object(SchemaObject {
+                    instance_type: Some(InstanceType::Boolean.into()),
+                    metadata: Some(Box::new(Metadata {
+                        description: Some(
+                            "Deprecated compatibility key retained as a no-op; the global tool execution yield default is authoritative."
+                                .to_string(),
+                        ),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                }),
             );
             continue;
         }

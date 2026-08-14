@@ -867,6 +867,9 @@ pub struct ThreadMetadataUpdateParams {
     /// provide a string to replace the stored value.
     #[ts(optional = nullable)]
     pub git_info: Option<ThreadMetadataGitInfoUpdateParams>,
+    /// Compatibility patch for membership in the built-in Pinned section.
+    #[ts(optional = nullable)]
+    pub is_pinned: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -1232,6 +1235,10 @@ pub struct ThreadListParams {
     /// If false or null, only non-archived threads are returned.
     #[ts(optional = nullable)]
     pub archived: Option<bool>,
+    /// Compatibility filter for membership in the built-in Pinned section.
+    /// This cannot be combined with `sectionId`.
+    #[ts(optional = nullable)]
+    pub is_pinned: Option<bool>,
     /// Omit to include every section, set to `null` for unsectioned threads,
     /// or provide a section ID to return only threads in that section.
     #[serde(
@@ -1246,6 +1253,11 @@ pub struct ThreadListParams {
     /// exactly matches one of these paths are returned.
     #[ts(optional = nullable, type = "string | Array<string> | null")]
     pub cwd: Option<ThreadListCwdFilter>,
+    /// Optional project checkout used to discover threads from the same Recorded Working
+    /// Directory or Repository Identity. Mutually exclusive with `cwd`.
+    #[experimental("thread/list.projectCwd")]
+    #[ts(optional = nullable)]
+    pub project_cwd: Option<LegacyAppPathString>,
     /// If true, return from the state DB without scanning JSONL rollouts to
     /// repair thread metadata. Omitted or false preserves scan-and-repair
     /// behavior.

@@ -17,6 +17,28 @@ fn write_project_session(project_root: &Path, project_cwd: &Path) {
     .expect("write project session");
 }
 
+fn expected_memory_import(
+    project_keys: &[&str],
+    artifacts: Vec<(String, Vec<u8>)>,
+) -> ExternalAgentMemoryImport {
+    let mut artifacts = artifacts
+        .into_iter()
+        .map(|(path, contents)| MemoryArtifact::new(path, contents).expect("valid artifact"))
+        .collect::<Vec<_>>();
+    artifacts.push(
+        MemoryArtifact::new(
+            format!("extensions/{EXTENSION_NAME}/instructions.md"),
+            EXTENSION_INSTRUCTIONS.as_bytes().to_vec(),
+        )
+        .expect("valid instructions artifact"),
+    );
+    ExternalAgentMemoryImport::new(
+        project_keys.iter().map(ToString::to_string).collect(),
+        MemoryArtifactSet::new(artifacts).expect("valid artifact set"),
+    )
+    .expect("valid memory import")
+}
+
 #[test]
 fn copies_only_selected_projects_and_recopies_changed_content() {
     let root = TempDir::new().expect("create tempdir");
@@ -50,8 +72,38 @@ fn copies_only_selected_projects_and_recopies_changed_content() {
 
     let outcome =
         copy_resources(&codex_home, &all_files, &selected_memory).expect("copy project A");
-    assert_eq!(outcome.synchronized_projects, vec!["project-a"]);
-    assert_eq!(outcome.failures, Vec::new());
+    let project_a_scope = serde_json::to_vec(&serde_json::json!({
+        "cwd": root.path().join("project-a-cwd"),
+    }))
+    .expect("serialize project A scope");
+    assert_eq!(
+        outcome,
+        MemoryImportOutcome {
+            synchronized_projects: vec!["project-a".to_string()],
+            failures: Vec::new(),
+            memory_import: Some(expected_memory_import(
+                &["project-a"],
+                vec![
+                    (
+                        "extensions/external_agent_import/resources/project-a/MEMORY.md"
+                            .to_string(),
+                        b"project A memory".to_vec(),
+                    ),
+                    (
+                        "extensions/external_agent_import/resources/project-a/release-process.md"
+                            .to_string(),
+                        b"project A release process".to_vec(),
+                    ),
+                    (
+                        "extensions/external_agent_import/resources/project-a/scope.json"
+                            .to_string(),
+                        project_a_scope,
+                    ),
+                ],
+            )),
+            workspace_changed: true,
+        }
+    );
     assert_eq!(
         fs::read(resources_root(&codex_home).join("project-a/MEMORY.md"))
             .expect("read project A memory"),
@@ -177,12 +229,14 @@ fn removes_project_resources_when_the_source_project_disappears() {
         projects_needing_import(&codex_home, &memory_files).expect("detect removed project"),
         BTreeSet::from(["project-a".to_string()])
     );
+    let outcome = copy_resources(&codex_home, &memory_files, &selected_memory)
+        .expect("remove imported project");
     assert_eq!(
-        copy_resources(&codex_home, &memory_files, &selected_memory)
-            .expect("remove imported project"),
+        outcome,
         MemoryImportOutcome {
             synchronized_projects: vec!["project-a".to_string()],
             failures: Vec::new(),
+            memory_import: Some(expected_memory_import(&["project-a"], Vec::new())),
             workspace_changed: true,
         }
     );
@@ -232,12 +286,32 @@ fn project_rename_removes_the_old_target_and_imports_the_new_target() {
         projects_needing_import(&codex_home, &memory_files).expect("detect renamed project"),
         BTreeSet::from(["project-a".to_string(), "project-b".to_string()])
     );
+    let outcome = copy_resources(&codex_home, &memory_files, &selected_memory)
+        .expect("synchronize renamed project");
+    let project_scope = serde_json::to_vec(&serde_json::json!({
+        "cwd": root.path().join("project-cwd"),
+    }))
+    .expect("serialize project scope");
     assert_eq!(
-        copy_resources(&codex_home, &memory_files, &selected_memory)
-            .expect("synchronize renamed project"),
+        outcome,
         MemoryImportOutcome {
             synchronized_projects: vec!["project-a".to_string(), "project-b".to_string()],
             failures: Vec::new(),
+            memory_import: Some(expected_memory_import(
+                &["project-a", "project-b"],
+                vec![
+                    (
+                        "extensions/external_agent_import/resources/project-b/MEMORY.md"
+                            .to_string(),
+                        b"project memory".to_vec(),
+                    ),
+                    (
+                        "extensions/external_agent_import/resources/project-b/scope.json"
+                            .to_string(),
+                        project_scope,
+                    ),
+                ],
+            )),
             workspace_changed: true,
         }
     );
@@ -274,6 +348,7 @@ fn does_not_import_a_new_project_without_a_reliable_cwd() {
                 project_key: "project-a".to_string(),
                 message: "failed to synchronize selected memory project-a: selected memory project has no reliable cwd: project-a".to_string(),
             }],
+            memory_import: None,
             workspace_changed: false,
         }
     );
@@ -322,12 +397,14 @@ fn removes_an_existing_unscoped_target_when_cwd_is_unavailable() {
         projects_needing_import(&codex_home, &memory_files).expect("detect unscoped target"),
         BTreeSet::from(["project-a".to_string()])
     );
+    let outcome = copy_resources(&codex_home, &memory_files, &selected_memory)
+        .expect("remove unscoped target");
     assert_eq!(
-        copy_resources(&codex_home, &memory_files, &selected_memory)
-            .expect("remove unscoped target"),
+        outcome,
         MemoryImportOutcome {
             synchronized_projects: vec!["project-a".to_string()],
             failures: Vec::new(),
+            memory_import: Some(expected_memory_import(&["project-a"], Vec::new())),
             workspace_changed: true,
         }
     );

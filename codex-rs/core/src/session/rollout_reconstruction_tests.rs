@@ -3,6 +3,7 @@ use super::*;
 use super::tests::build_world_state_from_turn_context;
 use super::tests::make_session_and_context;
 use super::tests::raw_history_items;
+use crate::context_manager::estimate_item_token_count;
 use codex_history::CompactedItem;
 use codex_history::InitialHistory;
 use codex_history::ResponseItemEnvelope;
@@ -10,6 +11,7 @@ use codex_history::ResumedHistory;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::SessionContextWindow;
@@ -120,6 +122,78 @@ fn completed_user_turn_rollout(
 }
 
 #[tokio::test]
+async fn reconstruct_history_discards_oversized_item_superseded_by_compaction() {
+    let (session, turn_context) = make_session_and_context().await;
+    let replacement = ResponseItemEnvelope::new(user_message("surviving compacted history"));
+    let rollout_items = vec![
+        RolloutItem::ResponseItem(user_message(&"x".repeat(50_000)).into()),
+        RolloutItem::Compacted(CompactedItem {
+            message: String::new(),
+            replacement_history: Some(vec![replacement.clone()]),
+            window_number: Some(1),
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+        }),
+    ];
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await;
+
+    assert_eq!(reconstructed.history, vec![replacement]);
+}
+
+#[tokio::test]
+async fn reconstruct_history_bounds_large_output_in_compaction_replacement() {
+    let (session, turn_context) = make_session_and_context().await;
+    let call_id = "large-compacted-output";
+    let rollout_items = vec![RolloutItem::Compacted(CompactedItem {
+        message: String::new(),
+        replacement_history: Some(vec![
+            ResponseItemEnvelope::new(ResponseItem::FunctionCall {
+                id: None,
+                name: "shell_command".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                encrypted_function_args: None,
+                call_id: call_id.to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            }),
+            ResponseItemEnvelope::new(ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: call_id.to_string(),
+                output: FunctionCallOutputPayload::from_text("historical output ".repeat(30_000)),
+                internal_chat_message_metadata_passthrough: None,
+            }),
+        ]),
+        window_number: Some(1),
+        first_window_id: None,
+        previous_window_id: None,
+        window_id: None,
+    })];
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await;
+
+    let output = reconstructed
+        .history
+        .iter()
+        .find(|item| matches!(&item.item, ResponseItem::FunctionCallOutput { .. }))
+        .expect("compaction replacement should retain the paired output");
+    assert!(estimate_item_token_count(&output.item) <= 10_000);
+    let ResponseItem::FunctionCallOutput { output, .. } = &output.item else {
+        unreachable!("filtered for function output")
+    };
+    assert!(
+        output
+            .text_content()
+            .is_some_and(|text| text.contains("truncated"))
+    );
+}
+
+#[tokio::test]
 async fn record_initial_history_reconstructs_typed_inter_agent_message() {
     let (session, _turn_context) = make_session_and_context().await;
     let communication = InterAgentCommunication::new(
@@ -195,13 +269,13 @@ async fn record_initial_history_resumed_bare_turn_context_does_not_hydrate_previ
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
         #[allow(deprecated)]
-        cwd: turn_context.cwd.clone(),
+        cwd: turn_context.cwd.clone().into(),
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
-        sandbox_policy: turn_context.sandbox_policy(),
+        sandbox_policy: turn_context.sandbox_policy().into(),
         permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,
@@ -242,13 +316,13 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
     let mut previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
         #[allow(deprecated)]
-        cwd: turn_context.cwd.clone(),
+        cwd: turn_context.cwd.clone().into(),
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
-        sandbox_policy: turn_context.sandbox_policy(),
+        sandbox_policy: turn_context.sandbox_policy().into(),
         permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,
@@ -1305,13 +1379,13 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
         #[allow(deprecated)]
-        cwd: turn_context.cwd.clone(),
+        cwd: turn_context.cwd.clone().into(),
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
-        sandbox_policy: turn_context.sandbox_policy(),
+        sandbox_policy: turn_context.sandbox_policy().into(),
         permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,
@@ -1394,13 +1468,13 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
         serde_json::to_value(Some(TurnContextItem {
             turn_id: Some(turn_context.sub_id.clone()),
             #[allow(deprecated)]
-            cwd: turn_context.cwd.clone(),
+            cwd: turn_context.cwd.clone().into(),
             workspace_roots: None,
             current_date: turn_context.current_date.clone(),
             timezone: turn_context.timezone.clone(),
             approval_policy: turn_context.approval_policy(),
             approvals_reviewer: None,
-            sandbox_policy: turn_context.sandbox_policy(),
+            sandbox_policy: turn_context.sandbox_policy().into(),
             permission_profile: None,
             network: None,
             file_system_sandbox_policy: None,
@@ -1426,13 +1500,13 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
         #[allow(deprecated)]
-        cwd: turn_context.cwd.clone(),
+        cwd: turn_context.cwd.clone().into(),
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
-        sandbox_policy: turn_context.sandbox_policy(),
+        sandbox_policy: turn_context.sandbox_policy().into(),
         permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,
@@ -1556,13 +1630,13 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
     let current_context_item = TurnContextItem {
         turn_id: Some(current_turn_id.clone()),
         #[allow(deprecated)]
-        cwd: turn_context.cwd.clone(),
+        cwd: turn_context.cwd.clone().into(),
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
-        sandbox_policy: turn_context.sandbox_policy(),
+        sandbox_policy: turn_context.sandbox_policy().into(),
         permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,
@@ -1683,13 +1757,13 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
         #[allow(deprecated)]
-        cwd: turn_context.cwd.clone(),
+        cwd: turn_context.cwd.clone().into(),
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
-        sandbox_policy: turn_context.sandbox_policy(),
+        sandbox_policy: turn_context.sandbox_policy().into(),
         permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,
@@ -1853,13 +1927,13 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
         #[allow(deprecated)]
-        cwd: turn_context.cwd.clone(),
+        cwd: turn_context.cwd.clone().into(),
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
-        sandbox_policy: turn_context.sandbox_policy(),
+        sandbox_policy: turn_context.sandbox_policy().into(),
         permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,

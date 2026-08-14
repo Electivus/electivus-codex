@@ -1,11 +1,11 @@
 name: blocking-ci
 
-# This is the single entrypoint for checks that block a PR merge. It also runs
-# after pushes to main so the same check family stays grouped in the Actions UI.
+# This is the single entrypoint for checks that block a PR merge. Manual
+# dispatch preserves the complete Stability-certification path without
+# repeating promoted checks after every push to main.
 on:
   pull_request: {}
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   # Keep reusable workflow calls alphabetized. The `required` job below is the
@@ -13,6 +13,8 @@ jobs:
   bazel:
     name: Bazel
     uses: ./.github/workflows/bazel.yml
+    with:
+      validation_scope: essential
     secrets: inherit
 
   blob-size-policy:
@@ -45,6 +47,135 @@ jobs:
     uses: ./.github/workflows/sdk.yml
     secrets: inherit
 
+  v8-canary:
+    name: v8-canary
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/v8-canary.yml
+    secrets: inherit
+
+  deep-linux-eligibility:
+    name: Deep Linux eligibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      eligible: ${{ steps.classify.outputs.eligible }}
+      reason: ${{ steps.classify.outputs.reason }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify Deep Linux eligibility
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          eligible=true
+          reason="classifier did not run; Deep Linux remains eligible"
+          classifier_status=0
+          classifier_output="$(python3 .github/scripts/deep_linux_changes.py \
+            --event-name "${EVENT_NAME}" \
+            --base "${BASE_SHA}" \
+            --head "${HEAD_SHA}" 2>&1)" || classifier_status=$?
+
+          if [[ $classifier_status -ne 0 ]]; then
+            reason="classifier exited with status ${classifier_status}; Deep Linux remains eligible"
+          else
+            mapfile -t classifier_lines <<< "$classifier_output"
+            if [[ ${#classifier_lines[@]} -eq 2 \
+              && ${classifier_lines[0]} =~ ^eligible=(true|false)$ \
+              && ${classifier_lines[1]} == reason=?* ]]; then
+              eligible="${BASH_REMATCH[1]}"
+              reason="${classifier_lines[1]#reason=}"
+            else
+              reason="classifier returned malformed output; Deep Linux remains eligible"
+            fi
+          fi
+
+          echo "eligible=${eligible}" >> "$GITHUB_OUTPUT"
+          echo "reason=${reason}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Deep Linux eligibility"
+            echo
+            echo "- Eligible: \`${eligible}\`"
+            echo "- Reason: ${reason}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deep-linux-bazel-release:
+    name: Deep Linux Bazel release
+    needs: deep-linux-eligibility
+    if: ${{ needs.deep-linux-eligibility.result == 'success' && needs.deep-linux-eligibility.outputs.eligible == 'true' }}
+    uses: ./.github/workflows/bazel.yml
+    with:
+      validation_scope: release-only
+    secrets: inherit
+
+  deep-linux-bazel-release-result:
+    name: Deep Linux Bazel release result
+    needs: [deep-linux-eligibility, deep-linux-bazel-release]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Validate Deep Linux Bazel release result
+        env:
+          ELIGIBILITY_RESULT: ${{ needs.deep-linux-eligibility.result }}
+          ELIGIBLE: ${{ needs.deep-linux-eligibility.outputs.eligible }}
+          VALIDATION_LABEL: Deep Linux Bazel release
+          VALIDATION_RESULT: ${{ needs.deep-linux-bazel-release.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/deep_linux_result.py | tee -a "$GITHUB_STEP_SUMMARY"
+
+  deep-linux-cargo:
+    name: Deep Linux Cargo
+    needs: deep-linux-eligibility
+    if: ${{ needs.deep-linux-eligibility.result == 'success' && needs.deep-linux-eligibility.outputs.eligible == 'true' }}
+    uses: ./.github/workflows/rust-ci-full.yml
+    with:
+      validation_scope: merge-gate
+    secrets: inherit
+
+  deep-linux-cargo-result:
+    name: Deep Linux Cargo result
+    needs: [deep-linux-eligibility, deep-linux-cargo]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Validate Deep Linux Cargo result
+        env:
+          ELIGIBILITY_RESULT: ${{ needs.deep-linux-eligibility.result }}
+          ELIGIBLE: ${{ needs.deep-linux-eligibility.outputs.eligible }}
+          VALIDATION_LABEL: Deep Linux Cargo
+          VALIDATION_RESULT: ${{ needs.deep-linux-cargo.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/deep_linux_result.py | tee -a "$GITHUB_STEP_SUMMARY"
+
   required:
     name: CI required
     # Without `always()`, GitHub skips this job after a failed dependency and a
@@ -55,9 +186,13 @@ jobs:
       - blob-size-policy
       - cargo-deny
       - codespell
+      - deep-linux-bazel-release-result
+      - deep-linux-cargo-result
+      - deep-linux-eligibility
       - repo-checks
       - rust-ci
       - sdk
+      - v8-canary
     runs-on: ubuntu-24.04
     steps:
       # Keep the helper on the same combined revision as the child workflows so

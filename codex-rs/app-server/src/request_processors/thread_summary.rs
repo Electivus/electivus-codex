@@ -4,6 +4,8 @@ use chrono::DateTime;
 #[cfg(test)]
 use chrono::Utc;
 use codex_protocol::config_types::MultiAgentMode;
+#[cfg(test)]
+use codex_utils_path_uri::LegacyAppPathString;
 
 #[cfg(test)]
 pub(crate) async fn read_summary_from_rollout(
@@ -196,7 +198,7 @@ pub(crate) fn thread_settings_from_config_snapshot(
 
 pub(crate) fn thread_settings_from_core_snapshot(
     snapshot: codex_protocol::protocol::ThreadSettingsSnapshot,
-) -> ThreadSettings {
+) -> std::io::Result<ThreadSettings> {
     let codex_protocol::protocol::ThreadSettingsSnapshot {
         model,
         model_provider_id,
@@ -211,12 +213,16 @@ pub(crate) fn thread_settings_from_core_snapshot(
         personality,
         collaboration_mode,
     } = snapshot;
+    let cwd = cwd.to_abs_path()?;
+    let permission_profile = permission_profile
+        .to_native()
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
     let sandbox_policy = codex_sandboxing::compatibility_sandbox_policy_for_permission_profile(
         &permission_profile,
         cwd.as_path(),
     )
     .into();
-    ThreadSettings {
+    Ok(ThreadSettings {
         sandbox_policy,
         cwd,
         approval_policy: approval_policy.into(),
@@ -232,7 +238,7 @@ pub(crate) fn thread_settings_from_core_snapshot(
         collaboration_mode,
         multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
         personality,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -263,10 +269,7 @@ pub(super) fn thread_started_notification(mut thread: Thread) -> ThreadStartedNo
 }
 
 #[cfg(test)]
-pub(crate) fn summary_to_thread(
-    summary: ConversationSummary,
-    fallback_cwd: &AbsolutePathBuf,
-) -> Thread {
+pub(crate) fn summary_to_thread(summary: ConversationSummary) -> Thread {
     let ConversationSummary {
         conversation_id,
         path,
@@ -287,16 +290,7 @@ pub(crate) fn summary_to_thread(
         branch: info.branch,
         origin_url: info.origin_url,
     });
-    let cwd =
-        AbsolutePathBuf::relative_to_current_dir(path_utils::normalize_for_native_workdir(cwd))
-            .unwrap_or_else(|err| {
-                warn!(
-                    conversation_id = %conversation_id,
-                    path = %path.display(),
-                    "failed to normalize thread cwd while summarizing thread: {err}"
-                );
-                fallback_cwd.clone()
-            });
+    let cwd = LegacyAppPathString::from_path(&cwd);
 
     let thread_id = conversation_id.to_string();
     Thread {
@@ -307,6 +301,7 @@ pub(crate) fn summary_to_thread(
         parent_thread_id: None,
         preview,
         ephemeral: false,
+        is_pinned: false,
         section: None,
         section_entered_at: None,
         history_mode: ThreadHistoryMode::Legacy,

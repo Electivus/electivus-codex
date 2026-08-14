@@ -19,7 +19,6 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::UserInput;
 use codex_protocol::ThreadId;
 use codex_protocol::items::UserMessageItem;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use ratatui::style::Stylize as _;
 use ratatui::text::Line;
 
@@ -63,7 +62,9 @@ pub(crate) fn thread_to_transcript_cells(
     raw_reasoning_visibility: RawReasoningVisibility,
     config: Option<&Config>,
 ) -> TranscriptCells {
-    let cwd = thread.cwd;
+    // Transcript rendering uses this only for lexical path display. Keeping the source-native
+    // spelling avoids rebinding foreign links to the host filesystem.
+    let cwd = std::path::PathBuf::from(thread.cwd.render_for_ui());
     let thread_id = ThreadId::from_string(&thread.id).ok();
     let mut cells = thread_items_to_transcript_cells(
         thread_id,
@@ -82,7 +83,7 @@ pub(crate) fn thread_to_transcript_cells(
 
 pub(crate) fn thread_items_to_transcript_cells(
     thread_id: Option<ThreadId>,
-    cwd: &AbsolutePathBuf,
+    cwd: &std::path::Path,
     items: impl IntoIterator<Item = ThreadItem>,
     raw_reasoning_visibility: RawReasoningVisibility,
     config: Option<&Config>,
@@ -125,21 +126,18 @@ pub(crate) fn thread_items_to_transcript_cells(
                 }));
             }
             ThreadItem::AgentMessage { text, .. } => {
-                let parsed = parse_assistant_markdown(&text, cwd.as_path());
+                let parsed = parse_assistant_markdown(&text, cwd);
                 if !parsed.visible_markdown.trim().is_empty() {
                     cells.push(Arc::new(AgentMarkdownCell::new_with_inline_visualizations(
                         parsed.visible_markdown,
-                        cwd.as_path(),
+                        cwd,
                         inline_visualization_context.clone(),
                     )));
                 }
             }
             ThreadItem::Plan { text, .. } => {
                 if !text.trim().is_empty() {
-                    cells.push(Arc::new(crate::history_cell::new_proposed_plan(
-                        text,
-                        cwd.as_path(),
-                    )));
+                    cells.push(Arc::new(crate::history_cell::new_proposed_plan(text, cwd)));
                 }
             }
             ThreadItem::Reasoning {
@@ -155,10 +153,7 @@ pub(crate) fn thread_items_to_transcript_cells(
                     };
                 if !text.trim().is_empty() {
                     cells.push(Arc::new(ReasoningSummaryCell::new(
-                        header,
-                        text,
-                        cwd.as_path(),
-                        /*transcript_only*/ false,
+                        header, text, cwd, /*transcript_only*/ false,
                     )));
                 }
             }

@@ -252,13 +252,14 @@ fn reference_context_item() -> TurnContextItem {
                 .expect("current directory")
                 .join("reference-cwd"),
         )
-        .expect("absolute reference cwd"),
+        .expect("absolute reference cwd")
+        .into(),
         workspace_roots: None,
         current_date: Some("2026-03-23".to_string()),
         timezone: Some("America/Los_Angeles".to_string()),
         approval_policy: AskForApproval::OnRequest,
         approvals_reviewer: None,
-        sandbox_policy: SandboxPolicy::new_read_only_policy(),
+        sandbox_policy: SandboxPolicy::new_read_only_policy().into(),
         permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,
@@ -387,17 +388,19 @@ fn non_last_reasoning_tokens_return_zero_when_no_user_messages() {
 
 #[test]
 fn non_last_reasoning_tokens_ignore_entries_after_last_user() {
+    let first_reasoning = reasoning_with_encrypted_content(/*len*/ 900);
+    let second_reasoning = reasoning_with_encrypted_content(/*len*/ 1_000);
     let history = create_history_with_items(vec![
-        reasoning_with_encrypted_content(/*len*/ 900),
+        first_reasoning.clone(),
         user_msg("first"),
-        reasoning_with_encrypted_content(/*len*/ 1_000),
+        second_reasoning.clone(),
         user_msg("second"),
         reasoning_with_encrypted_content(/*len*/ 2_000),
     ]);
-    // first: (900 * 0.75 - 650) / 4 = 6.25 tokens
-    // second: (1000 * 0.75 - 650) / 4 = 25 tokens
-    // first + second = 62.5
-    assert_eq!(history.get_non_last_reasoning_items_tokens(), 32);
+    let expected = estimate_item_token_count(&first_reasoning)
+        .saturating_add(estimate_item_token_count(&second_reasoning));
+
+    assert_eq!(history.get_non_last_reasoning_items_tokens(), expected);
 }
 
 #[test]
@@ -1328,10 +1331,6 @@ fn record_items_truncates_function_call_output_content() {
                 content.contains("tokens truncated"),
                 "expected token-based truncation marker, got {content}"
             );
-            assert!(
-                content.contains("tokens truncated"),
-                "expected truncation marker, got {content}"
-            );
         }
         other => panic!("unexpected history item: {other:?}"),
     }
@@ -1362,10 +1361,6 @@ fn record_items_truncates_custom_tool_call_output_content() {
             assert!(
                 output.contains("tokens truncated"),
                 "expected token-based truncation marker, got {output}"
-            );
-            assert!(
-                output.contains("tokens truncated") || output.contains("bytes truncated"),
-                "expected truncation marker, got {output}"
             );
         }
         other => panic!("unexpected history item: {other:?}"),
@@ -1398,6 +1393,274 @@ fn record_items_respects_custom_token_limit() {
             .text_content()
             .is_some_and(|content| content.contains("tokens truncated"))
     );
+}
+
+#[test]
+fn record_replayed_items_caps_large_outputs_using_the_complete_item_estimate() {
+    let cases = [
+        (
+            TruncationPolicy::Bytes(400_000),
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: "large-function-output".to_string(),
+                output: FunctionCallOutputPayload::from_text("a".repeat(400_000)),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            "chars truncated",
+        ),
+        (
+            TruncationPolicy::Tokens(100_000),
+            ResponseItem::CustomToolCallOutput {
+                id: None,
+                call_id: "large-custom-output".to_string(),
+                name: Some("exec".to_string()),
+                output: FunctionCallOutputPayload::from_text("b".repeat(400_000)),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            "tokens truncated",
+        ),
+    ];
+
+    for (policy, item, marker) in cases {
+        let mut history = ContextManager::new();
+        history.record_replayed_items([&item], policy);
+
+        let mut stored_items = history.raw_items();
+        let stored = stored_items
+            .next()
+            .expect("expected one stored output item");
+        assert!(stored_items.next().is_none());
+        assert!(
+            estimate_item_token_count(stored) <= 10_000,
+            "stored output exceeded the complete-item token limit: {stored:?}"
+        );
+        let output = match stored {
+            ResponseItem::FunctionCallOutput { output, .. }
+            | ResponseItem::CustomToolCallOutput { output, .. } => output,
+            other => panic!("unexpected history item: {other:?}"),
+        };
+        assert!(
+            output
+                .text_content()
+                .is_some_and(|content| content.contains(marker)),
+            "expected {marker} marker in {output:?}"
+        );
+    }
+}
+
+#[test]
+fn record_replayed_items_drops_output_when_its_envelope_cannot_fit() {
+    let item = ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: "oversized-call-id".repeat(10_000),
+        output: FunctionCallOutputPayload::from_text("output".repeat(50_000)),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut history = ContextManager::new();
+
+    history.record_replayed_items([&item], TruncationPolicy::Tokens(100_000));
+
+    assert!(history.raw_items().next().is_none());
+}
+
+#[test]
+fn record_replayed_items_caps_structured_text_outputs() {
+    let item = ResponseItem::CustomToolCallOutput {
+        id: None,
+        call_id: "structured-output".to_string(),
+        name: Some("shell_command".to_string()),
+        output: FunctionCallOutputPayload::from_content_items(vec![
+            FunctionCallOutputContentItem::InputText {
+                text: "historical output".repeat(30_000),
+            },
+        ]),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut history = ContextManager::new();
+
+    history.record_replayed_items([&item], TruncationPolicy::Tokens(100_000));
+
+    let mut stored_items = history.raw_items();
+    let stored = stored_items
+        .next()
+        .expect("expected one structured output item");
+    assert!(stored_items.next().is_none());
+    assert!(estimate_item_token_count(stored) <= 10_000);
+    let ResponseItem::CustomToolCallOutput { output, .. } = stored else {
+        panic!("expected custom tool output");
+    };
+    let FunctionCallOutputBody::ContentItems(items) = &output.body else {
+        panic!("expected structured output body");
+    };
+    assert!(matches!(
+        items.as_slice(),
+        [FunctionCallOutputContentItem::InputText { text }] if text.contains("tokens truncated")
+    ));
+}
+
+#[test]
+fn record_replayed_items_drops_oversized_non_output_items() {
+    let item = user_msg(&"oversized user message".repeat(50_000));
+    let mut history = ContextManager::new();
+
+    history.record_replayed_items([&item], TruncationPolicy::Tokens(100_000));
+
+    assert!(history.raw_items().next().is_none());
+}
+
+#[test]
+fn prompt_normalization_keeps_synthesized_call_outputs_within_cardinality_limit() {
+    let calls = (0..(MAX_REPLAY_HISTORY_ITEMS / 2 + 1))
+        .map(|index| ResponseItem::FunctionCall {
+            id: None,
+            name: "tool".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            encrypted_function_args: None,
+            call_id: format!("call-{index}"),
+            internal_chat_message_metadata_passthrough: None,
+        })
+        .collect::<Vec<_>>();
+    let mut history = ContextManager::new();
+    history.record_replayed_items(&calls, TruncationPolicy::Tokens(1_000));
+
+    let prompt = history.for_prompt(&default_input_modalities());
+
+    assert_eq!(prompt.len(), MAX_REPLAY_HISTORY_ITEMS);
+}
+
+#[test]
+fn prompt_normalization_drops_a_call_when_its_synthesized_output_exceeds_the_item_limit() {
+    let call_with_id = |call_id: String| ResponseItem::ToolSearchCall {
+        id: None,
+        call_id: Some(call_id),
+        status: None,
+        execution: "client".to_string(),
+        arguments: serde_json::json!({}),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut lower = 0usize;
+    let mut upper = 50_000usize;
+    while lower < upper {
+        let candidate = lower + (upper - lower).div_ceil(2);
+        if estimate_item_token_count(&call_with_id("x".repeat(candidate))) <= 10_000 {
+            lower = candidate;
+        } else {
+            upper = candidate - 1;
+        }
+    }
+    let call = call_with_id("x".repeat(lower));
+    let mut normalized = vec![call.clone().into()];
+    normalize::ensure_call_outputs_present(&mut normalized);
+    assert_eq!(normalized.len(), 2);
+    assert!(estimate_item_token_count(&normalized[1].item) > 10_000);
+
+    let mut history = ContextManager::new();
+    history.record_replayed_items([&call], TruncationPolicy::Tokens(10_000));
+
+    assert_eq!(history.for_prompt(&default_input_modalities()), Vec::new());
+}
+
+#[test]
+fn prompt_normalization_keeps_synthesized_outputs_within_the_total_byte_limit() {
+    let calls = (0..(MAX_REPLAY_HISTORY_ITEMS / 2))
+        .map(|index| ResponseItem::FunctionCall {
+            id: None,
+            name: "tool".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            encrypted_function_args: None,
+            call_id: format!("call-{index}-{}", "x".repeat(2_000)),
+            internal_chat_message_metadata_passthrough: None,
+        })
+        .collect::<Vec<_>>();
+    let mut history = ContextManager::new();
+    history.record_replayed_items(&calls, TruncationPolicy::Tokens(10_000));
+
+    let prompt = history.for_prompt(&default_input_modalities());
+    let serialized_bytes = prompt.iter().fold(0u64, |total, item| {
+        total.saturating_add(u64::try_from(serde_json::to_vec(item).unwrap().len()).unwrap())
+    });
+
+    assert!(prompt.len() < MAX_REPLAY_HISTORY_ITEMS);
+    assert!(serialized_bytes <= MAX_REPLAY_HISTORY_BYTES);
+    assert!(
+        prompt
+            .iter()
+            .all(|item| estimate_item_token_count(item) <= 10_000)
+    );
+}
+
+#[test]
+fn installed_replay_does_not_apply_replay_limits_to_new_items() {
+    let mut replay = ContextManager::new();
+    replay.record_replayed_items(
+        [&user_msg("replayed prefix")],
+        TruncationPolicy::Tokens(10_000),
+    );
+    let replay = replay.for_prompt(&default_input_modalities());
+    let oversized_live_item = user_msg(&"new live item".repeat(10_000));
+    let mut installed = ContextManager::new();
+    installed.replace_replayed(replay);
+    installed.record_items([&oversized_live_item], TruncationPolicy::Tokens(100_000));
+
+    let prompt = installed.for_prompt(&default_input_modalities());
+
+    assert_eq!(prompt.last(), Some(&oversized_live_item));
+    assert!(estimate_item_token_count(&oversized_live_item) > 10_000);
+}
+
+#[test]
+fn replay_preparation_preserves_media_for_later_model_switches() {
+    let media = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![
+            ContentItem::InputImage {
+                image_url: "data:image/png;base64,AAAA".to_string(),
+                detail: Some(ImageDetail::High),
+            },
+            ContentItem::InputAudio {
+                audio_url: "data:audio/wav;base64,AAAA".to_string(),
+            },
+        ],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut replay = ContextManager::new();
+    replay.replace_replayed(vec![media.clone()]);
+
+    assert_eq!(replay.prepare_replayed_history(), vec![media]);
+}
+
+#[test]
+fn rollback_preserves_the_retained_replay_marker() {
+    let prefix = user_msg("replayed prefix");
+    let live = user_msg("live turn");
+    let mut history = ContextManager::new();
+    history.replace_replayed(vec![prefix.clone()]);
+    history.record_items([&live], TruncationPolicy::Tokens(10_000));
+
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+
+    assert_eq!(
+        history.raw_items().cloned().collect::<Vec<_>>(),
+        vec![prefix]
+    );
+    assert_eq!(history.replay_prefix_items(), 1);
+    assert!(history.is_replayed_history());
+}
+
+#[test]
+fn replace_with_policy_keeps_only_the_latest_bounded_replacement_items() {
+    let items = (0..=MAX_REPLAY_HISTORY_ITEMS)
+        .map(|index| user_msg(&format!("message {index}")))
+        .collect::<Vec<_>>();
+    let mut history = ContextManager::new();
+
+    history.replace_with_policy(&items, TruncationPolicy::Tokens(1_000));
+
+    assert_eq!(history.raw_items().cloned().collect::<Vec<_>>(), items[1..]);
 }
 
 fn assert_truncated_message_matches(message: &str, line: &str, expected_removed: usize) {

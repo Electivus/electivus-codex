@@ -94,3 +94,9 @@ CHANGELOG.ignore.md
 # Python bytecode files
 __pycache__/
 *.pyc
+.babysit-pr/
+
+# LoopX local control-plane state
+.loopx/
+.codex/goals/
+.local/

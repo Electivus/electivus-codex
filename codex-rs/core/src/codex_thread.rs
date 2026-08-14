@@ -109,14 +109,14 @@ impl ThreadConfigSnapshot {
     }
 
     pub fn into_thread_settings_snapshot(self) -> ThreadSettingsSnapshot {
-        let cwd = self.cwd().clone();
+        let cwd = PathUri::from_abs_path(self.cwd());
         ThreadSettingsSnapshot {
             model: self.model,
             model_provider_id: self.model_provider_id,
             service_tier: self.service_tier,
             approval_policy: self.approval_policy,
             approvals_reviewer: self.approvals_reviewer,
-            permission_profile: self.permission_profile,
+            permission_profile: self.permission_profile.into(),
             active_permission_profile: self.active_permission_profile,
             cwd,
             reasoning_effort: self.reasoning_effort,

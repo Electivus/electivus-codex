@@ -249,11 +249,12 @@ fn case_insensitive_literal_regex(search_term: impl AsRef<str>) -> io::Result<Re
 
 fn content_match_snippet(jsonl_line: &str, search_term: &Regex) -> Option<String> {
     let rollout_line = serde_json::from_str::<RolloutLine>(jsonl_line.trim()).ok()?;
-    let text = conversation_text_from_item(&rollout_line.item)?;
+    let text = thread_searchable_content(&rollout_line.item)?;
     excerpt_around_match(text.as_str(), search_term)
 }
 
-fn conversation_text_from_item(item: &RolloutItem) -> Option<String> {
+/// Returns user- or assistant-visible text eligible for thread-level search.
+pub fn thread_searchable_content(item: &RolloutItem) -> Option<String> {
     match item {
         RolloutItem::EventMsg(EventMsg::UserMessage(user)) => {
             let text = strip_user_message_prefix(user.message.as_str());
@@ -294,6 +295,12 @@ fn conversation_text_from_item(item: &RolloutItem) -> Option<String> {
         | RolloutItem::Compacted(_)
         | RolloutItem::WorldState(_) => None,
     }
+}
+
+/// Builds the canonical thread-level search snippet for a literal, case-insensitive match.
+pub fn thread_search_match_snippet(text: &str, search_term: &str) -> Option<String> {
+    let search_term = case_insensitive_literal_regex(search_term).ok()?;
+    excerpt_around_match(text, &search_term)
 }
 
 fn content_item_text(item: &ContentItem) -> Option<&str> {

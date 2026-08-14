@@ -73,6 +73,7 @@ use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::LocalThreadStoreConfig;
 use codex_thread_store::MoveThreadToSectionParams;
+use codex_thread_store::PostgresThreadStore;
 use codex_thread_store::PreparedFork;
 use codex_thread_store::ReadThreadByRolloutPathParams;
 use codex_thread_store::ReadThreadParams;
@@ -366,8 +367,24 @@ pub fn build_models_manager(
 pub fn thread_store_from_config(
     config: &Config,
     state_db: Option<StateDbHandle>,
-) -> Arc<dyn ThreadStore> {
-    match &config.experimental_thread_store {
+) -> anyhow::Result<Arc<dyn ThreadStore>> {
+    if matches!(
+        &config.runtime_state_backend,
+        codex_state::RuntimeStateBackendConfig::Postgresql { .. }
+    ) {
+        let state_db = state_db.ok_or_else(|| {
+            anyhow::anyhow!(
+                "PostgreSQL Runtime State was not initialized before Thread Store construction"
+            )
+        })?;
+        let thread_store = PostgresThreadStore::from_runtime(state_db).map_err(|_| {
+            anyhow::anyhow!(
+                "PostgreSQL Runtime State did not provide a ready Thread Store connection"
+            )
+        })?;
+        return Ok(Arc::new(thread_store));
+    }
+    Ok(match &config.experimental_thread_store {
         ThreadStoreConfig::Local => {
             let compression_enabled = config
                 .features
@@ -397,10 +414,10 @@ pub fn thread_store_from_config(
             store
         }
         ThreadStoreConfig::InMemory { id } => InMemoryThreadStore::for_id(id),
-    }
+    })
 }
 
-/// Construct the default SQLite-backed agent graph store when local state is available.
+/// Construct the default runtime-backed agent graph store when state is available.
 pub fn local_agent_graph_store_from_state_db(
     state_db: Option<&StateDbHandle>,
 ) -> Option<Arc<dyn AgentGraphStore>> {
@@ -753,6 +770,19 @@ impl ThreadManager {
 
     pub async fn get_thread(&self, thread_id: ThreadId) -> CodexResult<Arc<CodexThread>> {
         self.state.get_thread(thread_id).await
+    }
+
+    /// Reads a persisted thread through the configured storage-neutral Thread Store.
+    pub async fn read_stored_thread(&self, params: ReadThreadParams) -> CodexResult<StoredThread> {
+        self.state.read_stored_thread(params).await
+    }
+
+    /// Loads complete Canonical Thread History for a detached background job.
+    pub async fn load_thread_history_items(
+        &self,
+        thread_id: ThreadId,
+    ) -> CodexResult<Vec<RolloutItem>> {
+        self.state.load_thread_history_items(thread_id).await
     }
 
     /// Updates metadata for loaded and cold threads through one entrypoint.
@@ -1337,6 +1367,27 @@ impl ThreadManagerState {
             })
     }
 
+    async fn load_thread_history_items(
+        &self,
+        thread_id: ThreadId,
+    ) -> CodexResult<Vec<RolloutItem>> {
+        self.thread_store
+            .load_history(LoadThreadHistoryParams {
+                thread_id,
+                include_archived: false,
+            })
+            .await
+            .map(|history| history.items)
+            .map_err(|err| match err {
+                ThreadStoreError::ThreadNotFound { thread_id } => {
+                    CodexErr::ThreadNotFound(thread_id)
+                }
+                err => CodexErr::Fatal(format!(
+                    "failed to load history for thread {thread_id}: {err}"
+                )),
+            })
+    }
+
     pub(crate) async fn load_latest_model_context(
         &self,
         params: LoadThreadHistoryParams,
@@ -1851,6 +1902,47 @@ impl ThreadManagerState {
             }
         };
 
+        let duplicate_thread_error =
+            || CodexErr::InvalidRequest(format!("thread {thread_id} is already running"));
+        if self.threads.read().await.contains_key(&thread_id) {
+            if let Err(err) = io.shutdown_and_wait().await {
+                warn!("failed to shut down duplicate thread {thread_id}: {err}");
+            }
+            return Err(duplicate_thread_error());
+        }
+
+        let registration_guard = if session_configured.parent_thread_id.is_some()
+            && session.live_thread().is_some()
+        {
+            match self
+                .thread_store
+                .validate_child_registration(thread_id)
+                .await
+            {
+                Ok(guard) => Some(guard),
+                Err(err) => {
+                    if let Err(shutdown_err) = io.shutdown_and_wait().await {
+                        warn!(
+                            "failed to shut down unregistered deleted child thread {thread_id}: {shutdown_err}"
+                        );
+                    }
+                    return Err(match err {
+                        ThreadStoreError::ThreadNotFound { thread_id } => {
+                            CodexErr::ThreadNotFound(thread_id)
+                        }
+                        ThreadStoreError::InvalidRequest { message } => {
+                            CodexErr::InvalidRequest(message)
+                        }
+                        err => CodexErr::Fatal(format!(
+                            "failed to verify persisted child thread {thread_id}: {err}"
+                        )),
+                    });
+                }
+            }
+        } else {
+            None
+        };
+
         {
             let mut threads = self.threads.write().await;
             if let std::collections::hash_map::Entry::Vacant(e) = threads.entry(thread_id) {
@@ -1870,12 +1962,11 @@ impl ThreadManagerState {
             }
         }
 
+        drop(registration_guard);
         if let Err(err) = io.shutdown_and_wait().await {
             warn!("failed to shut down duplicate thread {thread_id}: {err}");
         }
-        Err(CodexErr::InvalidRequest(format!(
-            "thread {thread_id} is already running"
-        )))
+        Err(duplicate_thread_error())
     }
 
     pub(crate) fn notify_thread_created(&self, thread_id: ThreadId) {

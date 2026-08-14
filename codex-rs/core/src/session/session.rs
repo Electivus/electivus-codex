@@ -121,6 +121,7 @@ pub(crate) struct SessionConfiguration {
     /// Effective originator used for this thread's Responses requests and analytics events.
     pub(super) originator: String,
     pub(super) dynamic_tools: Vec<DynamicToolSpec>,
+    pub(super) replayed_dynamic_tools: bool,
     pub(super) user_shell_override: Option<shell::Shell>,
 }
 
@@ -820,6 +821,10 @@ impl Session {
                 thread_store.as_any().downcast_ref::<LocalThreadStore>()
             {
                 local_store.state_db().await
+            } else if let Some(postgres_store) =
+                thread_store.as_any().downcast_ref::<PostgresThreadStore>()
+            {
+                postgres_store.state_db()
             } else {
                 None
             }
@@ -1211,9 +1216,7 @@ impl Session {
                 // published after SessionConfigured so MCP events follow it.
                 mcp_runtime,
                 mcp_handler_cache: Default::default(),
-                unified_exec_manager: UnifiedExecProcessManager::new(
-                    config.background_terminal_max_timeout,
-                ),
+                unified_exec_manager: UnifiedExecProcessManager::new(),
                 elicitations: crate::elicitation::ElicitationService::new(),
                 shell_zsh_path: config.zsh_path.clone(),
                 main_execve_wrapper_exe: config.main_execve_wrapper_exe.clone(),
@@ -1283,10 +1286,9 @@ impl Session {
                     ),
                 ),
                 executed_tool_calls,
-                code_mode_service: crate::tools::code_mode::CodeModeService::new(
-                    Arc::clone(&code_mode_session_provider),
-                    &config.code_mode,
-                ),
+                code_mode_service: crate::tools::code_mode::CodeModeService::new(Arc::clone(
+                    &code_mode_session_provider,
+                )),
                 tool_search_handler_cache: Default::default(),
                 turn_environments: Arc::clone(&turn_environments),
             };

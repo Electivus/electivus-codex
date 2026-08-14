@@ -1,10 +1,12 @@
 set working-directory := "codex-rs"
-set positional-arguments
+set positional-arguments := true
+
 export JUST_SHELL := justfile_directory() / "scripts/just-shell.py"
+
 set shell := ["python3", "-c", 'import os, runpy; runpy.run_path(os.environ["JUST_SHELL"], run_name="__main__")']
 set windows-shell := ["python", "-c", 'import os, runpy; runpy.run_path(os.environ["JUST_SHELL"], run_name="__main__")']
 
-rust_min_stack := "8388608" # 8 MiB
+rust_min_stack := "8388608"
 python := if os_family() == "windows" { "python" } else { "python3" }
 
 # Display help
@@ -12,7 +14,9 @@ help:
     just -l
 
 # `codex`
+
 alias c := codex
+
 codex *args:
     cargo run --bin codex -- {args}
 
@@ -76,6 +80,7 @@ install:
 #
 # Run `cargo install --locked cargo-nextest` if you don't have it installed.
 # Prefer this for routine local runs. Workspace crate features are banned, so
+
 # there should be no need to add `--all-features`.
 [unix]
 test *args:
@@ -86,10 +91,12 @@ test *args:
     $env:RUST_MIN_STACK = "{{ rust_min_stack }}"; $env:NEXTEST_PROFILE = "local"; cargo nextest run --no-fail-fast @($args | Select-Object -Skip 1)
 
 # Run from the repository root so scripts that resolve paths from `cwd` see
+
 # the same layout they use in GitHub Actions.
 [no-cd]
 test-github-scripts:
     {{ python }} -m unittest discover -s {{ justfile_directory() }}/.github/scripts -p 'test_*.py'
+    {{ python }} -m unittest discover -s {{ justfile_directory() }}/scripts -p 'test_generate_references.py'
 
 # Run explicit workspace benchmark targets.
 bench *args:
@@ -105,6 +112,7 @@ bench-e2e:
     bazel test --compilation_mode=opt --cache_test_results=no --test_output=streamed //codex-rs:e2e-benchmarks
 
 # Run Bazel-backed end-to-end macrobenchmarks once per case with release-like
+
 # Rust cfg paths but fastbuild codegen.
 bench-e2e-smoke:
     # Avoid optimizer cost because smoke runs only check that benchmarks work.
@@ -114,6 +122,7 @@ bench-e2e-smoke:
 
 # Build and run Codex from source using Bazel.
 # On Unix, use `[no-cd]` and `--run_under="cd $PWD &&"` to ensure Bazel runs
+
 # the command in the current working directory.
 [no-cd]
 [unix]
@@ -173,7 +182,7 @@ write-config-schema:
 
 # Regenerate vendored app-server protocol schema artifacts.
 write-app-server-schema *args:
-    cargo run -p codex-app-server-protocol --bin write_schema_fixtures -- {args}
+    {{ python }} app-server-protocol/scripts/write_schema_fixtures.py {args}
 
 [no-cd]
 write-hooks-schema:
