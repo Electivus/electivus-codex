@@ -95,3 +95,8 @@ CHANGELOG.ignore.md
 __pycache__/
 *.pyc
 .babysit-pr/
+
+# LoopX local control-plane state
+.loopx/
+.codex/goals/
+.local/
