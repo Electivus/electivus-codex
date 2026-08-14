@@ -38,8 +38,8 @@ This catalog lists every statically defined model tool in Codex's core registry 
 | `request_user_input` | `tools.experimental_request_user_input.enabled`; Default mode also uses `features.default_mode_request_user_input`. | `function` | _Description is generated at runtime or is not available._ | `codex-rs/core/src/tools/handlers/request_user_input_spec.rs` |
 | `send_message` | `features.multi_agent_v2` or model-selected v2. | `function` | Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn. | `codex-rs/core/src/tools/handlers/multi_agents_spec.rs` |
 | `shell_command` | `features.shell_tool` + one local environment. | `function` | Runs a Powershell command (Windows) and returns its output.<br><br>Examples of valid command strings:<br><br>- ls -a (show hidden): "Get-ChildItem -Force"<br>- recursive find by name: "Get-ChildItem -Recurse -Filter *.py"<br>- recursive grep: "Get-ChildItem -Path C:\\myrepo -Recurse \| Select-String -Pattern 'TODO' -CaseSensitive"<br>- ps aux \| grep python: "Get-Process \| Where-Object {{ $_.ProcessName -like '*python*' }}"<br>- setting an env var: "$env:FOO='bar'; echo $env:FOO"<br>- running an inline Python script: "@'\\nprint('Hello, world!')\\n'@ \| python -"<br><br>{runtime value} | `codex-rs/core/src/tools/handlers/shell_spec.rs` |
-| `skills.list` | No dedicated feature; enabled skill provider/orchestrator setting. | `function` | List skills owned by the requested authority. Returns the exact authority, package, and main_resource values required by skills.read. Pass next_cursor back as cursor to continue. | `codex-rs/ext/skills/src/tools/list.rs` |
-| `skills.read` | No dedicated feature; enabled skill provider/orchestrator setting. | `function` | Read one page from a skill resource. Pass the exact authority and package from skills.list or an explicitly selected skill's resource_access metadata, plus its main_resource or a referenced resource beneath that package. Pass next_cursor back as cursor to continue. | `codex-rs/ext/skills/src/tools/read.rs` |
+| `skills.list` | No dedicated feature; enabled skill provider/orchestrator setting. | `function` | List skills owned by the requested authority. Returns each skill's authority, package, and main_resource. Pass the package to skills.read, and pass next_cursor back as cursor to continue. | `codex-rs/ext/skills/src/tools/list.rs` |
+| `skills.read` | No dedicated feature; enabled skill provider/orchestrator setting. | `function` | Read one page from a skill. Pass its provided package directly; root aliases are resolved automatically. Omit resource to read SKILL.md; to read another file, use the same package and pass the file's complete skill:// identifier as resource. For executor-backed skills, skill_root is the skill's absolute directory in the executor filesystem and can be used to locate bundled scripts. If the package is not provided, use skills.list to find it. Pass next_cursor back as cursor to continue. | `codex-rs/ext/skills/src/tools/read.rs` |
 | `spawn_agent` | `features.multi_agent_v2` or model-selected v2. | `function` | _Description is generated at runtime or is not available._ | `codex-rs/core/src/tools/handlers/multi_agents_spec.rs` |
 | `test_sync_tool` | No user feature; model test-tool capability. | `function` | Internal synchronization helper used by Codex integration tests. | `codex-rs/core/src/tools/handlers/test_sync_spec.rs` |
 | `tool_search` | No active feature; model search + namespaces + deferred tools. | `hosted` | Search deferred tool metadata and load matching tools. | `codex-rs/core/src/tools/handlers/tool_search_spec.rs` |
@@ -1142,9 +1142,8 @@ struct ListResponse {
 schema::input_schema_for::<ReadArgs>()
 
 struct ReadArgs {
-    authority: SkillToolAuthority,
     package: String,
-    resource: String,
+    resource: Option<String>,
     cursor: Option<String>,
 }
 ```
@@ -1157,6 +1156,8 @@ Some(schema::output_schema_for::<ReadResponse>())
 struct ReadResponse {
     resource: String,
     contents: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skill_root: Option<String>,
     next_cursor: Option<String>,
 }
 ```
