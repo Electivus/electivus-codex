@@ -6,7 +6,6 @@ use std::sync::atomic::Ordering;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
-use crate::collect_explicit_skill_mentions;
 use crate::compact::InitialContextInjection;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
@@ -15,16 +14,15 @@ use crate::connectors;
 use crate::context::ContextualUserFragment;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
+use crate::hook_runtime::drain_async_hook_results;
 use crate::hook_runtime::inspect_pending_input;
 use crate::hook_runtime::record_additional_contexts;
 use crate::hook_runtime::record_pending_input;
-use crate::hook_runtime::reject_pending_input;
 use crate::hook_runtime::run_legacy_after_agent_hook;
 use crate::hook_runtime::run_pending_session_start_hooks;
 use crate::hook_runtime::run_turn_stop_hooks;
 use crate::mcp_skill_dependencies::maybe_prompt_and_install_mcp_dependencies;
 use crate::mentions::build_connector_slug_counts;
-use crate::mentions::build_skill_name_counts;
 use crate::mentions::collect_explicit_app_ids;
 use crate::mentions::collect_explicit_plugin_mentions;
 use crate::mentions::collect_tool_mentions_from_messages;
@@ -108,9 +106,12 @@ use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
 use codex_skills::ToolMentionKind;
 use codex_skills::app_id_from_path;
+use codex_skills::build_skill_name_counts;
+use codex_skills::collect_explicit_skill_mentions;
 use codex_skills::tool_kind_for_path;
 use codex_skills_extension::HostSkillPrompts;
 use codex_skills_extension::InjectedHostSkillPrompts;
+use codex_thread_store::PersistContext;
 use codex_tools::DiscoverableTool;
 use codex_tools::ToolName;
 use codex_tools::filter_request_plugin_install_discoverable_tools_for_client;
@@ -156,6 +157,9 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
+    // Record results from hooks that finished after the previous turn before this turn's user prompt.
+    drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
+
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
@@ -171,7 +175,8 @@ pub(crate) async fn run_turn(
     .await
     {
         if matches!(err.details(), CodexErrorDetails::TurnAborted) {
-            run_hooks_and_record_inputs(&sess, &turn_context, &input).await;
+            run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
+                .await;
             return Err(err);
         }
         if matches!(err.details(), CodexErrorDetails::ToolCollision(_)) {
@@ -192,7 +197,8 @@ pub(crate) async fn run_turn(
         {
             Ok(requirements) => requirements,
             Err(err) => {
-                run_hooks_and_record_inputs(&sess, &turn_context, &input).await;
+                run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
+                    .await;
                 return Err(err.into());
             }
         };
@@ -208,7 +214,8 @@ pub(crate) async fn run_turn(
     {
         Ok(step_context) => step_context,
         Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
-            run_hooks_and_record_inputs(&sess, &turn_context, &input).await;
+            run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
+                .await;
             return Err(err);
         }
         Err(err) => return Err(err),
@@ -236,7 +243,7 @@ pub(crate) async fn run_turn(
         return Ok(None);
     }
     let mut can_drain_pending_input = input.is_empty();
-    if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
+    if run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::TurnStart).await {
         return Ok(None);
     }
 
@@ -284,7 +291,14 @@ pub(crate) async fn run_turn(
             Vec::new()
         };
 
-        if run_hooks_and_record_inputs(&sess, &turn_context, &pending_input).await {
+        if run_hooks_and_record_inputs(
+            &sess,
+            &turn_context,
+            &pending_input,
+            PersistContext::Standard,
+        )
+        .await
+        {
             break;
         }
 
@@ -381,6 +395,8 @@ pub(crate) async fn run_turn(
                         .await;
                 }
                 can_drain_pending_input = true;
+                // Process async hooks only after sampling and its tools have finished.
+                drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ false).await;
                 let (has_pending_input, token_status) = async {
                     let has_pending_input =
                         sess.input_queue.has_pending_input(&sess.active_turn).await;
@@ -589,36 +605,30 @@ pub(crate) async fn run_hooks_and_record_inputs(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     input: &[TurnInput],
+    persist_context: PersistContext,
 ) -> bool {
     let mut blocked_input = false;
     let mut accepted_user_input = false;
-    let mut persistence_failed = false;
     for input_item in input {
         let hook_outcome = inspect_pending_input(sess, turn_context, input_item).await;
         if hook_outcome.should_stop {
             blocked_input = true;
-            reject_pending_input(sess, turn_context, input_item).await;
             record_additional_contexts(sess, turn_context, hook_outcome.additional_contexts).await;
         } else {
             if matches!(input_item, TurnInput::UserInput { content, .. } if !content.is_empty()) {
                 accepted_user_input = true;
             }
-            if record_pending_input(
+            record_pending_input(
                 sess,
                 turn_context,
                 input_item.clone(),
                 hook_outcome.additional_contexts,
+                persist_context,
             )
-            .await
-            .is_err()
-            {
-                // Preserve later drained inputs, but stop before sampling so a
-                // later queue retry cannot execute this message twice.
-                persistence_failed = true;
-            }
+            .await;
         }
     }
-    persistence_failed || (blocked_input && !accepted_user_input)
+    blocked_input && !accepted_user_input
 }
 
 fn turn_user_input(input: &[TurnInput]) -> Vec<UserInput> {
@@ -2756,8 +2766,10 @@ async fn try_run_sampling_request(
     outcome
 }
 
-pub(crate) fn get_last_assistant_message_from_turn(responses: &[ResponseItem]) -> Option<String> {
-    for item in responses.iter().rev() {
+pub(crate) fn get_last_assistant_message_from_turn<'a>(
+    responses: impl DoubleEndedIterator<Item = &'a ResponseItem>,
+) -> Option<String> {
+    for item in responses.rev() {
         if let Some(message) = last_assistant_message_from_item(item, /*plan_mode*/ false) {
             return Some(message);
         }

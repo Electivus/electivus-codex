@@ -331,7 +331,57 @@ impl App {
                     .await;
                 let config = self.fresh_session_config();
                 let turns = match self.thread_event_channels.get(&thread_id) {
-                    Some(channel) => Some(channel.store.lock().await.turns.clone()),
+                    Some(channel) => {
+                        let store = channel.store.lock().await;
+                        let mut turns = store.turns.clone();
+                        // Snapshot turns contain loaded history; newer live turns remain in
+                        // the replay buffer and must also be visible to prompt-edit lookups.
+                        for event in &store.buffer {
+                            let ThreadBufferedEvent::Notification(notification) = event else {
+                                continue;
+                            };
+                            match notification.as_ref() {
+                                ServerNotification::TurnStarted(notification)
+                                    if !turns
+                                        .iter()
+                                        .any(|turn| turn.id == notification.turn.id) =>
+                                {
+                                    turns.push(notification.turn.clone());
+                                }
+                                ServerNotification::ItemCompleted(notification) => {
+                                    if matches!(
+                                        notification.item,
+                                        ThreadItem::UserMessage { .. }
+                                            | ThreadItem::EnteredReviewMode { .. }
+                                            | ThreadItem::ExitedReviewMode { .. }
+                                    ) && let Some(turn) = turns
+                                        .iter_mut()
+                                        .find(|turn| turn.id == notification.turn_id)
+                                        && !turn
+                                            .items
+                                            .iter()
+                                            .any(|item| item.id() == notification.item.id())
+                                    {
+                                        turn.items.push(notification.item.clone());
+                                    }
+                                }
+                                ServerNotification::TurnCompleted(notification) => {
+                                    if let Some(turn) = turns
+                                        .iter_mut()
+                                        .find(|turn| turn.id == notification.turn.id)
+                                    {
+                                        turn.status = notification.turn.status.clone();
+                                        turn.error = notification.turn.error.clone();
+                                        turn.started_at = notification.turn.started_at;
+                                        turn.completed_at = notification.turn.completed_at;
+                                        turn.duration_ms = notification.turn.duration_ms;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        Some(turns)
+                    }
                     None => None,
                 };
                 let started = match turns {
@@ -943,6 +993,12 @@ impl App {
             AppEvent::RefreshTokenActivity { request_id } => {
                 self.refresh_token_activity(app_server, request_id);
             }
+            AppEvent::RefreshThreadUsage {
+                thread_id,
+                request_id,
+            } => {
+                self.refresh_thread_usage(app_server, thread_id, request_id);
+            }
             AppEvent::RefreshStatusLineWorkspaceHeadline { request_id } => {
                 self.refresh_status_line_workspace_headline(app_server, request_id);
             }
@@ -1167,6 +1223,13 @@ impl App {
                     // provisional transcript cells have been consolidated.
                     self.insert_pending_usage_output_if_ready(tui);
                 }
+            }
+            AppEvent::ThreadUsageLoaded {
+                thread_id,
+                request_id,
+                result,
+            } => {
+                self.finish_thread_usage_refresh(tui, thread_id, request_id, result)?;
             }
             AppEvent::CommitPendingUsageOutput => {
                 self.insert_pending_usage_output_if_ready(tui);

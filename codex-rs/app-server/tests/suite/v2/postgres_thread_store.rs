@@ -23,19 +23,20 @@ use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::user_input::UserInput;
+use codex_rollout::RolloutItem;
 use codex_state::PostgresNamespaceAction;
 use codex_state::PostgresNamespaceConfig;
 use codex_state::PostgresPoolConfig;
 use codex_state::RuntimeStateBackendConfig;
 use codex_state::StateRuntime;
 use codex_thread_store as store;
+use codex_thread_store::PersistContext;
 use codex_thread_store::ThreadStore;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
@@ -977,7 +978,9 @@ async fn seed_thread(
             },
         })
         .await?;
-    store.persist_thread(thread_id).await?;
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await?;
     store
         .append_items(store::AppendThreadItemsParams {
             thread_id,
@@ -1090,15 +1093,18 @@ fn turn(
                 }],
             }),
         ),
-        RolloutItem::ResponseItem(ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: user_text.to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        }),
+        RolloutItem::ResponseItem(
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: user_text.to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }
+            .into(),
+        ),
         completed_item(
             thread_id,
             turn_id,
@@ -1111,15 +1117,18 @@ fn turn(
                 memory_citation: None,
             }),
         ),
-        RolloutItem::ResponseItem(ResponseItem::Message {
-            id: None,
-            role: "assistant".to_string(),
-            content: vec![ContentItem::OutputText {
-                text: format!("final {user_text}"),
-            }],
-            phase: Some(MessagePhase::FinalAnswer),
-            internal_chat_message_metadata_passthrough: None,
-        }),
+        RolloutItem::ResponseItem(
+            ResponseItem::Message {
+                id: None,
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: format!("final {user_text}"),
+                }],
+                phase: Some(MessagePhase::FinalAnswer),
+                internal_chat_message_metadata_passthrough: None,
+            }
+            .into(),
+        ),
         RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: turn_id.to_string(),
             last_agent_message: None,

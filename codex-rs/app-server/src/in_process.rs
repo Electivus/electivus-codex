@@ -475,7 +475,7 @@ async fn start_uninitialized(
         ));
 
         let processor_outgoing = Arc::clone(&outgoing_message_sender);
-        let mut config_manager = ConfigManager::new(
+        let config_manager = ConfigManager::new(
             args.config.codex_home.to_path_buf(),
             args.cli_overrides,
             args.loader_overrides,
@@ -484,7 +484,6 @@ async fn start_uninitialized(
             args.arg0_paths.clone(),
             args.thread_config_loader,
         );
-        config_manager.psp = args.config.psp;
         let (processor_tx, mut processor_rx) = mpsc::channel::<ProcessorCommand>(channel_capacity);
         let mut processor_handle = tokio::spawn(async move {
             let processor_args = MessageProcessorArgs {

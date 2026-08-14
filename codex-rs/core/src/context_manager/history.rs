@@ -13,6 +13,8 @@ use crate::event_mapping::is_contextual_user_message_content;
 use crate::session::turn_context::TurnContext;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_history::CodexHarnessMetadata;
+use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -46,7 +48,7 @@ use std::sync::LazyLock;
 pub(crate) struct ContextManager {
     /// The oldest items are at the beginning of the vector. Snapshots share the vector until a
     /// caller needs to mutate it, avoiding deep copies for read-only history consumers.
-    items: Arc<Vec<ResponseItem>>,
+    items: Arc<Vec<ResponseItemEnvelope>>,
     /// Bumped whenever history is rewritten, such as compaction or rollback.
     history_version: u64,
     token_info: Option<TokenUsageInfo>,
@@ -108,9 +110,9 @@ impl ContextManager {
     ) -> (Vec<Box<dyn ContextualUserFragment>>, Option<WorldStateItem>) {
         let snapshot = world_state.snapshot();
         let fragments =
-            world_state.render_history_diff(self.world_state_baseline.as_ref(), &self.items);
+            world_state.render_history_diff(self.world_state_baseline.as_ref(), self.raw_items());
         let rollout_item = self.world_state_baseline.as_ref().map_or_else(
-            || Some(WorldStateItem::full(snapshot.clone().into_value())),
+            || Some(WorldStateItem::full(snapshot.clone().into_object())),
             |previous| {
                 snapshot
                     .merge_patch_from(previous)
@@ -138,15 +140,40 @@ impl ContextManager {
     pub(crate) fn record_items<I>(&mut self, items: I, policy: TruncationPolicy)
     where
         I: IntoIterator,
-        I::Item: std::ops::Deref<Target = ResponseItem>,
+        I::Item: Deref<Target = ResponseItem>,
     {
-        for item in items {
-            let item_ref = item.deref();
-            if !is_api_message(item_ref) {
+        self.record_items_with_metadata(items.into_iter().map(|item| (item, None)), policy);
+    }
+
+    /// Records history envelopes while preserving their history-only metadata.
+    pub(crate) fn record_annotated_items(
+        &mut self,
+        items: &[ResponseItemEnvelope],
+        policy: TruncationPolicy,
+    ) {
+        self.record_items_with_metadata(
+            items
+                .iter()
+                .map(|envelope| (&envelope.item, envelope.metadata.as_ref())),
+            policy,
+        );
+    }
+
+    fn record_items_with_metadata<'a, I, T>(&mut self, items: I, policy: TruncationPolicy)
+    where
+        I: IntoIterator<Item = (T, Option<&'a CodexHarnessMetadata>)>,
+        T: Deref<Target = ResponseItem>,
+    {
+        for (item, metadata) in items {
+            let item = item.deref();
+            if !is_api_message(item) {
                 continue;
             }
 
-            let processed = Self::process_item(item_ref, policy);
+            let processed = ResponseItemEnvelope {
+                item: Self::process_item(item, policy),
+                metadata: metadata.cloned(),
+            };
             Arc::make_mut(&mut self.items).push(processed);
         }
     }
@@ -154,7 +181,18 @@ impl ContextManager {
     /// Returns the history prepared for sending to the model. This applies a proper
     /// normalization and drops un-suited items. Unsupported image and audio content
     /// is stripped from messages and tool outputs according to `input_modalities`.
-    pub(crate) fn for_prompt(mut self, input_modalities: &[InputModality]) -> Vec<ResponseItem> {
+    pub(crate) fn for_prompt(self, input_modalities: &[InputModality]) -> Vec<ResponseItem> {
+        self.for_prompt_annotated(input_modalities)
+            .into_iter()
+            .map(ResponseItemEnvelope::into_item)
+            .collect()
+    }
+
+    /// Returns normalized history envelopes for internal consumers that must retain metadata.
+    pub(crate) fn for_prompt_annotated(
+        mut self,
+        input_modalities: &[InputModality],
+    ) -> Vec<ResponseItemEnvelope> {
         let contains_only_replay =
             self.replayed_history && self.replay_prefix_items >= self.items.len();
         self.normalize_history(input_modalities);
@@ -172,13 +210,28 @@ impl ContextManager {
         self.replayed_history
     }
 
-    /// Returns raw items in the history.
-    pub(crate) fn raw_items(&self) -> &[ResponseItem] {
+    /// Iterates over raw response items without exposing their history envelopes.
+    pub(crate) fn raw_items(
+        &self,
+    ) -> impl Clone + ExactSizeIterator<Item = &ResponseItem> + DoubleEndedIterator {
+        self.items.iter().map(|envelope| &envelope.item)
+    }
+
+    /// Returns annotated history items without cloning their response payloads.
+    pub(crate) fn annotated_items(&self) -> &[ResponseItemEnvelope] {
         &self.items
     }
 
     /// Returns raw items in the history and consumes the snapshot.
     pub(crate) fn into_raw_items(self) -> Vec<ResponseItem> {
+        self.into_annotated_items()
+            .into_iter()
+            .map(ResponseItemEnvelope::into_item)
+            .collect()
+    }
+
+    /// Returns annotated history items and consumes the snapshot.
+    pub(crate) fn into_annotated_items(self) -> Vec<ResponseItemEnvelope> {
         Arc::unwrap_or_clone(self.items)
     }
 
@@ -208,7 +261,7 @@ impl ContextManager {
         let items_tokens = self
             .items
             .iter()
-            .map(estimate_item_token_count)
+            .map(|envelope| estimate_item_token_count(&envelope.item))
             .fold(0i64, i64::saturating_add);
 
         Some(base_tokens.saturating_add(items_tokens))
@@ -223,14 +276,20 @@ impl ContextManager {
             // If the removed item participates in a call/output pair, also remove
             // its corresponding counterpart to keep the invariants intact without
             // running a full normalization pass.
-            let removed_items =
-                1 + usize::from(normalize::remove_corresponding_for(items, &removed).is_some());
+            let removed_items = 1 + usize::from(
+                normalize::remove_corresponding_for(items, &removed.item).is_some(),
+            );
             self.replay_prefix_items = self.replay_prefix_items.saturating_sub(removed_items);
             self.world_state_baseline = None;
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn replace(&mut self, items: Vec<ResponseItem>) {
+        self.replace_annotated(items.into_iter().map(ResponseItemEnvelope::new).collect());
+    }
+
+    pub(crate) fn replace_annotated(&mut self, items: Vec<ResponseItemEnvelope>) {
         self.items = Arc::new(items);
         self.history_version = self.history_version.saturating_add(1);
         self.world_state_baseline = None;
@@ -238,12 +297,20 @@ impl ContextManager {
         self.replayed_history = false;
     }
 
+    #[cfg(test)]
     pub(crate) fn replace_replayed(&mut self, items: Vec<ResponseItem>) {
         self.replace(items);
         self.replay_prefix_items = self.items.len();
         self.replayed_history = true;
     }
 
+    pub(crate) fn replace_annotated_replayed(&mut self, items: Vec<ResponseItemEnvelope>) {
+        self.replace_annotated(items);
+        self.replay_prefix_items = self.items.len();
+        self.replayed_history = true;
+    }
+
+    #[cfg(test)]
     pub(crate) fn replace_with_policy(&mut self, items: &[ResponseItem], policy: TruncationPolicy) {
         let start = items.len().saturating_sub(MAX_REPLAY_HISTORY_ITEMS);
         let processed = items
@@ -258,6 +325,29 @@ impl ContextManager {
         self.replayed_history = true;
     }
 
+    pub(crate) fn replace_annotated_with_policy(
+        &mut self,
+        items: &[ResponseItemEnvelope],
+        policy: TruncationPolicy,
+    ) {
+        let start = items.len().saturating_sub(MAX_REPLAY_HISTORY_ITEMS);
+        let processed = items
+            .get(start..)
+            .unwrap_or_default()
+            .iter()
+            .filter(|envelope| is_api_message(&envelope.item))
+            .filter_map(|envelope| {
+                process_replayed_item(&envelope.item, policy).map(|item| ResponseItemEnvelope {
+                    item,
+                    metadata: envelope.metadata.clone(),
+                })
+            })
+            .collect();
+        self.replace_annotated(processed);
+        self.replay_prefix_items = self.items.len();
+        self.replayed_history = true;
+    }
+
     pub(crate) fn record_replayed_items<'a>(
         &mut self,
         items: impl IntoIterator<Item = &'a ResponseItem>,
@@ -267,7 +357,28 @@ impl ContextManager {
         let processed_items = items
             .into_iter()
             .filter(|item| is_api_message(item))
-            .filter_map(|item| process_replayed_item(item, policy))
+            .filter_map(|item| process_replayed_item(item, policy).map(ResponseItemEnvelope::new))
+            .take(remaining);
+        Arc::make_mut(&mut self.items).extend(processed_items);
+        self.replay_prefix_items = self.items.len();
+        self.replayed_history = true;
+    }
+
+    pub(crate) fn record_replayed_annotated_items(
+        &mut self,
+        items: &[ResponseItemEnvelope],
+        policy: TruncationPolicy,
+    ) {
+        let remaining = MAX_REPLAY_HISTORY_ITEMS.saturating_sub(self.items.len());
+        let processed_items = items
+            .iter()
+            .filter(|envelope| is_api_message(&envelope.item))
+            .filter_map(|envelope| {
+                process_replayed_item(&envelope.item, policy).map(|item| ResponseItemEnvelope {
+                    item,
+                    metadata: envelope.metadata.clone(),
+                })
+            })
             .take(remaining);
         Arc::make_mut(&mut self.items).extend(processed_items);
         self.replay_prefix_items = self.items.len();
@@ -300,7 +411,7 @@ impl ContextManager {
         let replayed_history = self.replayed_history;
         let user_positions = user_message_positions(&snapshot);
         let Some(&first_instruction_turn_idx) = user_positions.first() else {
-            self.replace(Arc::unwrap_or_clone(snapshot));
+            self.replace_annotated(Arc::unwrap_or_clone(snapshot));
             self.replay_prefix_items = replay_prefix_items.min(self.items.len());
             self.replayed_history = replayed_history;
             return;
@@ -322,7 +433,7 @@ impl ContextManager {
         {
             retained_items.retain_mut(|item| {
                 if item.turn_id() == Some(first_turn_id)
-                    && let ResponseItem::Message { role, content, .. } = item
+                    && let ResponseItem::Message { role, content, .. } = &mut item.item
                     && role == "developer"
                 {
                     content.retain(|content| {
@@ -340,7 +451,7 @@ impl ContextManager {
         }
 
         let retained_replay_items = replay_prefix_items.min(retained_items.len());
-        self.replace(retained_items);
+        self.replace_annotated(retained_items);
         self.replay_prefix_items = retained_replay_items;
         self.replayed_history = replayed_history;
     }
@@ -359,35 +470,41 @@ impl ContextManager {
 
     fn get_non_last_reasoning_items_tokens(&self) -> i64 {
         // Get reasoning items excluding all the ones after the last instruction boundary.
-        let Some(last_user_index) = self.items.iter().rposition(is_user_turn_boundary) else {
+        let Some(last_user_index) = self
+            .items
+            .iter()
+            .rposition(|envelope| is_user_turn_boundary(&envelope.item))
+        else {
             return 0;
         };
 
         self.items
             .iter()
             .take(last_user_index)
-            .filter(|item| {
+            .filter(|envelope| {
                 matches!(
-                    item,
+                    &envelope.item,
                     ResponseItem::Reasoning {
                         encrypted_content: Some(_),
                         ..
                     }
                 )
             })
-            .map(estimate_item_token_count)
+            .map(|envelope| estimate_item_token_count(&envelope.item))
             .fold(0i64, i64::saturating_add)
     }
 
     // These are local items added after the most recent model-emitted item.
     // They are not reflected in `last_token_usage.total_tokens`.
-    fn items_after_last_model_generated_item(&self) -> &[ResponseItem] {
+    fn items_after_last_model_generated_item(
+        &self,
+    ) -> impl Clone + ExactSizeIterator<Item = &ResponseItem> + DoubleEndedIterator {
         let start = self
             .items
             .iter()
-            .rposition(is_model_generated_item)
+            .rposition(|envelope| is_model_generated_item(&envelope.item))
             .map_or(self.items.len(), |index| index.saturating_add(1));
-        &self.items[start..]
+        self.items[start..].iter().map(|envelope| &envelope.item)
     }
 
     /// When true, the server already accounted for past reasoning tokens and
@@ -400,7 +517,6 @@ impl ContextManager {
             .unwrap_or(0);
         let items_after_last_model_generated_tokens = self
             .items_after_last_model_generated_item()
-            .iter()
             .map(estimate_item_token_count)
             .fold(0i64, i64::saturating_add);
         if server_reasoning_included {
@@ -414,7 +530,6 @@ impl ContextManager {
 
     pub(crate) fn estimated_tokens_after_last_model_generated_item(&self) -> i64 {
         self.items_after_last_model_generated_item()
-            .iter()
             .map(estimate_item_token_count)
             .fold(0i64, i64::saturating_add)
     }
@@ -439,7 +554,15 @@ impl ContextManager {
         normalize::strip_audio_when_unsupported(input_modalities, items);
     }
 
-    pub(crate) fn prepare_replayed_history(mut self) -> Vec<ResponseItem> {
+    #[cfg(test)]
+    pub(crate) fn prepare_replayed_history(self) -> Vec<ResponseItem> {
+        self.prepare_replayed_annotated_history()
+            .into_iter()
+            .map(ResponseItemEnvelope::into_item)
+            .collect()
+    }
+
+    pub(crate) fn prepare_replayed_annotated_history(mut self) -> Vec<ResponseItemEnvelope> {
         let items = Arc::make_mut(&mut self.items);
         normalize::ensure_call_outputs_present(items);
         normalize::remove_orphan_outputs(items);
@@ -490,12 +613,12 @@ impl ContextManager {
     /// reinjection.
     fn trim_pre_turn_context_updates(
         &mut self,
-        snapshot: &[ResponseItem],
+        snapshot: &[ResponseItemEnvelope],
         first_instruction_turn_idx: usize,
         mut cut_idx: usize,
     ) -> usize {
         while cut_idx > first_instruction_turn_idx {
-            match &snapshot[cut_idx - 1] {
+            match &snapshot[cut_idx - 1].item {
                 ResponseItem::Message { role, content, .. }
                     if role == "developer" && is_contextual_dev_message_content(content) =>
                 {
@@ -519,25 +642,25 @@ impl ContextManager {
     }
 }
 
-fn enforce_replay_limits(items: &mut Vec<ResponseItem>) {
+fn enforce_replay_limits(items: &mut Vec<ResponseItemEnvelope>) {
     while let Some(index) = items
         .iter()
-        .position(|item| estimate_item_token_count(item) > 10_000)
+        .position(|envelope| estimate_item_token_count(&envelope.item) > 10_000)
     {
         let removed = items.remove(index);
-        normalize::remove_corresponding_for(items, &removed);
+        normalize::remove_corresponding_for(items, &removed.item);
     }
 
     let mut serialized_bytes = items.iter().fold(0u64, |total, item| {
-        total.saturating_add(serialized_response_item_bytes_u64(item))
+        total.saturating_add(serialized_response_item_bytes_u64(&item.item))
     });
     while items.len() > MAX_REPLAY_HISTORY_ITEMS || serialized_bytes > MAX_REPLAY_HISTORY_BYTES {
         let removed = items.remove(0);
         serialized_bytes =
-            serialized_bytes.saturating_sub(serialized_response_item_bytes_u64(&removed));
-        if let Some(corresponding) = normalize::remove_corresponding_for(items, &removed) {
-            serialized_bytes =
-                serialized_bytes.saturating_sub(serialized_response_item_bytes_u64(&corresponding));
+            serialized_bytes.saturating_sub(serialized_response_item_bytes_u64(&removed.item));
+        if let Some(corresponding) = normalize::remove_corresponding_for(items, &removed.item) {
+            serialized_bytes = serialized_bytes
+                .saturating_sub(serialized_response_item_bytes_u64(&corresponding.item));
         }
     }
 }
@@ -927,10 +1050,10 @@ fn is_inter_agent_instruction_content(content: &[ContentItem]) -> bool {
     InterAgentCommunication::is_message_content(content)
 }
 
-fn user_message_positions(items: &[ResponseItem]) -> Vec<usize> {
+fn user_message_positions(items: &[ResponseItemEnvelope]) -> Vec<usize> {
     let mut positions = Vec::new();
-    for (idx, item) in items.iter().enumerate() {
-        if is_user_turn_boundary(item) {
+    for (idx, envelope) in items.iter().enumerate() {
+        if is_user_turn_boundary(&envelope.item) {
             positions.push(idx);
         }
     }

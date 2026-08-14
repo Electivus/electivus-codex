@@ -243,7 +243,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     }
 
     let Cli {
-        psp,
         command,
         strict_config,
         shared,
@@ -421,7 +420,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         tools_web_search_request: None,
         ephemeral: ephemeral.then_some(true),
         bypass_hook_trust: bypass_hook_trust.then_some(true),
-        psp: Some(psp),
         additional_writable_roots: add_dir,
     };
 

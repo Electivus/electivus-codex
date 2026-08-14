@@ -10,12 +10,12 @@ use crate::model::ThreadRow;
 use anyhow::Context;
 use chrono::DateTime;
 use chrono::Utc;
+use codex_history::RolloutItem;
+use codex_history::RolloutLine;
 use codex_protocol::ThreadId;
 use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::dynamic_tools::group_dynamic_tools_by_namespace;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::ThreadMemoryMode;
 use serde::Serialize;
 use serde_json::Value;
@@ -280,6 +280,8 @@ async fn snapshot(
          name, preview, sandbox_policy, approval_mode, tokens_used, first_user_message, archived_at, \
          thread_section_id AS section, (SELECT name FROM thread_sections \
          WHERE thread_sections.id = threads.thread_section_id) AS section_name, \
+         (SELECT appearance FROM thread_sections \
+         WHERE thread_sections.id = threads.thread_section_id) AS section_appearance, \
          section_position, section_entered_at_ms, git_sha, git_branch, git_origin_url, repository_identity, \
          git_origin_url_is_explicit, memory_mode \
          FROM threads ORDER BY id",

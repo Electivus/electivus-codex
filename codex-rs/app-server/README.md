@@ -36,7 +36,7 @@ When running with `--listen ws://IP:PORT`, the same listener also serves basic H
 
 Websocket transport is currently experimental and unsupported. Do not rely on it for production workloads.
 
-Pass `--code-mode-host wss://HOST/PATH` to connect this app-server process to a remote code-mode host instead of starting a local host. This outbound connection is independent of `--listen` and is shared by the process's threads. Use `ws://` for a local code-mode host.
+Pass `--code-mode-host URL` to connect this app-server process to a remote code-mode host instead of starting a local host. Use `ws://` or `wss://` for the WebSocket protocol, or a root `http://` or `https://` URL without a path or query for gRPC. Remote hosts require the `code_mode_host` feature. This outbound connection is independent of `--listen` and is shared by the process's threads.
 
 The unix socket transport is intended for local app-server control-plane clients. `codex app-server proxy`
 opens exactly one raw stream connection to `$CODEX_HOME/app-server-control/app-server-control.sock`
@@ -167,9 +167,9 @@ Example with notification opt-out:
 - `thread/start`, `thread/resume`, and `thread/fork` responses include the legacy `sandbox` compatibility projection. `instructionSources` lists loaded instruction files using each source environment's native absolute path syntax, including files loaded from remote environments. Experimental clients can read `runtimeWorkspaceRoots` for the thread-scoped runtime roots and `activePermissionProfile` for the named or implicit built-in profile identity/provenance when known. Their deprecated experimental `multiAgentMode` field, and the corresponding thread setting, always report `explicitRequestOnly`; Ultra reasoning effort is the source of proactive multi-agent behavior.
 - The `cwd` inside a returned `thread` is its source-native Recorded Working Directory. It remains a JSON string and may use a path convention that is foreign to the app-server host, so clients should treat it as discovery and display metadata rather than a host filesystem path. The top-level `cwd` in `thread/start`, `thread/resume`, and `thread/fork` responses is the host-native working directory actually selected for the active thread.
 - `thread/list` — page through stored threads; supports cursor-based pagination and optional `modelProviders`, `sourceKinds`, `archived`, `sectionId`, legacy `isPinned`, `cwd`, and `searchTerm` filters. Set `sortKey` to `"section_position"` when listing a section in its persisted manual order. Experimental clients can use `parentThreadId` for direct spawned children or `ancestorThreadId` for spawned descendants at any depth; the two filters are mutually exclusive. Review and Guardian threads are not included because they do not participate in that spawn-edge lifecycle. Each returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded. Subagent threads also include `parentThreadId` when the immediate parent is known.
-- `threadSection/list` — page through independently persisted thread sections and their display names, including sections that do not currently contain any threads.
-- `threadSection/create` — create a durable custom section with a server-generated UUID and a nonempty display name; returns its `section`.
-- `threadSection/update` — rename an existing custom section while retaining its stable UUID; returns the updated `section`. The built-in pinned section cannot be renamed.
+- `threadSection/list` — page through independently persisted thread sections, including empty sections, their display names, and optional `appearance` (`icon` and `color`).
+- `threadSection/create` — create a durable custom section with a server-generated UUID, nonempty display name, and optional `appearance`; returns its `section`.
+- `threadSection/update` — rename an existing custom section and optionally replace its `appearance`; omit appearance to preserve it or pass `null` to clear it. The built-in pinned section cannot be updated.
 - `threadSection/delete` — delete an existing custom section and atomically return its member threads to the unsectioned list; returns `{}`. The built-in pinned section cannot be deleted.
 - `thread/loaded/list` — list the thread ids currently loaded in memory.
 - `thread/read` — read a stored thread by id without resuming it; optionally include turns via `includeTurns`. The returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded. For loaded threads, experimental clients can use `canAcceptDirectInput` to determine whether `turn/start` and `turn/steer` are accepted; unloaded stored threads report `null` when that capability is unavailable.
@@ -263,17 +263,17 @@ Example with notification opt-out:
 - `remoteControl/client/revoke` — experimental; revoke one controller device's grant for an environment. Pass `environmentId` and `clientId`; returns an empty object. This signed-in account-management operation works while the local relay is disabled or unenrolled.
 - `remoteControl/status/changed` — notification emitted when the remote-control status or client-visible environment id changes. `status` is one of `disabled`, `connecting`, `connected`, or `errored`; `serverName` is the local machine name used by this app-server process; `environmentId` is a string when the app-server has a current enrollment and `null` when that enrollment is cleared, invalidated, or remote control is disabled. Newly initialized app-server clients always receive the current status snapshot.
 - `skills/config/write` — write user-level skill config by name or absolute path.
-- `plugin/install` — install a plugin from a discovered marketplace entry, rejecting marketplace entries marked unavailable for install, install MCPs if any, and return the effective plugin auth policy plus any apps that still need auth (**under development; do not call from production clients yet**).
+- `plugin/install` — install a plugin from a discovered marketplace entry, rejecting marketplace entries marked unavailable for install, install MCPs if any, and return the effective plugin auth policy plus any apps that still need auth. For remote installs, clients may include an optional `installAttemptId`; app-server forwards it unchanged as `install_attempt_id` in the backend POST body, while omission preserves the legacy empty-body request (**under development; do not call from production clients yet**).
 - `plugin/uninstall` — uninstall a local plugin by `pluginId` in `<plugin>@<marketplace>` form by removing its cached files and clearing its user-level config entry, or uninstall a remote ChatGPT plugin by backend `pluginId` by forwarding the uninstall to the ChatGPT plugin backend and removing any downloaded remote-plugin cache (**under development; do not call from production clients yet**).
-- `mcpServer/oauth/login` — start an OAuth login for a configured MCP server; pass `threadId` to resolve servers from that thread's selected plugins and executor, and receive an `authorization_url` followed by `mcpServer/oauthLogin/completed` once the browser flow finishes.
+- `mcpServer/oauth/login` — start an OAuth login for a configured MCP server; pass `threadId` to resolve servers from that thread's selected plugins and executor, optionally pass `clientRegistration` (`auto`, `cimd`, or `dcr`) to override client registration for this login only, and receive an `authorization_url` followed by `mcpServer/oauthLogin/completed` once the browser flow finishes. Omitting `clientRegistration` automatically discovers the authorization server's supported registration methods; the override is never persisted in server configuration.
 - `tool/requestUserInput` — prompt the user with 1–3 short questions for a tool call and return their answers (experimental).
 - `config/mcpServer/reload` — reload MCP server config from disk and queue a refresh for loaded threads (applied on each thread's next active turn); returns `{}`. Use this after editing `config.toml` without restarting the server.
-- `mcpServerStatus/list` — enumerate configured MCP servers with their tools, auth status, server info, plus resources/resource templates for `full` detail; supports optional `threadId` and cursor+limit pagination. If `threadId` is omitted, the server reads from the latest global config directly. If `detail` is omitted, the server defaults to `full`. An `unknown` auth status means OAuth support could not be determined; `unsupported` means OAuth is known not to be supported.
+- `mcpServerStatus/list` — enumerate configured MCP servers with their tools, auth status, server info, owning `pluginId` (`null` for servers not contributed by a plugin), plus resources/resource templates for `full` detail; supports optional `threadId` and cursor+limit pagination. If `threadId` is omitted, the server reads from the latest global config directly. If `detail` is omitted, the server defaults to `full`. An `unknown` auth status means OAuth support could not be determined; `unsupported` means OAuth is known not to be supported.
 - `mcpServer/resource/read` — read a resource from a configured MCP server by optional `threadId`, `server`, and `uri`, returning text/blob resource `contents`. If `threadId` is omitted, the server reads from the latest MCP config directly.
 - `mcpServer/tool/call` — call a tool on a thread's configured MCP server by `threadId`, `server`, `tool`, optional `arguments`, and optional `_meta`, returning the MCP tool result.
 - `windowsSandbox/setupStart` — start Windows sandbox setup for the selected mode (`elevated` or `unelevated`); accepts an optional absolute `cwd` to target setup for a specific workspace, returns `{ started: true }` immediately, and later emits `windowsSandbox/setupCompleted`.
 - `feedback/upload` — submit a feedback report (classification + optional reason/logs, conversation_id, and optional `extraLogFiles` attachments array); returns the tracking thread id.
-- `config/read` — fetch the runtime-effective config after resolving config layering and managed requirements, including opaque `desktop` values stored in `config.toml`.
+- `config/read` — fetch the runtime-effective config after resolving config layering and managed requirements, including opaque `desktop` values stored in `config.toml`. When configured, the `packagedDefaults` layer has the lowest precedence.
 - `externalAgentConfig/detect` — detect migratable external-agent artifacts with `includeHome`, optional `cwds`, and an optional `migrationSource` selector. Omitted, `null`, or unrecognized migration-source values retain the default behavior. The deprecated optional `source` field remains accepted for compatibility but does not select the migration source. Each detected item includes `cwd` (`null` for home), and multi-item migrations may additionally include structured `details` with plugin ids, skill names, memory, session metadata, or other artifact names. The response also includes connector candidates inferred from detected source sessions, with a normalized display `name`, the number of detected sessions that used the connector, and the source metadata field used for detection.
 - `externalAgentConfig/import` — apply selected external-agent migration items by passing explicit `migrationItems` with `cwd` (`null` for home) and any `details` returned by detect. Pass the same optional `migrationSource` used for detection so the server reads from the matching source; omitted, `null`, or unrecognized values retain the default behavior. The optional `source` identifies the product that initiated the import, while the optional opaque `providerId` attributes analytics to the provider selected by that product without affecting migration-source selection. The response acknowledges the synchronous import phase with an `importId`. Expected migration failures are reported as per-item failures rather than JSON-RPC errors, so the server still returns that `importId` and emits `externalAgentConfig/import/completed` with the same ID once all synchronous and background work finishes. The completion notification contains type-level `itemTypeResults` with successes and failures, including raw failure messages for the client to report separately.
 - `externalAgentConfig/import/readHistories` — read completed import histories and connector candidates detected from successfully imported session histories. Successful session entries include the original imported title when one was available. Connector candidates include a normalized display `name`, the number of imported sessions that used the connector, and the source metadata field used for detection.
@@ -731,6 +731,8 @@ Experimental: use `memory/reset` to clear disposable local memory workspaces and
 ### Example: Set and update a thread goal
 
 Use `thread/goal/set` to create or update the current goal for a materialized thread. Clients can set `budgetLimited` when they stop because a token budget is exhausted or nearly exhausted, `blocked` when progress is waiting on outside intervention, and `usageLimited` when usage availability stops further work. The system also sets `budgetLimited` when accounting crosses a configured token budget and `usageLimited` when a turn ends on a hard usage-limit error.
+
+When `goals.max_goal_token_budget` is configured, new goals default to that limit, larger budgets are rejected, and setting `tokenBudget` to `null` resets the budget to the configured limit instead of removing it.
 
 ```json
 { "method": "thread/goal/set", "id": 27, "params": {
@@ -1945,6 +1947,8 @@ For linked Git worktrees, project hook declarations come from the matching `.cod
 
 Hooks are returned even when disabled so clients can render and re-enable them. User-controlled state lives under `hooks.state`. Managed hooks are non-configurable, and user entries for managed hook keys are ignored during loading.
 
+`executionMode` reports how a command hook runs. `sync` hooks participate in the current operation, while `async` hooks run in the background and deliver informational output through the existing steer-based injection path. Output is injected immediately into an active turn or persisted without starting a new turn when the session is idle.
+
 For unmanaged hooks, `currentHash` and `trustStatus` describe whether the current definition is first-seen, approved, or changed since approval. Only trusted unmanaged hooks become runnable. Hook keys combine the source identity with a trailing event/group/handler selector that is currently positional.
 
 ```json
@@ -1967,6 +1971,7 @@ For unmanaged hooks, `currentHash` and `trustStatus` describe whether the curren
         "key": "/Users/me/.codex/config.toml:pre_tool_use:0:0",
         "eventName": "pre_tool_use",
         "handlerType": "command",
+        "executionMode": "sync",
         "isManaged": false,
         "matcher": "Bash",
         "command": "python3 /Users/me/hook.py",
@@ -2111,6 +2116,7 @@ instead of failing the whole request.
 ```json
 { "method": "app/read", "id": 51, "params": {
     "appIds": ["demo-app", "missing-app"],
+    "threadId": "thr_123",
     "includeTools": true
 } }
 { "id": 51, "result": {
@@ -2138,11 +2144,13 @@ instead of failing the whole request.
 
 `app/read` reads fresh metadata records from a cache partitioned by backend URL and ChatGPT
 account/workspace identity, then makes at most one `POST /ps/apps/batch` for missing or
-expired ids. `includeTools` defaults to false and is forwarded as `include_tools`; a fresh
-metadata-only cache entry is refetched when tool summaries are requested. Backend or transport
-failures return an RPC error without replacing existing cache records. Its metadata shape can
-include display-only public tool summaries with enabled/read-only state and intentionally excludes
-runtime state, MCP tool state, full actions, and model descriptions.
+expired ids. When `threadId` is provided, app feature gating, workspace policy, and plugin
+attribution use that thread's effective configuration. `includeTools` defaults to false and is
+forwarded as `include_tools`; a fresh metadata-only cache entry is refetched when tool summaries
+are requested. Backend or transport failures return an RPC error without replacing existing cache
+records. Its metadata shape can include display-only public tool summaries with enabled/read-only
+state and intentionally excludes runtime state, MCP tool state, full actions, and model
+descriptions.
 
 Connected apps may override the thread's approval reviewer in `config.toml`.
 Use `apps._default.approvals_reviewer` to set the reviewer for all apps, and a
@@ -2222,7 +2230,7 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 - `account/updated` (notify) — emitted whenever auth mode changes (`authMode`: `apikey`, `bedrockApiKey`, `chatgpt`, `personalAccessToken`, or `null`) and includes the current ChatGPT `planType` when available.
 - `account/rateLimits/read` — fetch ChatGPT rate limits, an optional effective monthly credit limit, whether spend control has been reached, and the earned rate-limit resets currently available, including expiry details when provided by the backend. Rate-limit updates arrive via `account/rateLimits/updated` (notify); reset-credit data is snapshot-only.
 - `account/rateLimitResetCredit/consume` — consume one earned reset using a caller-provided idempotency key, optionally selecting a reset-credit ID returned by `account/rateLimits/read`.
-- `account/usage/read` — fetch ChatGPT account token-activity summary and daily buckets.
+- `account/usage/read` — fetch ChatGPT account token-activity summary and daily buckets, or pass a valid thread UUID as `threadId` to read estimated credits, optional cost, and usage breakdowns for one thread using the app-server's active account. The optional `threadUsage` response field is absent on older servers and `null` when the billing route is unavailable.
 - `account/workspaceMessages/read` — fetch active workspace messages, including workspace notification headlines when available.
 - `account/rateLimits/updated` (notify) — emitted whenever a user's ChatGPT rate limits change. This is a sparse rolling update; merge available values into the most recent `account/rateLimits/read` response or refetch that snapshot.
   `spendControlReached` is `true` or `false` when the backend reports spend-control state; `null` means unavailable and must not clear a previously observed value in a sparse update.

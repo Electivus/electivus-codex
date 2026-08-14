@@ -152,6 +152,7 @@ async fn postgres_contract_thread_sections_move_order_and_project_atomically() -
     let pinned = crate::ThreadSection {
         id: crate::PINNED_THREAD_SECTION_ID.to_string(),
         name: crate::PINNED_THREAD_SECTION_NAME.to_string(),
+        appearance: None,
     };
     assert_eq!(
         runtime.get_thread_section(&pinned.id).await?,

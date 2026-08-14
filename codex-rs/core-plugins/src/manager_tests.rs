@@ -952,6 +952,7 @@ async fn load_plugins_loads_default_skills_and_mcp_servers() {
                         bearer_token_env_var: None,
                         http_headers: None,
                         env_http_headers: None,
+                        http_headers_helper: None,
                     },
                     environment_id: "local".to_string(),
                     enabled: true,
@@ -991,7 +992,11 @@ async fn load_plugins_loads_default_skills_and_mcp_servers() {
         }]
     );
     assert_eq!(
-        outcome.effective_skill_roots(),
+        outcome
+            .effective_plugin_skill_roots()
+            .into_iter()
+            .map(|root| root.path)
+            .collect::<Vec<_>>(),
         vec![plugin_root.join("skills").abs()]
     );
     assert_eq!(outcome.effective_mcp_servers().len(), 1);
@@ -1046,6 +1051,7 @@ enabled = true
                     bearer_token_env_var: None,
                     http_headers: None,
                     env_http_headers: None,
+                    http_headers_helper: None,
                 },
                 environment_id: "local".to_string(),
                 enabled: true,
@@ -2142,6 +2148,7 @@ async fn load_plugins_uses_manifest_configured_component_paths() {
                         bearer_token_env_var: None,
                         http_headers: None,
                         env_http_headers: None,
+                        http_headers_helper: None,
                     },
                     environment_id: "local".to_string(),
                     enabled: true,
@@ -2479,6 +2486,7 @@ async fn load_plugins_ignores_manifest_component_paths_without_dot_slash() {
                     bearer_token_env_var: None,
                     http_headers: None,
                     env_http_headers: None,
+                    http_headers_helper: None,
                 },
                 environment_id: "local".to_string(),
                 enabled: true,
@@ -2596,7 +2604,7 @@ async fn load_plugins_preserves_disabled_plugins_without_effective_contributions
             error: None,
         }]
     );
-    assert!(outcome.effective_skill_roots().is_empty());
+    assert!(outcome.effective_plugin_skill_roots().is_empty());
     assert!(outcome.effective_mcp_servers().is_empty());
 }
 
@@ -2733,6 +2741,7 @@ fn capability_index_filters_inactive_and_zero_capability_plugins() {
             bearer_token_env_var: None,
             http_headers: None,
             env_http_headers: None,
+            http_headers_helper: None,
         },
         environment_id: "local".to_string(),
         enabled: true,
@@ -3086,7 +3095,7 @@ async fn load_plugins_rejects_invalid_plugin_keys() {
         outcome.plugins()[0].error.as_deref(),
         Some("invalid plugin key `sample`; expected <plugin>@<marketplace>")
     );
-    assert!(outcome.effective_skill_roots().is_empty());
+    assert!(outcome.effective_plugin_skill_roots().is_empty());
     assert!(outcome.effective_mcp_servers().is_empty());
 }
 

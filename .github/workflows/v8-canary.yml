@@ -17,13 +17,15 @@ jobs:
     timeout-minutes: 10
     outputs:
       canary_reason: ${{ steps.changes.outputs.canary_reason }}
-      canary_required: ${{ steps.changes.outputs.canary_required }}
+      # Older revisions can contain a detector that does not emit this output.
+      # Missing must mean "run" so they cannot silently skip the expensive V8
+      # coverage while reporting success.
+      canary_required: ${{ steps.changes.outputs.canary_required || 'true' }}
       v8_version: ${{ steps.v8_version.outputs.version }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -102,7 +104,6 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Validate V8 canary result
@@ -192,7 +193,6 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Set up Bazel

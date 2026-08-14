@@ -1,14 +1,15 @@
 use std::error::Error;
 
 use codex_protocol::ThreadId;
-use codex_protocol::protocol::CompactedItem;
-use codex_protocol::protocol::RolloutItem;
+use codex_rollout::CompactedItem;
+use codex_rollout::RolloutItem;
 use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
 
 use crate::AppendBatchId;
 use crate::AppendThreadItemsBatch;
 use crate::LoadThreadHistoryParams;
+use crate::PersistContext;
 use crate::PostgresThreadStore;
 use crate::ThreadStore;
 use crate::postgres_contract_tests::PostgresThreadStoreFixture;
@@ -28,7 +29,9 @@ async fn postgres_contract_active_writer_recovers_expired_lease_without_takeover
         .await?;
 
     expire_writer_lease(&pool, &fixture.schema, thread_id).await?;
-    writer.persist_thread(thread_id).await?;
+    writer
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await?;
 
     expire_writer_lease(&pool, &fixture.schema, thread_id).await?;
     writer

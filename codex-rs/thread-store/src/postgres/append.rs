@@ -273,9 +273,7 @@ pub(super) async fn append_batch(
     })
 }
 
-fn canonical_content_identity(
-    items: &[codex_protocol::protocol::RolloutItem],
-) -> ThreadStoreResult<Vec<u8>> {
+fn canonical_content_identity(items: &[codex_rollout::RolloutItem]) -> ThreadStoreResult<Vec<u8>> {
     let mut value = serde_json::to_value(items).map_err(serialization_error)?;
     sort_json_objects(&mut value);
     serde_json::to_vec(&value).map_err(serialization_error)

@@ -8,8 +8,8 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_rollout::RolloutItem;
 use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
 

@@ -48,6 +48,7 @@ async fn list_threads_filters_sections_before_recency_pagination_and_uses_index(
         metadata.section = section.map(|id| ThreadSection {
             id: id.to_string(),
             name: crate::PINNED_THREAD_SECTION_NAME.to_string(),
+            appearance: None,
         });
         runtime.upsert_thread(&metadata).await.unwrap();
     }
@@ -83,6 +84,7 @@ async fn list_threads_filters_sections_before_recency_pagination_and_uses_index(
             Some(ThreadSection {
                 id: crate::PINNED_THREAD_SECTION_ID.to_string(),
                 name: crate::PINNED_THREAD_SECTION_NAME.to_string(),
+                appearance: None,
             }),
         )
     );
@@ -192,6 +194,7 @@ async fn section_position_listing_uses_stable_indexed_keyset_pagination() {
         metadata.section = Some(ThreadSection {
             id: CUSTOM_THREAD_SECTION_ID.to_string(),
             name: "Custom section".to_string(),
+            appearance: None,
         });
         metadata.section_position = Some(position);
         metadata.section_entered_at = Some(metadata.updated_at);

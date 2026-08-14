@@ -1,3 +1,4 @@
+use crate::RolloutItem;
 use crate::config::RolloutConfig;
 use crate::config::RolloutConfigView;
 use crate::list::Cursor;
@@ -9,7 +10,6 @@ use anyhow::Context;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_protocol::ThreadId;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 pub use codex_state::LogEntry;
 use codex_state::RuntimeStateBackendConfig;
@@ -601,6 +601,11 @@ pub async fn read_repair_rollout_path(
     if let Some(thread_id) = thread_id
         && let Ok(Some(metadata)) = ctx.get_thread(thread_id).await
     {
+        // A fallback scan cannot distinguish an obsolete immutable rollout from the rollout
+        // currently selected after thread/revert, so it must not replace that selected path.
+        if metadata.rollout_path.as_path() != rollout_path {
+            return;
+        }
         saw_existing_metadata = true;
         let mut repaired = metadata.clone();
         repaired.rollout_path = rollout_path.to_path_buf();

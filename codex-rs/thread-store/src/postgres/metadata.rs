@@ -5,9 +5,9 @@ use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::GitInfo;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::ThreadMemoryMode;
+use codex_rollout::RolloutItem;
 use serde_json::Value;
 use sqlx::AssertSqlSafe;
 use sqlx::Row;
@@ -38,8 +38,10 @@ pub(super) async fn update_thread_metadata(
          writer_lease_expires_at > CURRENT_TIMESTAMP AS lease_active, \
          CURRENT_TIMESTAMP AS database_now, created_at, updated_at, recency_at, archived_at, \
          thread_section_id, section_position, section_entered_at, \
-         (SELECT name FROM {} AS sections WHERE sections.id = threads.thread_section_id) AS section_name \
+         (SELECT name FROM {} AS sections WHERE sections.id = threads.thread_section_id) AS section_name, \
+         (SELECT appearance FROM {} AS sections WHERE sections.id = threads.thread_section_id) AS section_appearance \
          FROM {} WHERE thread_id = $1 FOR UPDATE",
+        store.tables.sections,
         store.tables.sections,
         store.tables.threads
     )))
@@ -223,8 +225,18 @@ fn rebuild_projection(
     let section_name: Option<String> = row
         .try_get("section_name")
         .map_err(|error| database_error("repair thread metadata", error))?;
+    let section_appearance: Option<String> = row
+        .try_get("section_appearance")
+        .map_err(|error| database_error("repair thread metadata", error))?;
     let section = match (section_id, section_name) {
-        (Some(id), Some(name)) => Some(codex_state::ThreadSection { id, name }),
+        (Some(id), Some(name)) => Some(codex_state::ThreadSection {
+            id,
+            name,
+            appearance: section_appearance
+                .map(|appearance| serde_json::from_str(&appearance))
+                .transpose()
+                .map_err(serialization_error)?,
+        }),
         (None, None) => None,
         _ => {
             return Err(ThreadStoreError::Internal {

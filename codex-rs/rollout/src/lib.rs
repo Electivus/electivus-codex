@@ -16,12 +16,19 @@ mod persistence_metrics;
 pub(crate) mod policy;
 pub(crate) mod recorder;
 mod reverse_jsonl_scanner;
+mod rollout_file_name;
 mod rollout_reference_index;
 pub(crate) mod search;
 pub(crate) mod session_index;
 mod sqlite_metrics;
 pub mod state_db;
 
+pub use codex_history::CompactedItem;
+pub use codex_history::InitialHistory;
+pub use codex_history::ResponseItemEnvelope;
+pub use codex_history::ResumedHistory;
+pub use codex_history::RolloutItem;
+pub use codex_history::RolloutLine;
 pub(crate) use codex_protocol::protocol;
 
 pub const SESSIONS_SUBDIR: &str = "sessions";
@@ -59,6 +66,7 @@ pub use list::ThreadListLayout;
 pub use list::ThreadSortKey;
 pub use list::ThreadsPage;
 pub use list::find_archived_thread_path_by_id_str;
+pub use list::find_rollout_path_by_rollout_id;
 pub use list::find_thread_path_by_id_str;
 #[deprecated(note = "use find_thread_path_by_id_str")]
 pub use list::find_thread_path_by_id_str as find_conversation_path_by_id_str;
@@ -72,6 +80,7 @@ pub use list::rollout_date_parts;
 pub use maintenance::RolloutMaintenanceGuard;
 pub use maintenance::try_acquire_rollout_maintenance_lock;
 pub use metadata::builder_from_items;
+pub use metadata::rollout_id_from_path;
 pub use model_context::ModelContextScan;
 pub use model_context::ModelContextScanProgress;
 pub use persistence_metrics::RolloutPersistenceBatchMeasurement;
@@ -109,7 +118,7 @@ impl codex_state::CanonicalThreadHistoryReader for CanonicalRolloutHistoryReader
         &self,
         path: &std::path::Path,
         maximum_source_bytes: u64,
-    ) -> anyhow::Result<(Vec<codex_protocol::protocol::RolloutLine>, usize, u64)> {
+    ) -> anyhow::Result<(Vec<RolloutLine>, usize, u64)> {
         let (lines, _thread_id, rejected_line_count, source_bytes) =
             RolloutRecorder::load_rollout_lines_bounded(path, maximum_source_bytes).await?;
         Ok((lines, rejected_line_count, source_bytes))
@@ -118,7 +127,7 @@ impl codex_state::CanonicalThreadHistoryReader for CanonicalRolloutHistoryReader
     async fn extract_metadata(
         &self,
         path: &std::path::Path,
-        lines: &[codex_protocol::protocol::RolloutLine],
+        lines: &[RolloutLine],
         rejected_line_count: usize,
     ) -> anyhow::Result<codex_state::ExtractionOutcome> {
         metadata::extract_metadata_from_items(

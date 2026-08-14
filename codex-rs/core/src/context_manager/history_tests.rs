@@ -5,6 +5,8 @@ use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSection;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_history::CodexHarnessMetadata;
+use codex_history::ResponseItemEnvelope;
 use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::BaseInstructions;
@@ -104,6 +106,10 @@ fn create_history_with_items(items: Vec<ResponseItem>) -> ContextManager {
     // behavior, not on a specific model's token limit.
     h.record_items(items.iter(), TruncationPolicy::Tokens(10_000));
     h
+}
+
+fn raw_items(history: &ContextManager) -> Vec<ResponseItem> {
+    history.raw_items().cloned().collect()
 }
 
 struct TestWorldStateSection;
@@ -335,7 +341,7 @@ fn filters_non_api_messages() {
     let a = assistant_msg("hello");
     h.record_items([&u, &a], policy);
 
-    let items = h.raw_items();
+    let items = raw_items(&h);
     assert_eq!(
         items,
         vec![
@@ -411,7 +417,6 @@ fn items_after_last_model_generated_tokens_include_user_and_tool_output() {
     assert_eq!(
         history
             .items_after_last_model_generated_item()
-            .iter()
             .map(estimate_item_token_count)
             .fold(0i64, i64::saturating_add),
         expected_tokens
@@ -425,7 +430,6 @@ fn items_after_last_model_generated_tokens_are_zero_without_model_generated_item
     assert_eq!(
         history
             .items_after_last_model_generated_item()
-            .iter()
             .map(estimate_item_token_count)
             .fold(0i64, i64::saturating_add),
         0
@@ -444,7 +448,7 @@ fn for_prompt_preserves_inter_agent_assistant_messages() {
     let item = inter_agent_assistant_msg("continue");
     let history = create_history_with_items(vec![item.clone()]);
 
-    assert_eq!(history.raw_items(), std::slice::from_ref(&item));
+    assert_eq!(raw_items(&history), std::slice::from_ref(&item));
     assert_eq!(history.for_prompt(&default_input_modalities()), vec![item]);
 }
 
@@ -456,8 +460,8 @@ fn cloned_history_shares_items_until_mutated() {
     let mut snapshot = history.clone();
 
     assert!(std::ptr::eq(
-        history.raw_items().as_ptr(),
-        snapshot.raw_items().as_ptr()
+        history.annotated_items().as_ptr(),
+        snapshot.annotated_items().as_ptr()
     ));
 
     snapshot.record_items(
@@ -466,11 +470,85 @@ fn cloned_history_shares_items_until_mutated() {
     );
 
     assert!(!std::ptr::eq(
-        history.raw_items().as_ptr(),
-        snapshot.raw_items().as_ptr()
+        history.annotated_items().as_ptr(),
+        snapshot.annotated_items().as_ptr()
     ));
-    assert_eq!(history.raw_items(), std::slice::from_ref(&first));
-    assert_eq!(snapshot.raw_items(), &[first, second]);
+    assert_eq!(raw_items(&history), std::slice::from_ref(&first));
+    assert_eq!(raw_items(&snapshot), &[first, second]);
+}
+
+#[test]
+fn annotated_history_apis_preserve_envelopes() {
+    let first_item = assistant_msg("first");
+    let first_envelope = ResponseItemEnvelope {
+        item: first_item.clone(),
+        metadata: Some(CodexHarnessMetadata::default()),
+    };
+    let mut history = ContextManager::new();
+
+    history.replace_annotated(vec![first_envelope.clone()]);
+
+    assert_eq!(
+        history.annotated_items(),
+        std::slice::from_ref(&first_envelope)
+    );
+    assert_eq!(history.into_raw_items(), vec![first_item]);
+}
+
+#[test]
+fn record_annotated_items_preserves_metadata_while_processing_item() {
+    let envelope = ResponseItemEnvelope {
+        item: ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: "call-1".to_string(),
+            output: FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::Text("word ".repeat(100)),
+                success: Some(true),
+            },
+            internal_chat_message_metadata_passthrough: None,
+        },
+        metadata: Some(CodexHarnessMetadata::default()),
+    };
+    let mut history = ContextManager::new();
+
+    history.record_annotated_items(std::slice::from_ref(&envelope), TruncationPolicy::Tokens(4));
+
+    assert_eq!(history.annotated_items().len(), 1);
+    assert_eq!(
+        history.annotated_items()[0].metadata,
+        Some(CodexHarnessMetadata::default())
+    );
+    assert_ne!(history.annotated_items()[0].item, envelope.item);
+}
+
+#[test]
+fn for_prompt_annotated_preserves_metadata_while_normalizing_item() {
+    let envelope = ResponseItemEnvelope {
+        item: ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "keep".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "data:image/png;base64,abc".to_string(),
+                    detail: None,
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        metadata: Some(CodexHarnessMetadata::default()),
+    };
+    let mut history = ContextManager::new();
+    history.replace_annotated(vec![envelope.clone()]);
+
+    let normalized = history.for_prompt_annotated(&[InputModality::Text]);
+
+    assert_eq!(normalized.len(), 1);
+    assert_eq!(normalized[0].metadata, envelope.metadata);
+    assert_ne!(normalized[0].item, envelope.item);
 }
 
 #[test]
@@ -488,7 +566,7 @@ fn drop_last_n_user_turns_treats_inter_agent_assistant_messages_as_instruction_t
 
     history.drop_last_n_user_turns(/*num_turns*/ 1);
 
-    assert_eq!(history.raw_items(), &vec![first_turn, first_reply]);
+    assert_eq!(raw_items(&history), vec![first_turn, first_reply]);
 }
 
 #[test]
@@ -871,7 +949,7 @@ fn remove_first_item_removes_matching_output_for_function_call() {
     ];
     let mut h = create_history_with_items(items);
     h.remove_first_item();
-    assert_eq!(h.raw_items(), vec![]);
+    assert_eq!(raw_items(&h), vec![]);
 }
 
 #[test]
@@ -895,7 +973,7 @@ fn remove_first_item_removes_matching_call_for_output() {
     ];
     let mut h = create_history_with_items(items);
     h.remove_first_item();
-    assert_eq!(h.raw_items(), vec![]);
+    assert_eq!(raw_items(&h), vec![]);
 }
 
 #[test]
@@ -923,7 +1001,7 @@ fn remove_first_item_handles_local_shell_pair() {
     ];
     let mut h = create_history_with_items(items);
     h.remove_first_item();
-    assert_eq!(h.raw_items(), vec![]);
+    assert_eq!(raw_items(&h), vec![]);
 }
 
 #[test]
@@ -1188,7 +1266,7 @@ fn remove_first_item_handles_custom_tool_pair() {
     ];
     let mut h = create_history_with_items(items);
     h.remove_first_item();
-    assert_eq!(h.raw_items(), vec![]);
+    assert_eq!(raw_items(&h), vec![]);
 }
 
 #[test]
@@ -1245,7 +1323,7 @@ fn record_items_truncates_function_call_output_content() {
     history.record_items([&item], policy);
 
     assert_eq!(history.items.len(), 1);
-    match &history.items[0] {
+    match &history.items[0].item {
         ResponseItem::FunctionCallOutput { output, .. } => {
             let content = output.text_content().unwrap_or_default();
             assert_ne!(content, long_output);
@@ -1276,7 +1354,7 @@ fn record_items_truncates_custom_tool_call_output_content() {
     history.record_items([&item], policy);
 
     assert_eq!(history.items.len(), 1);
-    match &history.items[0] {
+    match &history.items[0].item {
         ResponseItem::CustomToolCallOutput { output, .. } => {
             let output = output.text_content().unwrap_or_default();
             assert_ne!(output, long_output);
@@ -1306,7 +1384,7 @@ fn record_items_respects_custom_token_limit() {
 
     history.record_items([&item], policy);
 
-    let stored = match &history.items[0] {
+    let stored = match &history.items[0].item {
         ResponseItem::FunctionCallOutput { output, .. } => output,
         other => panic!("unexpected history item: {other:?}"),
     };
@@ -1347,9 +1425,11 @@ fn record_replayed_items_caps_large_outputs_using_the_complete_item_estimate() {
         let mut history = ContextManager::new();
         history.record_replayed_items([&item], policy);
 
-        let [stored] = history.raw_items() else {
-            panic!("expected one stored output item");
-        };
+        let mut stored_items = history.raw_items();
+        let stored = stored_items
+            .next()
+            .expect("expected one stored output item");
+        assert!(stored_items.next().is_none());
         assert!(
             estimate_item_token_count(stored) <= 10_000,
             "stored output exceeded the complete-item token limit: {stored:?}"
@@ -1380,7 +1460,7 @@ fn record_replayed_items_drops_output_when_its_envelope_cannot_fit() {
 
     history.record_replayed_items([&item], TruncationPolicy::Tokens(100_000));
 
-    assert_eq!(history.raw_items(), &[]);
+    assert!(history.raw_items().next().is_none());
 }
 
 #[test]
@@ -1400,9 +1480,11 @@ fn record_replayed_items_caps_structured_text_outputs() {
 
     history.record_replayed_items([&item], TruncationPolicy::Tokens(100_000));
 
-    let [stored] = history.raw_items() else {
-        panic!("expected one structured output item");
-    };
+    let mut stored_items = history.raw_items();
+    let stored = stored_items
+        .next()
+        .expect("expected one structured output item");
+    assert!(stored_items.next().is_none());
     assert!(estimate_item_token_count(stored) <= 10_000);
     let ResponseItem::CustomToolCallOutput { output, .. } = stored else {
         panic!("expected custom tool output");
@@ -1423,7 +1505,7 @@ fn record_replayed_items_drops_oversized_non_output_items() {
 
     history.record_replayed_items([&item], TruncationPolicy::Tokens(100_000));
 
-    assert_eq!(history.raw_items(), &[]);
+    assert!(history.raw_items().next().is_none());
 }
 
 #[test]
@@ -1468,10 +1550,10 @@ fn prompt_normalization_drops_a_call_when_its_synthesized_output_exceeds_the_ite
         }
     }
     let call = call_with_id("x".repeat(lower));
-    let mut normalized = vec![call.clone()];
+    let mut normalized = vec![call.clone().into()];
     normalize::ensure_call_outputs_present(&mut normalized);
     assert_eq!(normalized.len(), 2);
-    assert!(estimate_item_token_count(&normalized[1]) > 10_000);
+    assert!(estimate_item_token_count(&normalized[1].item) > 10_000);
 
     let mut history = ContextManager::new();
     history.record_replayed_items([&call], TruncationPolicy::Tokens(10_000));
@@ -1561,7 +1643,10 @@ fn rollback_preserves_the_retained_replay_marker() {
 
     history.drop_last_n_user_turns(/*num_turns*/ 1);
 
-    assert_eq!(history.raw_items(), &[prefix]);
+    assert_eq!(
+        history.raw_items().cloned().collect::<Vec<_>>(),
+        vec![prefix]
+    );
     assert_eq!(history.replay_prefix_items(), 1);
     assert!(history.is_replayed_history());
 }
@@ -1575,7 +1660,7 @@ fn replace_with_policy_keeps_only_the_latest_bounded_replacement_items() {
 
     history.replace_with_policy(&items, TruncationPolicy::Tokens(1_000));
 
-    assert_eq!(history.raw_items(), &items[1..]);
+    assert_eq!(history.raw_items().cloned().collect::<Vec<_>>(), items[1..]);
 }
 
 fn assert_truncated_message_matches(message: &str, line: &str, expected_removed: usize) {
@@ -1690,7 +1775,7 @@ fn normalize_adds_missing_output_for_function_call() {
     h.normalize_history(&default_input_modalities());
 
     assert_eq!(
-        h.raw_items(),
+        raw_items(&h),
         vec![
             ResponseItem::FunctionCall {
                 id: None,
@@ -1728,7 +1813,7 @@ fn normalize_adds_missing_output_for_custom_tool_call() {
     h.normalize_history(&default_input_modalities());
 
     assert_eq!(
-        h.raw_items(),
+        raw_items(&h),
         vec![
             ResponseItem::CustomToolCall {
                 id: None,
@@ -1771,7 +1856,7 @@ fn normalize_adds_missing_output_for_local_shell_call_with_id() {
     h.normalize_history(&default_input_modalities());
 
     assert_eq!(
-        h.raw_items(),
+        raw_items(&h),
         vec![
             ResponseItem::LocalShellCall {
                 id: None,
@@ -1809,7 +1894,7 @@ fn normalize_removes_orphan_function_call_output() {
 
     h.normalize_history(&default_input_modalities());
 
-    assert_eq!(h.raw_items(), vec![]);
+    assert_eq!(raw_items(&h), vec![]);
 }
 
 #[cfg(not(debug_assertions))]
@@ -1826,7 +1911,7 @@ fn normalize_removes_orphan_custom_tool_call_output() {
 
     h.normalize_history(&default_input_modalities());
 
-    assert_eq!(h.raw_items(), vec![]);
+    assert_eq!(raw_items(&h), vec![]);
 }
 
 #[cfg(not(debug_assertions))]
@@ -1880,7 +1965,7 @@ fn normalize_mixed_inserts_and_removals() {
     h.normalize_history(&default_input_modalities());
 
     assert_eq!(
-        h.raw_items(),
+        raw_items(&h),
         vec![
             ResponseItem::FunctionCall {
                 id: None,
@@ -1950,7 +2035,7 @@ fn normalize_adds_missing_output_for_function_call_inserts_output() {
     let mut h = create_history_with_items(items);
     h.normalize_history(&default_input_modalities());
     assert_eq!(
-        h.raw_items(),
+        raw_items(&h),
         vec![
             ResponseItem::FunctionCall {
                 id: None,
@@ -2030,7 +2115,7 @@ fn normalize_adds_missing_output_for_tool_search_call() {
     h.normalize_history(&default_input_modalities());
 
     assert_eq!(
-        h.raw_items(),
+        raw_items(&h),
         vec![
             ResponseItem::ToolSearchCall {
                 id: None,
@@ -2134,7 +2219,7 @@ fn normalize_removes_orphan_client_tool_search_output() {
 
     h.normalize_history(&default_input_modalities());
 
-    assert_eq!(h.raw_items(), vec![]);
+    assert_eq!(raw_items(&h), vec![]);
 }
 
 #[cfg(debug_assertions)]
@@ -2168,7 +2253,7 @@ fn normalize_keeps_server_tool_search_output_without_matching_call() {
     h.normalize_history(&default_input_modalities());
 
     assert_eq!(
-        h.raw_items(),
+        raw_items(&h),
         vec![ResponseItem::ToolSearchOutput {
             id: None,
             call_id: Some("server-search".to_string()),
@@ -2419,7 +2504,7 @@ fn record_items_omits_audio_that_exceeds_the_output_budget() {
     history.record_items([&item], TruncationPolicy::Tokens(50));
 
     assert_eq!(
-        history.raw_items(),
+        raw_items(&history),
         &[ResponseItem::FunctionCallOutput {
             id: None,
             call_id: "call-audio".to_string(),

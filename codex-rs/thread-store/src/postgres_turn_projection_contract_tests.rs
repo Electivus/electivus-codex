@@ -13,10 +13,10 @@ use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_rollout::RolloutItem;
 use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
 

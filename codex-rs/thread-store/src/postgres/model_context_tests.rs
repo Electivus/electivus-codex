@@ -3,9 +3,9 @@ use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
-use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::WarningEvent;
+use codex_rollout::CompactedItem;
 use pretty_assertions::assert_eq;
 
 #[test]
@@ -53,37 +53,49 @@ fn model_context_validation_distinguishes_presentation_and_model_visible_items()
     let presentation = RolloutItem::EventMsg(EventMsg::Warning(WarningEvent {
         message: "presentation".repeat(50_000),
     }));
-    let oversized_message = RolloutItem::ResponseItem(ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "model-visible".repeat(50_000),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    });
-    let truncatable_output = RolloutItem::ResponseItem(ResponseItem::FunctionCallOutput {
-        id: None,
-        call_id: "call-1".to_string(),
-        output: FunctionCallOutputPayload::from_text("output".repeat(50_000)),
-        internal_chat_message_metadata_passthrough: None,
-    });
-    let impossible_output = RolloutItem::ResponseItem(ResponseItem::FunctionCallOutput {
-        id: None,
-        call_id: "call".repeat(50_000),
-        output: FunctionCallOutputPayload::from_text("output".repeat(50_000)),
-        internal_chat_message_metadata_passthrough: None,
-    });
-    let discounted_image = RolloutItem::ResponseItem(ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputImage {
-            image_url: format!("data:image/png;base64,{}", "a".repeat(50_000)),
-            detail: None,
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    });
+    let oversized_message = RolloutItem::ResponseItem(
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "model-visible".repeat(50_000),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+        .into(),
+    );
+    let truncatable_output = RolloutItem::ResponseItem(
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: "call-1".to_string(),
+            output: FunctionCallOutputPayload::from_text("output".repeat(50_000)),
+            internal_chat_message_metadata_passthrough: None,
+        }
+        .into(),
+    );
+    let impossible_output = RolloutItem::ResponseItem(
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: "call".repeat(50_000),
+            output: FunctionCallOutputPayload::from_text("output".repeat(50_000)),
+            internal_chat_message_metadata_passthrough: None,
+        }
+        .into(),
+    );
+    let discounted_image = RolloutItem::ResponseItem(
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputImage {
+                image_url: format!("data:image/png;base64,{}", "a".repeat(50_000)),
+                detail: None,
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+        .into(),
+    );
 
     for accepted in [&presentation, &truncatable_output, &discounted_image] {
         let mut budget = ModelContextBudget::new(thread_id);
@@ -117,7 +129,7 @@ fn compacted_replacement_history_is_bounded_after_expansion() {
     };
     let compacted = RolloutItem::Compacted(CompactedItem {
         message: "summary".to_string(),
-        replacement_history: Some(vec![replacement; MAX_MODEL_CONTEXT_ITEMS + 1]),
+        replacement_history: Some(vec![replacement.into(); MAX_MODEL_CONTEXT_ITEMS + 1]),
         window_number: None,
         first_window_id: None,
         previous_window_id: None,

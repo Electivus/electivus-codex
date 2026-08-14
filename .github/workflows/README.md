@@ -8,6 +8,9 @@ remain the fallback.
 
 ## Linux Support Boundary
 
+- Required checks run against GitHub's synthetic merge commit, not the pull
+  request head alone. This includes changes already on `main` and catches
+  conflicts before they reach the branch.
 - Native Linux x64 on `ubuntu-24.04` is the current Essential platform.
 - Linux ARM64 on `ubuntu-24.04-arm` and remaining build variants are Extended
   validation. Promoted release, x64 test, and V8 lanes are not repeated after

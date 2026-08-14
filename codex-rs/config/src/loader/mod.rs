@@ -71,6 +71,7 @@ const PROJECT_LOCAL_CONFIG_DENYLIST: &[&str] = &[
     "openai_base_url",
     "chatgpt_base_url",
     "apps_mcp_product_sku",
+    "responses_api_metadata",
     "model_provider",
     "model_providers",
     "notify",
@@ -101,6 +102,7 @@ async fn first_layer_config_error_from_entries(layers: &[ConfigLayerEntry]) -> O
 ///
 /// Configuration is built up from multiple layers in the following order:
 ///
+/// - package:  optional default configuration supplied with the Codex package
 /// - admin:    managed preferences (*)
 /// - system    `/etc/codex/config.toml` (Unix) or
 ///   `%ProgramData%\OpenAI\Codex\config.toml` (Windows)
@@ -134,6 +136,49 @@ pub async fn load_config_layers_state(
         strict_config,
         cloud_config_bundle,
     } = options.into();
+    let packaged_defaults_layer = if let Some(file) = &overrides.packaged_defaults_path {
+        let config = layer_io::read_config_from_path(
+            fs,
+            file,
+            /*log_missing_as_info*/ false,
+            strict_config,
+        )
+        .await?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("packaged defaults config file {} not found", file.display()),
+            )
+        })?;
+        let base_dir = file.as_path().parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "packaged defaults config file {} has no parent directory",
+                    file.display()
+                ),
+            )
+        })?;
+        ConfigLayerEntry::new(
+            ConfigLayerSource::PackagedDefaults { file: file.clone() },
+            resolve_relative_paths_in_config_toml(config, base_dir)?,
+        )
+    } else {
+        let file = AbsolutePathBuf::from_absolute_path(std::env::current_exe()?)?;
+        let raw_toml = include_str!("../../defaults.toml");
+        let config = toml::from_str(raw_toml).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid embedded packaged defaults; this is a Codex build error: {error}"),
+            )
+        })?;
+        ConfigLayerEntry::new_with_raw_toml(
+            ConfigLayerSource::PackagedDefaults { file },
+            config,
+            raw_toml.to_owned(),
+            AbsolutePathBuf::from_absolute_path(codex_home)?,
+        )
+    };
     let active_user_profile = overrides.user_config_profile.clone();
     let ignore_managed_requirements = overrides.ignore_managed_requirements;
     let ignore_user_config = overrides.ignore_user_config;
@@ -218,6 +263,7 @@ pub async fn load_config_layers_state(
         .map_err(io::Error::other)?;
 
     let mut layers = Vec::<ConfigLayerEntry>::new();
+    layers.push(packaged_defaults_layer);
 
     let cli_overrides_layer = if cli_overrides.is_empty() {
         None

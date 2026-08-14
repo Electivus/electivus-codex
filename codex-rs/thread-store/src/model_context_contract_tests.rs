@@ -14,10 +14,8 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -27,6 +25,8 @@ use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
+use codex_rollout::CompactedItem;
+use codex_rollout::RolloutItem;
 use codex_utils_absolute_path::test_support::PathExt;
 use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
@@ -156,15 +156,18 @@ async fn postgres_contract_model_context_accepts_large_presentation_rows_only()
     store
         .append_items(AppendThreadItemsParams {
             thread_id: oversized_model_thread_id,
-            items: vec![RolloutItem::ResponseItem(ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: "x".repeat(50_000),
-                }],
-                phase: None,
-                internal_chat_message_metadata_passthrough: None,
-            })],
+            items: vec![RolloutItem::ResponseItem(
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "x".repeat(50_000),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                }
+                .into(),
+            )],
         })
         .await?;
     let oversized_model_error = store
@@ -533,15 +536,18 @@ fn turn_started(turn_id: &str) -> RolloutItem {
 }
 
 fn user_response(turn_id: &str) -> RolloutItem {
-    RolloutItem::ResponseItem(ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: format!("{turn_id} user message"),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    })
+    RolloutItem::ResponseItem(
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: format!("{turn_id} user message"),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+        .into(),
+    )
 }
 
 fn completed_user_message(thread_id: ThreadId, turn_id: &str) -> RolloutItem {

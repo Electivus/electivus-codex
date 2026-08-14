@@ -11,13 +11,13 @@ use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_rollout::CompactedItem;
+use codex_rollout::RolloutItem;
 use codex_state::PostgresNamespaceAction;
 use codex_state::PostgresNamespaceConfig;
 use codex_state::PostgresPoolConfig;
@@ -28,6 +28,7 @@ use crate::AppendBatchId;
 use crate::AppendThreadItemsBatch;
 use crate::CreateThreadParams;
 use crate::GitInfoPatch;
+use crate::PersistContext;
 use crate::PostgresThreadStore;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
@@ -597,7 +598,9 @@ async fn postgres_contract_flush_and_shutdown_preserve_durable_history()
         ))
         .await?;
 
-    writer.persist_thread(thread_id).await?;
+    writer
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await?;
     writer.flush_thread(thread_id).await?;
     let durable = reader
         .load_history(crate::LoadThreadHistoryParams {
@@ -832,12 +835,17 @@ fn append_items() -> Vec<RolloutItem> {
             message: "full fidelity user message".to_string(),
             ..Default::default()
         })),
-        RolloutItem::ResponseItem(ResponseItem::FunctionCallOutput {
-            id: Some(ResponseItemId::from_server("response-output-id".into())),
-            call_id: "function-call-id".to_string(),
-            output: FunctionCallOutputPayload::from_text("structured function output".to_string()),
-            internal_chat_message_metadata_passthrough: None,
-        }),
+        RolloutItem::ResponseItem(
+            ResponseItem::FunctionCallOutput {
+                id: Some(ResponseItemId::from_server("response-output-id".into())),
+                call_id: "function-call-id".to_string(),
+                output: FunctionCallOutputPayload::from_text(
+                    "structured function output".to_string(),
+                ),
+                internal_chat_message_metadata_passthrough: None,
+            }
+            .into(),
+        ),
         RolloutItem::Compacted(CompactedItem {
             message: "compacted history marker".to_string(),
             replacement_history: None,

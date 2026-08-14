@@ -5,11 +5,11 @@ use std::sync::atomic::Ordering;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_rollout::RolloutItem;
 use codex_state::PostgresNamespaceAction;
 use codex_state::PostgresNamespaceConfig;
 use codex_state::PostgresPoolConfig;
@@ -31,6 +31,7 @@ use crate::DeleteThreadParams;
 use crate::LoadThreadHistoryParams;
 use crate::LocalThreadStore;
 use crate::LocalThreadStoreConfig;
+use crate::PersistContext;
 use crate::PostgresThreadStore;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
@@ -116,7 +117,7 @@ async fn postgres_contract_lifecycle_archive_serializes_with_local_appends()
                 || matches!(append_result, Err(ThreadStoreError::ThreadNotFound { .. }))
         );
         let late_persist = store
-            .persist_thread(thread_id)
+            .persist_thread(thread_id, PersistContext::Standard)
             .await
             .expect_err("archive must remove the local writer");
         assert!(matches!(

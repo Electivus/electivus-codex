@@ -1,25 +1,38 @@
 use super::StateRuntime;
 use crate::PINNED_THREAD_SECTION_ID;
 use crate::ThreadSection;
+use crate::ThreadSectionAppearance;
 use uuid::Uuid;
 
 mod postgres;
 
 impl StateRuntime {
     /// Create a custom thread section with a stable, server-assigned UUIDv7.
-    pub async fn create_thread_section(&self, name: &str) -> anyhow::Result<ThreadSection> {
+    pub async fn create_thread_section(
+        &self,
+        name: &str,
+        appearance: Option<ThreadSectionAppearance>,
+    ) -> anyhow::Result<ThreadSection> {
         let section = ThreadSection {
             id: Uuid::now_v7().to_string(),
             name: name.to_string(),
+            appearance,
         };
 
         if let Some((pool, schema)) = self.postgres_connection() {
             return postgres::create_thread_section(&pool, &schema, section).await;
         }
 
-        sqlx::query("INSERT INTO thread_sections (id, name) VALUES (?, ?)")
+        sqlx::query("INSERT INTO thread_sections (id, name, appearance) VALUES (?, ?, ?)")
             .bind(&section.id)
             .bind(&section.name)
+            .bind(
+                section
+                    .appearance
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
+            )
             .execute(self.sqlite_pool()?)
             .await?;
 
@@ -31,24 +44,32 @@ impl StateRuntime {
         &self,
         id: &str,
         name: &str,
+        appearance: Option<Option<ThreadSectionAppearance>>,
     ) -> anyhow::Result<Option<ThreadSection>> {
         if id == PINNED_THREAD_SECTION_ID {
             anyhow::bail!("built-in pinned thread section cannot be renamed");
         }
 
         if let Some((pool, schema)) = self.postgres_connection() {
-            return postgres::rename_thread_section(&pool, &schema, id, name).await;
+            return postgres::rename_thread_section(&pool, &schema, id, name, appearance).await;
         }
 
-        let section = sqlx::query_as::<_, (String, String)>(
-            "UPDATE thread_sections SET name = ? WHERE id = ? RETURNING id, name",
+        let replace_appearance = appearance.is_some();
+        let appearance = appearance
+            .flatten()
+            .map(|appearance| serde_json::to_string(&appearance))
+            .transpose()?;
+        let section = sqlx::query_as::<_, (String, String, Option<String>)>(
+            "UPDATE thread_sections SET name = ?, appearance = CASE WHEN ? THEN ? ELSE appearance END WHERE id = ? RETURNING id, name, appearance",
         )
         .bind(name)
+        .bind(replace_appearance)
+        .bind(appearance)
         .bind(id)
         .fetch_optional(self.sqlite_pool()?)
         .await?;
 
-        Ok(section.map(|(id, name)| ThreadSection { id, name }))
+        section.map(ThreadSection::from_row).transpose()
     }
 
     /// Delete a custom section and return its threads to the unsectioned list.

@@ -5,9 +5,8 @@ use crate::agents_md_manager::AgentsMdManager;
 use crate::config::ConstraintError;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentSnapshot;
-use crate::session::turn_context::EnvironmentConfig;
+use crate::session::turn_context::TurnEnvironmentConfig;
 use crate::shell_snapshot::ShellSnapshot;
-use crate::skills::SkillError;
 use crate::state::ActiveTurn;
 use codex_extension_api::ExtensionDataInit;
 use codex_http_client::ClientRouteClass;
@@ -21,10 +20,12 @@ use codex_protocol::config_types::ServiceTier;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSpecialPath;
+use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelections;
+use codex_skills::SkillError;
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
 
@@ -55,8 +56,7 @@ pub(crate) struct Session {
     pub(super) mcp_prewarm_task: std::sync::Mutex<Option<JoinHandle<()>>>,
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
-    pub(crate) pending_user_message_admissions:
-        crate::user_message_admission::PendingUserMessageAdmissions,
+    pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
     pub(crate) input_queue: InputQueue,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
@@ -82,9 +82,6 @@ pub(crate) struct SessionConfiguration {
 
     /// Base instructions for the session.
     pub(super) base_instructions: String,
-
-    /// Compact prompt override.
-    pub(super) compact_prompt: Option<String>,
 
     /// When to escalate for approval for execution
     pub(super) approval_policy: Constrained<AskForApproval>,
@@ -159,13 +156,14 @@ impl SessionConfiguration {
         &self.permission_profile_state
     }
 
-    pub(super) fn environment_config(&self) -> EnvironmentConfig {
-        EnvironmentConfig {
+    pub(super) fn turn_environment_config(&self) -> TurnEnvironmentConfig {
+        TurnEnvironmentConfig {
             allow_login_shell: self
                 .original_config_do_not_use
                 .permissions
                 .allow_login_shell,
             permission_profile: self.permission_profile_state.snapshot(),
+            selected_capability_roots: None,
         }
     }
 
@@ -1063,14 +1061,14 @@ impl Session {
                 environment_manager,
                 default_shell.clone(),
                 // Temporary: preserve thread-level behavior until environments supply config.
-                session_configuration.environment_config(),
+                session_configuration.turn_environment_config(),
                 shell_snapshot,
                 inherited_environments.unwrap_or_default(),
                 config.features.enabled(Feature::DeferredExecutor),
             ));
             turn_environments.update_selections(
                 session_configuration.environment_selections(),
-                &session_configuration.environment_config(),
+                &session_configuration.turn_environment_config(),
             );
             let resolved_environments = turn_environments.snapshot().await;
             let agents_md_manager = Arc::new(AgentsMdManager::new(user_instructions));
@@ -1103,17 +1101,6 @@ impl Session {
                 );
             }
             session_configuration.thread_name = thread_name.clone();
-            validate_config_lock_if_configured(
-                &session_configuration,
-                base_instructions_provenance.as_ref(),
-            )
-            .await?;
-            export_config_lock_if_configured(
-                &session_configuration,
-                thread_id,
-                base_instructions_provenance.as_ref(),
-            )
-            .await?;
             let mut state = SessionState::new_with_auto_compact_window_ids(
                 session_configuration.clone(),
                 initial_auto_compact_window_ids,
@@ -1174,12 +1161,13 @@ impl Session {
                     (None, None)
                 };
 
-            let hooks = build_hooks_for_config(
+            let hooks_config = build_hooks_config(
                 &config,
                 plugins_manager.as_ref(),
                 resolved_environments.single_local_environment(),
             )
             .await;
+            let (hooks, async_hook_results) = Hooks::new(hooks_config, thread_id);
             for warning in hooks.startup_warnings() {
                 post_session_configured_events.push(Event {
                     id: INITIAL_SUBMIT_ID.to_owned(),
@@ -1202,6 +1190,7 @@ impl Session {
             ));
             let session_extension_data =
                 codex_extension_api::ExtensionData::new(session_id.to_string());
+            session_extension_data.insert(analytics_events_client.clone());
             let mcp_resource_client = Arc::new(McpResourceClient::new(Arc::clone(&mcp_runtime)));
             let extension_metrics =
                 extension_metrics::from_session_telemetry(session_telemetry.clone());
@@ -1322,7 +1311,7 @@ impl Session {
                 mcp_prewarm_task: std::sync::Mutex::new(None),
                 conversation: Arc::new(RealtimeConversationManager::new()),
                 active_turn: Mutex::new(None),
-                pending_user_message_admissions: Default::default(),
+                async_hook_results,
                 input_queue: InputQueue::new(),
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 services,
@@ -1429,7 +1418,8 @@ impl Session {
             }
             if matches!(&sess.fork_persistence, ForkPersistence::Referenced { .. }) {
                 // Keep the source reserved until the child's history reference is durable.
-                sess.try_ensure_rollout_materialized().await?;
+                sess.try_ensure_rollout_materialized(PersistContext::Standard)
+                    .await?;
             }
             {
                 let mut state = sess.state.lock().await;

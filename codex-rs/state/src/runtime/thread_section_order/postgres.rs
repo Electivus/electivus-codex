@@ -54,14 +54,14 @@ pub(super) async fn get_thread_section(
     id: &str,
 ) -> anyhow::Result<Option<ThreadSection>> {
     let sections = qualified_table(schema, "thread_sections");
-    let row = sqlx::query_as::<_, (String, String)>(AssertSqlSafe(format!(
-        "SELECT id, name FROM {sections} WHERE id = $1"
+    let row = sqlx::query_as::<_, (String, String, Option<String>)>(AssertSqlSafe(format!(
+        "SELECT id, name, appearance FROM {sections} WHERE id = $1"
     )))
     .bind(id)
     .fetch_optional(pool)
     .await
     .map_err(|error| map_sql_error(schema, "read thread section", error))?;
-    Ok(row.map(|(id, name)| ThreadSection { id, name }))
+    row.map(ThreadSection::from_row).transpose()
 }
 
 pub(super) async fn list_thread_sections(
@@ -73,8 +73,9 @@ pub(super) async fn list_thread_sections(
     let sections = qualified_table(schema, "thread_sections");
     let page_size = limit.max(1);
     let fetch_limit = i64::try_from(page_size.saturating_add(1))?;
-    let mut query =
-        QueryBuilder::<Postgres>::new(format!("SELECT id, name FROM {sections} WHERE 1 = 1"));
+    let mut query = QueryBuilder::<Postgres>::new(format!(
+        "SELECT id, name, appearance FROM {sections} WHERE 1 = 1"
+    ));
     if let Some(cursor) = cursor {
         query.push(" AND id > ");
         query.push_bind(cursor);
@@ -82,14 +83,14 @@ pub(super) async fn list_thread_sections(
     query.push(" ORDER BY id LIMIT ");
     query.push_bind(fetch_limit);
     let rows = query
-        .build_query_as::<(String, String)>()
+        .build_query_as::<(String, String, Option<String>)>()
         .fetch_all(pool)
         .await
         .map_err(|error| map_sql_error(schema, "list thread sections", error))?;
     let mut sections = rows
         .into_iter()
-        .map(|(id, name)| ThreadSection { id, name })
-        .collect::<Vec<_>>();
+        .map(ThreadSection::from_row)
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let next_cursor = if sections.len() > page_size {
         sections.pop();
         sections.last().map(|section| section.id.clone())
@@ -145,14 +146,17 @@ pub(super) async fn move_thread_to_section(
         return Ok(true);
     };
 
-    let section_name = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
-        "SELECT name FROM {sections} WHERE id = $1"
-    )))
+    let section_row = sqlx::query_as::<_, (String, String, Option<String>)>(AssertSqlSafe(
+        format!("SELECT id, name, appearance FROM {sections} WHERE id = $1"),
+    ))
     .bind(section)
     .fetch_optional(transaction.as_mut())
     .await
     .map_err(|error| map_sql_error(schema, "read destination thread section", error))?
+    .map(ThreadSection::from_row)
+    .transpose()?
     .ok_or_else(|| anyhow::anyhow!("section {section} does not exist"))?;
+    let section_projection = serde_json::to_value(section_row)?;
 
     let before_thread_id = before_thread_id.map(|id| id.to_string());
     if before_thread_id.as_deref() == Some(thread_id.as_str()) {
@@ -196,14 +200,14 @@ pub(super) async fn move_thread_to_section(
         sqlx::query(AssertSqlSafe(format!(
             "UPDATE {threads} SET thread_section_id = $1, section_position = $2, \
              section_entered_at = $3, projection = jsonb_set(jsonb_set(jsonb_set(\
-             projection, '{{section}}', jsonb_build_object('id', $1::text, 'name', $4::text), \
+             projection, '{{section}}', $4, \
              TRUE), '{{section_position}}', to_jsonb($2::bigint), TRUE), \
              '{{section_entered_at}}', to_jsonb($3::timestamptz), TRUE) WHERE thread_id = $5"
         )))
         .bind(section)
         .bind(position)
         .bind(entered_at)
-        .bind(section_name)
+        .bind(section_projection)
         .bind(&thread_id)
         .execute(transaction.as_mut())
         .await

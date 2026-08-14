@@ -3,7 +3,7 @@ use super::import_threads::thread_projection;
 use crate::postgres::qualified_table;
 use anyhow::Context;
 use chrono::DateTime;
-use codex_protocol::protocol::RolloutItem;
+use codex_history::RolloutItem;
 use futures::TryStreamExt;
 use serde_json::Value;
 use sha2::Digest;

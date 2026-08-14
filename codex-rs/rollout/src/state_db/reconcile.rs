@@ -1,11 +1,11 @@
 //! Checked and best-effort rollout reconciliation into runtime state.
 
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_state::ThreadMetadataBuilder;
 use std::path::Path;
 use tracing::warn;
 
+use crate::RolloutItem;
 use crate::metadata;
 use crate::recorder::RolloutRecorder;
 
@@ -45,6 +45,14 @@ async fn persist_extracted_rollout(
     let memory_mode = outcome.memory_mode.unwrap_or_else(|| "enabled".to_string());
     metadata.cwd = normalize_cwd_for_state_db(&metadata.cwd);
     let existing_metadata = context.get_thread(metadata.id).await?;
+    // A fallback scan cannot distinguish an obsolete immutable rollout from the rollout
+    // currently selected after thread/revert, so it must not replace that selected path.
+    if existing_metadata
+        .as_ref()
+        .is_some_and(|existing| existing.rollout_path != metadata.rollout_path)
+    {
+        return Ok(());
+    }
     // Paginated metadata updates are SQLite-only. Use the rollout mode to seed a
     // missing row, then keep the value from SQLite.
     let restore_memory_mode_from_rollout =

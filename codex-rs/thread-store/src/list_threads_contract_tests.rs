@@ -4,11 +4,11 @@ use chrono::DateTime;
 use chrono::Utc;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
+use codex_rollout::RolloutItem;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
@@ -21,6 +21,7 @@ use crate::ListThreadsParams;
 use crate::LocalThreadStore;
 use crate::LocalThreadStoreConfig;
 use crate::MoveThreadToSectionParams;
+use crate::PersistContext;
 use crate::PostgresThreadStore;
 use crate::SortDirection;
 use crate::ThreadLocationFilter;
@@ -197,6 +198,7 @@ async fn postgres_contract_section_position_pages_migrated_legacy_pins()
     let pinned = codex_state::ThreadSection {
         id: codex_state::PINNED_THREAD_SECTION_ID.to_string(),
         name: codex_state::PINNED_THREAD_SECTION_NAME.to_string(),
+        appearance: None,
     };
     assert_eq!(
         first
@@ -973,7 +975,9 @@ pub(super) async fn create_listed_thread(
             .append_items(AppendThreadItemsParams { thread_id, items })
             .await?;
     }
-    store.persist_thread(thread_id).await?;
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await?;
     store.shutdown_thread(thread_id).await?;
     let timestamp = DateTime::parse_from_rfc3339(timestamp)?.with_timezone(&Utc);
     store

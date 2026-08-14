@@ -1,26 +1,29 @@
 use anyhow::Result;
 use codex_core::StartThreadOptions;
+use codex_history::InitialHistory;
 use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::InitialHistory;
-use codex_protocol::protocol::Op;
-use codex_protocol::protocol::RolloutItem;
+use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::user_input::UserInput;
+use codex_rollout::RolloutItem;
 use core_test_support::responses;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 
 fn user_message(text: String) -> RolloutItem {
-    RolloutItem::ResponseItem(ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText { text }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    })
+    RolloutItem::ResponseItem(
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText { text }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+        .into(),
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -53,16 +56,10 @@ async fn resumed_request_trims_only_replay_to_fit_exact_responses_lite_cardinali
         .thread;
 
     thread
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "new-live-message".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "new-live-message".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 
@@ -108,16 +105,10 @@ async fn resumed_request_keeps_oversized_live_dynamic_tool_unchanged() -> Result
         .thread;
 
     thread
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "use the live tool".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "use the live tool".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 

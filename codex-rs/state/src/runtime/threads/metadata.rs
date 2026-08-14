@@ -80,6 +80,11 @@ SELECT
         FROM thread_sections
         WHERE thread_sections.id = threads.thread_section_id
     ) AS section_name,
+    (
+        SELECT thread_sections.appearance
+        FROM thread_sections
+        WHERE thread_sections.id = threads.thread_section_id
+    ) AS section_appearance,
     threads.section_position,
     threads.section_entered_at_ms,
     threads.git_sha,
@@ -96,6 +101,37 @@ WHERE threads.id = ?
         .await?;
         row.map(|row| ThreadRow::try_from_row(&row).and_then(ThreadMetadata::try_from))
             .transpose()
+    }
+
+    /// Swap one thread's rollout path only when it still matches the expected path.
+    ///
+    /// This intentionally updates only the physical path. The logical metadata stays attached to
+    /// the stable thread id.
+    pub async fn replace_rollout_path_if_current(
+        &self,
+        id: ThreadId,
+        expected: &std::path::Path,
+        replacement: &std::path::Path,
+    ) -> anyhow::Result<bool> {
+        if let Some((pool, schema)) = self.postgres_connection() {
+            return postgres::replace_rollout_path_if_current(
+                &pool,
+                &schema,
+                id,
+                expected,
+                replacement,
+            )
+            .await;
+        }
+
+        let result =
+            sqlx::query("UPDATE threads SET rollout_path = ? WHERE id = ? AND rollout_path = ?")
+                .bind(replacement.display().to_string())
+                .bind(id.to_string())
+                .bind(expected.display().to_string())
+                .execute(self.sqlite_pool()?)
+                .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn get_thread_memory_mode(&self, id: ThreadId) -> anyhow::Result<Option<String>> {

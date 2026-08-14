@@ -11,6 +11,7 @@ use sqlx::PgPool;
 use sqlx::Postgres;
 use sqlx::QueryBuilder;
 use sqlx::Row;
+use std::path::Path;
 use std::path::PathBuf;
 
 pub(super) async fn get_thread_resume_metadata(
@@ -48,6 +49,27 @@ pub(super) async fn mark_thread_paginated(
     .await
     .map_err(|error| map_sql_error(schema, "promote thread history mode", error))?;
     Ok(result.rows_affected() > 0)
+}
+
+pub(super) async fn replace_rollout_path_if_current(
+    pool: &PgPool,
+    schema: &str,
+    thread_id: ThreadId,
+    expected: &Path,
+    replacement: &Path,
+) -> anyhow::Result<bool> {
+    let threads = qualified_table(schema, "threads");
+    let result = sqlx::query(AssertSqlSafe(format!(
+        "UPDATE {threads} SET projection = jsonb_set(projection, '{{rollout_path}}', \
+         to_jsonb($1::text), TRUE) WHERE thread_id = $2 AND projection ->> 'rollout_path' = $3"
+    )))
+    .bind(replacement.display().to_string())
+    .bind(thread_id.to_string())
+    .bind(expected.display().to_string())
+    .execute(pool)
+    .await
+    .map_err(|error| map_sql_error(schema, "replace current thread rollout path", error))?;
+    Ok(result.rows_affected() == 1)
 }
 
 pub(super) async fn set_thread_preview_if_empty(

@@ -194,16 +194,18 @@ INSERT INTO threads (
         .expect("legacy thread insert should succeed");
     }
 
-    let registered_sections =
-        sqlx::query_as::<_, (String, String)>("SELECT id, name FROM thread_sections ORDER BY id")
-            .fetch_all(&pool)
-            .await
-            .expect("independent thread sections should load");
+    let registered_sections = sqlx::query_as::<_, (String, String, Option<String>)>(
+        "SELECT id, name, appearance FROM thread_sections ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("independent thread sections should load");
     assert_eq!(
         registered_sections,
         vec![(
             PINNED_THREAD_SECTION_ID.to_string(),
             PINNED_THREAD_SECTION_NAME.to_string(),
+            None,
         )]
     );
 
@@ -853,7 +855,7 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
 
 #[tokio::test]
 async fn repairs_complete_official_thread_migration_history_before_fork_migrations() {
-    for official_last_version in 43..=46 {
+    for official_last_version in 43..=48 {
         let sqlite_home = crate::runtime::test_support::unique_temp_dir();
         tokio::fs::create_dir_all(&sqlite_home)
             .await
@@ -874,9 +876,10 @@ async fn repairs_complete_official_thread_migration_history_before_fork_migratio
             .filter(|migration| migration.version <= 42)
             .cloned()
             .collect::<Vec<_>>();
-        for (official_version, combined_version) in [(43, 44), (44, 45), (45, 47), (46, 48)]
-            .into_iter()
-            .take_while(|(official_version, _)| *official_version <= official_last_version)
+        for (official_version, combined_version) in
+            [(43, 44), (44, 45), (45, 47), (46, 48), (47, 50), (48, 51)]
+                .into_iter()
+                .take_while(|(official_version, _)| *official_version <= official_last_version)
         {
             let migration = STATE_MIGRATOR
                 .migrations

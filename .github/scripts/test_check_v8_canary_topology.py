@@ -26,6 +26,7 @@ class V8CanaryTopologyTests(unittest.TestCase):
             ("exact Linux matrix", 0, canary.replace("variant: ptrcomp-sandbox", "variant: release", 1)),
             ("exact Linux matrix", 0, canary.replace("runner: ubuntu-24.04-arm", "runner: macos-15", 1)),
             ("metadata fail safe", 0, canary.replace("canary_required=true", "canary_required=false", 1)),
+            ("metadata fail safe", 0, canary.replace(" || 'true'", "", 1)),
             ("metadata fail safe", 0, canary.replace('canary_required="${detector_lines[0]#canary_required=}"', 'canary_required="${BASH_REMATCH[1]}"')),
             ("metadata fail safe", 0, canary.replace("classifier returned malformed output", "classifier output ignored")),
             ("version fallback", 0, canary.replace("unknown-${GITHUB_SHA:0:12}", "unknown")),

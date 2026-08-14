@@ -2,12 +2,16 @@ use super::*;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::exec_policy::AllowPrefixRules;
 use crate::shell_snapshot::ShellSnapshotFile;
+use crate::tools::sandboxing::executor_windows_sandbox_level;
 use codex_core_plugins::PluginCommandAttribution;
+use codex_core_plugins::ResolvedPluginMetricsOperation;
 use codex_core_plugins::TrustedPluginRoots;
+use codex_exec_server::ExecutorFileSystem;
 use codex_file_system::FileSystemSandboxContext;
 use codex_model_provider::SharedModelProvider;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
+use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
 use codex_protocol::openai_models::ModelInfo;
@@ -29,9 +33,11 @@ pub(crate) type ShellSnapshotTask = Shared<BoxFuture<'static, Option<Arc<ShellSn
 
 /// Effective per-environment config; fields move here as executor config is migrated.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct EnvironmentConfig {
+pub(crate) struct TurnEnvironmentConfig {
     pub(crate) allow_login_shell: bool,
     pub(crate) permission_profile: PermissionProfileSnapshot,
+    /// None preserves legacy executor roots; Some, including empty, is owner-installed.
+    pub(crate) selected_capability_roots: Option<Vec<SelectedCapabilityRoot>>,
 }
 
 #[derive(Clone)]
@@ -41,7 +47,7 @@ pub(crate) struct TurnEnvironment {
     cwd: PathUri,
     workspace_roots: Vec<PathUri>,
     pub(crate) shell: Option<shell::Shell>,
-    pub(crate) config: EnvironmentConfig,
+    pub(crate) config: TurnEnvironmentConfig,
     pub(crate) shell_snapshot: ShellSnapshotTask,
 }
 
@@ -52,7 +58,7 @@ impl TurnEnvironment {
         cwd: PathUri,
         workspace_roots: Vec<PathUri>,
         shell: Option<shell::Shell>,
-        config: EnvironmentConfig,
+        config: TurnEnvironmentConfig,
     ) -> Self {
         Self {
             environment_id,
@@ -205,6 +211,18 @@ impl TurnContext {
             .resolve_attribution(command, cwd)
     }
 
+    pub(crate) async fn plugin_attribution_for_executor_command(
+        &self,
+        command: &[String],
+        cwd: &PathUri,
+        file_system: &dyn ExecutorFileSystem,
+    ) -> Option<PluginCommandAttribution> {
+        self.extension_data
+            .get::<TrustedPluginRoots>()?
+            .resolve_executor_attribution(command, cwd, file_system)
+            .await
+    }
+
     pub(crate) fn approval_policy(&self) -> AskForApproval {
         self.config.permissions.approval_policy.value()
     }
@@ -223,6 +241,26 @@ impl TurnContext {
             AllowPrefixRules::IgnoreForCyberModel
         } else {
             AllowPrefixRules::Honor
+        }
+    }
+
+    pub(crate) async fn plugin_metrics_operation_for_command(
+        &self,
+        command: &[String],
+        cwd: &PathUri,
+        environment: &Environment,
+    ) -> Option<ResolvedPluginMetricsOperation> {
+        let trusted_roots = self.extension_data.get::<TrustedPluginRoots>()?;
+        if environment.is_remote() {
+            trusted_roots
+                .resolve_metrics_operation_in_filesystem(
+                    command,
+                    cwd,
+                    environment.get_filesystem().as_ref(),
+                )
+                .await
+        } else {
+            trusted_roots.resolve_metrics_operation(command, &cwd.to_abs_path().ok()?)
         }
     }
 
@@ -380,7 +418,10 @@ impl TurnContext {
             permissions: permissions.into(),
             cwd: Some(environment.cwd().clone()),
             workspace_roots: environment.workspace_roots().to_vec(),
-            windows_sandbox_level: self.windows_sandbox_level,
+            windows_sandbox_level: executor_windows_sandbox_level(
+                self.windows_sandbox_level,
+                environment.cwd(),
+            ),
             windows_sandbox_private_desktop: self
                 .config
                 .permissions
@@ -572,6 +613,10 @@ impl Session {
             &model_info,
         );
         let permission_profile = per_turn_config.permissions.effective_permission_profile();
+        let auto_review_enabled = crate::guardian::routes_approval_policy_to_guardian(
+            per_turn_config.permissions.approval_policy.value(),
+            per_turn_config.approvals_reviewer,
+        );
         let per_turn_config = Arc::new(per_turn_config);
         let turn_metadata_state = Arc::new(TurnMetadataState::new(
             session_id.to_string(),
@@ -585,7 +630,11 @@ impl Session {
             &permission_profile,
             session_configuration.windows_sandbox_level,
             network.is_some(),
+            auto_review_enabled,
+            &model_info,
         ));
+        turn_metadata_state
+            .set_responses_api_metadata(per_turn_config.responses_api_metadata.clone());
         let (current_date, timezone) = local_time_context();
         let extension_data = Arc::new(codex_extension_api::ExtensionData::new(sub_id.clone()));
         extension_data.insert(skills_snapshot);
@@ -656,12 +705,13 @@ impl Session {
                     });
                     let new_config = notify_config_contributors
                         .then(|| Self::build_effective_session_config(&next));
-                    let environment_config = next.environment_config();
+                    let environment_config = next.turn_environment_config();
                     if updates.environments.is_some() {
                         self.services
                             .turn_environments
                             .update_selections(next.environment_selections(), &environment_config);
-                    } else if state.session_configuration.environment_config() != environment_config
+                    } else if state.session_configuration.turn_environment_config()
+                        != environment_config
                     {
                         self.services
                             .turn_environments

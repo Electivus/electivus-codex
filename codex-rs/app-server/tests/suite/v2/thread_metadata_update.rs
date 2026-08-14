@@ -114,6 +114,7 @@ async fn legacy_is_pinned_maps_to_the_pinned_section_and_filtered_pagination() -
     let pinned_section = ThreadSection {
         id: PINNED_THREAD_SECTION_ID.to_string(),
         name: PINNED_THREAD_SECTION_NAME.to_string(),
+        appearance: None,
     };
     let section_list_id = mcp
         .send_raw_request(
@@ -151,6 +152,7 @@ async fn legacy_is_pinned_maps_to_the_pinned_section_and_filtered_pagination() -
     let custom_section = ThreadSection {
         id: "01984de2-8f74-7c91-a3b2-5c5e937cf317".to_string(),
         name: "Custom section".to_string(),
+        appearance: None,
     };
     let sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
     let sqlite_pool = sqlite.open_read_write_pool(&sqlite.state_db_path()).await?;
@@ -218,6 +220,7 @@ async fn legacy_is_pinned_maps_to_the_pinned_section_and_filtered_pagination() -
             Some(codex_state::ThreadSection {
                 id: pinned_section.id.clone(),
                 name: pinned_section.name.clone(),
+                appearance: None,
             })
         );
     }

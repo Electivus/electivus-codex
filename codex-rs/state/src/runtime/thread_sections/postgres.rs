@@ -1,4 +1,5 @@
 use crate::ThreadSection;
+use crate::ThreadSectionAppearance;
 use crate::postgres::map_sql_error;
 use crate::postgres::qualified_table;
 use sqlx::AssertSqlSafe;
@@ -10,11 +11,17 @@ pub(super) async fn create_thread_section(
     section: ThreadSection,
 ) -> anyhow::Result<ThreadSection> {
     let sections = qualified_table(schema, "thread_sections");
+    let appearance = section
+        .appearance
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     sqlx::query(AssertSqlSafe(format!(
-        "INSERT INTO {sections} (id, name) VALUES ($1, $2)"
+        "INSERT INTO {sections} (id, name, appearance) VALUES ($1, $2, $3)"
     )))
     .bind(&section.id)
     .bind(&section.name)
+    .bind(appearance)
     .execute(pool)
     .await
     .map_err(|error| map_sql_error(schema, "create thread section", error))?;
@@ -26,6 +33,7 @@ pub(super) async fn rename_thread_section(
     schema: &str,
     id: &str,
     name: &str,
+    appearance: Option<Option<ThreadSectionAppearance>>,
 ) -> anyhow::Result<Option<ThreadSection>> {
     let sections = qualified_table(schema, "thread_sections");
     let threads = qualified_table(schema, "threads");
@@ -33,20 +41,30 @@ pub(super) async fn rename_thread_section(
         .begin()
         .await
         .map_err(|error| map_sql_error(schema, "begin thread section rename", error))?;
-    let section = sqlx::query_as::<_, (String, String)>(AssertSqlSafe(format!(
-        "UPDATE {sections} SET name = $1 WHERE id = $2 RETURNING id, name"
+    let replace_appearance = appearance.is_some();
+    let appearance = appearance
+        .flatten()
+        .map(|appearance| serde_json::to_string(&appearance))
+        .transpose()?;
+    let section = sqlx::query_as::<_, (String, String, Option<String>)>(AssertSqlSafe(format!(
+        "UPDATE {sections} SET name = $1, appearance = CASE WHEN $2 THEN $3 ELSE appearance END \
+         WHERE id = $4 RETURNING id, name, appearance"
     )))
     .bind(name)
+    .bind(replace_appearance)
+    .bind(appearance)
     .bind(id)
     .fetch_optional(transaction.as_mut())
     .await
     .map_err(|error| map_sql_error(schema, "rename thread section", error))?;
-    if section.is_some() {
+    let section = section.map(ThreadSection::from_row).transpose()?;
+    if let Some(section) = section.as_ref() {
+        let section = serde_json::to_value(section)?;
         sqlx::query(AssertSqlSafe(format!(
-            "UPDATE {threads} SET projection = jsonb_set(projection, '{{section,name}}', \
-             to_jsonb($1::text), TRUE) WHERE thread_section_id = $2"
+            "UPDATE {threads} SET projection = jsonb_set(projection, '{{section}}', $1, TRUE) \
+             WHERE thread_section_id = $2"
         )))
-        .bind(name)
+        .bind(section)
         .bind(id)
         .execute(transaction.as_mut())
         .await
@@ -56,7 +74,7 @@ pub(super) async fn rename_thread_section(
         .commit()
         .await
         .map_err(|error| map_sql_error(schema, "commit thread section rename", error))?;
-    Ok(section.map(|(id, name)| ThreadSection { id, name }))
+    Ok(section)
 }
 
 pub(super) async fn delete_thread_section(

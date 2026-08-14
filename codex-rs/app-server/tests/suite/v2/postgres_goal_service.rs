@@ -55,6 +55,7 @@ async fn postgres_contract_goal_service_is_backend_neutral_across_replicas() -> 
                 objective: GoalObjectiveUpdate::Set("share goals through the app-server seam"),
                 status: Some(ThreadGoalStatus::Active),
                 token_budget: GoalTokenBudgetUpdate::Set(Some(100)),
+                max_goal_token_budget: None,
             },
         )
         .await?;
@@ -97,6 +98,7 @@ async fn postgres_contract_goal_service_is_backend_neutral_across_replicas() -> 
                 objective: GoalObjectiveUpdate::Set("update through another replica"),
                 status: Some(ThreadGoalStatus::Paused),
                 token_budget: GoalTokenBudgetUpdate::Set(Some(200)),
+                max_goal_token_budget: None,
             },
         )
         .await?;

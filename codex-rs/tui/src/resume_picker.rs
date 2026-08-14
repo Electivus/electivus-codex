@@ -424,7 +424,7 @@ async fn run_resume_picker_with_launch_context(
             archive_request_handle,
             include_non_interactive,
             raw_reasoning_visibility(config),
-            (!uses_remote_workspace).then(|| config.codex_home.to_path_buf()),
+            (!uses_remote_workspace).then(|| config.clone()),
             bg_tx,
         ),
         bg_rx,
@@ -478,7 +478,7 @@ pub async fn run_fork_picker_with_app_server(
             archive_request_handle,
             /*include_non_interactive*/ false,
             raw_reasoning_visibility(config),
-            (!uses_remote_workspace).then(|| config.codex_home.to_path_buf()),
+            (!uses_remote_workspace).then(|| config.clone()),
             bg_tx,
         ),
         bg_rx,
@@ -621,7 +621,7 @@ fn spawn_app_server_page_loader(
     archive_request_handle: AppServerRequestHandle,
     include_non_interactive: bool,
     raw_reasoning_visibility: RawReasoningVisibility,
-    codex_home: Option<PathBuf>,
+    config: Option<Config>,
     bg_tx: mpsc::UnboundedSender<BackgroundEvent>,
 ) -> PickerLoader {
     let (request_tx, mut request_rx) = mpsc::unbounded_channel::<PickerLoadRequest>();
@@ -644,8 +644,7 @@ fn spawn_app_server_page_loader(
                 }
                 PickerLoadRequest::Preview { thread_id } => {
                     let preview =
-                        load_transcript_preview(&mut app_server, thread_id, codex_home.as_deref())
-                            .await;
+                        load_transcript_preview(&mut app_server, thread_id, config.as_ref()).await;
                     let _ = bg_tx.send(BackgroundEvent::Preview { thread_id, preview });
                 }
                 PickerLoadRequest::Transcript {
@@ -657,7 +656,7 @@ fn spawn_app_server_page_loader(
                             &mut app_server,
                             thread_id,
                             raw_reasoning_visibility,
-                            codex_home.as_deref(),
+                            config.as_ref(),
                         ) => {
                             let _ = bg_tx.send(BackgroundEvent::Transcript {
                                 thread_id,
@@ -864,7 +863,7 @@ async fn load_app_server_page(
 pub(crate) async fn load_transcript_preview(
     app_server: &mut AppServerSession,
     thread_id: ThreadId,
-    codex_home: Option<&Path>,
+    config: Option<&Config>,
 ) -> std::io::Result<Vec<TranscriptPreviewLine>> {
     const MAX_PREVIEW_LINES: usize = 6;
 
@@ -887,10 +886,10 @@ pub(crate) async fn load_transcript_preview(
     // The markdown parser treats this as lexical display context only; it must never be used for
     // host filesystem access.
     let cwd = PathBuf::from(thread.cwd.render_for_ui());
-    let inline_visualization_context = codex_home.and_then(|codex_home| {
+    let inline_visualization_context = config.and_then(|config| {
         ThreadId::from_string(&thread.id)
             .ok()
-            .and_then(|thread_id| InlineVisualizationContext::new(codex_home, thread_id))
+            .and_then(|thread_id| InlineVisualizationContext::from_config(config, thread_id))
     });
     let mut lines = if thread.history_mode == ThreadHistoryMode::Paginated {
         let mut groups = Vec::new();
@@ -6666,7 +6665,7 @@ session_picker_view = "dense"
         let rendered = thread_to_transcript_cells(
             thread,
             RawReasoningVisibility::Visible,
-            /*codex_home*/ None,
+            /*config*/ None,
         )
         .into_iter()
         .flat_map(|cell| cell.transcript_lines(/*width*/ 80))
@@ -6732,7 +6731,7 @@ session_picker_view = "dense"
         let hidden = thread_to_transcript_cells(
             thread.clone(),
             RawReasoningVisibility::Hidden,
-            /*codex_home*/ None,
+            /*config*/ None,
         )
         .into_iter()
         .flat_map(|cell| cell.transcript_lines(/*width*/ 80))
@@ -6742,7 +6741,7 @@ session_picker_view = "dense"
         let visible = thread_to_transcript_cells(
             thread,
             RawReasoningVisibility::Visible,
-            /*codex_home*/ None,
+            /*config*/ None,
         )
         .into_iter()
         .flat_map(|cell| cell.transcript_lines(/*width*/ 80))
@@ -6805,7 +6804,7 @@ session_picker_view = "dense"
         let rendered = thread_to_transcript_cells(
             thread,
             RawReasoningVisibility::Visible,
-            /*codex_home*/ None,
+            /*config*/ None,
         )
         .into_iter()
         .flat_map(|cell| cell.transcript_lines(/*width*/ 80))

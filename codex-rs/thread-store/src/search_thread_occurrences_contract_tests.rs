@@ -6,10 +6,10 @@ use codex_protocol::items::ReasoningItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::MessagePhase;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::user_input::UserInput;
+use codex_rollout::RolloutItem;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use sqlx::AssertSqlSafe;
@@ -20,6 +20,7 @@ use crate::ArchiveThreadParams;
 use crate::ListTurnsParams;
 use crate::LocalThreadStore;
 use crate::LocalThreadStoreConfig;
+use crate::PersistContext;
 use crate::PostgresThreadStore;
 use crate::SearchThreadOccurrencesParams;
 use crate::SortDirection;
@@ -259,7 +260,9 @@ async fn create_thread(
     params.history_mode = history_mode;
     params.metadata.cwd = Some(cwd.to_path_buf());
     store.create_thread(params).await?;
-    store.persist_thread(thread_id).await?;
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await?;
     if !items.is_empty() {
         store
             .append_items(AppendThreadItemsParams { thread_id, items })

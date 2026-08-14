@@ -8,12 +8,12 @@ use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::TurnContextItem;
+use codex_rollout::RolloutItem;
 use codex_utils_absolute_path::test_support::PathExt;
 use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
@@ -26,6 +26,7 @@ use crate::GitInfoPatch;
 use crate::LoadThreadHistoryParams;
 use crate::LocalThreadStore;
 use crate::LocalThreadStoreConfig;
+use crate::PersistContext;
 use crate::PostgresThreadStore;
 use crate::ReadThreadParams;
 use crate::ThreadMetadataPatch;
@@ -104,7 +105,9 @@ async fn postgres_contract_metadata_matches_public_thread_store_semantics()
             })],
         })
         .await?;
-    store.persist_thread(cwd_thread_id).await?;
+    store
+        .persist_thread(cwd_thread_id, PersistContext::Standard)
+        .await?;
     store.shutdown_thread(cwd_thread_id).await?;
     let projected = read_thread(&store, cwd_thread_id, /*include_archived*/ false).await?;
     assert_eq!(projected.cwd, latest_cwd);
@@ -125,7 +128,9 @@ async fn assert_metadata_contract(
             ThreadHistoryMode::Legacy,
         ))
         .await?;
-    store.persist_thread(thread_id).await?;
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await?;
     store.shutdown_thread(thread_id).await?;
     let initial = read_thread(store, thread_id, /*include_archived*/ false).await?;
     let updated_at = millisecond_timestamp(initial.updated_at + Duration::minutes(30));
@@ -429,7 +434,9 @@ async fn assert_metadata_contract(
             ThreadHistoryMode::Paginated,
         ))
         .await?;
-    store.persist_thread(paginated_id).await?;
+    store
+        .persist_thread(paginated_id, PersistContext::Standard)
+        .await?;
     store.shutdown_thread(paginated_id).await?;
     let derived_title = update_metadata(
         store,

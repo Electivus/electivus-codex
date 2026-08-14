@@ -458,7 +458,11 @@ impl ThreadStore for PostgresThreadStore {
         })
     }
 
-    fn persist_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+    fn persist_thread(
+        &self,
+        thread_id: ThreadId,
+        _context: crate::PersistContext,
+    ) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
             let _operation_guard = self.lock_operation(thread_id).await;
             lifecycle::renew_writer(self, thread_id).await

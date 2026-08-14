@@ -26,12 +26,14 @@ use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::user_input::UserInput;
+use codex_rollout::InitialHistory;
+use codex_rollout::RolloutItem;
+use codex_rollout::RolloutLine;
 use codex_state::Phase2JobClaimOutcome;
 use codex_state::PostgresNamespaceAction;
 use codex_state::PostgresNamespaceConfig;
@@ -745,7 +747,7 @@ async fn postgres_contract_memories_startup_phase1_loads_pathless_canonical_thre
         .start_thread(codex_core::StartThreadOptions {
             config: test.config.clone(),
             allow_provider_model_fallback: false,
-            initial_history: codex_protocol::protocol::InitialHistory::New,
+            initial_history: InitialHistory::New,
             history_mode: None,
             session_source: Some(SessionSource::Cli),
             thread_source: None,
@@ -759,16 +761,10 @@ async fn postgres_contract_memories_startup_phase1_loads_pathless_canonical_thre
         .await?;
     candidate
         .thread
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "remember canonical pathless history".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "remember canonical pathless history".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event(&candidate.thread, |event| {
         matches!(event, EventMsg::TurnComplete(_))
@@ -1175,15 +1171,18 @@ async fn seed_stage1_candidate(
     let line = RolloutLine {
         timestamp: updated_at.to_rfc3339(),
         ordinal: None,
-        item: RolloutItem::ResponseItem(ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "remember this startup test conversation".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        }),
+        item: RolloutItem::ResponseItem(
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "remember this startup test conversation".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }
+            .into(),
+        ),
     };
     let session_meta_jsonl = serde_json::to_string(&session_meta)?;
     let response_jsonl = serde_json::to_string(&line)?;
