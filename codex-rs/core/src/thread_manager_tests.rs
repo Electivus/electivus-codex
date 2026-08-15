@@ -1703,7 +1703,8 @@ async fn metadata_update_without_result_reads_only_when_the_caller_needs_the_thr
 
     let auth_manager =
         AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
-    let thread_store = thread_store_from_config(&config, /*state_db*/ None);
+    let thread_store = thread_store_from_config(&config, /*state_db*/ None)
+        .expect("thread store should initialize");
     let in_memory_store = thread_store
         .as_any()
         .downcast_ref::<InMemoryThreadStore>()
