@@ -19,6 +19,7 @@ use codex_app_server_client::ExecServerRuntimePaths;
 use codex_app_server_client::InProcessAppServerClient;
 use codex_app_server_client::InProcessClientStartArgs;
 use codex_app_server_client::InProcessServerEvent;
+use codex_app_server_client::resolve_project_repository_identity;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
@@ -70,14 +71,11 @@ use codex_core::config::find_codex_home;
 use codex_core::config::load_config_toml_with_layer_stack;
 use codex_core::config::resolve_oss_provider;
 use codex_core::config::resolve_profile_v2_config_path;
-use codex_core::find_thread_meta_by_name_str;
 use codex_core::format_exec_policy_error_with_source;
 use codex_core::path_utils;
 use codex_core::read_session_meta_line;
 use codex_feedback::CodexFeedback;
 use codex_git_utils::get_git_repo_root;
-use codex_history::RolloutItem;
-use codex_history::RolloutLine;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::default_client::set_default_originator;
 use codex_login::enforce_login_restrictions;
@@ -103,6 +101,7 @@ use codex_utils_absolute_path::canonicalize_existing_preserving_symlinks;
 use codex_utils_cli::SharedCliOptions;
 use codex_utils_oss::ensure_oss_provider_ready;
 use codex_utils_oss::get_default_model_for_oss_provider;
+use codex_utils_path_uri::LegacyAppPathString;
 use event_processor_with_human_output::EventProcessorWithHumanOutput;
 pub use event_processor_with_jsonl_output::CodexStatus;
 pub use event_processor_with_jsonl_output::CollectedThreadEvents;
@@ -206,7 +205,6 @@ impl RequestIdSequencer {
 
 struct ExecRunArgs {
     in_process_start_args: InProcessClientStartArgs,
-    state_db: Option<StateDbHandle>,
     command: Option<ExecCommand>,
     config: Config,
     resume_approvals_reviewer_override: Option<codex_app_server_protocol::ApprovalsReviewer>,
@@ -521,7 +519,19 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         arg0_paths.codex_self_exe.clone(),
         arg0_paths.codex_linux_sandbox_exe.clone(),
     )?;
-    let state_db = codex_core::init_state_db(&config).await;
+    let state_db = if config.runtime_state_backend.is_postgresql() {
+        Some(
+            codex_core::try_init_state_db(&config)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed to initialize PostgreSQL Runtime State Backend: {error:#}"
+                    )
+                })?,
+        )
+    } else {
+        codex_core::init_state_db(&config).await
+    };
     let environment_manager = if run_loader_overrides.ignore_user_config {
         EnvironmentManager::from_env(Some(local_runtime_paths), config.http_client_factory())
             .await?
@@ -556,7 +566,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     };
     run_exec_session(ExecRunArgs {
         in_process_start_args,
-        state_db,
         command,
         config,
         resume_approvals_reviewer_override,
@@ -654,7 +663,6 @@ async fn load_bootstrap_config_or_exit(
 async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let ExecRunArgs {
         in_process_start_args,
-        state_db,
         command,
         config,
         resume_approvals_reviewer_override,
@@ -802,6 +810,8 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     }
 
     let mut request_ids = RequestIdSequencer::new();
+    let state_db = in_process_start_args.state_db.clone();
+    let environment_manager = in_process_start_args.environment_manager.clone();
     let mut client = InProcessAppServerClient::start(in_process_start_args)
         .await
         .map_err(|err| {
@@ -812,8 +822,14 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let (primary_thread_id, fallback_session_configured) = if let Some(ExecCommand::Resume(args)) =
         command.as_ref()
     {
-        if let Some(thread_id) =
-            resolve_resume_thread_id(&client, &config, state_db.as_ref(), args).await?
+        if let Some(thread_id) = resolve_resume_thread_id(
+            &client,
+            &config,
+            state_db.as_ref(),
+            environment_manager.as_ref(),
+            args,
+        )
+        .await?
         {
             let response: ThreadResumeResponse = send_request_with_response(
                 &client,
@@ -857,10 +873,15 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             images: Vec::new(),
             prompt: None,
         };
-        let source_thread_id =
-            resolve_resume_thread_id(&client, &config, state_db.as_ref(), &source_args)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.session_id))?;
+        let source_thread_id = resolve_resume_thread_id(
+            &client,
+            &config,
+            state_db.as_ref(),
+            environment_manager.as_ref(),
+            &source_args,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.session_id))?;
         let permissions = permissions_selection_from_config(&config);
         let sandbox = permissions.is_none().then(|| {
             sandbox_mode_from_permission_profile(
@@ -1519,43 +1540,24 @@ fn all_thread_source_kinds() -> Vec<ThreadSourceKind> {
     ]
 }
 
-async fn latest_thread_cwd(thread: &AppServerThread) -> PathBuf {
-    if let Some(path) = thread.path.as_deref()
-        && let Some(cwd) = parse_latest_turn_context_cwd(path).await
-    {
-        return cwd;
-    }
-    thread.cwd.to_path_buf()
-}
-
-async fn parse_latest_turn_context_cwd(path: &Path) -> Option<PathBuf> {
-    let text = tokio::fs::read_to_string(path).await.ok()?;
-    for line in text.lines().rev() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(trimmed) else {
-            continue;
-        };
-        if let RolloutItem::TurnContext(item) = rollout_line.item {
-            return Some(item.cwd.into_path_buf());
-        }
-    }
-    None
-}
-
-fn cwds_match(current_cwd: &Path, session_cwd: &Path) -> bool {
-    path_utils::paths_match_after_normalization(current_cwd, session_cwd)
-}
-
 async fn resolve_resume_thread_id(
     client: &InProcessAppServerClient,
     config: &Config,
     state_db: Option<&StateDbHandle>,
+    environment_manager: &EnvironmentManager,
     args: &crate::cli::ResumeArgs,
 ) -> anyhow::Result<Option<String>> {
     let model_providers = resume_lookup_model_providers(config, args);
+    let project_cwd = (!args.all).then(|| LegacyAppPathString::from_abs_path(&config.cwd));
+    let validate_local_rollout_project = state_db
+        .is_some_and(|state_db| state_db.uses_local_rollout_history())
+        && project_cwd.is_some();
+    let project_repository_identity = match (validate_local_rollout_project, project_cwd.clone()) {
+        (true, Some(project_cwd)) => {
+            resolve_project_repository_identity(environment_manager, project_cwd).await
+        }
+        (true, None) | (false, _) => None,
+    };
 
     if args.last {
         let mut use_state_db_only = state_db.is_some();
@@ -1573,10 +1575,12 @@ async fn resolve_resume_thread_id(
                         model_providers: model_providers.clone(),
                         source_kinds: Some(all_thread_source_kinds()),
                         archived: Some(false),
+                        is_pinned: None,
                         section_id: None,
                         parent_thread_id: None,
                         ancestor_thread_id: None,
                         cwd: None,
+                        project_cwd: project_cwd.clone(),
                         use_state_db_only,
                         search_term: None,
                     },
@@ -1593,17 +1597,31 @@ async fn resolve_resume_thread_id(
                     if session_meta.meta.id.to_string() != thread.id {
                         continue;
                     }
+                    if validate_local_rollout_project {
+                        let cwd_matches = path_utils::paths_match_after_normalization(
+                            config.cwd.as_path(),
+                            session_meta.meta.cwd.as_path(),
+                        );
+                        let repository_matches = project_repository_identity
+                            .as_deref()
+                            .is_some_and(|expected_identity| {
+                                thread
+                                    .git_info
+                                    .as_ref()
+                                    .and_then(|git_info| git_info.origin_url.as_deref())
+                                    .and_then(codex_git_utils::canonicalize_git_remote_url)
+                                    .as_deref()
+                                    == Some(expected_identity)
+                            });
+                        if !cwd_matches && !repository_matches {
+                            continue;
+                        }
+                    }
                 }
-                let latest_cwd = latest_thread_cwd(&thread).await;
-                if args.all || cwds_match(config.cwd.as_path(), latest_cwd.as_path()) {
-                    // A usable SQLite candidate is authoritative. Scanning is reserved for a
-                    // complete miss so successful `--last` lookups avoid auditing every rollout.
-                    return Ok(Some(thread.id));
-                }
+                return Ok(Some(thread.id));
             }
             let Some(next_cursor) = response.next_cursor else {
                 if use_state_db_only {
-                    // Repair from rollouts before giving up on a missing SQLite match.
                     use_state_db_only = false;
                     cursor = None;
                     continue;
@@ -1620,28 +1638,6 @@ async fn resolve_resume_thread_id(
     if Uuid::parse_str(session_id).is_ok() {
         return Ok(Some(session_id.to_string()));
     }
-    if let Some(state_db) = state_db {
-        let cwd = (!args.all).then_some(config.cwd.as_path());
-        let resolved = state_db
-            .find_thread_by_exact_title(
-                session_id,
-                &[],
-                /*model_providers*/ None,
-                /*archived_only*/ false,
-                cwd,
-            )
-            .await?;
-        if let Some(thread) = resolved {
-            return Ok(Some(thread.id.to_string()));
-        }
-        if let Some((_, session_meta)) =
-            find_thread_meta_by_name_str(&config.codex_home, session_id, Some(state_db.as_ref()))
-                .await?
-            && (args.all || cwds_match(config.cwd.as_path(), &session_meta.meta.cwd))
-        {
-            return Ok(Some(session_meta.meta.id.to_string()));
-        }
-    }
 
     let mut cursor = None;
     loop {
@@ -1657,12 +1653,14 @@ async fn resolve_resume_thread_id(
                     model_providers: model_providers.clone(),
                     source_kinds: Some(all_thread_source_kinds()),
                     archived: Some(false),
+                    is_pinned: None,
                     section_id: None,
                     parent_thread_id: None,
                     ancestor_thread_id: None,
                     cwd: None,
                     use_state_db_only: false,
                     search_term: Some(session_id.to_string()),
+                    project_cwd: project_cwd.clone(),
                 },
             },
             "thread/list",
@@ -1670,11 +1668,7 @@ async fn resolve_resume_thread_id(
         .await
         .map_err(anyhow::Error::msg)?;
         for thread in response.data {
-            if thread.name.as_deref() != Some(session_id) {
-                continue;
-            }
-            let latest_cwd = latest_thread_cwd(&thread).await;
-            if args.all || cwds_match(config.cwd.as_path(), latest_cwd.as_path()) {
+            if thread.name.as_deref() == Some(session_id) {
                 return Ok(Some(thread.id));
             }
         }

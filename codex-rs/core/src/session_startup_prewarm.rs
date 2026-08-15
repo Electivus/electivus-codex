@@ -291,6 +291,8 @@ async fn schedule_startup_prewarm_inner(
     let build_prompt_started_at = Instant::now();
     let startup_prompt = build_prompt(
         Vec::new(),
+        /*replay_prefix_items*/ 0,
+        /*replayed_history*/ false,
         startup_router.as_ref(),
         startup_turn_context.as_ref(),
         BaseInstructions {

@@ -58,10 +58,15 @@ pub(super) async fn run_remote_compact_attempt(
     let trace_input_history = compaction_trace
         .is_enabled()
         .then(|| history.raw_items().cloned().collect());
+    let replay_prefix_items = history.replay_prefix_items();
+    let replayed_history = history.is_replayed_history();
     let prompt_input = history.for_prompt(&turn_context.model_info.input_modalities);
     let tool_router = &step_context.tool_router;
     let prompt = Prompt {
         input: prompt_input,
+        replay_prefix_items,
+        replayed_history,
+        replayed_dynamic_tools: replayed_history && turn_context.replayed_dynamic_tools,
         tools: tool_router.model_visible_specs(),
         parallel_tool_calls: true,
         base_instructions,

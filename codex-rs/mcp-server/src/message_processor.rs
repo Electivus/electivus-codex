@@ -95,6 +95,8 @@ impl MessageProcessor {
                     .enabled(codex_features::Feature::SkillSearch),
             },
         );
+        let thread_store = codex_core::thread_store_from_config(config.as_ref(), state_db.clone())
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
         let thread_manager = Arc::new(ThreadManager::new(
             config.as_ref(),
             Arc::clone(&auth_manager),
@@ -105,7 +107,7 @@ impl MessageProcessor {
             Arc::new(extensions.build()),
             user_instructions_provider,
             /*analytics_events_client*/ None,
-            codex_core::thread_store_from_config(config.as_ref(), state_db.clone()),
+            thread_store,
             codex_core::local_agent_graph_store_from_state_db(state_db.as_ref()),
             installation_id,
             /*attestation_provider*/ None,

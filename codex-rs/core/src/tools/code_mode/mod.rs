@@ -23,7 +23,6 @@ use serde_json::Value as JsonValue;
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::CodeModeConfig;
 use crate::function_tool::FunctionCallError;
 use crate::original_image_detail::can_request_original_image_detail;
 use crate::original_image_detail::sanitize_original_image_detail as sanitize_image_detail_items;
@@ -53,7 +52,6 @@ pub(crate) use wait_handler::CodeModeWaitHandler;
 
 pub(crate) const PUBLIC_TOOL_NAME: &str = codex_code_mode::PUBLIC_TOOL_NAME;
 pub(crate) const WAIT_TOOL_NAME: &str = codex_code_mode::WAIT_TOOL_NAME;
-pub(crate) const DEFAULT_WAIT_YIELD_TIME_MS: u64 = codex_code_mode::DEFAULT_WAIT_YIELD_TIME_MS;
 
 /// Returns true for the code-mode `exec` tool in the default namespace.
 pub(crate) fn is_exec_tool_name(tool_name: &ToolName) -> bool {
@@ -71,16 +69,12 @@ pub(crate) struct CodeModeService {
     session_provider: Arc<dyn CodeModeSessionProvider>,
     availability: Result<(), String>,
     dispatch_broker: Arc<CodeModeDispatchBroker>,
-    default_exec_yield_time_ms: u64,
     shutting_down: AtomicBool,
     unavailable_warning_emitted: AtomicBool,
 }
 
 impl CodeModeService {
-    pub(crate) fn new(
-        session_provider: Arc<dyn CodeModeSessionProvider>,
-        config: &CodeModeConfig,
-    ) -> Self {
+    pub(crate) fn new(session_provider: Arc<dyn CodeModeSessionProvider>) -> Self {
         let dispatch_broker = Arc::new(CodeModeDispatchBroker::new());
         let availability = session_provider.availability();
         Self {
@@ -88,7 +82,6 @@ impl CodeModeService {
             session_provider,
             availability,
             dispatch_broker,
-            default_exec_yield_time_ms: config.default_exec_yield_time_ms,
             shutting_down: AtomicBool::new(false),
             unavailable_warning_emitted: AtomicBool::new(false),
         }
@@ -120,11 +113,8 @@ impl CodeModeService {
 
     pub(crate) async fn execute(
         &self,
-        mut request: codex_code_mode::ExecuteRequest,
+        request: codex_code_mode::ExecuteRequest,
     ) -> Result<codex_code_mode::StartedCell, String> {
-        request
-            .yield_time_ms
-            .get_or_insert(self.default_exec_yield_time_ms);
         self.session().await?.execute(request).await
     }
 

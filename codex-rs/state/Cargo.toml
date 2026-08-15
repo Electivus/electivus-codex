@@ -8,23 +8,37 @@ license.workspace = true
 anyhow = { workspace = true }
 chrono = { workspace = true }
 codex-history = { workspace = true }
+codex-git-utils = { workspace = true }
 codex-protocol = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
+futures = { workspace = true }
 libsqlite3-sys = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-sqlx = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true, features = ["postgres"] }
 strum = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+url = { workspace = true }
 uuid = { workspace = true }
+zstd = { workspace = true }
 
 [dev-dependencies]
-codex-git-utils = { workspace = true }
 pretty_assertions = { workspace = true }
 scopeguard = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }
 
 [lints]
 workspace = true

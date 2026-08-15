@@ -6,6 +6,8 @@ use sqlx::QueryBuilder;
 use sqlx::Sqlite;
 use std::collections::HashMap;
 
+mod postgres;
+
 const SECTION_POSITION_GAP: i64 = 1_000_000;
 
 impl StateRuntime {
@@ -16,6 +18,9 @@ impl StateRuntime {
     ) -> anyhow::Result<HashMap<ThreadId, (Option<i64>, Option<DateTime<Utc>>)>> {
         if thread_ids.is_empty() {
             return Ok(HashMap::new());
+        }
+        if let Some((pool, schema)) = self.postgres_connection() {
+            return postgres::get_thread_section_ordering(&pool, &schema, thread_ids).await;
         }
 
         let mut builder = QueryBuilder::<Sqlite>::new(
@@ -29,7 +34,7 @@ impl StateRuntime {
 
         let rows = builder
             .build_query_as::<(String, Option<i64>, Option<i64>)>()
-            .fetch_all(self.pool.as_ref())
+            .fetch_all(self.sqlite_pool()?)
             .await?;
         rows.into_iter()
             .map(|(thread_id, section_position, section_entered_at_ms)| {
@@ -51,11 +56,14 @@ impl StateRuntime {
         &self,
         id: &str,
     ) -> anyhow::Result<Option<crate::ThreadSection>> {
+        if let Some((pool, schema)) = self.postgres_connection() {
+            return postgres::get_thread_section(&pool, &schema, id).await;
+        }
         let row = sqlx::query_as::<_, (String, String, Option<String>)>(
             "SELECT id, name, appearance FROM thread_sections WHERE id = ?",
         )
         .bind(id)
-        .fetch_optional(self.pool.as_ref())
+        .fetch_optional(self.sqlite_pool()?)
         .await?;
         row.map(crate::ThreadSection::from_row).transpose()
     }
@@ -66,6 +74,9 @@ impl StateRuntime {
         cursor: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<crate::ThreadSectionsPage> {
+        if let Some((pool, schema)) = self.postgres_connection() {
+            return postgres::list_thread_sections(&pool, &schema, cursor, limit).await;
+        }
         let page_size = limit.max(1);
         let fetch_limit = i64::try_from(page_size.saturating_add(1))?;
         let rows = sqlx::query_as::<_, (String, String, Option<String>)>(
@@ -80,7 +91,7 @@ LIMIT ?
         .bind(cursor)
         .bind(cursor)
         .bind(fetch_limit)
-        .fetch_all(self.pool.as_ref())
+        .fetch_all(self.sqlite_pool()?)
         .await?;
         let mut sections = rows
             .into_iter()
@@ -113,7 +124,18 @@ LIMIT ?
             ));
         }
 
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some((pool, schema)) = self.postgres_connection() {
+            return postgres::move_thread_to_section(
+                &pool,
+                &schema,
+                thread_id,
+                section,
+                before_thread_id,
+            )
+            .await;
+        }
+
+        let mut tx = self.sqlite_pool()?.begin_with("BEGIN IMMEDIATE").await?;
         let thread_id = thread_id.to_string();
         let current_section = sqlx::query_scalar::<_, Option<String>>(
             "SELECT thread_section_id FROM threads WHERE id = ?",

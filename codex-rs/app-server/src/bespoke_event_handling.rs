@@ -85,6 +85,7 @@ use codex_app_server_protocol::TurnStartedNotification;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::WarningNotification;
 use codex_app_server_protocol::build_item_from_guardian_event;
+use codex_app_server_protocol::build_paginated_turns_from_rollout_items;
 use codex_app_server_protocol::guardian_auto_approval_review_notification;
 use codex_app_server_protocol::item_event_to_server_notification;
 use codex_core::CodexThread;
@@ -1189,7 +1190,13 @@ pub(crate) async fn apply_bespoke_event_handling(
         EventMsg::ThreadQueueChanged(_) => {}
         EventMsg::ThreadSettingsApplied(thread_settings_event) => {
             let thread_settings =
-                thread_settings_from_core_snapshot(thread_settings_event.thread_settings);
+                match thread_settings_from_core_snapshot(thread_settings_event.thread_settings) {
+                    Ok(thread_settings) => thread_settings,
+                    Err(err) => {
+                        tracing::warn!(%err, "ignored thread settings event with a foreign cwd");
+                        return;
+                    }
+                };
             let changed = {
                 let mut state = thread_state.lock().await;
                 state.note_thread_settings(thread_settings.clone())
@@ -1545,6 +1552,10 @@ fn thread_rollback_response_from_stored_thread(
     loaded_status: ThreadStatus,
 ) -> std::result::Result<ThreadRollbackResponse, String> {
     let thread_id = stored_thread.thread_id;
+    let paginated = matches!(
+        stored_thread.history_mode,
+        codex_protocol::protocol::ThreadHistoryMode::Paginated
+    );
     let (mut thread, history) =
         thread_from_stored_thread(stored_thread, fallback_model_provider, fallback_cwd);
     thread.session_id = session_id;
@@ -1553,7 +1564,11 @@ fn thread_rollback_response_from_stored_thread(
             "thread {thread_id} did not include persisted history after rollback"
         ));
     };
-    populate_thread_turns_from_history(&mut thread, &history.items, /*active_turn*/ None);
+    if paginated {
+        thread.turns = build_paginated_turns_from_rollout_items(&history.items);
+    } else {
+        populate_thread_turns_from_history(&mut thread, &history.items, /*active_turn*/ None);
+    }
     thread.status = loaded_status;
     Ok(ThreadRollbackResponse { thread })
 }
@@ -2236,8 +2251,9 @@ mod tests {
             agent_role: None,
             agent_path: None,
             git_info: None,
+            repository_identity: None,
             approval_mode: AskForApproval::OnRequest,
-            permission_profile: PermissionProfile::read_only(),
+            permission_profile: PermissionProfile::read_only().into(),
             token_usage: None,
             first_user_message: Some("before rollback".to_string()),
             history: Some(StoredThreadHistory {

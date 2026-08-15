@@ -38,6 +38,7 @@ use codex_rollout::CompactedItem;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
+use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
@@ -1390,13 +1391,13 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
             started("child-turn"),
             RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("child-turn".to_string()),
-                cwd: serde_json::from_value(json!(home.path())).expect("absolute cwd"),
+                cwd: PathUri::from_host_native_path(home.path()).expect("absolute cwd"),
                 workspace_roots: None,
                 current_date: None,
                 timezone: None,
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: None,
-                sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                sandbox_policy: SandboxPolicy::new_read_only_policy().into(),
                 permission_profile: None,
                 network: None,
                 file_system_sandbox_policy: None,

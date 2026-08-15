@@ -16,6 +16,8 @@ pub struct Stage1Output {
     pub rollout_slug: Option<String>,
     pub cwd: PathBuf,
     pub git_branch: Option<String>,
+    /// The latest persisted raw Git origin URL from thread metadata, if known.
+    pub git_origin_url: Option<String>,
     pub generated_at: DateTime<Utc>,
 }
 

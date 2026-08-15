@@ -14,6 +14,7 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
+use std::io::Write;
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -81,6 +82,7 @@ async fn list_threads_db_rejects_mismatched_sqlite_config_without_cleanup() -> a
         &[],
         /*model_providers*/ None,
         /*cwd_filters*/ None,
+        /*repository_identity*/ None,
         /*relation_filter*/ None,
         /*archived*/ false,
         /*section*/ None,
@@ -101,13 +103,19 @@ async fn try_init_waits_for_concurrent_startup_backfill() -> anyhow::Result<()> 
         "test-provider".to_string(),
     )
     .await?;
-    let claimed = runtime.try_claim_backfill(/*lease_seconds*/ 60).await?;
-    assert!(claimed);
-    let runtime_for_completion = runtime.clone();
+    let coordinator = runtime.backfill_coordinator();
+    let lease = match coordinator
+        .try_claim("concurrent-worker", Duration::from_secs(60))
+        .await?
+    {
+        codex_state::BackfillClaimOutcome::Claimed { lease, .. } => lease,
+        outcome => anyhow::bail!("expected claimed lease, got {outcome:?}"),
+    };
+    let coordinator_for_completion = coordinator.clone();
     let complete_backfill = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        runtime_for_completion
-            .mark_backfill_complete(/*last_watermark*/ None)
+        coordinator_for_completion
+            .complete(&lease, /*last_watermark*/ None)
             .await
     });
 
@@ -115,12 +123,12 @@ async fn try_init_waits_for_concurrent_startup_backfill() -> anyhow::Result<()> 
         home.path().to_path_buf(),
         codex_state::SqliteConfig::new_for_testing(home.path().abs()),
         "test-provider".to_string(),
-        /*backfill_lease_seconds*/ 60,
+        /*backfill_lease_duration*/ Duration::from_secs(60),
     )
     .await?;
     complete_backfill.await??;
     assert_eq!(
-        initialized.get_backfill_state().await?.status,
+        initialized.backfill_coordinator().state().await?.status,
         codex_state::BackfillStatus::Complete
     );
 
@@ -135,14 +143,20 @@ async fn try_init_times_out_waiting_for_stuck_startup_backfill() -> anyhow::Resu
         "test-provider".to_string(),
     )
     .await?;
-    let claimed = runtime.try_claim_backfill(/*lease_seconds*/ 60).await?;
-    assert!(claimed);
+    let _lease = match runtime
+        .backfill_coordinator()
+        .try_claim("stuck-worker", Duration::from_secs(60))
+        .await?
+    {
+        codex_state::BackfillClaimOutcome::Claimed { lease, .. } => lease,
+        outcome => anyhow::bail!("expected claimed lease, got {outcome:?}"),
+    };
 
     let result = try_init_with_roots_and_backfill_lease(
         home.path().to_path_buf(),
         codex_state::SqliteConfig::new_for_testing(home.path().abs()),
         "test-provider".to_string(),
-        /*backfill_lease_seconds*/ 60,
+        /*backfill_lease_duration*/ Duration::from_secs(60),
     )
     .await;
     let err = match result {
@@ -256,6 +270,89 @@ async fn filesystem_repair_preserves_existing_rollout_path() -> anyhow::Result<(
     )
     .await;
     assert_eq!(runtime.get_thread(thread_id).await?, Some(active_metadata));
+    Ok(())
+}
+
+#[tokio::test]
+async fn checked_reconcile_reports_decoded_source_bytes_after_persisting() -> anyhow::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let thread_id = ThreadId::new();
+    let rollout_path =
+        write_rollout_with_user_message(home.path(), thread_id, "Hey", ThreadHistoryMode::Legacy)?;
+    let source_bytes = std::fs::metadata(&rollout_path)?.len();
+    let runtime = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(home.path().abs()),
+        "test-provider".to_string(),
+    )
+    .await?;
+
+    let consumed_source_bytes = reconcile_rollout_checked(
+        runtime.as_ref(),
+        rollout_path.as_path(),
+        "test-provider",
+        /*archived_only*/ Some(false),
+        /*maximum_source_bytes*/ source_bytes,
+    )
+    .await?;
+
+    assert_eq!(consumed_source_bytes, source_bytes);
+    assert!(runtime.get_thread(thread_id).await?.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn checked_reconcile_propagates_source_budget_and_parse_failures() -> anyhow::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let runtime = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(home.path().abs()),
+        "test-provider".to_string(),
+    )
+    .await?;
+
+    let oversized_id = ThreadId::new();
+    let oversized_path = write_rollout_with_user_message(
+        home.path(),
+        oversized_id,
+        "oversized",
+        ThreadHistoryMode::Legacy,
+    )?;
+    let source_bytes = std::fs::metadata(&oversized_path)?.len();
+    let oversized = reconcile_rollout_checked(
+        runtime.as_ref(),
+        &oversized_path,
+        "test-provider",
+        Some(false),
+        source_bytes - 1,
+    )
+    .await
+    .expect_err("source budget should be enforced");
+    assert!(oversized.to_string().contains("decoded-byte budget"));
+    assert!(runtime.get_thread(oversized_id).await?.is_none());
+
+    let invalid_id = ThreadId::new();
+    let invalid_path = write_rollout_with_user_message(
+        home.path(),
+        invalid_id,
+        "valid",
+        ThreadHistoryMode::Legacy,
+    )?;
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&invalid_path)?,
+        "not-json"
+    )?;
+    let invalid = reconcile_rollout_checked(
+        runtime.as_ref(),
+        &invalid_path,
+        "test-provider",
+        Some(false),
+        u64::MAX,
+    )
+    .await
+    .expect_err("parse failure should be propagated");
+    assert!(invalid.to_string().contains("invalid record"));
+    assert!(runtime.get_thread(invalid_id).await?.is_none());
     Ok(())
 }
 

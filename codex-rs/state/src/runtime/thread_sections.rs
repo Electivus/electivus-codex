@@ -4,6 +4,8 @@ use crate::ThreadSection;
 use crate::ThreadSectionAppearance;
 use uuid::Uuid;
 
+mod postgres;
+
 impl StateRuntime {
     /// Create a custom thread section with a stable, server-assigned UUIDv7.
     pub async fn create_thread_section(
@@ -17,6 +19,10 @@ impl StateRuntime {
             appearance,
         };
 
+        if let Some((pool, schema)) = self.postgres_connection() {
+            return postgres::create_thread_section(&pool, &schema, section).await;
+        }
+
         sqlx::query("INSERT INTO thread_sections (id, name, appearance) VALUES (?, ?, ?)")
             .bind(&section.id)
             .bind(&section.name)
@@ -27,7 +33,7 @@ impl StateRuntime {
                     .map(serde_json::to_string)
                     .transpose()?,
             )
-            .execute(self.pool.as_ref())
+            .execute(self.sqlite_pool()?)
             .await?;
 
         Ok(section)
@@ -44,6 +50,10 @@ impl StateRuntime {
             anyhow::bail!("built-in pinned thread section cannot be renamed");
         }
 
+        if let Some((pool, schema)) = self.postgres_connection() {
+            return postgres::rename_thread_section(&pool, &schema, id, name, appearance).await;
+        }
+
         let replace_appearance = appearance.is_some();
         let appearance = appearance
             .flatten()
@@ -56,7 +66,7 @@ impl StateRuntime {
         .bind(replace_appearance)
         .bind(appearance)
         .bind(id)
-        .fetch_optional(self.pool.as_ref())
+        .fetch_optional(self.sqlite_pool()?)
         .await?;
 
         section.map(ThreadSection::from_row).transpose()
@@ -68,7 +78,11 @@ impl StateRuntime {
             anyhow::bail!("built-in pinned thread section cannot be deleted");
         }
 
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some((pool, schema)) = self.postgres_connection() {
+            return postgres::delete_thread_section(&pool, &schema, id).await;
+        }
+
+        let mut tx = self.sqlite_pool()?.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "UPDATE threads SET section_position = NULL, section_entered_at_ms = NULL WHERE thread_section_id = ?",
         )

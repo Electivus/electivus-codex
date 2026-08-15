@@ -42,7 +42,8 @@ pub async fn build_prompt_input(
         config.codex_linux_sandbox_exe.clone(),
     )?;
 
-    let thread_store = thread_store_from_config(&config, state_db.clone());
+    let thread_store = thread_store_from_config(&config, state_db.clone())
+        .map_err(|error| CodexErr::Fatal(error.to_string()))?;
     let installation_id = resolve_installation_id(&config.codex_home).await?;
     let thread_manager = ThreadManager::new(
         &config,
@@ -98,13 +99,15 @@ pub(crate) async fn build_prompt_input_from_session(
             .await;
     }
 
-    let prompt_input = sess
-        .clone_history()
-        .await
-        .for_prompt(&turn_context.model_info.input_modalities);
+    let history = sess.clone_history().await;
+    let replay_prefix_items = history.replay_prefix_items();
+    let replayed_history = history.is_replayed_history();
+    let prompt_input = history.for_prompt(&turn_context.model_info.input_modalities);
     let base_instructions = sess.get_base_instructions().await;
     let prompt = build_prompt(
         prompt_input,
+        replay_prefix_items,
+        replayed_history,
         step_context.tool_router.as_ref(),
         turn_context.as_ref(),
         base_instructions,

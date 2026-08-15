@@ -106,28 +106,16 @@ fn is_fork_excluded_developer_message(item: &ResponseItem, usage_hint_texts: &[S
 async fn load_agent_model_context(
     state: &ThreadManagerState,
     thread_id: ThreadId,
-    history_mode: ThreadHistoryMode,
 ) -> CodexResult<Option<Vec<RolloutItem>>> {
-    match history_mode {
-        ThreadHistoryMode::Legacy => Ok(state
-            .read_stored_thread(ReadThreadParams {
+    Ok(Some(
+        state
+            .load_latest_model_context(LoadThreadHistoryParams {
                 thread_id,
                 include_archived: true,
-                include_history: true,
             })
             .await?
-            .history
-            .map(|history| history.items)),
-        ThreadHistoryMode::Paginated => Ok(Some(
-            state
-                .load_latest_model_context(LoadThreadHistoryParams {
-                    thread_id,
-                    include_archived: true,
-                })
-                .await?
-                .items,
-        )),
-    }
+            .items,
+    ))
 }
 
 impl AgentControl {
@@ -279,7 +267,7 @@ impl AgentControl {
         let stored_model_provider = stored_thread.model_provider.clone();
         let stored_source = stored_thread.source.clone();
         let stored_parent_thread_id = stored_thread.parent_thread_id;
-        let history = load_agent_model_context(&state, thread_id, stored_thread.history_mode)
+        let history = load_agent_model_context(&state, thread_id)
             .await?
             .ok_or(CodexErr::ThreadNotFound(thread_id))?;
         let initial_history = InitialHistory::Resumed(ResumedHistory {
@@ -662,14 +650,13 @@ impl AgentControl {
 
         let destination_history_mode = matches!(parent_history_mode, ThreadHistoryMode::Paginated)
             .then_some(ThreadHistoryMode::Paginated);
-        let mut forked_rollout_items =
-            load_agent_model_context(state, parent_thread_id, parent_history_mode)
-                .await?
-                .ok_or_else(|| {
-                    CodexErr::Fatal(format!(
-                        "parent thread history unavailable for fork: {parent_thread_id}"
-                    ))
-                })?;
+        let mut forked_rollout_items = load_agent_model_context(state, parent_thread_id)
+            .await?
+            .ok_or_else(|| {
+                CodexErr::Fatal(format!(
+                    "parent thread history unavailable for fork: {parent_thread_id}"
+                ))
+            })?;
 
         let selected_capability_roots = forked_rollout_items
             .iter()
@@ -956,7 +943,7 @@ impl AgentControl {
             .map_err(|err| CodexErr::InvalidRequest(format!("invalid stored agent path: {err}")))?;
         let resumed_agent_nickname = stored_thread.agent_nickname.clone();
         let resumed_agent_role = stored_thread.agent_role.clone();
-        let history = load_agent_model_context(&state, thread_id, stored_thread.history_mode)
+        let history = load_agent_model_context(&state, thread_id)
             .await?
             .ok_or(CodexErr::ThreadNotFound(thread_id))?;
         let initial_history = InitialHistory::Resumed(ResumedHistory {

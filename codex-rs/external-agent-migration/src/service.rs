@@ -72,7 +72,7 @@ pub struct ExternalAgentConfigService {
     pub(crate) auth_mode: Option<AuthMode>,
     pub(crate) source: ExternalAgentSource,
     pub(crate) session_import_limits: ExternalAgentSessionImportLimits,
-    state_db: Option<StateDbHandle>,
+    pub(crate) state_db: Option<StateDbHandle>,
 }
 
 impl ExternalAgentConfigService {
@@ -408,6 +408,9 @@ impl ExternalAgentConfigService {
                             selected_memory,
                         )
                         .await?;
+                        if let Some(memory_import) = memory_outcome.memory_import {
+                            outcome.merge_memory_import(memory_import)?;
+                        }
                         emit_migration_metric(
                             EXTERNAL_AGENT_CONFIG_IMPORT_METRIC,
                             ExternalAgentConfigMigrationItemType::Memory,

@@ -13,11 +13,7 @@ use chrono::Utc;
 use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::SessionContextWindow;
-use codex_protocol::protocol::SessionMeta;
-use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::ThreadHistoryMode;
-use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutItem;
 use codex_rollout::persisted_rollout_items;
 
@@ -35,6 +31,8 @@ use crate::ResumeThreadParams;
 use crate::StoredModelContext;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
+#[cfg(test)]
+use crate::ThreadLocationFilter;
 use crate::ThreadMetadataPatch;
 use crate::ThreadPage;
 use crate::ThreadRelationFilter;
@@ -45,6 +43,7 @@ use crate::ThreadStoreFuture;
 use crate::ThreadStoreResult;
 use crate::UpdateThreadMetadataParams;
 use crate::error::reject_paginated_history_mode;
+use crate::types::initial_session_meta_item;
 
 static IN_MEMORY_THREAD_STORES: OnceLock<Mutex<HashMap<String, Arc<InMemoryThreadStore>>>> =
     OnceLock::new();
@@ -65,6 +64,7 @@ mod tests {
     use crate::ThreadSortKey;
     use codex_protocol::models::BaseInstructions;
     use codex_protocol::protocol::SessionSource;
+    use codex_protocol::protocol::ThreadMemoryMode;
 
     #[tokio::test]
     async fn default_turn_pagination_methods_return_unsupported() {
@@ -172,7 +172,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: None,
                 archived: false,
                 search_term: None,
@@ -200,7 +200,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: None,
                 archived: false,
                 search_term: None,
@@ -228,7 +228,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: Some(Some(codex_state::PINNED_THREAD_SECTION_ID.to_string())),
                 archived: false,
                 search_term: None,
@@ -256,7 +256,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: ThreadLocationFilter::Unrestricted,
                 section: Some(None),
                 archived: false,
                 search_term: None,
@@ -539,39 +539,15 @@ impl InMemoryThreadStore {
         reject_paginated_history_mode(params.history_mode)?;
         let mut state = self.state.lock().await;
         state.calls.create_thread += 1;
-        let session_meta = SessionMeta {
-            session_id: params.session_id,
-            id: params.thread_id,
-            forked_from_id: params.forked_from_id,
-            parent_thread_id: params.parent_thread_id,
-            cwd: params.metadata.cwd.clone().unwrap_or_default(),
-            agent_nickname: params.source.get_nickname(),
-            agent_role: params.source.get_agent_role(),
-            agent_path: params.source.get_agent_path().map(Into::into),
-            originator: params.originator.clone(),
-            source: params.source.clone(),
-            thread_source: params.thread_source.clone(),
-            model_provider: Some(params.metadata.model_provider.clone()),
-            base_instructions: Some(params.base_instructions.clone()),
-            dynamic_tools: (!params.dynamic_tools.is_empty()).then(|| params.dynamic_tools.clone()),
-            selected_capability_roots: params.selected_capability_roots.clone(),
-            memory_mode: matches!(params.metadata.memory_mode, ThreadMemoryMode::Disabled)
-                .then_some("disabled".to_string()),
-            history_mode: params.history_mode,
-            history_base: params.history_base,
-            subagent_history_start_ordinal: params.subagent_history_start_ordinal,
-            multi_agent_version: params.multi_agent_version,
-            context_window: Some(SessionContextWindow::new(params.initial_window_id.clone())),
-            ..SessionMeta::default()
-        };
         state
             .histories
             .entry(params.thread_id)
             .or_default()
-            .push(RolloutItem::SessionMeta(SessionMetaLine {
-                meta: session_meta,
-                git: None,
-            }));
+            .push(initial_session_meta_item(
+                &params,
+                String::new(),
+                String::new(),
+            ));
         state.created_threads.insert(params.thread_id, params);
         Ok(())
     }
@@ -915,6 +891,21 @@ impl ThreadStore for InMemoryThreadStore {
     fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
         Box::pin(async move {
             let mut page = InMemoryThreadStore::list_threads(self).await?;
+            match &params.location_filter {
+                crate::ThreadLocationFilter::Unrestricted => {}
+                crate::ThreadLocationFilter::ExactCwds(cwds) => {
+                    page.items.retain(|thread| cwds.contains(&thread.cwd));
+                }
+                crate::ThreadLocationFilter::ProjectSessionScope {
+                    cwd,
+                    repository_identity,
+                } => {
+                    page.items.retain(|thread| {
+                        thread.cwd == *cwd
+                            || thread.repository_identity.as_ref() == Some(repository_identity)
+                    });
+                }
+            }
             match params.relation_filter {
                 Some(ThreadRelationFilter::DirectChildrenOf(parent_thread_id)) => {
                     page.items
@@ -1083,13 +1074,19 @@ fn stored_thread_from_state(
         agent_nickname: metadata.and_then(|metadata| metadata.agent_nickname.clone().flatten()),
         agent_role: metadata.and_then(|metadata| metadata.agent_role.clone().flatten()),
         agent_path: metadata.and_then(|metadata| metadata.agent_path.clone().flatten()),
+        repository_identity: metadata
+            .and_then(|metadata| metadata.git_info.as_ref())
+            .and_then(|git_info| git_info.origin_url.as_ref())
+            .and_then(|origin_url| origin_url.as_deref())
+            .and_then(codex_git_utils::canonicalize_git_remote_url),
         git_info: metadata.and_then(git_info_from_patch),
         approval_mode: metadata
             .and_then(|metadata| metadata.approval_mode)
             .unwrap_or(AskForApproval::Never),
         permission_profile: metadata
             .and_then(|metadata| metadata.permission_profile.clone())
-            .unwrap_or_else(PermissionProfile::read_only),
+            .unwrap_or_else(PermissionProfile::read_only)
+            .into(),
         token_usage: metadata.and_then(|metadata| metadata.token_usage.clone()),
         first_user_message: metadata.and_then(|metadata| metadata.first_user_message.clone()),
         history,

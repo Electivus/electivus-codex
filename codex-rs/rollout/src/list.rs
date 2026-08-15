@@ -122,6 +122,9 @@ struct HeadTailSummary {
 const MAX_SCAN_FILES: usize = 10000;
 const HEAD_RECORD_LIMIT: usize = 10;
 const USER_EVENT_SCAN_LIMIT: usize = 200;
+// Session metadata and preview events are small; cap their cumulative decoded head well below the
+// checked repair's 32 MiB per-rollout budget so listing cannot allocate an oversized first line.
+const HEAD_SUMMARY_SOURCE_BYTE_BUDGET: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadSortKey {
@@ -181,6 +184,7 @@ impl Cursor {
 /// pagination.
 struct AnchorState {
     ts: OffsetDateTime,
+    id: Option<Uuid>,
     passed: bool,
 }
 
@@ -189,20 +193,24 @@ impl AnchorState {
         match anchor {
             Some(cursor) => Self {
                 ts: cursor.ts,
+                id: cursor
+                    .id
+                    .and_then(|id| Uuid::parse_str(&id.to_string()).ok()),
                 passed: false,
             },
             None => Self {
                 ts: OffsetDateTime::UNIX_EPOCH,
+                id: None,
                 passed: true,
             },
         }
     }
 
-    fn should_skip(&mut self, ts: OffsetDateTime, _id: Uuid) -> bool {
+    fn should_skip(&mut self, ts: OffsetDateTime, id: Uuid) -> bool {
         if self.passed {
             return false;
         }
-        if ts < self.ts {
+        if ts < self.ts || (ts == self.ts && self.id.is_some_and(|anchor_id| id < anchor_id)) {
             self.passed = true;
             false
         } else {
@@ -762,13 +770,10 @@ fn build_next_cursor(items: &[ThreadItem], sort_key: ThreadSortKey) -> Option<Cu
             OffsetDateTime::parse(recency_at, &Rfc3339).ok()?
         }
     };
-    match sort_key {
-        ThreadSortKey::RecencyAt => Some(Cursor::with_thread_id(
-            ts,
-            ThreadId::from_string(&id.to_string()).ok()?,
-        )),
-        ThreadSortKey::CreatedAt | ThreadSortKey::UpdatedAt => Some(Cursor::new(ts)),
-    }
+    Some(Cursor::with_thread_id(
+        ts,
+        ThreadId::from_string(&id.to_string()).ok()?,
+    ))
 }
 
 async fn build_thread_item(
@@ -1103,14 +1108,19 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
     let mut lines = compression::open_rollout_line_reader(path).await?;
     let mut summary = HeadTailSummary::default();
     let mut lines_scanned = 0usize;
+    let mut source_bytes = 0_u64;
 
     while lines_scanned < head_limit
         || (summary.saw_session_meta
             && (summary.preview.is_none() || summary.first_user_message.is_none())
             && lines_scanned < head_limit + USER_EVENT_SCAN_LIMIT)
     {
-        let line_opt = lines.next_line().await?;
-        let Some(line) = line_opt else { break };
+        let remaining_source_bytes = HEAD_SUMMARY_SOURCE_BYTE_BUDGET.saturating_sub(source_bytes);
+        let Some((line, line_bytes)) = lines.next_line_bounded(remaining_source_bytes).await?
+        else {
+            break;
+        };
+        source_bytes = source_bytes.saturating_add(line_bytes);
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -1329,6 +1339,11 @@ async fn find_thread_path_by_id_str_in_subdir(
 ) -> io::Result<Option<PathBuf>> {
     // Validate UUID format early.
     if Uuid::parse_str(id_str).is_err() {
+        return Ok(None);
+    }
+
+    // A remote Canonical Thread History authority never consults replica-local rollout files.
+    if state_db_ctx.is_some_and(|state_db| !state_db.uses_local_rollout_history()) {
         return Ok(None);
     }
 
