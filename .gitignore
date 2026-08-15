@@ -23,7 +23,13 @@ result
 
 # editor
 .vscode/
-.idea/
+# Keep portable RustRover project metadata; ignore personal workspace state.
+.idea/*
+!.idea/
+!.idea/electivus-codex.iml
+!.idea/modules.xml
+!.idea/vcs.xml
+# Shared JetBrains run/debug configurations are versioned in .run/.
 .history/
 .zed/
 *.swp
