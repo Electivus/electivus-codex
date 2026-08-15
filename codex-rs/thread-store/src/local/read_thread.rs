@@ -65,7 +65,8 @@ pub(super) async fn read_thread(
             thread.permission_profile = permission_profile_from_metadata_value(
                 &metadata_sandbox_policy,
                 thread.cwd.as_path(),
-            );
+            )
+            .into();
         }
         reject_paginated_history(&thread, params.include_history)?;
         attach_history_if_requested(&mut thread, params.include_history).await?;
@@ -144,7 +145,8 @@ pub(super) async fn read_thread_by_rollout_path(
                 thread.permission_profile = permission_profile_from_metadata_value(
                     &metadata.sandbox_policy,
                     thread.cwd.as_path(),
-                );
+                )
+                .into();
             }
             let (fallback_sha, fallback_branch, fallback_origin_url) = match thread.git_info.take()
             {
@@ -400,7 +402,7 @@ pub(super) fn stored_thread_from_state_metadata(
             metadata.git_origin_url,
         ),
         approval_mode: parse_or_default(&metadata.approval_mode, AskForApproval::OnRequest),
-        permission_profile,
+        permission_profile: permission_profile.into(),
         token_usage: (metadata.tokens_used != 0).then(|| TokenUsage {
             total_tokens: metadata.tokens_used,
             ..Default::default()
@@ -508,7 +510,7 @@ fn stored_thread_from_meta_line(
             .and_then(codex_git_utils::canonicalize_git_remote_url),
         git_info: meta_line.git,
         approval_mode: AskForApproval::OnRequest,
-        permission_profile: PermissionProfile::read_only(),
+        permission_profile: PermissionProfile::read_only().into(),
         token_usage: None,
         first_user_message: None,
         history: None,
@@ -1001,7 +1003,7 @@ mod tests {
             .expect("read thread");
 
         assert_eq!(thread.preview, "Hello from user");
-        assert_eq!(thread.permission_profile, PermissionProfile::Disabled);
+        assert_eq!(thread.permission_profile(), PermissionProfile::Disabled);
     }
 
     #[tokio::test]
@@ -1039,7 +1041,7 @@ mod tests {
             .await
             .expect("read thread");
 
-        assert_eq!(thread.permission_profile, PermissionProfile::Disabled);
+        assert_eq!(thread.permission_profile(), PermissionProfile::Disabled);
     }
 
     #[tokio::test]
@@ -1126,7 +1128,7 @@ mod tests {
             exclude_slash_tmp: false,
         };
         assert_eq!(
-            thread.permission_profile,
+            thread.permission_profile(),
             PermissionProfile::from_legacy_sandbox_policy_for_cwd(
                 &legacy_policy,
                 sqlite_cwd.as_path()

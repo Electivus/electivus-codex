@@ -4,6 +4,7 @@ use std::sync::Arc;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_app_server_protocol::CodexErrorInfo;
+use codex_protocol::DurablePermissionProfile;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -713,14 +714,25 @@ pub struct StoredThread {
     pub repository_identity: Option<String>,
     /// Approval mode captured for the thread.
     pub approval_mode: AskForApproval,
-    /// Canonical runtime permissions captured for the thread.
-    pub permission_profile: PermissionProfile,
+    /// Durable permissions captured for the thread, which may contain foreign paths.
+    ///
+    /// Use [`Self::permission_profile`] for permissions materialized on the current host.
+    pub permission_profile: DurablePermissionProfile,
     /// Last observed token usage.
     pub token_usage: Option<TokenUsage>,
     /// First user message observed for this thread, if any.
     pub first_user_message: Option<String>,
     /// Persisted history, populated only when requested.
     pub history: Option<StoredThreadHistory>,
+}
+
+impl StoredThread {
+    /// Returns permissions usable on this host, failing closed for foreign paths.
+    pub fn permission_profile(&self) -> PermissionProfile {
+        self.permission_profile
+            .to_native()
+            .unwrap_or_else(|_| PermissionProfile::read_only())
+    }
 }
 
 /// Optional field patch where omission leaves a value unchanged and `Some(None)` clears it.
@@ -1091,6 +1103,71 @@ mod tests {
             serde_json::from_value(json!({})).expect("deserialize legacy patch");
 
         assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn stored_thread_preserves_foreign_permission_profile_paths() {
+        let now = Utc::now();
+        let thread = StoredThread {
+            thread_id: ThreadId::new(),
+            extra_config: None,
+            rollout_path: None,
+            forked_from_id: None,
+            parent_thread_id: None,
+            preview: "foreign permission profile".to_string(),
+            name: None,
+            model_provider: "openai".to_string(),
+            model: None,
+            reasoning_effort: None,
+            created_at: now,
+            updated_at: now,
+            recency_at: now,
+            archived_at: None,
+            section: None,
+            section_position: None,
+            section_entered_at: None,
+            cwd: std::env::current_dir().expect("current directory"),
+            cli_version: "0.0.0".to_string(),
+            source: SessionSource::VSCode,
+            history_mode: ThreadHistoryMode::Paginated,
+            thread_source: None,
+            agent_nickname: None,
+            agent_role: None,
+            agent_path: None,
+            git_info: None,
+            repository_identity: None,
+            approval_mode: AskForApproval::Never,
+            permission_profile: PermissionProfile::read_only().into(),
+            token_usage: None,
+            first_user_message: None,
+            history: None,
+        };
+        let mut projection = serde_json::to_value(thread).expect("serialize stored thread");
+        let foreign_path = if cfg!(windows) {
+            "/home/k3/.codex/worktrees/c160/electivus-codex"
+        } else {
+            r"C:\Users\msilvane\.codex\worktrees\c160\electivus-codex"
+        };
+        projection["permission_profile"] = json!({
+            "type": "managed",
+            "file_system": {
+                "type": "restricted",
+                "entries": [{
+                    "path": { "type": "path", "path": foreign_path },
+                    "access": "write"
+                }]
+            },
+            "network": "restricted"
+        });
+
+        let decoded: StoredThread =
+            serde_json::from_value(projection.clone()).expect("deserialize foreign projection");
+
+        assert_eq!(decoded.permission_profile(), PermissionProfile::read_only());
+        assert_eq!(
+            serde_json::to_value(decoded).expect("reserialize foreign projection"),
+            projection
+        );
     }
 
     #[test]

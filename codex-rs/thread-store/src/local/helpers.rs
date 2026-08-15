@@ -186,7 +186,7 @@ pub(super) fn stored_thread_from_rollout_item(
             .and_then(codex_git_utils::canonicalize_git_remote_url),
         git_info,
         approval_mode: AskForApproval::OnRequest,
-        permission_profile: PermissionProfile::read_only(),
+        permission_profile: PermissionProfile::read_only().into(),
         token_usage: None,
         first_user_message: item.first_user_message,
         history: None,
