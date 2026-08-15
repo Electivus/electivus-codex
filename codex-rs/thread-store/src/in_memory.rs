@@ -1046,7 +1046,8 @@ fn stored_thread_from_state(
             .unwrap_or(AskForApproval::Never),
         permission_profile: metadata
             .and_then(|metadata| metadata.permission_profile.clone())
-            .unwrap_or_else(PermissionProfile::read_only),
+            .unwrap_or_else(PermissionProfile::read_only)
+            .into(),
         token_usage: metadata.and_then(|metadata| metadata.token_usage.clone()),
         first_user_message: metadata.and_then(|metadata| metadata.first_user_message.clone()),
         history,

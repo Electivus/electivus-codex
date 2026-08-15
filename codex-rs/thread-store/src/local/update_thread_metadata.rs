@@ -1383,7 +1383,7 @@ mod tests {
             .await
             .expect("set permission profile");
 
-        assert_eq!(thread.permission_profile, PermissionProfile::Disabled);
+        assert_eq!(thread.permission_profile(), PermissionProfile::Disabled);
         let thread = store
             .update_thread_metadata(UpdateThreadMetadataParams {
                 thread_id,

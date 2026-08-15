@@ -70,7 +70,7 @@ fn stored_thread(cwd: &str, title: &str, first_user_message: &str) -> StoredThre
             repository_url: None,
         }),
         approval_mode: AskForApproval::Never,
-        permission_profile: PermissionProfile::read_only(),
+        permission_profile: PermissionProfile::read_only().into(),
         token_usage: None,
         first_user_message: Some(first_user_message.to_string()),
         history: None,

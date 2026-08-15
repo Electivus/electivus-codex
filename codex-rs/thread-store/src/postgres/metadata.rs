@@ -283,7 +283,7 @@ fn rebuild_projection(
             .and_then(codex_git_utils::canonicalize_git_remote_url),
         git_info: normalized_git_info(session_meta.git),
         approval_mode: AskForApproval::OnRequest,
-        permission_profile: PermissionProfile::read_only(),
+        permission_profile: PermissionProfile::read_only().into(),
         token_usage: None,
         first_user_message: None,
         history: None,
@@ -402,7 +402,7 @@ pub(super) fn apply_metadata_patch(thread: &mut StoredThread, patch: &ThreadMeta
         thread.approval_mode = approval_mode;
     }
     if let Some(permission_profile) = patch.permission_profile.clone() {
-        thread.permission_profile = permission_profile;
+        thread.permission_profile = permission_profile.into();
     }
     if let Some(token_usage) = patch.token_usage.clone() {
         thread.token_usage = Some(token_usage);

@@ -1335,6 +1335,7 @@ impl PostgresFixture {
                 "summary": "auto"
             }
         });
+        let foreign_permission_profile = foreign_context["payload"]["permission_profile"].clone();
         let pool = sqlx::PgPool::connect(&self.database_url).await?;
         let mut transaction = pool.begin().await?;
         let schema = &self.schema;
@@ -1383,11 +1384,15 @@ impl PostgresFixture {
         .await?;
         sqlx::query(AssertSqlSafe(format!(
             "UPDATE \"{schema}\".threads \
-             SET projection = jsonb_set(projection, '{{cwd}}', to_jsonb($2::text), false) \
+             SET projection = jsonb_set(\
+                 jsonb_set(projection, '{{cwd}}', to_jsonb($2::text), false), \
+                 '{{permission_profile}}', $3, false\
+             ) \
              WHERE thread_id = $1"
         )))
         .bind(thread_id.to_string())
         .bind(foreign_cwd)
+        .bind(foreign_permission_profile)
         .execute(transaction.as_mut())
         .await?;
         transaction.commit().await?;

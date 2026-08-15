@@ -223,7 +223,7 @@ impl PostgresThreadStore {
             git_info: None,
             repository_identity: None,
             approval_mode: AskForApproval::OnRequest,
-            permission_profile: PermissionProfile::read_only(),
+            permission_profile: PermissionProfile::read_only().into(),
             token_usage: None,
             first_user_message: None,
             history: None,
