@@ -9,6 +9,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    throw "install-local.ps1 requires PowerShell 7 or newer. Run it with pwsh."
+}
+
 function Write-Step {
     param(
         [string]$Message
@@ -21,11 +25,12 @@ function Show-Usage {
     Write-Host @"
 Usage: install-local.ps1 [-UseUpstreamVersion]
 
-  -UseUpstreamVersion  Build using the upstream release or pre-release version
-                        persisted by upstream synchronization instead of 0.0.0.
+  -UseUpstreamVersion  Build using the greatest upstream release or pre-release
+                        version in the current commit's ancestry instead of 0.0.0.
 
 The CODEX_HOME environment variable selects the standalone installation root.
 CODEX_INSTALL_DIR selects the directory exposed on PATH.
+PowerShell 7 or newer is required; run this script with pwsh.
 "@
 }
 
@@ -524,26 +529,84 @@ function Set-WorkspaceVersion {
     )
 }
 
+function ConvertTo-SemanticVersion {
+    param(
+        [string]$Version
+    )
+
+    $pattern = '^(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<patch>0|[1-9]\d*)(?:-(?<prerelease>(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
+    $match = [regex]::Match($Version, $pattern)
+    if (-not $match.Success) {
+        return $null
+    }
+
+    try {
+        return [System.Management.Automation.SemanticVersion]::new($Version)
+    } catch {
+        return $null
+    }
+}
+
 function Get-UpstreamBuildVersion {
     param(
         [string]$GitPath,
         [string]$RepoRoot
     )
 
-    $subjects = & $GitPath -C $RepoRoot log --format=%s --all -- "codex-rs/Cargo.toml"
+    $entries = & $GitPath -C $RepoRoot log --full-history --format=%H%x09%s HEAD -- "codex-rs/Cargo.toml"
     if ($LASTEXITCODE -ne 0) {
         throw "Could not inspect repository history for the upstream release version."
     }
 
-    $releasePattern = '^Release (?<version>[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)$'
-    foreach ($subject in @($subjects)) {
-        $match = [regex]::Match([string]$subject, $releasePattern)
-        if ($match.Success) {
-            return $match.Groups["version"].Value
+    $releasePattern = '^Release (?<version>.+)$'
+    $workspaceVersionPattern = '(?ms)(^\[workspace\.package\]\s+(?:(?!^\[).)*?^\s*version\s*=\s*")([^"]+)(")'
+    $selectedVersion = $null
+    $selectedVersionText = $null
+    foreach ($entry in @($entries)) {
+        $parts = ([string]$entry).Split("`t", 2)
+        if ($parts.Count -ne 2) {
+            continue
+        }
+
+        $releaseMatch = [regex]::Match($parts[1], $releasePattern)
+        if (-not $releaseMatch.Success) {
+            continue
+        }
+
+        $versionText = $releaseMatch.Groups["version"].Value
+        $semanticVersion = ConvertTo-SemanticVersion -Version $versionText
+        if ($null -eq $semanticVersion -or $versionText -eq "0.0.0") {
+            continue
+        }
+
+        $manifestLines = & $GitPath -C $RepoRoot show "$($parts[0]):codex-rs/Cargo.toml"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not inspect Cargo.toml at release candidate $($parts[0])."
+        }
+        $manifestMatch = [regex]::Match(
+            ($manifestLines -join "`n"),
+            $workspaceVersionPattern
+        )
+        if (
+            -not $manifestMatch.Success -or
+            $manifestMatch.Groups[2].Value -cne $versionText
+        ) {
+            continue
+        }
+
+        if (
+            $null -eq $selectedVersion -or
+            $semanticVersion.CompareTo($selectedVersion) -gt 0
+        ) {
+            $selectedVersion = $semanticVersion
+            $selectedVersionText = $versionText
         }
     }
 
-    throw "Could not find an upstream release version in repository history."
+    if ($null -eq $selectedVersion) {
+        throw "Could not find a valid upstream release version in HEAD's ancestry."
+    }
+    return $selectedVersionText
 }
 
 function Backup-CargoManifestFiles {
@@ -722,12 +785,11 @@ try {
         Remove-StaleInstallArtifacts -StandaloneRoot $standaloneRoot -ReleasesDir $releasesDir
         Write-Step "Installing local debug build to $releaseDir"
 
-        $cargoBackups = $null
         if ($useUpstreamVersionRequested) {
-            $gitPath = Resolve-CommandPath -Names @("git") -Description "git"
             $currentWorkspaceVersion = Read-WorkspaceVersion -CargoManifestPath $cargoManifestPath
-            $upstreamBuildVersion = Get-UpstreamBuildVersion -GitPath $gitPath -RepoRoot $repoRoot
-            if ($upstreamBuildVersion -ne $currentWorkspaceVersion) {
+            if ($currentWorkspaceVersion -eq "0.0.0") {
+                $gitPath = Resolve-CommandPath -Names @("git") -Description "git"
+                $upstreamBuildVersion = Get-UpstreamBuildVersion -GitPath $gitPath -RepoRoot $repoRoot
                 Write-Step "Using upstream release version $upstreamBuildVersion for local build"
                 $cargoBackups = Backup-CargoManifestFiles `
                     -CargoManifestPath $cargoManifestPath `
@@ -749,6 +811,7 @@ try {
                         -CargoLockPath $cargoLockPath
                 }
             } else {
+                Write-Step "Using existing workspace version $currentWorkspaceVersion for local build"
                 Invoke-LocalPackageBuild `
                     -PackageDir $stagingDir `
                     -Target $target `
