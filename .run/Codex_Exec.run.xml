@@ -1,0 +1,20 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Codex Exec" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+    <option name="command" value="run --bin codex -- exec" />
+    <option name="workingDirectory" value="file://$PROJECT_DIR$/codex-rs" />
+    <option name="emulateTerminal" value="true" />
+    <option name="channel" value="DEFAULT" />
+    <option name="requiredFeatures" value="true" />
+    <option name="allFeatures" value="false" />
+    <option name="withSudo" value="false" />
+    <option name="buildOptions">
+      <option name="buildProfileId" value="dev" />
+    </option>
+    <envs>
+      <env name="RUST_BACKTRACE" value="1" />
+    </envs>
+    <method v="2">
+      <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+    </method>
+  </configuration>
+</component>
