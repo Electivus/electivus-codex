@@ -88,7 +88,8 @@ async fn postgres_contract_metadata_updates_and_repairs_from_canonical_history()
             },
             include_archived: false,
         })
-        .await?;
+        .await?
+        .expect("existing PostgreSQL thread should be updated");
     let from_replica = replica
         .read_thread(ReadThreadParams {
             thread_id,
@@ -147,7 +148,8 @@ async fn postgres_contract_metadata_updates_and_repairs_from_canonical_history()
             },
             include_archived: false,
         })
-        .await?;
+        .await?
+        .expect("existing PostgreSQL thread should be partially updated");
     assert_eq!(
         serde_json::to_value(&partially_updated.git_info)?,
         serde_json::json!({
@@ -169,7 +171,8 @@ async fn postgres_contract_metadata_updates_and_repairs_from_canonical_history()
             },
             include_archived: false,
         })
-        .await?;
+        .await?
+        .expect("existing PostgreSQL thread Git metadata should be cleared");
     assert!(cleared.git_info.is_none());
     let memory_only = writer
         .update_thread_metadata(UpdateThreadMetadataParams {
@@ -180,7 +183,8 @@ async fn postgres_contract_metadata_updates_and_repairs_from_canonical_history()
             },
             include_archived: false,
         })
-        .await?;
+        .await?
+        .expect("existing PostgreSQL thread memory mode should be updated");
     assert!(memory_only.git_info.is_none());
     let metadata_markers = replica
         .load_history(crate::LoadThreadHistoryParams {
@@ -220,7 +224,8 @@ async fn postgres_contract_metadata_updates_and_repairs_from_canonical_history()
             },
             include_archived: false,
         })
-        .await?;
+        .await?
+        .expect("existing PostgreSQL thread projection should be repaired");
     assert_eq!(
         serde_json::to_value(repaired)?,
         serde_json::to_value(expected_repaired)?
