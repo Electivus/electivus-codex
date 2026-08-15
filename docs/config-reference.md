@@ -129,8 +129,23 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `features.fast_mode` | <code>boolean</code> | _No description available._ |
 | `features.goals` | <code>boolean</code> | _No description available._ |
 | `features.guardian_approval` | <code>boolean</code> | _No description available._ |
+| `features.guardian_enhanced_node_repl_transcripts` | <code>boolean</code> | _No description available._ |
+| `features.guardian_node_repl_transcript_images` | <code>boolean</code> | _No description available._ |
 | `features.guardian_reuse_parent_compaction` | <code>boolean</code> | _No description available._ |
-| `features.guardianv2` | <code>boolean</code> | _No description available._ |
+| `features.guardianv2` | <code>boolean or table</code> | Options: User-configurable prompt, approval, and context settings for Guardian v2. |
+| `features.guardianv2.classifier_instructions` | <code>string</code> | _No description available._ |
+| `features.guardianv2.enabled` | <code>boolean</code> | _No description available._ |
+| `features.guardianv2.max_action_tokens` | <code>integer</code> | _No description available._ |
+| `features.guardianv2.max_classifier_instruction_tokens` | <code>integer</code> | _No description available._ |
+| `features.guardianv2.reasoning_effort` | <code>string</code> | A non-empty reasoning effort value advertised by the model. |
+| `features.guardianv2.review_threshold` | <code>number</code> | _No description available._ |
+| `features.guardianv2.transcript` | <code>table</code> | Bounds and optional sources for the Guardian v2 conversation transcript. |
+| `features.guardianv2.transcript.max_message_entry_tokens` | <code>integer</code> | _No description available._ |
+| `features.guardianv2.transcript.max_message_transcript_tokens` | <code>integer</code> | _No description available._ |
+| `features.guardianv2.transcript.max_recent_non_user_entries` | <code>integer</code> | _No description available._ |
+| `features.guardianv2.transcript.max_tool_entry_tokens` | <code>integer</code> | _No description available._ |
+| `features.guardianv2.transcript.max_tool_transcript_tokens` | <code>integer</code> | _No description available._ |
+| `features.guardianv2.transcript.sources` | <code>array&lt;string (&quot;tool_calls&quot;, &quot;tool_outputs&quot;, &quot;reasoning&quot;)&gt;</code> | _No description available._ |
 | `features.hooks` | <code>boolean</code> | _No description available._ |
 | `features.image_detail_original` | <code>boolean</code> | _No description available._ |
 | `features.image_generation` | <code>boolean</code> | _No description available._ |
@@ -241,6 +256,7 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `features.tool_suggest` | <code>boolean</code> | _No description available._ |
 | `features.tui_app_server` | <code>boolean</code> | _No description available._ |
 | `features.unavailable_dummy_tools` | <code>boolean</code> | _No description available._ |
+| `features.unbounded_connection_retries` | <code>boolean</code> | _No description available._ |
 | `features.undo` | <code>boolean</code> | _No description available._ |
 | `features.unified_exec` | <code>boolean</code> | _No description available._ |
 | `features.unified_exec_zsh_fork` | <code>boolean</code> | _No description available._ |
@@ -458,6 +474,7 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `mcp_servers.<key>.http_headers_helper` | <code>string</code> | _No description available._ |
 | `mcp_servers.<key>.name` | <code>string</code> | Legacy display-name field accepted for backward compatibility. |
 | `mcp_servers.<key>.oauth` | <code>table</code> | OAuth client settings used when Codex launches an MCP OAuth flow. |
+| `mcp_servers.<key>.oauth.callback_port` | <code>integer</code> | Fixed callback port that takes precedence over Codex's global OAuth callback port. |
 | `mcp_servers.<key>.oauth.client_id` | <code>string</code> | Explicit OAuth client identifier to present during authorization and token exchange. |
 | `mcp_servers.<key>.oauth_resource` | <code>string</code> | _No description available._ |
 | `mcp_servers.<key>.omit_tools_from` | <code>array&lt;string (&quot;code_mode&quot;, &quot;deferred&quot;, &quot;direct&quot;)&gt;</code> | _No description available._ |
@@ -699,8 +716,23 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `profiles.<key>.features.fast_mode` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.goals` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.guardian_approval` | <code>boolean</code> | _No description available._ |
+| `profiles.<key>.features.guardian_enhanced_node_repl_transcripts` | <code>boolean</code> | _No description available._ |
+| `profiles.<key>.features.guardian_node_repl_transcript_images` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.guardian_reuse_parent_compaction` | <code>boolean</code> | _No description available._ |
-| `profiles.<key>.features.guardianv2` | <code>boolean</code> | _No description available._ |
+| `profiles.<key>.features.guardianv2` | <code>boolean or table</code> | Options: User-configurable prompt, approval, and context settings for Guardian v2. |
+| `profiles.<key>.features.guardianv2.classifier_instructions` | <code>string</code> | _No description available._ |
+| `profiles.<key>.features.guardianv2.enabled` | <code>boolean</code> | _No description available._ |
+| `profiles.<key>.features.guardianv2.max_action_tokens` | <code>integer</code> | _No description available._ |
+| `profiles.<key>.features.guardianv2.max_classifier_instruction_tokens` | <code>integer</code> | _No description available._ |
+| `profiles.<key>.features.guardianv2.reasoning_effort` | <code>string</code> | A non-empty reasoning effort value advertised by the model. |
+| `profiles.<key>.features.guardianv2.review_threshold` | <code>number</code> | _No description available._ |
+| `profiles.<key>.features.guardianv2.transcript` | <code>table</code> | Bounds and optional sources for the Guardian v2 conversation transcript. |
+| `profiles.<key>.features.guardianv2.transcript.max_message_entry_tokens` | <code>integer</code> | _No description available._ |
+| `profiles.<key>.features.guardianv2.transcript.max_message_transcript_tokens` | <code>integer</code> | _No description available._ |
+| `profiles.<key>.features.guardianv2.transcript.max_recent_non_user_entries` | <code>integer</code> | _No description available._ |
+| `profiles.<key>.features.guardianv2.transcript.max_tool_entry_tokens` | <code>integer</code> | _No description available._ |
+| `profiles.<key>.features.guardianv2.transcript.max_tool_transcript_tokens` | <code>integer</code> | _No description available._ |
+| `profiles.<key>.features.guardianv2.transcript.sources` | <code>array&lt;string (&quot;tool_calls&quot;, &quot;tool_outputs&quot;, &quot;reasoning&quot;)&gt;</code> | _No description available._ |
 | `profiles.<key>.features.hooks` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.image_detail_original` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.image_generation` | <code>boolean</code> | _No description available._ |
@@ -811,6 +843,7 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `profiles.<key>.features.tool_suggest` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.tui_app_server` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.unavailable_dummy_tools` | <code>boolean</code> | _No description available._ |
+| `profiles.<key>.features.unbounded_connection_retries` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.undo` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.unified_exec` | <code>boolean</code> | _No description available._ |
 | `profiles.<key>.features.unified_exec_zsh_fork` | <code>boolean</code> | _No description available._ |
