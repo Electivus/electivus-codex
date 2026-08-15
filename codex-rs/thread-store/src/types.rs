@@ -714,7 +714,9 @@ pub struct StoredThread {
     pub repository_identity: Option<String>,
     /// Approval mode captured for the thread.
     pub approval_mode: AskForApproval,
-    /// Canonical runtime permissions captured for the thread.
+    /// Durable permissions captured for the thread, which may contain foreign paths.
+    ///
+    /// Use [`Self::permission_profile`] for permissions materialized on the current host.
     pub permission_profile: DurablePermissionProfile,
     /// Last observed token usage.
     pub token_usage: Option<TokenUsage>,
