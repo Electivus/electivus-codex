@@ -13,6 +13,7 @@ use crate::event_mapping::is_contextual_user_message_content;
 use crate::session::turn_context::TurnContext;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_extension_api::ConversationHistorySnapshot;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::AgentMessageInputContent;
@@ -73,6 +74,27 @@ pub(crate) struct ContextManager {
     replayed_history: bool,
 }
 
+struct SharedConversationHistory {
+    items: Arc<Vec<ResponseItemEnvelope>>,
+}
+
+impl ConversationHistorySnapshot for SharedConversationHistory {
+    fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
+        Box::new(
+            self.items
+                .iter()
+                .map(|envelope| &envelope.item)
+                .filter(|item| {
+                    !matches!(
+                        item,
+                        ResponseItem::Message { role, content, .. }
+                            if role == "user" && is_contextual_user_message_content(content)
+                    )
+                }),
+        )
+    }
+}
+
 impl ContextManager {
     pub(crate) fn new() -> Self {
         Self {
@@ -86,6 +108,12 @@ impl ContextManager {
             replay_prefix_items: 0,
             replayed_history: false,
         }
+    }
+
+    pub(crate) fn conversation_history_snapshot(&self) -> Arc<dyn ConversationHistorySnapshot> {
+        Arc::new(SharedConversationHistory {
+            items: Arc::clone(&self.items),
+        })
     }
 
     pub(crate) fn token_info(&self) -> Option<TokenUsageInfo> {

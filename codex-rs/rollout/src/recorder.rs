@@ -1067,7 +1067,7 @@ impl RolloutRecorder {
                 reject_unknown_thread_history_mode(&value)?;
             }
 
-            let rollout_line = match serde_json::from_value::<RolloutLine>(value) {
+            let rollout_line = match crate::decode_rollout_line(value) {
                 Ok(rollout_line) => rollout_line,
                 Err(e) => {
                     trace!("failed to parse rollout line: {e}");
@@ -2083,6 +2083,7 @@ async fn resume_candidate_matches_cwd(
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::EventMsg(_) => None,
         })
     {

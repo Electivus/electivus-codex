@@ -165,7 +165,7 @@ impl ThreadStore for DelayedChildCreateStore {
     fn update_thread_metadata(
         &self,
         params: UpdateThreadMetadataParams,
-    ) -> ThreadStoreFuture<'_, StoredThread> {
+    ) -> ThreadStoreFuture<'_, Option<StoredThread>> {
         self.inner.update_thread_metadata(params)
     }
 

@@ -164,6 +164,7 @@ fn validate_model_context_item(
         RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
+        | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::EventMsg(_) => Ok(()),
     }
 }

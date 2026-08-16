@@ -421,6 +421,7 @@ fn session_meta_id(lines: &[RolloutLine]) -> Option<ThreadId> {
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
+        | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::EventMsg(_) => None,
     })
 }
@@ -542,6 +543,7 @@ async fn read_thread_snapshot(
                 | RolloutItem::Compacted(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::WorldState(_)
+                | RolloutItem::SecurityRiskScore(_)
                 | RolloutItem::EventMsg(_) => None,
             })
             .and_then(|meta| meta.dynamic_tools.clone())

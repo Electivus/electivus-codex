@@ -757,7 +757,7 @@ goals = true
     assert!(source_goal.time_used_seconds >= 12);
     assert_eq!(retry_goal.objective, RETRY_GOAL);
     assert!(retry_goal.tokens_used >= expected_source_tokens);
-    assert!(retry_goal.time_used_seconds >= 12);
+    assert!(retry_goal.time_used_seconds >= source_goal.time_used_seconds);
 
     let request_bodies = server
         .requests()

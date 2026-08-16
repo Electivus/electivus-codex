@@ -293,6 +293,7 @@ pub fn thread_searchable_content(item: &RolloutItem) -> Option<String> {
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::Compacted(_)
+        | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::WorldState(_) => None,
     }
 }

@@ -609,10 +609,12 @@ impl ThreadStore for PostgresThreadStore {
     fn update_thread_metadata(
         &self,
         params: UpdateThreadMetadataParams,
-    ) -> ThreadStoreFuture<'_, StoredThread> {
+    ) -> ThreadStoreFuture<'_, Option<StoredThread>> {
         Box::pin(async move {
             let _operation_guard = self.lock_operation(params.thread_id).await;
-            metadata::update_thread_metadata(self, params).await
+            metadata::update_thread_metadata(self, params)
+                .await
+                .map(Some)
         })
     }
     fn move_thread_to_section(

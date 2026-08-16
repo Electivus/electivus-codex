@@ -503,7 +503,8 @@ async fn update_metadata(
             patch,
             include_archived,
         })
-        .await
+        .await?
+        .ok_or(crate::ThreadStoreError::ThreadNotFound { thread_id })
 }
 
 async fn read_thread(

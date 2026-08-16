@@ -54,13 +54,14 @@ impl MessageProcessor {
         environment_manager: Arc<EnvironmentManager>,
         state_db: Option<StateDbHandle>,
         installation_id: String,
-    ) -> anyhow::Result<Self> {
+    ) -> std::io::Result<Self> {
         let outgoing = Arc::new(outgoing);
         let auth_manager = AuthManager::shared_from_config(
             config.as_ref(),
             /*enable_codex_api_key_env*/ false,
         )
-        .await;
+        .await
+        .map_err(std::io::Error::other)?;
         let user_instructions_provider = Arc::new(CodexHomeUserInstructionsProvider::new(
             config.codex_home.clone(),
         ));
@@ -94,7 +95,8 @@ impl MessageProcessor {
                     .enabled(codex_features::Feature::SkillSearch),
             },
         );
-        let thread_store = codex_core::thread_store_from_config(config.as_ref(), state_db.clone())?;
+        let thread_store = codex_core::thread_store_from_config(config.as_ref(), state_db.clone())
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
         let thread_manager = Arc::new(ThreadManager::new(
             config.as_ref(),
             Arc::clone(&auth_manager),
