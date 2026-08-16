@@ -65,7 +65,7 @@ class InstallLocalPowerShellTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(
                 build_log.read_text(encoding="utf-8"),
-                "0.148.0-alpha.12",
+                "0.148.0-alpha.12\nrelease",
             )
             self.assertEqual(cargo_toml.read_bytes(), original_cargo_toml)
             self.assertEqual(cargo_lock.read_bytes(), original_cargo_lock)
@@ -89,7 +89,7 @@ class InstallLocalPowerShellTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(
                 build_log.read_text(encoding="utf-8"),
-                "0.148.0-alpha.12",
+                "0.148.0-alpha.12\nrelease",
             )
             self.assertEqual(cargo_toml.read_bytes(), original_cargo_toml)
             self.assertEqual(
@@ -110,7 +110,10 @@ class InstallLocalPowerShellTest(unittest.TestCase):
             result = run_installer(root, repo, build_log)
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(build_log.read_text(encoding="utf-8"), "1.2.3-beta.4")
+            self.assertEqual(
+                build_log.read_text(encoding="utf-8"),
+                "1.2.3-beta.4\nrelease",
+            )
             self.assertEqual(cargo_toml.read_bytes(), original_cargo_toml)
             self.assertEqual(
                 (repo / "codex-rs" / "Cargo.lock").read_bytes(),
@@ -137,8 +140,11 @@ def create_repo(root: Path) -> Path:
             )
             if match is None:
                 raise RuntimeError("workspace version not found")
+            arguments = os.sys.argv[1:]
+            profile_index = arguments.index("--cargo-profile") + 1
             Path(os.environ["CODEX_TEST_BUILD_LOG"]).write_text(
-                match.group(1), encoding="utf-8"
+                f"{match.group(1)}\\n{arguments[profile_index]}",
+                encoding="utf-8",
             )
             raise SystemExit(23)
             """

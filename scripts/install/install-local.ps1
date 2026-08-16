@@ -70,7 +70,7 @@ function Resolve-CommandPath {
         }
     }
 
-    throw "$Description is required to install a local Codex debug build."
+    throw "$Description is required to install a local Codex release build."
 }
 
 function ConvertTo-AbsolutePath {
@@ -445,7 +445,7 @@ function Invoke-LocalPackageBuild {
         [string[]]$PythonPrefixArguments
     )
 
-    Write-Step "Building local Codex debug package"
+    Write-Step "Building local Codex release package"
     if (Test-Path -LiteralPath $PackageDir) {
         Remove-Item -LiteralPath $PackageDir -Recurse -Force
     }
@@ -459,7 +459,7 @@ function Invoke-LocalPackageBuild {
         "--variant",
         "codex",
         "--cargo-profile",
-        "dev",
+        "release",
         "--package-dir",
         $PackageDir,
         "--force"
@@ -472,23 +472,10 @@ function Invoke-LocalPackageBuild {
         $buildArguments += @("--rg-bin", $localRgPath)
     }
 
-    $previousDebugAssertions = [Environment]::GetEnvironmentVariable(
-        "CARGO_PROFILE_DEV_DEBUG_ASSERTIONS",
-        "Process"
-    )
-    try {
-        $env:CARGO_PROFILE_DEV_DEBUG_ASSERTIONS = "false"
-        $commandArguments = @($PythonPrefixArguments) + $buildArguments
-        & $PythonPath @commandArguments
-        if ($LASTEXITCODE -ne 0) {
-            throw "Local Codex package build failed with exit code $LASTEXITCODE."
-        }
-    } finally {
-        if ($null -eq $previousDebugAssertions) {
-            Remove-Item Env:CARGO_PROFILE_DEV_DEBUG_ASSERTIONS -ErrorAction SilentlyContinue
-        } else {
-            $env:CARGO_PROFILE_DEV_DEBUG_ASSERTIONS = $previousDebugAssertions
-        }
+    $commandArguments = @($PythonPrefixArguments) + $buildArguments
+    & $PythonPath @commandArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Local Codex package build failed with exit code $LASTEXITCODE."
     }
 }
 
@@ -771,7 +758,7 @@ $visibleBinDir = if ([string]::IsNullOrWhiteSpace($env:CODEX_INSTALL_DIR)) {
 }
 $visibleBinDir = ConvertTo-AbsolutePath $visibleBinDir
 
-$releasePrefix = "local-debug-$target"
+$releasePrefix = "local-release-$target"
 $releaseName = "$releasePrefix-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))-$PID"
 $releaseDir = Join-Path $releasesDir $releaseName
 $stagingDir = Join-Path $releasesDir ".staging.$releaseName.$PID"
@@ -783,7 +770,7 @@ try {
         New-Item -ItemType Directory -Force -Path $standaloneRoot | Out-Null
         New-Item -ItemType Directory -Force -Path $releasesDir | Out-Null
         Remove-StaleInstallArtifacts -StandaloneRoot $standaloneRoot -ReleasesDir $releasesDir
-        Write-Step "Installing local debug build to $releaseDir"
+        Write-Step "Installing local release build to $releaseDir"
 
         if ($useUpstreamVersionRequested) {
             $currentWorkspaceVersion = Read-WorkspaceVersion -CargoManifestPath $cargoManifestPath
@@ -881,4 +868,4 @@ if (-not (Path-Contains -PathValue $env:Path -Entry $visibleBinDir)) {
 
 Write-Step "Current PowerShell session: codex"
 Write-Step "Future PowerShell windows: open a new PowerShell window and run: codex"
-Write-Host "Local Codex debug build installed successfully."
+Write-Host "Local Codex release build installed successfully."

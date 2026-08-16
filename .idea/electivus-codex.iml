@@ -170,6 +170,8 @@
       <sourceFolder url="file://$MODULE_DIR$/codex-rs/websocket-client/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/codex-rs/windows-sandbox-rs/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/codex-rs/workload-identity/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/codex-rs/ext/guardian-v2/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/codex-rs/windows-sandbox-rs/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/codex-rs/target" />
     </content>
     <orderEntry type="inheritedJdk" />
