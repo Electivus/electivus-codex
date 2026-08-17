@@ -22,8 +22,10 @@ class RustCiFullPlan:
     reason: str
     lint_matrix: tuple[LintLane, ...]
     run_general: bool
-    run_x64: bool
-    run_arm64: bool
+    run_linux_x64: bool
+    run_linux_arm64: bool
+    run_windows_x64: bool
+    run_windows_arm64: bool
     selected_families: tuple[str, ...]
 
 
@@ -38,16 +40,24 @@ EXTENDED_LINT_MATRIX = (
     LintLane("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu", "dev"),
     LintLane("ubuntu-24.04-arm", "aarch64-unknown-linux-musl", "release"),
 )
+WINDOWS_LINT_MATRIX = (
+    LintLane("windows-2025", "x86_64-pc-windows-msvc", "dev"),
+    LintLane("windows-2025", "x86_64-pc-windows-msvc", "release"),
+    LintLane("windows-11-arm", "aarch64-pc-windows-msvc", "dev"),
+    LintLane("windows-11-arm", "aarch64-pc-windows-msvc", "release"),
+)
 FULL_LINT_MATRIX = (
-    EXTENDED_LINT_MATRIX[0], MERGE_GATE_LINT_MATRIX[0], EXTENDED_LINT_MATRIX[1], EXTENDED_LINT_MATRIX[2], MERGE_GATE_LINT_MATRIX[2], EXTENDED_LINT_MATRIX[3], MERGE_GATE_LINT_MATRIX[1],
+    EXTENDED_LINT_MATRIX[0], MERGE_GATE_LINT_MATRIX[0], EXTENDED_LINT_MATRIX[1], EXTENDED_LINT_MATRIX[2], MERGE_GATE_LINT_MATRIX[2], EXTENDED_LINT_MATRIX[3], MERGE_GATE_LINT_MATRIX[1], *WINDOWS_LINT_MATRIX,
 )
 MERGE_FAMILIES = ("x64 GNU dev lint/build", "x64 GNU release lint/build", "x64 musl release lint/build", "x64 nextest 4+1 PostgreSQL")
 EXTENDED_FAMILIES = ("x64 musl dev lint/build", "ARM64 musl dev lint/build", "ARM64 GNU dev lint/build", "ARM64 musl release lint/build", "ARM64 nextest")
-FULL_FAMILIES = ("general formatting and benchmark", "cargo shear", "argument comment lint package", "argument comment lint prebuilt", "all seven lint/build lanes", "x64 nextest 4+1 PostgreSQL", "ARM64 nextest")
+WINDOWS_FAMILIES = ("Windows argument comment lint", "Windows x64 dev/release lint/build", "Windows ARM64 dev/release lint/build", "Windows x64 nextest", "Windows ARM64 nextest")
+FULL_FAMILIES = ("general formatting and benchmark", "cargo shear", "argument comment lint package", "argument comment lint prebuilt", "all eleven lint/build lanes", "x64 nextest 4+1 PostgreSQL", "ARM64 nextest", *WINDOWS_FAMILIES)
 SCOPE_DEFINITIONS = {
-    "merge-gate": (MERGE_GATE_LINT_MATRIX, False, True, False, MERGE_FAMILIES),
-    "extended": (EXTENDED_LINT_MATRIX, False, False, True, EXTENDED_FAMILIES),
-    "full": (FULL_LINT_MATRIX, True, True, True, FULL_FAMILIES),
+    "merge-gate": (MERGE_GATE_LINT_MATRIX, False, True, False, False, False, MERGE_FAMILIES),
+    "extended": (EXTENDED_LINT_MATRIX, False, False, True, False, False, EXTENDED_FAMILIES),
+    "windows": (WINDOWS_LINT_MATRIX, False, False, False, True, True, WINDOWS_FAMILIES),
+    "full": (FULL_LINT_MATRIX, True, True, True, True, True, FULL_FAMILIES),
 }
 VALIDATION_SCOPES = frozenset(SCOPE_DEFINITIONS)
 MAX_SCOPE_LABEL_LENGTH = 64
@@ -66,13 +76,13 @@ def plan_for_scope(scope: str) -> RustCiFullPlan:
         scope, reason = "full", f"unknown scope '{requested_scope}' defaults fail-safe to full"
     else:
         reason = f"requested {scope} scope"
-    lint_matrix, run_general, run_x64, run_arm64, families = SCOPE_DEFINITIONS[scope]
-    return RustCiFullPlan(requested_scope, scope, reason, lint_matrix, run_general, run_x64, run_arm64, families)
+    lint_matrix, run_general, run_linux_x64, run_linux_arm64, run_windows_x64, run_windows_arm64, families = SCOPE_DEFINITIONS[scope]
+    return RustCiFullPlan(requested_scope, scope, reason, lint_matrix, run_general, run_linux_x64, run_linux_arm64, run_windows_x64, run_windows_arm64, families)
 
 
 def github_outputs(plan: RustCiFullPlan) -> dict[str, str]:
     compact = {"separators": (",", ":")}
-    outputs = {"resolved_scope": plan.resolved_scope, "reason": plan.reason, "lint_matrix": json.dumps([asdict(lane) for lane in plan.lint_matrix], **compact), "run_general": str(plan.run_general).lower(), "run_x64": str(plan.run_x64).lower(), "run_arm64": str(plan.run_arm64).lower(), "selected_families": json.dumps(plan.selected_families, **compact)}
+    outputs = {"resolved_scope": plan.resolved_scope, "reason": plan.reason, "lint_matrix": json.dumps([asdict(lane) for lane in plan.lint_matrix], **compact), "run_general": str(plan.run_general).lower(), "run_linux_x64": str(plan.run_linux_x64).lower(), "run_linux_arm64": str(plan.run_linux_arm64).lower(), "run_windows_x64": str(plan.run_windows_x64).lower(), "run_windows_arm64": str(plan.run_windows_arm64).lower(), "selected_families": json.dumps(plan.selected_families, **compact)}
     if any(any(separator in value for separator in "\r\n") or len(value) > MAX_OUTPUT_VALUE_LENGTH for value in outputs.values()):
         raise ValueError("GitHub output must be single-line and bounded")
     return outputs
@@ -82,7 +92,8 @@ def render_summary(plan: RustCiFullPlan) -> str:
     return (
         "## Rust CI full plan\n\n"
         f"- Requested scope: `{plan.requested_scope or '<empty>'}`\n- Resolved scope: `{plan.resolved_scope}`\n- Reason: {plan.reason}\n"
-        f"- General families: `{str(plan.run_general).lower()}`\n- x64 nextest 4+1 PostgreSQL: `{str(plan.run_x64).lower()}`\n- ARM64 nextest: `{str(plan.run_arm64).lower()}`\n- Lint/build lanes: `{len(plan.lint_matrix)}`\n"
+        f"- General families: `{str(plan.run_general).lower()}`\n- Linux x64 nextest 4+1 PostgreSQL: `{str(plan.run_linux_x64).lower()}`\n- Linux ARM64 nextest: `{str(plan.run_linux_arm64).lower()}`\n"
+        f"- Windows x64 nextest: `{str(plan.run_windows_x64).lower()}`\n- Windows ARM64 nextest: `{str(plan.run_windows_arm64).lower()}`\n- Lint/build lanes: `{len(plan.lint_matrix)}`\n"
         f"- Selected families: {'; '.join(plan.selected_families)}\n"
     )
 

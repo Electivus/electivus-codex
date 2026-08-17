@@ -29,6 +29,12 @@ EXTENDED_LANES = (
     ("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu", "dev"),
     ("ubuntu-24.04-arm", "aarch64-unknown-linux-musl", "release"),
 )
+WINDOWS_LANES = (
+    ("windows-2025", "x86_64-pc-windows-msvc", "dev"),
+    ("windows-2025", "x86_64-pc-windows-msvc", "release"),
+    ("windows-11-arm", "aarch64-pc-windows-msvc", "dev"),
+    ("windows-11-arm", "aarch64-pc-windows-msvc", "release"),
+)
 FULL_LANES = (
     EXTENDED_LANES[0],
     MERGE_LANES[0],
@@ -37,6 +43,7 @@ FULL_LANES = (
     MERGE_LANES[2],
     EXTENDED_LANES[3],
     MERGE_LANES[1],
+    *WINDOWS_LANES,
 )
 NEXTEST_JUNIT_ENV = (
     "NEXTEST_JUNIT_FILE: "
@@ -65,11 +72,20 @@ def _planner_matrix(source: str, name: str) -> tuple[tuple[str, str, str], ...]:
     matrices = {
         "MERGE_GATE": _planner_matrix(source, "MERGE_GATE_LINT_MATRIX"),
         "EXTENDED": _planner_matrix(source, "EXTENDED_LINT_MATRIX"),
+        "WINDOWS": _planner_matrix(source, "WINDOWS_LINT_MATRIX"),
     }
-    return tuple(
-        matrices[matrix][int(index)]
-        for matrix, index in re.findall(r"(MERGE_GATE|EXTENDED)_LINT_MATRIX\[(\d)\]", body)
+    lanes = []
+    token = re.compile(
+        r"(?:(MERGE_GATE|EXTENDED|WINDOWS)_LINT_MATRIX\[(\d)\])"
+        r"|(?:\*(MERGE_GATE|EXTENDED|WINDOWS)_LINT_MATRIX)"
     )
+    for match in token.finditer(body):
+        indexed_matrix, index, expanded_matrix = match.groups()
+        if expanded_matrix:
+            lanes.extend(matrices[expanded_matrix])
+        else:
+            lanes.append(matrices[indexed_matrix][int(index)])
+    return tuple(lanes)
 
 
 def _block(text: str, start: str, following: str) -> str:
@@ -309,7 +325,7 @@ def validate_topology(
         ("validation scope fails safe", re.search(r"validation_scope:\n\s+description: .*\n\s+required: false\n\s+default: full\n\s+type: string", full) is not None and "empty scope defaults to full" in planner and "defaults fail-safe to full" in planner),
         ("merge-gate lint matrix", _planner_matrix(planner, "MERGE_GATE_LINT_MATRIX") == MERGE_LANES and "cargo clippy --workspace --target ${{ matrix.target }} --tests --profile dev --timings -- -D warnings" in lint),
         ("full Extended matrix", _planner_matrix(planner, "EXTENDED_LINT_MATRIX") == EXTENDED_LANES),
-        ("merge-gate schedules only x64", all("needs.plan.outputs.run_general == 'true'" in _job(full, name) for name in ("general", "cargo_shear", "argument_comment_lint_package", "argument_comment_lint_prebuilt")) and "needs.plan.outputs.run_x64 == 'true'" in x64 and "needs.plan.outputs.run_arm64 == 'true'" in arm64 and "include: ${{ fromJSON(needs.plan.outputs.lint_matrix) }}" in lint),
+        ("merge-gate schedules only x64", all("needs.plan.outputs.run_general == 'true'" in _job(full, name) for name in ("general", "cargo_shear", "argument_comment_lint_package", "argument_comment_lint_prebuilt")) and "needs.plan.outputs.run_linux_x64 == 'true'" in x64 and "needs.plan.outputs.run_linux_arm64 == 'true'" in arm64 and "include: ${{ fromJSON(needs.plan.outputs.lint_matrix) }}" in lint),
         ("scope-aware full result", "rust_ci_full_result.py" in full_results and "plan expected success" in result_helper and 'wanted = "success" if should_run else "skipped"' in result_helper and "actual != wanted" in result_helper and "tests_linux_x64" in result_helper and "tests_linux_arm64" in result_helper),
         ("eligible Cargo promotion", not pg_gate and "needs: deep-linux-eligibility" in cargo_gate and "needs.deep-linux-eligibility.result == 'success'" in cargo_gate and "needs.deep-linux-eligibility.outputs.eligible == 'true'" in cargo_gate and "uses: ./.github/workflows/rust-ci-full.yml" in cargo_gate and "validation_scope: merge-gate" in cargo_gate),
         ("bounded Cargo result", "needs: [deep-linux-eligibility, deep-linux-cargo]" in cargo_result and "if: ${{ always() }}" in cargo_result and "timeout-minutes: 10" in cargo_result and "VALIDATION_LABEL: Deep Linux Cargo" in cargo_result and "VALIDATION_RESULT: ${{ needs.deep-linux-cargo.result }}" in cargo_result and "ELIGIBILITY_RESULT: ${{ needs.deep-linux-eligibility.result }}" in cargo_result and "ELIGIBLE: ${{ needs.deep-linux-eligibility.outputs.eligible }}" in cargo_result and "set -euo pipefail" in cargo_result and "deep_linux_result.py | tee -a \"$GITHUB_STEP_SUMMARY\"" in cargo_result),

@@ -386,7 +386,7 @@ class PostgresArchiveTopologyTests(unittest.TestCase):
             ("merge-gate lint matrix", 2, full.replace("cargo clippy --workspace", "cargo clippy -p codex-core")),
             ("merge-gate lint matrix", 5, planner.replace('LintLane("ubuntu-24.04", "x86_64-unknown-linux-gnu", "release")', 'LintLane("ubuntu-24.04", "x86_64-unknown-linux-gnu", "dev")', 1)),
             ("full Extended matrix", 5, planner.replace('LintLane("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu", "dev")', 'LintLane("ubuntu-24.04-arm", "aarch64-unknown-linux-unknown", "dev")', 1)),
-            ("merge-gate schedules only x64", 2, full.replace("needs.plan.outputs.run_x64 == 'true'", "needs.plan.outputs.run_arm64 == 'true'")),
+            ("merge-gate schedules only x64", 2, full.replace("needs.plan.outputs.run_linux_x64 == 'true'", "needs.plan.outputs.run_linux_arm64 == 'true'")),
             ("eligible Cargo promotion", 4, blocking.replace("  repo-checks:\n", "  postgres-runtime-state-contracts:\n    uses: ./.github/workflows/postgres-runtime-state-contracts.yml\n\n  repo-checks:\n")),
             ("eligible Cargo promotion", 4, blocking.replace("  deep-linux-cargo:\n", "  missing-deep-linux-cargo:\n")),
             ("required aggregate promotion", 4, blocking.replace("- deep-linux-cargo-result", "- deep-linux-cargo")),

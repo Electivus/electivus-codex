@@ -16,9 +16,12 @@ class ChildResults:
     cargo_shear: str
     argument_comment_lint_package: str
     argument_comment_lint_prebuilt: str
+    argument_comment_lint_windows: str
     lint_build: str
     tests_linux_x64: str
     tests_linux_arm64: str
+    tests_windows_x64: str
+    tests_windows_arm64: str
 
 
 @dataclass(frozen=True)
@@ -27,12 +30,22 @@ class RustCiFullDecision:
     issues: tuple[str, ...]
 
 
-CHILDREN = ("general", "cargo_shear", "argument_comment_lint_package", "argument_comment_lint_prebuilt", "lint_build", "tests_linux_x64", "tests_linux_arm64")
+CHILDREN = ("general", "cargo_shear", "argument_comment_lint_package", "argument_comment_lint_prebuilt", "argument_comment_lint_windows", "lint_build", "tests_linux_x64", "tests_linux_arm64", "tests_windows_x64", "tests_windows_arm64")
 
 
 def expected_children(resolved_scope: str) -> dict[str, bool]:
     plan = plan_for_scope(resolved_scope)
-    return dict(zip(CHILDREN, (plan.run_general,) * 4 + (True, plan.run_x64, plan.run_arm64), strict=True))
+    expected = (
+        (plan.run_general,) * 4
+        + (plan.run_windows_x64, True)
+        + (
+            plan.run_linux_x64,
+            plan.run_linux_arm64,
+            plan.run_windows_x64,
+            plan.run_windows_arm64,
+        )
+    )
+    return dict(zip(CHILDREN, expected, strict=True))
 
 
 def evaluate_results(resolved_scope: str, plan_result: str, results: ChildResults) -> RustCiFullDecision:

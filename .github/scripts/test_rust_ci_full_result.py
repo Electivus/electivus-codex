@@ -4,14 +4,15 @@ import unittest
 from rust_ci_full_result import ChildResults, RustCiFullDecision, evaluate_results, render_result_summary
 
 
-MERGE = ChildResults("skipped", "skipped", "skipped", "skipped", "success", "success", "skipped")
-EXTENDED = ChildResults("skipped", "skipped", "skipped", "skipped", "success", "skipped", "success")
-FULL = ChildResults(*("success",) * 7)
+MERGE = ChildResults("skipped", "skipped", "skipped", "skipped", "skipped", "success", "success", "skipped", "skipped", "skipped")
+EXTENDED = ChildResults("skipped", "skipped", "skipped", "skipped", "skipped", "success", "skipped", "success", "skipped", "skipped")
+WINDOWS = ChildResults("skipped", "skipped", "skipped", "skipped", "success", "success", "skipped", "skipped", "success", "success")
+FULL = ChildResults(*("success",) * 10)
 
 
 class RustCiFullResultTests(unittest.TestCase):
     def test_each_scope_requires_exact_success_and_skipped_children(self) -> None:
-        for scope, results in (("merge-gate", MERGE), ("extended", EXTENDED), ("full", FULL)):
+        for scope, results in (("merge-gate", MERGE), ("extended", EXTENDED), ("windows", WINDOWS), ("full", FULL)):
             with self.subTest(scope=scope):
                 self.assertEqual(RustCiFullDecision(True, ()), evaluate_results(scope, "success", results))
 
@@ -24,7 +25,7 @@ class RustCiFullResultTests(unittest.TestCase):
                 self.assertEqual(RustCiFullDecision(False, (f"resolved scope is invalid: {label}",)), evaluate_results(scope, "success", FULL))
 
     def test_plan_and_every_non_success_child_state_fail_closed(self) -> None:
-        plan_failure = evaluate_results("extended", "failure", ChildResults(*("skipped",) * 7))
+        plan_failure = evaluate_results("extended", "failure", ChildResults(*("skipped",) * 10))
         self.assertEqual("plan expected success, got failure", plan_failure.issues[0])
         for state in ("skipped", "failure", "cancelled", "incomplete"):
             with self.subTest(state=state):
