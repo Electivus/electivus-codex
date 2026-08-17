@@ -127,6 +127,7 @@ base64 = { workspace = true }
 codex-model-provider-info = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 core_test_support = { workspace = true }
+dunce = { workspace = true }
 flate2 = { workspace = true }
 hmac = { workspace = true }
 opentelemetry = { workspace = true }

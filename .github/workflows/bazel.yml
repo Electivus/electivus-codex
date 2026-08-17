@@ -169,7 +169,16 @@ jobs:
           target: x86_64-pc-windows-gnullvm
           cache-scope: bazel-test-windows
 
+      - name: Copy checkout to stable Windows Bazel workspace
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: >-
+          & "$env:GITHUB_WORKSPACE\.github\scripts\copy-windows-ci-workspace.ps1"
+          -Source $env:GITHUB_WORKSPACE
+          -Destination 'C:\codex-bazel-workspace'
+
       - name: Bazel test shard
+        working-directory: C:/codex-bazel-workspace
         env:
           BAZEL_TEST_SHARD: ${{ matrix.shard }}
           BAZEL_TEST_SHARD_COUNT: 4

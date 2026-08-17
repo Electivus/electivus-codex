@@ -2050,6 +2050,7 @@ dependencies = [
  "codex-web-search-extension",
  "codex-windows-sandbox",
  "core_test_support",
+ "dunce",
  "flate2",
  "futures",
  "hmac 0.12.1",

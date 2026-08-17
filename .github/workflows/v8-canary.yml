@@ -325,7 +325,7 @@ jobs:
     name: Build ptrcomp-sandbox ${{ matrix.target }} from source
     needs: metadata
     runs-on: windows-2025
-    timeout-minutes: 120
+    timeout-minutes: 180
     permissions:
       contents: read
     strategy:

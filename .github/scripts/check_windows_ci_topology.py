@@ -41,7 +41,7 @@ SOURCES = (
     ".github/windows-rust-skip-baseline.json",
     ".bazelrc",
     ".github/workflows/rust-ci.yml",
-    ".github/scripts/copy-windows-nextest-workspace.ps1",
+    ".github/scripts/copy-windows-ci-workspace.ps1",
 )
 WINDOWS_SCOPE_IF = (
     "inputs.validation_scope != 'essential' && "
@@ -96,6 +96,7 @@ def validate_topology(
     shard_tests = _step(shards, "tests")
     platform_result = _job(platform, "result")
     bazel_shards = _job(bazel, "test-windows-shard")
+    bazel_shard_test = _step(bazel_shards, "Bazel test shard")
     bazel_test_result = _job(bazel, "test-windows")
     bazel_clippy = _job(bazel, "clippy-windows")
     bazel_release = _job(bazel, "verify-release-build-windows")
@@ -113,6 +114,11 @@ def validate_topology(
             re.MULTILINE,
         )
     )
+    bazelrc_skip_filter_lines = {
+        line
+        for line in bazelrc.splitlines()
+        if "CODEX_BAZEL_TEST_SKIP_FILTERS=" in line
+    }
 
     try:
         inventory = json.loads(inventory_source)
@@ -191,9 +197,9 @@ def validate_topology(
             and "uses: ./.github/actions/setup-rusty-v8" in archive
             and "C:/codex-nextest-workspace/codex-rs" in archive
             and "C:/codex-nextest-workspace/codex-rs" in shards
-            and archive.count("Copy checkout to stable Windows nextest workspace") == 1
-            and shards.count("Copy checkout to stable Windows nextest workspace") == 1
-            and (archive + shards).count("copy-windows-nextest-workspace.ps1") == 2
+            and archive.count("Copy checkout to stable Windows CI workspace") == 1
+            and shards.count("Copy checkout to stable Windows CI workspace") == 1
+            and (archive + shards).count("copy-windows-ci-workspace.ps1") == 2
             and "ItemType Junction" not in platform
             and all(
                 marker in workspace_copy
@@ -202,7 +208,7 @@ def validate_topology(
                     "/COPY:DAT",
                     "/DCOPY:DAT",
                     "$robocopyExitCode -gt 7",
-                    "Stable Windows nextest workspace is incomplete",
+                    "Stable Windows CI workspace is incomplete",
                 )
             )
             and "/COPYALL" not in workspace_copy
@@ -250,6 +256,9 @@ def validate_topology(
             "matrix:\n        shard: [1, 2, 3, 4]" in bazel_shards
             and "fail-fast: false" in bazel_shards
             and "windows_bazel_shards.py" in bazel_shards
+            and bazel_shards.count("Copy checkout to stable Windows Bazel workspace") == 1
+            and bazel_shards.count("copy-windows-ci-workspace.ps1") == 1
+            and "working-directory: C:/codex-bazel-workspace" in bazel_shard_test
             and "--windows-cross-compile" in bazel_shards + bazel_clippy + bazel_release
             and "--test_tag_filters=-argument-comment-lint" in bazel_shards
             and "list-bazel-clippy-targets.sh --windows-cross-compile" in bazel_clippy
@@ -285,6 +294,7 @@ def validate_topology(
             v8_windows.count("- x86_64-pc-windows-msvc") == 1
             and v8_windows.count("- aarch64-pc-windows-msvc") == 1
             and "windows-11-arm" not in v8_windows
+            and "timeout-minutes: 180" in v8_windows
             and "V8_FROM_SOURCE: \"1\"" in v8_windows
             and 'GN_ARGS: "symbol_level=0 v8_symbol_level=0"' in v8_windows
             and v8_windows_cache.count("windows-2025-sandbox-symbols0-") == 2
@@ -327,9 +337,11 @@ def validate_topology(
         ),
         (
             "no new Windows test filters",
-            bazelrc.count("CODEX_BAZEL_TEST_SKIP_FILTERS=") == 2
-            and "common:ci-windows --test_env=CODEX_BAZEL_TEST_SKIP_FILTERS=suite::code_mode::code_mode_can_call_hidden_dynamic_tools,tests::windows_tests::conpty_ctrl_c_interrupts_powershell_foreground_child" in bazelrc
-            and "common:ci-windows-cross --test_env=CODEX_BAZEL_TEST_SKIP_FILTERS=command_safety::powershell_parser::tests::,suite::code_mode::code_mode_can_call_hidden_dynamic_tools,tests::windows_tests::conpty_ctrl_c_interrupts_powershell_foreground_child" in bazelrc,
+            bazelrc_skip_filter_lines
+            == {
+                "common:ci-windows --test_env=CODEX_BAZEL_TEST_SKIP_FILTERS=suite::code_mode::code_mode_can_call_hidden_dynamic_tools",
+                "common:ci-windows-cross --test_env=CODEX_BAZEL_TEST_SKIP_FILTERS=command_safety::powershell_parser::tests::,suite::code_mode::code_mode_can_call_hidden_dynamic_tools",
+            },
         ),
         (
             "required repository topology check",

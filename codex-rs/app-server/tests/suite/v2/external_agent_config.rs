@@ -887,7 +887,7 @@ async fn external_agent_config_detects_and_imports_project_memory_files() -> Res
     let project_cwd = codex_home.path().join("project-a");
     std::fs::create_dir_all(&source_memory)?;
     std::fs::create_dir_all(&project_cwd)?;
-    let project_cwd = std::fs::canonicalize(project_cwd)?;
+    let project_cwd = dunce::canonicalize(project_cwd)?;
     let source_file = source_memory.join("MEMORY.md");
     let source_topic = source_memory.join("release-process.md");
     std::fs::write(&source_file, "project A memory")?;

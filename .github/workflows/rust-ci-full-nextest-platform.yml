@@ -75,12 +75,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Copy checkout to stable Windows nextest workspace
+      - name: Copy checkout to stable Windows CI workspace
         if: runner.os == 'Windows'
         working-directory: ${{ github.workspace }}
         shell: pwsh
         run: >-
-          & "$env:GITHUB_WORKSPACE\.github\scripts\copy-windows-nextest-workspace.ps1"
+          & "$env:GITHUB_WORKSPACE\.github\scripts\copy-windows-ci-workspace.ps1"
           -Source $env:GITHUB_WORKSPACE
           -Destination 'C:\codex-nextest-workspace'
 
@@ -335,12 +335,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Copy checkout to stable Windows nextest workspace
+      - name: Copy checkout to stable Windows CI workspace
         if: runner.os == 'Windows'
         working-directory: ${{ github.workspace }}
         shell: pwsh
         run: >-
-          & "$env:GITHUB_WORKSPACE\.github\scripts\copy-windows-nextest-workspace.ps1"
+          & "$env:GITHUB_WORKSPACE\.github\scripts\copy-windows-ci-workspace.ps1"
           -Source $env:GITHUB_WORKSPACE
           -Destination 'C:\codex-nextest-workspace'
 

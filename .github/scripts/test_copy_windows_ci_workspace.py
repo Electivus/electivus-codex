@@ -7,13 +7,13 @@ import unittest
 
 
 @unittest.skipUnless(os.name == "nt", "Windows workspace copy uses robocopy")
-class CopyWindowsNextestWorkspaceTests(unittest.TestCase):
+class CopyWindowsCiWorkspaceTests(unittest.TestCase):
     def test_copies_checkout_and_refuses_existing_destination(self) -> None:
         pwsh = shutil.which("pwsh")
         if pwsh is None:
             self.skipTest("PowerShell 7 is required")
 
-        script = Path(__file__).with_name("copy-windows-nextest-workspace.ps1")
+        script = Path(__file__).with_name("copy-windows-ci-workspace.ps1")
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             source = temp / "source"
@@ -44,7 +44,7 @@ class CopyWindowsNextestWorkspaceTests(unittest.TestCase):
             second = subprocess.run(command, check=False, capture_output=True, text=True)
             self.assertNotEqual(0, second.returncode)
             self.assertIn(
-                "Stable Windows nextest workspace already exists",
+                "Stable Windows CI workspace already exists",
                 second.stdout + second.stderr,
             )
 
