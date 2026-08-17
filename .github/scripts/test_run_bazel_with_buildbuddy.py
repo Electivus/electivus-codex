@@ -48,6 +48,18 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
             ["build", "--", "//codex-rs/cli:codex"],
         )
 
+    def test_keyless_windows_invocation_retains_local_ci_configuration(self) -> None:
+        args = [
+            "test",
+            "--config=ci-windows",
+            "--",
+            "//codex-rs/cli:codex",
+        ]
+        self.assertEqual(
+            args,
+            run_bazel_with_buildbuddy.bazel_args_with_remote_config(args, {}),
+        )
+
     def test_program_arguments_after_separator_do_not_select_or_lose_rbe(self) -> None:
         args = ["run", "//codex-rs/cli:codex", "--", "--config=remote"]
 

@@ -88,7 +88,7 @@ print_bazel_test_log_tails() {
   local testlogs_dir
 
   local -a bazel_info_args=(info)
-  if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
+  if [[ -n "${BUILDBUDDY_API_KEY:-}" || "${RUNNER_OS:-}" == "Windows" ]]; then
     # `bazel info` needs the same CI config as the failed test invocation so
     # platform-specific output roots match. On Windows, omitting `ci-windows`
     # would point at `local_windows-fastbuild` even when the test ran with the
@@ -303,7 +303,9 @@ if [[ "${RUNNER_OS:-}" == "Windows" && $windows_cross_compile -eq 1 && -z "${BUI
   # The Windows cross-compile config depends on authenticated remote
   # execution. When credentials are unavailable, keep the local build shape
   # and its lower concurrency cap.
-  post_config_bazel_args+=(--jobs=8)
+  # Standard public Windows runners provide four vCPUs. Keep the local fallback
+  # within that capacity instead of inheriting the larger private-runner limit.
+  post_config_bazel_args+=(--jobs=4)
 fi
 
 if [[ -n "${BAZEL_REPO_CONTENTS_CACHE:-}" ]]; then
@@ -388,6 +390,11 @@ if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
   bazel_run_args+=("--config=${ci_config}")
 else
   echo "BuildBuddy API key is not available; using local Bazel configuration."
+  if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
+    # The local Windows config owns the MSVC platform, known inherited test
+    # exclusions, cache layout, and CI metadata without enabling remote work.
+    bazel_run_args+=("--config=${ci_config}")
+  fi
 fi
 if (( ${#post_config_bazel_args[@]} > 0 )); then
   bazel_run_args+=("${post_config_bazel_args[@]}")

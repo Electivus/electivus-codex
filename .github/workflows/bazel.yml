@@ -7,11 +7,22 @@ on:
   workflow_call:
     inputs:
       validation_scope:
-        description: Validation scope; unknown values run all Bazel jobs.
+        description: Validation scope (essential, release-only, windows, or full); unknown values run all jobs.
         required: false
         default: essential
         type: string
   workflow_dispatch:
+    inputs:
+      validation_scope:
+        description: Validation scope.
+        required: true
+        default: full
+        type: choice
+        options:
+          - essential
+          - release-only
+          - windows
+          - full
 
 concurrency:
   # Cancel previous actions from the same PR or branch except 'main' branch.
@@ -24,7 +35,7 @@ jobs:
     # Native Linux x64 is the current essential platform. Additional Linux
     # architectures and build variants run in Extended validation.
     timeout-minutes: 90
-    if: ${{ inputs.validation_scope != 'release-only' }}
+    if: ${{ inputs.validation_scope != 'release-only' && inputs.validation_scope != 'windows' }}
     strategy:
       fail-fast: false
       matrix:
@@ -130,9 +141,220 @@ jobs:
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
 
+  test-windows-shard:
+    timeout-minutes: 90
+    if: ${{ inputs.validation_scope != 'essential' && inputs.validation_scope != 'release-only' && inputs.validation_scope != '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    runs-on: windows-2025
+    name: Bazel test on windows-2025 for x86_64-pc-windows-gnullvm shard ${{ matrix.shard }}/4
+    environment:
+      name: bazel
+      deployment: false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Test BuildBuddy Bazel wrapper
+        if: matrix.shard == 1
+        shell: pwsh
+        run: python .github/scripts/test_run_bazel_with_buildbuddy.py
+
+      - name: Prepare Bazel CI
+        uses: ./.github/actions/prepare-bazel-ci
+        with:
+          target: x86_64-pc-windows-gnullvm
+          cache-scope: bazel-test-windows
+
+      - name: Bazel test shard
+        env:
+          BAZEL_TEST_SHARD: ${{ matrix.shard }}
+          BAZEL_TEST_SHARD_COUNT: 4
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bazel_test_query='tests(//...) except tests(//third_party/v8:all) except attr(tags, "manual", tests(//...))'
+          selected_output="$(
+            ./.github/scripts/run-bazel-query-ci.sh --output=label -- "${bazel_test_query}" \
+              | python3 .github/scripts/windows_bazel_shards.py \
+                --shard "${BAZEL_TEST_SHARD}" \
+                --shard-count "${BAZEL_TEST_SHARD_COUNT}"
+          )
+          mapfile -t selected_targets <<< "${selected_output}"
+          echo "Selected ${#selected_targets[@]} Bazel test targets for Windows shard ${BAZEL_TEST_SHARD}/${BAZEL_TEST_SHARD_COUNT}."
+
+          ./.github/scripts/run-bazel-ci.sh \
+            --print-failed-action-summary \
+            --print-failed-test-logs \
+            --windows-cross-compile \
+            --remote-download-toplevel \
+            -- \
+            test \
+            --skip_incompatible_explicit_targets \
+            --test_tag_filters=-argument-comment-lint \
+            --test_verbose_timeout_warnings \
+            --build_metadata=COMMIT_SHA=${GITHUB_SHA} \
+            --build_metadata=TAG_windows_test_shard=${BAZEL_TEST_SHARD} \
+            -- \
+            "${selected_targets[@]}"
+
+      - name: Upload Bazel execution logs
+        if: always() && !cancelled()
+        continue-on-error: true
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: bazel-execution-logs-test-x86_64-pc-windows-gnullvm-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/bazel-execution-logs
+          if-no-files-found: ignore
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
+  test-windows:
+    name: Windows Bazel test result
+    if: always() && inputs.validation_scope != 'essential' && inputs.validation_scope != 'release-only' && inputs.validation_scope != ''
+    needs: test-windows-shard
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Confirm Windows Bazel test shards passed
+        shell: bash
+        run: |
+          if [[ "${{ needs.test-windows-shard.result }}" != "success" ]]; then
+            echo "Windows Bazel test shards finished with result: ${{ needs.test-windows-shard.result }}" >&2
+            exit 1
+          fi
+
+  clippy-windows:
+    timeout-minutes: 90
+    if: ${{ inputs.validation_scope != 'essential' && inputs.validation_scope != 'release-only' && inputs.validation_scope != '' }}
+    runs-on: windows-2025
+    name: Bazel clippy on windows-2025 for x86_64-pc-windows-gnullvm
+    environment:
+      name: bazel
+      deployment: false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Prepare Bazel CI
+        uses: ./.github/actions/prepare-bazel-ci
+        with:
+          target: x86_64-pc-windows-gnullvm
+          cache-scope: bazel-clippy-windows
+
+      - name: Bazel build Windows clippy targets
+        env:
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bazel_clippy_args=(
+            --config=clippy
+            --build_metadata=COMMIT_SHA=${GITHUB_SHA}
+            --build_metadata=TAG_job=clippy-windows
+          )
+          if [[ -z "${BUILDBUDDY_API_KEY:-}" ]]; then
+            bazel_clippy_args+=(--skip_incompatible_explicit_targets)
+          fi
+          bazel_target_lines="$(./scripts/list-bazel-clippy-targets.sh --windows-cross-compile)"
+          mapfile -t bazel_targets <<< "${bazel_target_lines}"
+          ./.github/scripts/run-bazel-ci.sh \
+            --print-failed-action-summary \
+            --windows-cross-compile \
+            -- \
+            build \
+            "${bazel_clippy_args[@]}" \
+            -- \
+            "${bazel_targets[@]}"
+
+      - name: Upload Bazel execution logs
+        if: always() && !cancelled()
+        continue-on-error: true
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: bazel-execution-logs-clippy-x86_64-pc-windows-gnullvm
+          path: ${{ runner.temp }}/bazel-execution-logs
+          if-no-files-found: ignore
+
+  verify-release-build-windows:
+    timeout-minutes: 90
+    if: ${{ inputs.validation_scope != 'essential' && inputs.validation_scope != 'release-only' && inputs.validation_scope != '' }}
+    runs-on: windows-2025
+    name: Verify release build on windows-2025 for x86_64-pc-windows-gnullvm
+    environment:
+      name: bazel
+      deployment: false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Prepare Bazel CI
+        uses: ./.github/actions/prepare-bazel-ci
+        with:
+          target: x86_64-pc-windows-gnullvm
+          cache-scope: bazel-release-windows
+
+      - name: Bazel build Windows release targets
+        env:
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bazel_target_lines="$(bash ./scripts/list-bazel-release-targets.sh)"
+          mapfile -t bazel_targets <<< "${bazel_target_lines}"
+          ./.github/scripts/run-bazel-ci.sh \
+            --windows-cross-compile \
+            -- \
+            build \
+            --compilation_mode=fastbuild \
+            --@rules_rust//rust/settings:extra_rustc_flag=-Cdebug-assertions=no \
+            --@rules_rust//rust/settings:extra_exec_rustc_flag=-Cdebug-assertions=no \
+            --build_metadata=COMMIT_SHA=${GITHUB_SHA} \
+            --build_metadata=TAG_job=verify-release-build-windows \
+            --build_metadata=TAG_rust_debug_assertions=off \
+            -- \
+            "${bazel_targets[@]}"
+
+      - name: Upload Bazel execution logs
+        if: always() && !cancelled()
+        continue-on-error: true
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: bazel-execution-logs-verify-release-build-x86_64-pc-windows-gnullvm
+          path: ${{ runner.temp }}/bazel-execution-logs
+          if-no-files-found: ignore
+
+  windows-result:
+    name: Windows Bazel result
+    needs: [test-windows, clippy-windows, verify-release-build-windows]
+    if: always() && inputs.validation_scope != 'essential' && inputs.validation_scope != 'release-only' && inputs.validation_scope != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Confirm Windows Bazel validation passed
+        env:
+          CLIPPY_RESULT: ${{ needs.clippy-windows.result }}
+          RELEASE_RESULT: ${{ needs.verify-release-build-windows.result }}
+          TEST_RESULT: ${{ needs.test-windows.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for result in "${TEST_RESULT}" "${CLIPPY_RESULT}" "${RELEASE_RESULT}"; do
+            if [[ "${result}" != "success" ]]; then
+              echo "Windows Bazel child finished with result: ${result:-missing}" >&2
+              exit 1
+            fi
+          done
+
   clippy:
     timeout-minutes: 90
-    if: ${{ inputs.validation_scope != 'release-only' }}
+    if: ${{ inputs.validation_scope != 'release-only' && inputs.validation_scope != 'windows' }}
     strategy:
       fail-fast: false
       matrix:
@@ -209,7 +431,7 @@ jobs:
   verify-release-build:
     # An empty scope is the manual-dispatch default and preserves Essential
     # validation. Unknown nonempty scopes fail safe by running every job.
-    if: ${{ inputs.validation_scope != 'essential' && inputs.validation_scope != '' }}
+    if: ${{ inputs.validation_scope != 'essential' && inputs.validation_scope != 'windows' && inputs.validation_scope != '' }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
