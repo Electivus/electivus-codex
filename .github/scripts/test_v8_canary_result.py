@@ -11,18 +11,18 @@ class V8CanaryResultTests(unittest.TestCase):
     def test_only_full_matrix_success_and_metadata_only_skip_pass(self) -> None:
         cases = (
             (
-                "success", "true", "V8 path changed", "success",
-                result.Decision(True, "V8 canary required and all matrix legs succeeded"),
+                "success", "true", "V8 path changed", "success", "success",
+                result.Decision(True, "Windows V8 and required Linux matrix legs succeeded"),
             ),
             (
-                "success", "false", "ordinary Codex source", "skipped",
-                result.Decision(True, "V8 canary not required and build correctly skipped"),
+                "success", "false", "ordinary Codex source", "skipped", "success",
+                result.Decision(True, "Windows V8 succeeded and Linux matrix correctly skipped"),
             ),
         )
-        for metadata, required, reason, build, expected in cases:
+        for metadata, required, reason, build, windows_build, expected in cases:
             with self.subTest(required=required):
                 self.assertEqual(
-                    expected, result.evaluate(metadata, required, reason, build)
+                    expected, result.evaluate(metadata, required, reason, build, windows_build)
                 )
 
     def test_every_incomplete_or_inconsistent_state_fails_closed(self) -> None:
@@ -49,7 +49,14 @@ class V8CanaryResultTests(unittest.TestCase):
             with self.subTest(state=(metadata, required, build)):
                 self.assertEqual(
                     result.Decision(False, message),
-                    result.evaluate(metadata, required, reason, build),
+                    result.evaluate(metadata, required, reason, build, "success"),
+                )
+
+        for windows_build in ("", "skipped", "failure", "cancelled"):
+            with self.subTest(windows_build=windows_build):
+                self.assertEqual(
+                    result.Decision(False, f"Windows source matrix expected success, found {windows_build or 'missing'}"),
+                    result.evaluate("success", "false", "ordinary Codex source", "skipped", windows_build),
                 )
 
     def test_main_writes_bounded_summary(self) -> None:
@@ -59,11 +66,13 @@ class V8CanaryResultTests(unittest.TestCase):
             "CANARY_REASON": "ordinary Codex source",
             "CANARY_REQUIRED": "false",
             "METADATA_RESULT": "success",
+            "WINDOWS_BUILD_RESULT": "success",
         }
         with patch.dict(os.environ, env, clear=True), redirect_stdout(output):
             self.assertEqual(0, result.main())
         self.assertIn("- Required: `false`\n", output.getvalue())
         self.assertIn("- Build matrix: `skipped`\n", output.getvalue())
+        self.assertIn("- Windows source matrix: `success`\n", output.getvalue())
         self.assertIn("- Reason: ordinary Codex source\n", output.getvalue())
 
 

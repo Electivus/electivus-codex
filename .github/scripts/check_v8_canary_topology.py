@@ -44,6 +44,7 @@ def validate_topology(
 ) -> list[str]:
     metadata = _job(canary, "metadata")
     build = _job(canary, "build")
+    windows_build = _job(canary, "build-windows-source")
     result = _job(canary, "result")
     detect = _step(metadata, "Detect V8 canary changes")
     version = _step(metadata, "Resolve exact v8 crate version")
@@ -66,9 +67,11 @@ def validate_topology(
         ("metadata fail safe", "canary_reason: ${{ steps.changes.outputs.canary_reason }}" in metadata and "canary_required: ${{ steps.changes.outputs.canary_required || 'true' }}" in metadata and "canary_required=true" in detect and "detector_status=0" in detect and "detector exited with status" in detect and "${#detector_lines[@]} -eq 2" in detect and "^canary_required=(true|false)$" in detect and "^canary_reason=([[:print:]]{1,240})$" in detect and 'canary_required="${detector_lines[0]#canary_required=}"' in detect and "classifier returned malformed output" in detect and "canary_reason=${canary_reason}" in detect and "GITHUB_STEP_SUMMARY" in detect),
         ("version fallback", "unknown-${GITHUB_SHA:0:12}" in version and "resolved-v8-crate-version" in version and "^[A-Za-z0-9._-]{1,64}$" in version),
         ("conditional build", "needs: metadata" in build and "if: ${{ needs.metadata.outputs.canary_required == 'true' }}" in build),
-        ("bounded result", "needs: [metadata, build]" in result and "if: ${{ always() }}" in result and "BUILD_RESULT: ${{ needs.build.result }}" in result and "CANARY_REASON: ${{ needs.metadata.outputs.canary_reason }}" in result and "CANARY_REQUIRED: ${{ needs.metadata.outputs.canary_required }}" in result and "METADATA_RESULT: ${{ needs.metadata.result }}" in result and "v8_canary_result.py | tee -a \"$GITHUB_STEP_SUMMARY\"" in result),
+        ("exact Windows matrix", windows_build.count("- x86_64-pc-windows-msvc") == 1 and windows_build.count("- aarch64-pc-windows-msvc") == 1 and "runs-on: windows-2025" in windows_build and "windows-11-arm" not in windows_build and "fail-fast: false" in windows_build and re.search(r"^    if:", windows_build, re.MULTILINE) is None),
+        ("bounded result", "needs: [metadata, build, build-windows-source]" in result and "if: ${{ always() }}" in result and "BUILD_RESULT: ${{ needs.build.result }}" in result and "WINDOWS_BUILD_RESULT: ${{ needs.build-windows-source.result }}" in result and "CANARY_REASON: ${{ needs.metadata.outputs.canary_reason }}" in result and "CANARY_REQUIRED: ${{ needs.metadata.outputs.canary_required }}" in result and "METADATA_RESULT: ${{ needs.metadata.result }}" in result and "v8_canary_result.py | tee -a \"$GITHUB_STEP_SUMMARY\"" in result),
         ("artifact and smoke integrity", "Build Bazel V8 release pair" in build and "BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}" in build and "run_bazel_with_buildbuddy.py" in build and "rusty_v8_bazel.py stage-release-pair" in build and "x86_64-unknown-linux-gnu:x86_64|aarch64-unknown-linux-gnu:aarch64" in smoke and "Skipping non-native Cargo smoke" in smoke and "actions/upload-artifact@" in upload and "v8-canary-${{ needs.metadata.outputs.v8_version }}-${{ matrix.variant }}-${{ matrix.target }}" in upload and '"codex-rs/v8-poc/**"' in detector),
-        ("red matrix", "continue-on-error:" not in build),
+        ("Windows source integrity", "repository: denoland/rusty_v8" in windows_build and "ref: v${{ needs.metadata.outputs.v8_version }}" in windows_build and "V8_FROM_SOURCE: \"1\"" in windows_build and "--features v8_enable_sandbox" in windows_build and "stage-upstream-release-pair" in windows_build and "Smoke link staged artifact with Cargo" in windows_build and "--features sandbox --no-run" in windows_build and "setup-msvc-env" in windows_build),
+        ("red matrix", "continue-on-error:" not in build + windows_build),
         ("V8 caller required", blocking.count("uses: ./.github/workflows/v8-canary.yml") == 1 and "uses: ./.github/workflows/v8-canary.yml" in caller and "- v8-canary" in required),
         ("V8 caller permissions", "permissions:\n      contents: read\n      actions: read" in caller and "permissions:\n      contents: read\n      actions: read" in build),
         ("detector self relevance", all(f'"{path}"' in detector for path in infra_paths)),
