@@ -376,51 +376,79 @@ fn replay_splittable_message_expansion(
     let message_with_content = |content| ResponseItem::Message {
         id: id.clone(),
         role: role.clone(),
-        content: vec![content],
+        content,
         phase: phase.clone(),
         internal_chat_message_metadata_passthrough: metadata.clone(),
     };
     let mut expanded_items = 0usize;
     let mut expanded_bytes = 0usize;
-    for content in content {
-        let single_item = message_with_content(content.clone());
-        let single_item_bytes = serialized_bytes(&single_item)?;
-        let (item_count, split_item_bytes) = if single_item_bytes <= max_model_context_item_bytes()
-            || has_discounted_model_payload(&single_item)
-        {
-            (1, single_item_bytes)
-        } else {
-            let empty_content = match content {
-                ContentItem::InputText { .. } => ContentItem::InputText {
-                    text: String::new(),
-                },
-                ContentItem::OutputText { .. } => ContentItem::OutputText {
-                    text: String::new(),
-                },
-                ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => return Ok(None),
-            };
-            let empty_item_bytes = serialized_bytes(&message_with_content(empty_content))?;
-            // Leave enough room for any one JSON-escaped Unicode scalar at a chunk boundary.
-            let text_capacity = max_model_context_item_bytes()
-                .saturating_sub(empty_item_bytes)
-                .saturating_sub(12);
-            if text_capacity == 0 {
-                return Ok(None);
-            }
-            let text_bytes = single_item_bytes.saturating_sub(empty_item_bytes);
-            let item_count = text_bytes.div_ceil(text_capacity).max(1);
-            let split_item_bytes = empty_item_bytes
-                .checked_mul(item_count)
-                .and_then(|bytes| bytes.checked_add(text_bytes))
-                .ok_or_else(|| budget.limit_error("byte count overflow"))?;
-            (item_count, split_item_bytes)
-        };
+    let mut account = |item_count: usize, item_bytes: usize| -> ThreadStoreResult<()> {
         expanded_items = expanded_items
             .checked_add(item_count)
             .ok_or_else(|| budget.limit_error("item count overflow"))?;
         expanded_bytes = expanded_bytes
-            .checked_add(split_item_bytes)
+            .checked_add(item_bytes)
             .ok_or_else(|| budget.limit_error("byte count overflow"))?;
+        Ok(())
+    };
+    let empty_group_bytes = serialized_bytes(&message_with_content(Vec::new()))?;
+    let mut current_group_bytes: Option<usize> = None;
+    for content in content {
+        let single_item = message_with_content(vec![content.clone()]);
+        let single_item_bytes = serialized_bytes(&single_item)?;
+        if single_item_bytes <= max_model_context_item_bytes()
+            || has_discounted_model_payload(&single_item)
+        {
+            let content_bytes = single_item_bytes.saturating_sub(empty_group_bytes);
+            let candidate_bytes = match current_group_bytes {
+                Some(group_bytes) => group_bytes
+                    .checked_add(content_bytes)
+                    .and_then(|bytes| bytes.checked_add(1))
+                    .ok_or_else(|| budget.limit_error("byte count overflow"))?,
+                None => single_item_bytes,
+            };
+            if candidate_bytes <= max_model_context_item_bytes()
+                || current_group_bytes.is_none() && has_discounted_model_payload(&single_item)
+            {
+                current_group_bytes = Some(candidate_bytes);
+                continue;
+            }
+            if let Some(group_bytes) = current_group_bytes.replace(single_item_bytes) {
+                account(/*item_count*/ 1, group_bytes)?;
+            }
+            continue;
+        }
+
+        if let Some(group_bytes) = current_group_bytes.take() {
+            account(/*item_count*/ 1, group_bytes)?;
+        }
+        let empty_content = match content {
+            ContentItem::InputText { .. } => ContentItem::InputText {
+                text: String::new(),
+            },
+            ContentItem::OutputText { .. } => ContentItem::OutputText {
+                text: String::new(),
+            },
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => return Ok(None),
+        };
+        let empty_item_bytes = serialized_bytes(&message_with_content(vec![empty_content]))?;
+        // Leave enough room for any one JSON-escaped Unicode scalar at a chunk boundary.
+        let text_capacity = max_model_context_item_bytes()
+            .saturating_sub(empty_item_bytes)
+            .saturating_sub(12);
+        if text_capacity == 0 {
+            return Ok(None);
+        }
+        let text_bytes = single_item_bytes.saturating_sub(empty_item_bytes);
+        let item_count = text_bytes.div_ceil(text_capacity).max(1);
+        let split_item_bytes = empty_item_bytes
+            .checked_mul(item_count)
+            .and_then(|bytes| bytes.checked_add(text_bytes))
+            .ok_or_else(|| budget.limit_error("byte count overflow"))?;
+        account(item_count, split_item_bytes)?;
+    }
+    if let Some(group_bytes) = current_group_bytes {
+        account(/*item_count*/ 1, group_bytes)?;
     }
     Ok(Some(ReplayMessageExpansion {
         additional_items: expanded_items.saturating_sub(1),

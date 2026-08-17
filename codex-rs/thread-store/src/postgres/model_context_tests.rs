@@ -143,6 +143,32 @@ fn model_context_validation_accepts_replay_splittable_messages_and_accounts_expa
 }
 
 #[test]
+fn model_context_validation_packs_small_message_content_before_accounting_expansion() {
+    let thread_id = codex_protocol::ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f038")
+        .expect("thread id");
+    let message = ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: (0..MAX_MODEL_CONTEXT_ITEMS)
+            .map(|_| ContentItem::InputText {
+                text: "x".to_string(),
+            })
+            .collect(),
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut budget = ModelContextBudget::new(thread_id);
+    budget
+        .account_item(/*item_bytes*/ 1)
+        .expect("session metadata");
+    budget.account_item(/*item_bytes*/ 1).expect("history row");
+
+    validate_response_item(&message, &mut budget).expect("small content should pack during replay");
+
+    assert!(budget.items < 100);
+}
+
+#[test]
 fn compacted_replacement_history_is_bounded_after_expansion() {
     let thread_id = codex_protocol::ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f038")
         .expect("thread id");
