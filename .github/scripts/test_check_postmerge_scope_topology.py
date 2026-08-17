@@ -24,11 +24,11 @@ class PostmergeScopeTopologyTests(unittest.TestCase):
         rust_on = topology._block(self.sources[0], r"^on:\s*$", r"^jobs:\s*$")
         self.assertIn("workflow_dispatch:\n    inputs:\n      validation_scope:", rust_on)
         self.assertIn("type: choice", rust_on)
-        self.assertIn("options:\n          - merge-gate\n          - extended\n          - full", rust_on)
+        self.assertIn("options:\n          - merge-gate\n          - extended\n          - windows\n          - full", rust_on)
 
     def test_every_inventory_family_and_cardinality_is_executable(self) -> None:
         inventory = json.loads(self.sources[7])
-        for group in ("rustCiFull", "v8"):
+        for group in ("rustCiFull", "bazelWindows", "v8"):
             for index, row in enumerate(inventory[group]):
                 for mutation in ("remove", "cardinality"):
                     changed = copy.deepcopy(inventory)
@@ -39,14 +39,19 @@ class PostmergeScopeTopologyTests(unittest.TestCase):
                     sources = list(self.sources)
                     sources[7] = json.dumps(changed)
                     with self.subTest(family=row["id"], mutation=mutation):
-                        self.assertIn("inventory executable binding", "\n".join(topology.validate_topology(*sources)))
+                        expected = (
+                            "validation inventory complete"
+                            if group == "bazelWindows" or "windows" in row["id"]
+                            else "inventory executable binding"
+                        )
+                        self.assertIn(expected, "\n".join(topology.validate_topology(*sources)))
 
     def test_postmerge_scope_mutations_fail_closed(self) -> None:
         rust, postmerge, blocking, repo_checks, planner, result, detector, inventory, platform, v8 = self.sources
         v8_job = "\n  v8-canary:\n    uses: ./.github/workflows/v8-canary.yml\n"
         cases = (
             ("blocking trigger ownership", 2, blocking.replace("  workflow_dispatch:", "  push:\n    branches: [main]\n  workflow_dispatch:")),
-            ("planner workflow contract", 0, rust.replace("run_arm64: ${{ steps.scope.outputs.run_arm64 }}", "run_arm64: false")),
+            ("planner workflow contract", 0, rust.replace("run_windows_arm64: ${{ steps.scope.outputs.run_windows_arm64 }}", "run_windows_arm64: false")),
             ("direct dispatch scope contract", 0, rust.replace("          - merge-gate", "          - essential", 1)),
             ("direct dispatch scope contract", 0, rust.replace("        type: choice", "        type: string", 1)),
             ("exact merge lint plan", 4, planner.replace('LintLane("ubuntu-24.04", "x86_64-unknown-linux-musl", "release")', 'LintLane("ubuntu-24.04", "x86_64-unknown-linux-musl", "dev")', 1)),
@@ -54,14 +59,14 @@ class PostmergeScopeTopologyTests(unittest.TestCase):
             ("exact full lint plan", 4, planner.replace("MERGE_GATE_LINT_MATRIX[1]", "MERGE_GATE_LINT_MATRIX[0]", 1)),
             ("scoped general scheduling", 0, rust.replace("needs.plan.outputs.run_general == 'true'", "needs.plan.outputs.run_general != 'false'", 1)),
             ("scoped lint scheduling", 0, rust.replace("fromJSON(needs.plan.outputs.lint_matrix)", "fromJSON(inputs.validation_scope)")),
-            ("scoped test scheduling", 0, rust.replace("needs.plan.outputs.run_x64 == 'true'", "needs.plan.outputs.run_arm64 == 'true'")),
+            ("scoped test scheduling", 0, rust.replace("needs.plan.outputs.run_linux_x64 == 'true'", "needs.plan.outputs.run_linux_arm64 == 'true'")),
             ("merge-gate Cargo preserved", 0, rust.replace("postgres_contracts: true", "postgres_contracts: false")),
             ("inventory executable binding", 0, rust.replace("run: cargo shear --deny-warnings", "run: true")),
             ("inventory executable binding", 0, rust.replace("run: cargo test\n", "run: cargo check\n", 1)),
             ("inventory executable binding", 0, rust.replace("uses: ./.github/actions/run-argument-comment-lint", "uses: ./.github/actions/setup-ci")),
             ("inventory executable binding", 8, platform.replace("shard: [1, 2, 3, 4]", "shard: [1, 2, 3]")),
             ("inventory executable binding", 0, rust.replace("uses: ./.github/workflows/rust-ci-full-nextest-platform.yml", "uses: ./missing-nextest.yml", 1)),
-            ("inventory executable binding", 0, rust.replace("      use_sccache: true\n    secrets: inherit\n\n  # --- Gatherer", "      use_sccache: true\n      postgres_contracts: true\n    secrets: inherit\n\n  # --- Gatherer")),
+            ("inventory executable binding", 0, rust.replace("      artifact_id: linux-arm64", "      artifact_id: linux-arm64\n      postgres_contracts: true")),
             ("full result fail closed", 0, rust.replace("PLAN_RESULT: ${{ needs.plan.result }}", "PLAN_RESULT: success")),
             ("result helper exact states", 5, result.replace("actual != wanted", "actual == wanted")),
             ("postmerge only Extended Rust", 1, postmerge.replace("validation_scope: extended", "validation_scope: full")),

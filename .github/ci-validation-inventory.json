@@ -5,6 +5,7 @@
     { "id": "cargo-shear", "disposition": "promoted", "promotionSource": "existing", "activeScopes": ["full"], "cardinality": 1 },
     { "id": "argument-comment-lint-package", "disposition": "promoted", "promotionSource": "existing", "activeScopes": ["full"], "cardinality": 1 },
     { "id": "argument-comment-lint-prebuilt", "disposition": "promoted", "promotionSource": "existing", "activeScopes": ["full"], "cardinality": 1 },
+    { "id": "argument-comment-lint-windows-x64", "disposition": "promoted", "promotionSource": "#139", "activeScopes": ["windows", "full"], "cardinality": 1 },
     { "id": "lint-x64-gnu-dev", "disposition": "promoted", "promotionSource": "#86", "activeScopes": ["merge-gate", "full"], "cardinality": 1 },
     { "id": "lint-x64-gnu-release", "disposition": "promoted", "promotionSource": "#87", "activeScopes": ["merge-gate", "full"], "cardinality": 1 },
     { "id": "lint-x64-musl-release", "disposition": "promoted", "promotionSource": "#87", "activeScopes": ["merge-gate", "full"], "cardinality": 1 },
@@ -13,7 +14,22 @@
     { "id": "lint-arm64-gnu-dev", "disposition": "retained", "promotionSource": null, "activeScopes": ["extended", "full"], "cardinality": 1 },
     { "id": "lint-arm64-musl-release", "disposition": "retained", "promotionSource": null, "activeScopes": ["extended", "full"], "cardinality": 1 },
     { "id": "tests-x64-nextest-postgres", "disposition": "promoted", "promotionSource": "#86", "activeScopes": ["merge-gate", "full"], "cardinality": 5 },
-    { "id": "tests-arm64-nextest", "disposition": "retained", "promotionSource": null, "activeScopes": ["extended", "full"], "cardinality": 4 }
+    { "id": "tests-arm64-nextest", "disposition": "retained", "promotionSource": null, "activeScopes": ["extended", "full"], "cardinality": 4 },
+    { "id": "lint-windows-x64-dev", "disposition": "promoted", "promotionSource": "#136", "activeScopes": ["windows", "full"], "cardinality": 1 },
+    { "id": "lint-windows-x64-release", "disposition": "promoted", "promotionSource": "#136", "activeScopes": ["windows", "full"], "cardinality": 1 },
+    { "id": "lint-windows-arm64-dev", "disposition": "promoted", "promotionSource": "#137", "activeScopes": ["windows", "full"], "cardinality": 1 },
+    { "id": "lint-windows-arm64-release", "disposition": "promoted", "promotionSource": "#137", "activeScopes": ["windows", "full"], "cardinality": 1 },
+    { "id": "tests-windows-x64-archive", "disposition": "promoted", "promotionSource": "#136", "activeScopes": ["windows", "full"], "cardinality": 1 },
+    { "id": "tests-windows-x64-shards", "disposition": "promoted", "promotionSource": "#136", "activeScopes": ["windows", "full"], "cardinality": 4 },
+    { "id": "tests-windows-arm64-archive", "disposition": "promoted", "promotionSource": "#137", "activeScopes": ["windows", "full"], "cardinality": 1 },
+    { "id": "tests-windows-arm64-shards", "disposition": "promoted", "promotionSource": "#137", "activeScopes": ["windows", "full"], "cardinality": 4 }
+  ],
+  "bazelWindows": [
+    { "id": "bazel-windows-x64-test-shards", "disposition": "promoted", "promotionSource": "#138", "activeScopes": ["windows", "full"], "cardinality": 4 },
+    { "id": "bazel-windows-x64-test-result", "disposition": "promoted", "promotionSource": "#138", "activeScopes": ["windows", "full"], "cardinality": 1 },
+    { "id": "bazel-windows-x64-clippy", "disposition": "promoted", "promotionSource": "#139", "activeScopes": ["windows", "full"], "cardinality": 1 },
+    { "id": "bazel-windows-x64-release", "disposition": "promoted", "promotionSource": "#139", "activeScopes": ["windows", "full"], "cardinality": 1 },
+    { "id": "bazel-windows-result", "disposition": "promoted", "promotionSource": "#142", "activeScopes": ["windows", "full"], "cardinality": 1 }
   ],
   "v8": [
     { "id": "v8-x64-gnu-release", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"], "cardinality": 1 },
@@ -23,7 +39,9 @@
     { "id": "v8-x64-musl-release", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"], "cardinality": 1 },
     { "id": "v8-x64-musl-ptrcomp-sandbox", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"], "cardinality": 1 },
     { "id": "v8-arm64-musl-release", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"], "cardinality": 1 },
-    { "id": "v8-arm64-musl-ptrcomp-sandbox", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"], "cardinality": 1 }
+    { "id": "v8-arm64-musl-ptrcomp-sandbox", "disposition": "promoted", "promotionSource": "#88", "activeScopes": ["change-triggered", "manual"], "cardinality": 1 },
+    { "id": "v8-windows-x64-ptrcomp-sandbox", "disposition": "promoted", "promotionSource": "#140", "activeScopes": ["windows", "full"], "cardinality": 1 },
+    { "id": "v8-windows-arm64-ptrcomp-sandbox", "disposition": "promoted", "promotionSource": "#140", "activeScopes": ["windows", "full"], "cardinality": 1 }
   ],
-  "outOfBoundary": ["macOS", "Windows"]
+  "outOfBoundary": ["macOS"]
 }

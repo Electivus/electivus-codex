@@ -67,6 +67,9 @@ jobs:
       - name: Verify V8 canary topology
         run: python3 .github/scripts/check_v8_canary_topology.py
 
+      - name: Verify Windows CI topology
+        run: python3 .github/scripts/check_windows_ci_topology.py
+
       - name: Verify postmerge scope topology
         run: python3 .github/scripts/check_postmerge_scope_topology.py
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import sys
 
-from check_postgres_archive_topology import EXTENDED_LANES, FULL_LANES, MERGE_LANES, _block, _job, _planner_matrix
+from check_postgres_archive_topology import EXTENDED_LANES, FULL_LANES, MERGE_LANES, WINDOWS_LANES, _block, _job, _planner_matrix
 from check_rust_test_policy import _workflow_jobs
 from check_v8_canary_topology import ROW
 
@@ -19,6 +19,7 @@ def _inventory_valid(source: str) -> bool:
     try:
         inventory = json.loads(source)
         rust_rows = inventory["rustCiFull"]
+        bazel_windows_rows = inventory["bazelWindows"]
         v8_rows = inventory["v8"]
     except (json.JSONDecodeError, KeyError, TypeError):
         return False
@@ -26,15 +27,51 @@ def _inventory_valid(source: str) -> bool:
     issue_86 = {"lint-x64-gnu-dev": 1, "tests-x64-nextest-postgres": 5}
     issue_87 = {"lint-x64-gnu-release": 1, "lint-x64-musl-release": 1}
     retained = {"lint-x64-musl-dev": 1, "lint-arm64-musl-dev": 1, "lint-arm64-gnu-dev": 1, "lint-arm64-musl-release": 1, "tests-arm64-nextest": 4}
+    windows = {
+        "argument-comment-lint-windows-x64": ("#139", 1),
+        "lint-windows-x64-dev": ("#136", 1),
+        "lint-windows-x64-release": ("#136", 1),
+        "lint-windows-arm64-dev": ("#137", 1),
+        "lint-windows-arm64-release": ("#137", 1),
+        "tests-windows-x64-archive": ("#136", 1),
+        "tests-windows-x64-shards": ("#136", 4),
+        "tests-windows-arm64-archive": ("#137", 1),
+        "tests-windows-arm64-shards": ("#137", 4),
+    }
     rust_expected = {name: ("promoted", "existing", ("full",), count) for name, count in existing.items()}
     rust_expected.update({name: ("promoted", "#86", ("merge-gate", "full"), count) for name, count in issue_86.items()})
     rust_expected.update({name: ("promoted", "#87", ("merge-gate", "full"), count) for name, count in issue_87.items()})
     rust_expected.update({name: ("retained", None, ("extended", "full"), count) for name, count in retained.items()})
-    v8_ids = {"v8-x64-gnu-release", "v8-x64-gnu-ptrcomp-sandbox", "v8-arm64-gnu-release", "v8-arm64-gnu-ptrcomp-sandbox", "v8-x64-musl-release", "v8-x64-musl-ptrcomp-sandbox", "v8-arm64-musl-release", "v8-arm64-musl-ptrcomp-sandbox"}
+    rust_expected.update({name: ("promoted", source, ("windows", "full"), count) for name, (source, count) in windows.items()})
+    linux_v8_ids = {"v8-x64-gnu-release", "v8-x64-gnu-ptrcomp-sandbox", "v8-arm64-gnu-release", "v8-arm64-gnu-ptrcomp-sandbox", "v8-x64-musl-release", "v8-x64-musl-ptrcomp-sandbox", "v8-arm64-musl-release", "v8-arm64-musl-ptrcomp-sandbox"}
+    windows_v8_ids = {"v8-windows-x64-ptrcomp-sandbox", "v8-windows-arm64-ptrcomp-sandbox"}
     rust_actual = {row.get("id"): (row.get("disposition"), row.get("promotionSource"), tuple(row.get("activeScopes", ())), row.get("cardinality")) for row in rust_rows if isinstance(row, dict)}
     actual_v8_ids = {row.get("id") for row in v8_rows if isinstance(row, dict)}
-    v8_metadata_valid = all(row.get("disposition") == "promoted" and row.get("promotionSource") == "#88" and row.get("activeScopes") == ["change-triggered", "manual"] and row.get("cardinality") == 1 for row in v8_rows if isinstance(row, dict))
-    return inventory.get("schemaVersion") == 1 and len(rust_rows) == len(rust_actual) == len(rust_expected) and rust_actual == rust_expected and len(v8_rows) == len(actual_v8_ids) == 8 and actual_v8_ids == v8_ids and v8_metadata_valid and inventory.get("outOfBoundary") == ["macOS", "Windows"]
+    v8_metadata_valid = all(
+        row.get("disposition") == "promoted"
+        and row.get("cardinality") == 1
+        and (
+            (row.get("id") in linux_v8_ids and row.get("promotionSource") == "#88" and row.get("activeScopes") == ["change-triggered", "manual"])
+            or (row.get("id") in windows_v8_ids and row.get("promotionSource") == "#140" and row.get("activeScopes") == ["windows", "full"])
+        )
+        for row in v8_rows
+        if isinstance(row, dict)
+    )
+    bazel_expected = {
+        "bazel-windows-x64-test-shards": ("#138", 4),
+        "bazel-windows-x64-test-result": ("#138", 1),
+        "bazel-windows-x64-clippy": ("#139", 1),
+        "bazel-windows-x64-release": ("#139", 1),
+        "bazel-windows-result": ("#142", 1),
+    }
+    bazel_actual = {
+        row.get("id"): (row.get("promotionSource"), row.get("cardinality"))
+        for row in bazel_windows_rows
+        if isinstance(row, dict)
+        and row.get("disposition") == "promoted"
+        and row.get("activeScopes") == ["windows", "full"]
+    }
+    return inventory.get("schemaVersion") == 1 and len(rust_rows) == len(rust_actual) == len(rust_expected) and rust_actual == rust_expected and len(bazel_windows_rows) == len(bazel_actual) == len(bazel_expected) and bazel_actual == bazel_expected and len(v8_rows) == len(actual_v8_ids) == 10 and actual_v8_ids == linux_v8_ids | windows_v8_ids and v8_metadata_valid and inventory.get("outOfBoundary") == ["macOS"]
 
 
 def _inventory_bound_to_execution(rust: str, platform: str, v8: str, planner: str, source: str) -> bool:
@@ -55,7 +92,8 @@ def _inventory_bound_to_execution(rust: str, platform: str, v8: str, planner: st
     lint_rows = [row for row in rows if row.get("id", "").startswith("lint-")]
     lint_counts = {scope: sum(row.get("cardinality", 0) for row in lint_rows if scope in row.get("activeScopes", ())) for scope in ("merge-gate", "extended", "full")}
     planned_counts = {scope: len(_planner_matrix(planner, constant)) for scope, constant in (("merge-gate", "MERGE_GATE_LINT_MATRIX"), ("extended", "EXTENDED_LINT_MATRIX"), ("full", "FULL_LINT_MATRIX"))}
-    return executable == {name: cardinalities.get(name) for name in executable} and lint_counts == planned_counts and sum(row.get("cardinality", 0) for row in v8_rows) == len(ROW.findall(v8)) == 8
+    linux_v8_rows = [row for row in v8_rows if not row.get("id", "").startswith("v8-windows-")]
+    return executable == {name: cardinalities.get(name) for name in executable} and lint_counts == planned_counts and sum(row.get("cardinality", 0) for row in linux_v8_rows) == len(ROW.findall(v8)) == 8
 
 
 def validate_topology(rust: str, postmerge: str, blocking: str, repo_checks: str, planner: str, result_helper: str, v8_detector: str, inventory: str, platform: str, v8: str) -> list[str]:
@@ -69,14 +107,14 @@ def validate_topology(rust: str, postmerge: str, blocking: str, repo_checks: str
     merge_rust = _job(blocking, "deep-linux-cargo")
     checks = (
         ("blocking trigger ownership", "pull_request: {}" in blocking_on and "workflow_dispatch:" in blocking_on and "push:" not in blocking_on),
-        ("planner workflow contract", "workflow_dispatch:" in rust_on and "default: full" in rust_on and "resolved_scope:" in rust_on and "rust_ci_full_plan.py" in plan and all(f"{name}: ${{{{ steps.scope.outputs.{name} }}}}" in plan for name in ("resolved_scope", "reason", "lint_matrix", "run_general", "run_x64", "run_arm64", "selected_families"))),
-        ("direct dispatch scope contract", "inputs:\n      validation_scope:" in rust_dispatch and "required: true" in rust_dispatch and "default: full" in rust_dispatch and "type: choice" in rust_dispatch and "options:\n          - merge-gate\n          - extended\n          - full" in rust_dispatch),
+        ("planner workflow contract", "workflow_dispatch:" in rust_on and "default: full" in rust_on and "resolved_scope:" in rust_on and "rust_ci_full_plan.py" in plan and all(f"{name}: ${{{{ steps.scope.outputs.{name} }}}}" in plan for name in ("resolved_scope", "reason", "lint_matrix", "run_general", "run_linux_x64", "run_linux_arm64", "run_windows_x64", "run_windows_arm64", "selected_families"))),
+        ("direct dispatch scope contract", "inputs:\n      validation_scope:" in rust_dispatch and "required: true" in rust_dispatch and "default: full" in rust_dispatch and "type: choice" in rust_dispatch and "options:\n          - merge-gate\n          - extended\n          - windows\n          - full" in rust_dispatch),
         ("exact merge lint plan", _planner_matrix(planner, "MERGE_GATE_LINT_MATRIX") == MERGE_LANES),
         ("exact Extended lint plan", _planner_matrix(planner, "EXTENDED_LINT_MATRIX") == EXTENDED_LANES),
-        ("exact full lint plan", _planner_matrix(planner, "FULL_LINT_MATRIX") == FULL_LANES and set(FULL_LANES) == set(MERGE_LANES) | set(EXTENDED_LANES)),
+        ("exact full lint plan", _planner_matrix(planner, "FULL_LINT_MATRIX") == FULL_LANES and set(FULL_LANES) == set(MERGE_LANES) | set(EXTENDED_LANES) | set(WINDOWS_LANES)),
         ("scoped general scheduling", all("needs: plan" in job and "needs.plan.result == 'success'" in job and "needs.plan.outputs.run_general == 'true'" in job for job in general_jobs)),
         ("scoped lint scheduling", "needs: plan" in lint and "needs.plan.result == 'success'" in lint and "include: ${{ fromJSON(needs.plan.outputs.lint_matrix) }}" in lint and "inputs.validation_scope" not in lint),
-        ("scoped test scheduling", "needs.plan.outputs.run_x64 == 'true'" in x64 and "needs.plan.outputs.run_arm64 == 'true'" in arm64 and all("needs: plan" in job and "needs.plan.result == 'success'" in job for job in (x64, arm64))),
+        ("scoped test scheduling", "needs.plan.outputs.run_linux_x64 == 'true'" in x64 and "needs.plan.outputs.run_linux_arm64 == 'true'" in arm64 and all("needs: plan" in job and "needs.plan.result == 'success'" in job for job in (x64, arm64))),
         ("merge-gate Cargo preserved", "validation_scope: merge-gate" in merge_rust and "postgres_contracts: true" in x64 and "test_threads: 1" in x64),
         ("full result fail closed", "needs:" in rust_results and all(f"{name}," in rust_results for name in ("plan", "general", "cargo_shear", "argument_comment_lint_package", "argument_comment_lint_prebuilt", "lint_build", "tests_linux_x64", "tests_linux_arm64")) and "if: always()" in rust_results and "rust_ci_full_result.py" in rust_results and all(f"${{{{ needs.{name}.result }}}}" in rust_results for name in ("plan", "general", "cargo_shear", "argument_comment_lint_package", "argument_comment_lint_prebuilt", "lint_build", "tests_linux_x64", "tests_linux_arm64"))),
         ("result helper exact states", "plan expected success" in result_helper and 'wanted = "success" if should_run else "skipped"' in result_helper and "actual != wanted" in result_helper and "return 0 if decision.success else 1" in result_helper and "Resolved scope" in result_helper and "Selected families" in result_helper),

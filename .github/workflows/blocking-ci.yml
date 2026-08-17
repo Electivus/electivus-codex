@@ -176,6 +176,20 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/deep_linux_result.py | tee -a "$GITHUB_STEP_SUMMARY"
 
+  windows-bazel:
+    name: Windows Bazel
+    uses: ./.github/workflows/bazel.yml
+    with:
+      validation_scope: windows
+    secrets: inherit
+
+  windows-cargo:
+    name: Windows Cargo
+    uses: ./.github/workflows/rust-ci-full.yml
+    with:
+      validation_scope: windows
+    secrets: inherit
+
   required:
     name: CI required
     # Without `always()`, GitHub skips this job after a failed dependency and a
@@ -193,6 +207,8 @@ jobs:
       - rust-ci
       - sdk
       - v8-canary
+      - windows-bazel
+      - windows-cargo
     runs-on: ubuntu-24.04
     steps:
       # Keep the helper on the same combined revision as the child workflows so
