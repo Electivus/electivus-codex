@@ -1,3 +1,4 @@
+import copy
 import datetime as dt
 from pathlib import Path
 import tempfile
@@ -80,6 +81,83 @@ async fn conditional_test() {}
             policy.validate_ignore_policy([occurrence], {"ignores": {occurrence.identity: "specialized-environment"}}),
         )
         self.assertIn("unclassified", "\n".join(policy.validate_ignore_policy([occurrence], {"ignores": {}})))
+
+    def test_windows_effective_conditions_are_classified_conservatively(self) -> None:
+        cases = (
+            ('cfg_attr(windows,ignore)', "explicit-windows-condition"),
+            ('cfg_attr(target_os="windows",ignore)', "explicit-windows-condition"),
+            ('cfg_attr(not(unix),ignore)', "generic-windows-condition"),
+            ('cfg_attr(any(target_arch="aarch64",feature="future"),ignore)', "generic-windows-condition"),
+            ('cfg_attr(not(windows),ignore)', None),
+            ('cfg_attr(target_os="linux",ignore)', None),
+        )
+        for attribute, expected in cases:
+            with self.subTest(attribute=attribute):
+                occurrence = policy.IgnoreOccurrence("src/lib.rs", "test", attribute)
+                self.assertEqual(expected, policy.windows_skip_kind(occurrence))
+
+        self.assertEqual(
+            "schema-generation",
+            policy.windows_skip_kind(
+                policy.IgnoreOccurrence(
+                    "src/shell_snapshot.rs",
+                    "windows_unified_exec_uses_shell_snapshot",
+                    "ignore",
+                )
+            ),
+        )
+        self.assertEqual(
+            "windows-runtime-gap",
+            policy.windows_skip_kind(
+                policy.IgnoreOccurrence(
+                    "src/windows_console.rs", "windows_conpty", 'ignore="known gap"'
+                )
+            ),
+        )
+
+    def test_fixed_windows_skip_baseline_accepts_only_exact_upstream_identities(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        manifest, load_issues = policy.load_json(
+            repo / ".github/windows-rust-skip-baseline.json"
+        )
+        self.assertEqual([], load_issues)
+        occurrences = policy.inventory_ignores(repo)
+        self.assertEqual([], policy.validate_windows_skip_baseline(occurrences, manifest))
+
+        changed = list(occurrences)
+        index = next(
+            index
+            for index, occurrence in enumerate(changed)
+            if policy.windows_skip_kind(occurrence) == "explicit-windows-condition"
+        )
+        original = changed[index]
+        changed[index] = policy.IgnoreOccurrence(
+            original.path,
+            original.test,
+            original.attribute.replace("ignore", 'ignore="drift"', 1),
+        )
+        drift = "\n".join(policy.validate_windows_skip_baseline(changed, manifest))
+        self.assertIn("removed or modified inherited Windows skip", drift)
+        self.assertIn("new or modified Windows-effective skip", drift)
+
+        lockstep_manifest = copy.deepcopy(manifest)
+        for record in lockstep_manifest["entries"]:
+            if record["identity"] == original.identity:
+                record["identity"] = changed[index].identity
+                break
+        lockstep = "\n".join(
+            policy.validate_windows_skip_baseline(changed, lockstep_manifest)
+        )
+        self.assertIn("fixed upstream digest", lockstep)
+
+        new_unconditional = [
+            *occurrences,
+            policy.IgnoreOccurrence("src/new.rs", "ordinary_test", "ignore"),
+        ]
+        unconditional = "\n".join(
+            policy.validate_windows_skip_baseline(new_unconditional, manifest)
+        )
+        self.assertIn("unconditional Rust ignores", unconditional)
 
 
 class QuarantinePolicyTests(unittest.TestCase):

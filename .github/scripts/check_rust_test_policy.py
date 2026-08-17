@@ -5,6 +5,7 @@ import argparse
 from collections import Counter
 from dataclasses import dataclass
 import datetime as dt
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -22,6 +23,35 @@ FUNCTION_RE = re.compile(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)")
 ATTRIBUTE_START_RE = re.compile(r"#\s*\[")
 JOB_RE = re.compile(r"  ([A-Za-z_][A-Za-z0-9_-]*):\s*(?:#.*)?$")
 ACTIONLINT_IGNORE = "SC2317|SC2129"
+WINDOWS_SKIP_BASELINE_COMMIT = "6c108912eeacabfc82723bf44f8a23f6e2f86585"
+WINDOWS_SKIP_BASELINE_DIGEST = (
+    "dd315835cb22fb265136fddd622ec53f7ecaa6e14ba453c7c194cfbdd1079dc7"
+)
+ELECTIVUS_SKIP_BASELINE_COMMIT = "fefc83aef97940a1ed918027c0499e5c4a672f46"
+ELECTIVUS_UNCONDITIONAL_IGNORE_COUNT = 136
+ELECTIVUS_UNCONDITIONAL_IGNORE_DIGEST = (
+    "9b5ca3cc1500fb4d9e757f28afdee34e9cbd7b4b03935b492e741eb357a91489"
+)
+WINDOWS_SKIP_KINDS = frozenset(
+    {
+        "explicit-windows-condition",
+        "generic-windows-condition",
+        "schema-generation",
+        "windows-runtime-gap",
+    }
+)
+EXPECTED_WINDOWS_SKIP_COUNTS = {
+    "explicit-windows-condition": 52,
+    "generic-windows-condition": 28,
+    "schema-generation": 2,
+    "windows-runtime-gap": 2,
+}
+WINDOWS_SCHEMA_GENERATION_TESTS = frozenset(
+    {
+        "windows_powershell_snapshot_includes_sections",
+        "windows_unified_exec_uses_shell_snapshot",
+    }
+)
 
 
 @dataclass(frozen=True, order=True)
@@ -134,6 +164,50 @@ def _split_top_level(arguments: str) -> list[str]:
     parts.append(arguments[start:])
     return parts
 
+
+def _cfg_truth_values(expression: str, target_arch: str) -> set[bool]:
+    """Evaluate a Rust cfg expression conservatively for one Windows target."""
+    expression = _normalize_meta(expression)
+    for operator in ("all", "any", "not"):
+        prefix = f"{operator}("
+        if not expression.startswith(prefix) or not expression.endswith(")"):
+            continue
+        operands = _split_top_level(expression[len(prefix) : -1])
+        if operator == "not":
+            return (
+                {not value for value in _cfg_truth_values(operands[0], target_arch)}
+                if len(operands) == 1
+                else {False, True}
+            )
+        possible = {operator == "all"}
+        for operand in operands:
+            operand_values = _cfg_truth_values(operand, target_arch)
+            if operator == "all":
+                possible = {left and right for left in possible for right in operand_values}
+            else:
+                possible = {left or right for left in possible for right in operand_values}
+        return possible
+
+    if expression == "windows":
+        return {True}
+    if expression == "unix":
+        return {False}
+    key, separator, raw_value = expression.partition("=")
+    if separator and raw_value.startswith('"') and raw_value.endswith('"'):
+        value = raw_value[1:-1]
+        known = {
+            "target_arch": target_arch,
+            "target_env": "msvc",
+            "target_family": "windows",
+            "target_os": "windows",
+            "target_vendor": "pc",
+        }
+        if key in known:
+            return {known[key] == value}
+    # Unknown feature/vendor predicates are treated as potentially true so a
+    # new Windows-effective skip cannot hide behind syntax this checker lacks.
+    return {False, True}
+
 def _is_string_literal(value: str) -> bool:
     if value.startswith('"'):
         return _quoted_end(value, 0, '"') == len(value)
@@ -202,6 +276,123 @@ def inventory_ignores(repo: Path) -> list[IgnoreOccurrence]:
         if "ignore" in text:
             occurrences.extend(inventory_file(relative_path, text))
     return sorted(occurrences)
+
+
+def windows_skip_kind(occurrence: IgnoreOccurrence) -> str | None:
+    if occurrence.attribute.startswith("cfg_attr("):
+        arguments = _split_top_level(occurrence.attribute[len("cfg_attr(") : -1])
+        if not arguments:
+            return "generic-windows-condition"
+        condition = arguments[0]
+        if True not in (
+            _cfg_truth_values(condition, "x86_64")
+            | _cfg_truth_values(condition, "aarch64")
+        ):
+            return None
+        if condition in {"windows", 'target_os="windows"'}:
+            return "explicit-windows-condition"
+        return "generic-windows-condition"
+    if "windows" not in f"{occurrence.path}::{occurrence.test}".casefold():
+        return None
+    if occurrence.test in WINDOWS_SCHEMA_GENERATION_TESTS:
+        return "schema-generation"
+    return "windows-runtime-gap"
+
+
+def load_json(path: Path) -> tuple[object | None, list[str]]:
+    if not path.is_file():
+        return None, [f"required manifest is missing or not a regular file: {path}"]
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), []
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        return None, [f"cannot read valid JSON from {path}: {error}"]
+
+
+def validate_windows_skip_baseline(
+    occurrences: list[IgnoreOccurrence], manifest: object
+) -> list[str]:
+    if not isinstance(manifest, dict):
+        return ["Windows skip baseline must be a JSON object"]
+    issues: list[str] = []
+    if manifest.get("schemaVersion") != 1:
+        issues.append("Windows skip baseline requires schemaVersion 1")
+    if manifest.get("upstreamRepository") != "openai/codex":
+        issues.append("Windows skip baseline requires upstreamRepository openai/codex")
+    if manifest.get("upstreamCommit") != WINDOWS_SKIP_BASELINE_COMMIT:
+        issues.append(
+            f"Windows skip baseline requires upstreamCommit {WINDOWS_SKIP_BASELINE_COMMIT}"
+        )
+    if manifest.get("entriesSha256") != WINDOWS_SKIP_BASELINE_DIGEST:
+        issues.append("Windows skip baseline requires the canonical upstream digest")
+    if manifest.get("electivusUnconditionalBaseline") != {
+        "commit": ELECTIVUS_SKIP_BASELINE_COMMIT,
+        "count": ELECTIVUS_UNCONDITIONAL_IGNORE_COUNT,
+        "sha256": ELECTIVUS_UNCONDITIONAL_IGNORE_DIGEST,
+    }:
+        issues.append("Windows skip baseline requires the Electivus unconditional-ignore digest")
+    if manifest.get("counts") != EXPECTED_WINDOWS_SKIP_COUNTS:
+        issues.append("Windows skip baseline counts do not match the fixed upstream reference")
+
+    records = manifest.get("entries")
+    if not isinstance(records, list):
+        return [*issues, "Windows skip baseline entries must be an array"]
+    expected: dict[str, str] = {}
+    for index, record in enumerate(records, 1):
+        if not isinstance(record, dict):
+            issues.append(f"Windows skip baseline entry {index} must be an object")
+            continue
+        identity, kind = record.get("identity"), record.get("kind")
+        if not isinstance(identity, str) or not identity:
+            issues.append(f"Windows skip baseline entry {index} requires identity")
+            continue
+        if kind not in WINDOWS_SKIP_KINDS:
+            issues.append(f"Windows skip baseline entry {index} has invalid kind {kind!r}")
+            continue
+        if identity in expected:
+            issues.append(f"duplicate Windows skip baseline identity: {identity}")
+        expected[identity] = kind
+
+    record_counts = Counter(expected.values())
+    if dict(record_counts) != EXPECTED_WINDOWS_SKIP_COUNTS:
+        issues.append("Windows skip baseline entries do not match the declared fixed counts")
+    baseline_payload = "\n".join(
+        f"{identity}\0{expected[identity]}" for identity in sorted(expected)
+    )
+    if hashlib.sha256(baseline_payload.encode()).hexdigest() != WINDOWS_SKIP_BASELINE_DIGEST:
+        issues.append("Windows skip baseline identities do not match the fixed upstream digest")
+    actual = {
+        occurrence.identity: kind
+        for occurrence in occurrences
+        if (kind := windows_skip_kind(occurrence)) is not None
+    }
+    issues.extend(
+        f"removed or modified inherited Windows skip: {identity}"
+        for identity in sorted(expected.keys() - actual.keys())
+    )
+    issues.extend(
+        f"new or modified Windows-effective skip: {identity}"
+        for identity in sorted(actual.keys() - expected.keys())
+    )
+    issues.extend(
+        f"Windows skip classification drift for {identity}: expected {expected[identity]}, got {actual[identity]}"
+        for identity in sorted(expected.keys() & actual.keys())
+        if expected[identity] != actual[identity]
+    )
+    unconditional = sorted(
+        occurrence.identity
+        for occurrence in occurrences
+        if occurrence.attribute.startswith("ignore")
+    )
+    unconditional_digest = hashlib.sha256("\n".join(unconditional).encode()).hexdigest()
+    if (
+        len(unconditional) != ELECTIVUS_UNCONDITIONAL_IGNORE_COUNT
+        or unconditional_digest != ELECTIVUS_UNCONDITIONAL_IGNORE_DIGEST
+    ):
+        issues.append(
+            "unconditional Rust ignores do not match Electivus baseline "
+            f"{ELECTIVUS_SKIP_BASELINE_COMMIT}"
+        )
+    return issues
 
 def inventory_rust_test_functions(repo: Path) -> list[RustFunctionOccurrence]:
     return sorted(
@@ -395,10 +586,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     repo = args.repo.resolve()
     issues: list[str] = []
+    inventory_ready = True
     try:
         occurrences = inventory_ignores(repo)
     except (OSError, subprocess.CalledProcessError, UnicodeError) as error:
         occurrences = []
+        inventory_ready = False
         issues.append(f"cannot inventory tracked Rust sources: {error}")
     policy, policy_issues = load_toml(repo / ".github/rust-test-policy.toml")
     issues.extend(policy_issues)
@@ -407,6 +600,12 @@ def main(argv: list[str] | None = None) -> int:
             issues.append("rust test policy requires version = 1")
         else:
             issues.extend(validate_ignore_policy(occurrences, policy))
+    windows_baseline, windows_baseline_issues = load_json(
+        repo / ".github/windows-rust-skip-baseline.json"
+    )
+    issues.extend(windows_baseline_issues)
+    if inventory_ready and windows_baseline is not None:
+        issues.extend(validate_windows_skip_baseline(occurrences, windows_baseline))
     quarantines, quarantine_issues = load_toml(repo / ".github/quarantined-checks.toml")
     issues.extend(quarantine_issues)
     if quarantines is not None:
@@ -418,7 +617,8 @@ def main(argv: list[str] | None = None) -> int:
         print("Rust test signal policy failed:\n" + "\n".join(f"- {issue}" for issue in issues), file=sys.stderr)
         return 1
     quarantine_count = len(quarantines.get("quarantines", []))
-    print(f"Rust test signal policy passed: {len(occurrences)} ignore occurrences; {quarantine_count} active quarantines")
+    windows_count = sum(windows_skip_kind(occurrence) is not None for occurrence in occurrences)
+    print(f"Rust test signal policy passed: {len(occurrences)} ignore occurrences; {windows_count} inherited Windows skips; {quarantine_count} active quarantines")
     return 0
 
 
