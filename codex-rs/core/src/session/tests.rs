@@ -3304,13 +3304,15 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
     .await;
     let rollout_path =
         attach_thread_persistence(Arc::get_mut(&mut session).expect("unique session")).await;
-    let response_item = crate::context_manager::updates::build_developer_update_item(vec![
+    let response_items = crate::context_manager::updates::build_developer_update_items(vec![
         "Subagent guidance.".to_string(),
-    ])
-    .expect("developer message");
+    ]);
+    let [response_item] = response_items.as_slice() else {
+        panic!("expected one developer message");
+    };
     let mut expected_item = response_item.clone();
     let response_item = ResponseItemEnvelope {
-        item: response_item,
+        item: response_item.clone(),
         metadata: Some(CodexHarnessMetadata::default()),
     };
 
@@ -9187,6 +9189,9 @@ async fn make_multi_agent_v2_usage_hint_test_session(
 
 struct PromptExtensionTestContributor;
 struct PromptExtensionTestState;
+struct OversizedDeveloperContextTestContributor {
+    sections: Vec<String>,
+}
 struct TurnContextExtensionTestContributor;
 struct TurnContextExtensionTestState {
     expected_model_context_window: Option<i64>,
@@ -9212,6 +9217,24 @@ impl codex_extension_api::ContextContributor for PromptExtensionTestContributor 
                 .into_iter()
                 .collect()
         })
+    }
+}
+
+impl codex_extension_api::ContextContributor for OversizedDeveloperContextTestContributor {
+    fn contribute_thread_context<'a>(
+        &'a self,
+        _session_store: &'a codex_extension_api::ExtensionData,
+        _thread_store: &'a codex_extension_api::ExtensionData,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Vec<codex_extension_api::PromptFragment>> + Send + 'a>,
+    > {
+        Box::pin(std::future::ready(
+            self.sections
+                .iter()
+                .cloned()
+                .map(codex_extension_api::PromptFragment::developer_policy)
+                .collect(),
+        ))
     }
 }
 
@@ -9266,6 +9289,67 @@ async fn build_initial_context_includes_prompt_fragments_from_extensions() {
             .flatten()
             .any(|text| *text == "prompt extension enabled"),
         "expected prompt extension developer text, got {developer_messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn build_initial_context_splits_oversized_developer_bundle_without_losing_sections() {
+    let section = |label: &str, bytes: usize| {
+        let prefix = format!("resume-limit-{label}:");
+        format!("{prefix}{}", "x".repeat(bytes - prefix.len()))
+    };
+    let sections = [
+        section("memory", 17_398),
+        section("skills", 19_822),
+        section("permissions", 362),
+        section("collaboration", 966),
+        section("apps", 646),
+        section("plugins", 1_014),
+    ];
+    let (mut session, turn_context) = make_session_and_context().await;
+    let mut builder = codex_extension_api::ExtensionRegistryBuilder::new();
+    builder.prompt_contributor(Arc::new(OversizedDeveloperContextTestContributor {
+        sections: sections.to_vec(),
+    }));
+    session.services.extensions = Arc::new(builder.build());
+
+    let initial_context = build_initial_context(&session, &Arc::new(turn_context)).await;
+    let developer_messages = developer_message_texts(&initial_context);
+    let expected_sections = sections.iter().map(String::as_str).collect::<Vec<_>>();
+    let actual_sections = developer_messages
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|text| expected_sections.contains(text))
+        .collect::<Vec<_>>();
+    let messages_with_test_sections = initial_context
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                ResponseItem::Message { role, content, .. }
+                    if role == "developer"
+                        && content.iter().any(|content| {
+                            matches!(
+                                content,
+                                ContentItem::InputText { text }
+                                    if text.starts_with("resume-limit-")
+                            )
+                        })
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(actual_sections, expected_sections);
+    assert!(
+        messages_with_test_sections.len() > 1,
+        "oversized developer sections should span multiple messages"
+    );
+    assert!(
+        messages_with_test_sections
+            .iter()
+            .all(|item| crate::context_manager::estimate_item_token_count(item) <= 10_000),
+        "every initial-context message must fit the per-item model limit"
     );
 }
 

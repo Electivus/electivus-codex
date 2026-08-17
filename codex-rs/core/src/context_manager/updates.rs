@@ -1,6 +1,13 @@
 use crate::context::ContextualUserFragment;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::InternalChatMessageMetadataPassthrough;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
+
+use super::history::estimate_item_token_count;
+
+pub(super) const MAX_MODEL_CONTEXT_ITEM_TOKENS: i64 = 10_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MessageGroup {
@@ -8,12 +15,58 @@ enum MessageGroup {
     Mergeable,
 }
 
-pub(crate) fn build_developer_update_item(text_sections: Vec<String>) -> Option<ResponseItem> {
-    build_text_message("developer", text_sections)
+#[derive(Clone, Copy)]
+enum TextContentKind {
+    Input,
+    Output,
 }
 
-pub(crate) fn build_contextual_user_message(text_sections: Vec<String>) -> Option<ResponseItem> {
-    build_text_message("user", text_sections)
+impl TextContentKind {
+    fn content(self, text: String) -> ContentItem {
+        match self {
+            Self::Input => ContentItem::InputText { text },
+            Self::Output => ContentItem::OutputText { text },
+        }
+    }
+}
+
+struct MessageTemplate {
+    id: Option<ResponseItemId>,
+    role: String,
+    phase: Option<MessagePhase>,
+    metadata: Option<InternalChatMessageMetadataPassthrough>,
+}
+
+impl MessageTemplate {
+    fn item(&self, content: Vec<ContentItem>) -> ResponseItem {
+        ResponseItem::Message {
+            id: self.id.clone(),
+            role: self.role.clone(),
+            content,
+            phase: self.phase.clone(),
+            internal_chat_message_metadata_passthrough: self.metadata.clone(),
+        }
+    }
+
+    fn into_items(self, content_groups: Vec<Vec<ContentItem>>) -> Vec<ResponseItem> {
+        let mut id = self.id.clone();
+        content_groups
+            .into_iter()
+            .map(|content| {
+                let mut item = self.item(content);
+                item.set_id(id.take());
+                item
+            })
+            .collect()
+    }
+}
+
+pub(crate) fn build_developer_update_items(text_sections: Vec<String>) -> Vec<ResponseItem> {
+    build_text_messages("developer", text_sections)
+}
+
+pub(crate) fn build_contextual_user_messages(text_sections: Vec<String>) -> Vec<ResponseItem> {
+    build_text_messages("user", text_sections)
 }
 
 pub(crate) fn merge_contextual_fragments(
@@ -41,25 +94,118 @@ pub(crate) fn merge_contextual_fragments(
     }
     messages
         .into_iter()
-        .filter_map(|(role, _, text_sections)| build_text_message(role, text_sections))
+        .flat_map(|(role, _, text_sections)| build_text_messages(role, text_sections))
         .collect()
 }
 
-fn build_text_message(role: &str, text_sections: Vec<String>) -> Option<ResponseItem> {
-    if text_sections.is_empty() {
-        return None;
+/// Losslessly splits a message while preserving its ordered UTF-8 text.
+pub(crate) fn split_message_to_model_context_limit(item: ResponseItem) -> Vec<ResponseItem> {
+    if estimate_item_token_count(&item) <= MAX_MODEL_CONTEXT_ITEM_TOKENS {
+        return vec![item];
     }
 
-    let content = text_sections
+    let ResponseItem::Message {
+        id,
+        role,
+        content,
+        phase,
+        internal_chat_message_metadata_passthrough: metadata,
+    } = item
+    else {
+        return vec![item];
+    };
+    let template = MessageTemplate {
+        id,
+        role,
+        phase,
+        metadata,
+    };
+    let content = content
         .into_iter()
-        .map(|text| ContentItem::InputText { text })
-        .collect();
+        .flat_map(|content| split_oversized_text_content(&template, content))
+        .collect::<Vec<_>>();
+    let mut content_groups = Vec::new();
+    let mut current_group = Vec::new();
+    for content in content {
+        current_group.push(content);
+        if estimate_item_token_count(&template.item(current_group.clone()))
+            > MAX_MODEL_CONTEXT_ITEM_TOKENS
+            && current_group.len() > 1
+        {
+            let overflow = current_group.remove(current_group.len() - 1);
+            content_groups.push(std::mem::take(&mut current_group));
+            current_group.push(overflow);
+        }
+    }
+    if !current_group.is_empty() || content_groups.is_empty() {
+        content_groups.push(current_group);
+    }
+    template.into_items(content_groups)
+}
 
-    Some(ResponseItem::Message {
+fn build_text_messages(role: &str, text_sections: Vec<String>) -> Vec<ResponseItem> {
+    if text_sections.is_empty() {
+        return Vec::new();
+    }
+
+    split_message_to_model_context_limit(ResponseItem::Message {
         id: None,
         role: role.to_string(),
-        content,
+        content: text_sections
+            .into_iter()
+            .map(|text| ContentItem::InputText { text })
+            .collect(),
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     })
+}
+
+fn split_oversized_text_content(
+    template: &MessageTemplate,
+    content: ContentItem,
+) -> Vec<ContentItem> {
+    if estimate_item_token_count(&template.item(vec![content.clone()]))
+        <= MAX_MODEL_CONTEXT_ITEM_TOKENS
+    {
+        return vec![content];
+    }
+    let (kind, text) = match content {
+        ContentItem::InputText { text } => (TextContentKind::Input, text),
+        ContentItem::OutputText { text } => (TextContentKind::Output, text),
+        content @ (ContentItem::InputImage { .. } | ContentItem::InputAudio { .. }) => {
+            return vec![content];
+        }
+    };
+
+    let mut chunks = Vec::new();
+    let mut remaining = text.as_str();
+    while !remaining.is_empty() {
+        let mut lower = 1;
+        let mut upper = remaining.len();
+        let mut best_end = None;
+        while lower <= upper {
+            let middle = lower + (upper - lower) / 2;
+            let end = remaining.floor_char_boundary(middle);
+            if end == 0 {
+                lower = middle + 1;
+                continue;
+            }
+            let candidate = kind.content(remaining[..end].to_string());
+            if estimate_item_token_count(&template.item(vec![candidate]))
+                <= MAX_MODEL_CONTEXT_ITEM_TOKENS
+            {
+                best_end = Some(end);
+                lower = middle + 1;
+            } else {
+                upper = end - 1;
+            }
+        }
+        let Some(end) = best_end else {
+            chunks.push(kind.content(remaining.to_string()));
+            break;
+        };
+        chunks.push(kind.content(remaining[..end].to_string()));
+        remaining = &remaining[end..];
+    }
+    chunks
 }

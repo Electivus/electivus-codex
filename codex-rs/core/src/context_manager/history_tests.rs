@@ -1549,13 +1549,62 @@ fn record_replayed_items_caps_structured_text_outputs() {
 }
 
 #[test]
-fn record_replayed_items_drops_oversized_non_output_items() {
-    let item = user_msg(&"oversized user message".repeat(50_000));
+fn record_replayed_items_splits_oversized_developer_bundle_without_losing_sections() {
+    let section = |label: &str, bytes: usize| {
+        let prefix = format!("resume-limit-{label}:");
+        format!("{prefix}{}", "x".repeat(bytes - prefix.len()))
+    };
+    let sections = [
+        format!("resume-limit-memory:{}", "á".repeat(21_000)),
+        section("skills", 19_822),
+        section("permissions", 362),
+        section("collaboration", 966),
+        section("apps", 646),
+        section("plugins", 1_014),
+    ];
+    let item = ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: sections
+            .iter()
+            .cloned()
+            .map(|text| ContentItem::InputText { text })
+            .collect(),
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let original_tokens = estimate_item_token_count(&item);
+    assert!(
+        original_tokens > 10_000,
+        "fixture must exceed the replay item limit, got {original_tokens} estimated tokens"
+    );
     let mut history = ContextManager::new();
 
     history.record_replayed_items([&item], TruncationPolicy::Tokens(100_000));
 
-    assert!(history.raw_items().next().is_none());
+    let replayed = history.raw_items().cloned().collect::<Vec<_>>();
+    let replayed_text = replayed
+        .iter()
+        .flat_map(|item| match item {
+            ResponseItem::Message { role, content, .. } if role == "developer" => {
+                content.as_slice()
+            }
+            other => panic!("expected developer message, got {other:?}"),
+        })
+        .filter_map(|content| match content {
+            ContentItem::InputText { text } => Some(text),
+            _ => None,
+        })
+        .map(String::as_str)
+        .collect::<String>();
+
+    assert_eq!(replayed_text, sections.concat());
+    assert!(replayed.len() > 1);
+    assert!(
+        replayed
+            .iter()
+            .all(|item| estimate_item_token_count(item) <= 10_000)
+    );
 }
 
 #[test]

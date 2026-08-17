@@ -4,22 +4,28 @@ use codex_utils_output_truncation::approx_bytes_for_tokens;
 
 use super::history::estimate_item_token_count;
 use super::history::truncate_function_output_payload;
+use super::updates::MAX_MODEL_CONTEXT_ITEM_TOKENS;
+use super::updates::split_message_to_model_context_limit;
 
 // Reserve stable headroom for live turn items, instructions, and tools added after reconstruction.
 pub(super) const MAX_REPLAY_HISTORY_ITEMS: usize = 8_000;
 pub(super) const MAX_REPLAY_HISTORY_BYTES: u64 = 12 * 1024 * 1024;
-const MAX_REPLAY_OUTPUT_ITEM_TOKENS: i64 = 10_000;
 
 pub(crate) fn process_replayed_item(
     item: &ResponseItem,
     policy: TruncationPolicy,
-) -> Option<ResponseItem> {
+) -> Vec<ResponseItem> {
     match item {
         ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. } => {
             truncate_replayed_output_item(item, policy * 1.2)
+                .into_iter()
+                .collect()
         }
+        ResponseItem::Message { .. } => split_message_to_model_context_limit(item.clone())
+            .into_iter()
+            .filter(|item| estimate_item_token_count(item) <= MAX_MODEL_CONTEXT_ITEM_TOKENS)
+            .collect(),
         ResponseItem::AdditionalTools { .. }
-        | ResponseItem::Message { .. }
         | ResponseItem::AgentMessage { .. }
         | ResponseItem::Reasoning { .. }
         | ResponseItem::LocalShellCall { .. }
@@ -32,9 +38,10 @@ pub(crate) fn process_replayed_item(
         | ResponseItem::Compaction { .. }
         | ResponseItem::CompactionTrigger { .. }
         | ResponseItem::ContextCompaction { .. }
-        | ResponseItem::Other => {
-            (estimate_item_token_count(item) <= MAX_REPLAY_OUTPUT_ITEM_TOKENS).then(|| item.clone())
-        }
+        | ResponseItem::Other => (estimate_item_token_count(item) <= MAX_MODEL_CONTEXT_ITEM_TOKENS)
+            .then(|| item.clone())
+            .into_iter()
+            .collect(),
     }
 }
 
@@ -73,16 +80,16 @@ fn truncate_replayed_output_item(
     preferred_policy: TruncationPolicy,
 ) -> Option<ResponseItem> {
     let preferred = truncate_output_item(item, preferred_policy);
-    if estimate_item_token_count(&preferred) <= MAX_REPLAY_OUTPUT_ITEM_TOKENS {
+    if estimate_item_token_count(&preferred) <= MAX_MODEL_CONTEXT_ITEM_TOKENS {
         return Some(preferred);
     }
 
     let max_budget = match preferred_policy {
         TruncationPolicy::Bytes(bytes) => bytes.min(approx_bytes_for_tokens(
-            usize::try_from(MAX_REPLAY_OUTPUT_ITEM_TOKENS).unwrap_or(usize::MAX),
+            usize::try_from(MAX_MODEL_CONTEXT_ITEM_TOKENS).unwrap_or(usize::MAX),
         )),
         TruncationPolicy::Tokens(tokens) => {
-            tokens.min(usize::try_from(MAX_REPLAY_OUTPUT_ITEM_TOKENS).unwrap_or(usize::MAX))
+            tokens.min(usize::try_from(MAX_MODEL_CONTEXT_ITEM_TOKENS).unwrap_or(usize::MAX))
         }
     };
     let mut lower = 0;
@@ -95,7 +102,7 @@ fn truncate_replayed_output_item(
             TruncationPolicy::Tokens(_) => TruncationPolicy::Tokens(budget),
         };
         let candidate = truncate_output_item(item, policy);
-        if estimate_item_token_count(&candidate) <= MAX_REPLAY_OUTPUT_ITEM_TOKENS {
+        if estimate_item_token_count(&candidate) <= MAX_MODEL_CONTEXT_ITEM_TOKENS {
             best = Some(candidate);
             lower = budget.saturating_add(1);
         } else if budget == 0 {

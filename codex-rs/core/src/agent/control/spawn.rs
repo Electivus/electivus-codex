@@ -802,12 +802,14 @@ impl AgentControl {
                 .reference_context_item()
                 .await
                 .is_some()
-            && let Some(developer_message) =
-                crate::context_manager::updates::build_developer_update_item(vec![
+        {
+            forked_rollout_items.extend(
+                crate::context_manager::updates::build_developer_update_items(vec![
                     subagent_developer_instructions.clone(),
                 ])
-        {
-            forked_rollout_items.push(RolloutItem::ResponseItem(developer_message.into()));
+                .into_iter()
+                .map(|item| RolloutItem::ResponseItem(item.into())),
+            );
         }
         if preserve_reference_context_item
             && multi_agent_version == MultiAgentVersion::V2

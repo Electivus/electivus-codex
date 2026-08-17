@@ -346,7 +346,8 @@ impl ContextManager {
             .unwrap_or_default()
             .iter()
             .filter(|item| is_api_message(item))
-            .filter_map(|item| process_replayed_item(item, policy))
+            .flat_map(|item| process_replayed_item(item, policy))
+            .take(MAX_REPLAY_HISTORY_ITEMS)
             .collect();
         self.replace(processed);
         self.replay_prefix_items = self.items.len();
@@ -364,12 +365,16 @@ impl ContextManager {
             .unwrap_or_default()
             .iter()
             .filter(|envelope| is_api_message(&envelope.item))
-            .filter_map(|envelope| {
-                process_replayed_item(&envelope.item, policy).map(|item| ResponseItemEnvelope {
-                    item,
-                    metadata: envelope.metadata.clone(),
-                })
+            .flat_map(|envelope| {
+                let metadata = envelope.metadata.clone();
+                process_replayed_item(&envelope.item, policy)
+                    .into_iter()
+                    .map(move |item| ResponseItemEnvelope {
+                        item,
+                        metadata: metadata.clone(),
+                    })
             })
+            .take(MAX_REPLAY_HISTORY_ITEMS)
             .collect();
         self.replace_annotated(processed);
         self.replay_prefix_items = self.items.len();
@@ -385,7 +390,11 @@ impl ContextManager {
         let processed_items = items
             .into_iter()
             .filter(|item| is_api_message(item))
-            .filter_map(|item| process_replayed_item(item, policy).map(ResponseItemEnvelope::new))
+            .flat_map(|item| {
+                process_replayed_item(item, policy)
+                    .into_iter()
+                    .map(ResponseItemEnvelope::new)
+            })
             .take(remaining);
         Arc::make_mut(&mut self.items).extend(processed_items);
         self.replay_prefix_items = self.items.len();
@@ -401,11 +410,14 @@ impl ContextManager {
         let processed_items = items
             .iter()
             .filter(|envelope| is_api_message(&envelope.item))
-            .filter_map(|envelope| {
-                process_replayed_item(&envelope.item, policy).map(|item| ResponseItemEnvelope {
-                    item,
-                    metadata: envelope.metadata.clone(),
-                })
+            .flat_map(|envelope| {
+                let metadata = envelope.metadata.clone();
+                process_replayed_item(&envelope.item, policy)
+                    .into_iter()
+                    .map(move |item| ResponseItemEnvelope {
+                        item,
+                        metadata: metadata.clone(),
+                    })
             })
             .take(remaining);
         Arc::make_mut(&mut self.items).extend(processed_items);
