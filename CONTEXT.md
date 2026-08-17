@@ -30,13 +30,11 @@ A supported operating-system, architecture, or build variant validated after mer
 signal matters but does not justify adding latency to every pull request.
 _Avoid_: Optional platform, unsupported platform
 
-**Linux support boundary**:
-The current fork-validation scope: native Linux x64 in the merge gate, plus a Release portability
-check and Change-triggered validation for relevant V8 changes. Linux ARM64 tests, remaining GNU/musl
-build variants, and other specialized Linux paths stay in extended validation, while macOS and
-Windows remain product platforms but are deferred from fork validation until sustainable runners
-are certified.
-_Avoid_: Codex platform support, permanent platform removal
+**Fork validation boundary**:
+The product-platform and build-variant scope actively enforced by Sustainable fork CI. Linux x64,
+Windows x64, and Windows ARM64 are inside the Merge gate; Linux ARM64 and specialized Linux variants
+remain in Extended validation, while macOS remains outside the boundary.
+_Avoid_: Linux support boundary, Codex platform support, permanent platform removal
 
 **Validation workflow**:
 An automation path that produces evidence about a proposed or integrated code change without
@@ -59,7 +57,8 @@ private runner fleets, or infrastructure secrets.
 _Avoid_: Free tier, OpenAI infrastructure, optional accelerator
 
 **Essential validation**:
-Native Linux x64 tests whose success is required by the current merge gate.
+Validation on Linux x64, Windows x64, and Windows ARM64 whose success is required by the current
+Merge gate.
 _Avoid_: Cross-compile check, build-only signal, smoke test
 
 **Release portability check**:
@@ -126,10 +125,9 @@ latency to pull requests or repeating promoted validation.
 _Avoid_: Merge gate, best-effort CI, optional tests
 
 **Stability certification**:
-Initial evidence on one commit consisting of one complete retry-free successful Merge gate run and
-one successful run of every retained Extended validation suite for the same rollout/workflow
-version.
-_Avoid_: Merge-gate-only evidence, continuous reliability measurement
+Initial evidence on one unchanged commit consisting of two complete retry-free successful Fresh
+merge gate executions, at least one of which uses a cold or isolated cache path.
+_Avoid_: Partial rerun, retry-assisted pass, continuous reliability measurement
 
 **Test reactivation certification**:
 Evidence for one temporarily ignored test on one immutable commit consisting of exactly 20

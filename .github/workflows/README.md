@@ -2,23 +2,21 @@
 
 The workflows in this directory implement Sustainable fork CI as a compatibility
 patch over the inherited validation suite. Correctness depends only on standard
-GitHub-hosted Linux runners. BuildBuddy can accelerate Bazel work when its
-secret is available, while the existing local-build and GitHub-cache paths
-remain the fallback.
+public GitHub-hosted Linux and Windows runners. BuildBuddy can accelerate Bazel
+work when its secret is available, while local-build and GitHub-cache paths
+remain the correctness fallback.
 
-## Linux Support Boundary
+## Fork Validation Boundary
 
 - Required checks run against GitHub's synthetic merge commit, not the pull
   request head alone. This includes changes already on `main` and catches
   conflicts before they reach the branch.
-- Native Linux x64 on `ubuntu-24.04` is the current Essential platform.
+- Native Linux x64 on `ubuntu-24.04`, Windows x64 on `windows-2025`, and Windows
+  ARM64 on `windows-11-arm` are Essential platforms.
 - Linux ARM64 on `ubuntu-24.04-arm` and remaining build variants are Extended
   validation. Promoted release, x64 test, and V8 lanes are not repeated after
   merge.
-- macOS and Windows remain Codex product platforms, but this fork does not
-  select them in active validation matrices. They can return by restoring
-  inherited jobs and widening matrices after their standard-runner paths are
-  certified.
+- macOS remains a Codex product platform outside the Fork validation boundary.
 
 ## Electivus Linux And Windows Release
 
@@ -118,15 +116,14 @@ Windows output together with Linux assets in one release.
 - `blocking-ci.yml` owns the version-controlled list of merge-blocking child
   workflows. After Stability certification, the active `main` ruleset requires
   only its aggregate `CI required` job and enforces strict base freshness.
-- `bazel.yml` runs native Linux x64 Bazel `test` and `clippy` as the Essential
-  path, including the generated Rust test binaries needed to lint inline
-  `#[cfg(test)]` code. Eligible Deep Linux changes independently run its
-  release-only scope, preserving the fastbuild no-debug-assertion targets and
-  bwrap compilation.
+- `bazel.yml` runs native Linux x64 Bazel `test` and `clippy` plus a dedicated
+  Windows x64 scope: four public-runner test shards, one stable test result,
+  clippy, and no-debug-assertion release verification. BuildBuddy is optional;
+  the no-secret path executes locally with four jobs. Eligible Deep Linux
+  changes independently run the Linux release-only scope and bwrap compilation.
 - `rust-ci.yml` keeps the Cargo-native PR checks intentionally small:
   - `cargo fmt --check`
   - `cargo shear`
-  - `argument-comment-lint` on Linux
   - `tools/argument-comment-lint` package tests when the lint or its workflow wiring changes
 - `sdk.yml` runs Python and TypeScript SDK validation on `ubuntu-24.04`.
 - `blocking-ci.yml` always runs the repository-owned Deep Linux eligibility
@@ -140,14 +137,18 @@ Windows output together with Linux assets in one release.
   PostgreSQL consumer. Irrelevant changes skip both expensive release calls;
   independent Bazel and Cargo result jobs accept only the exact
   eligible/success or irrelevant/skipped pair and fail closed otherwise.
-- `v8-canary.yml` is independently Change-triggered. Known ordinary Codex and
-  documentation changes finish through metadata only; V8-relevant, unknown,
-  indeterminate, or manual runs require its exact eight-leg Linux matrix and a
-  bounded terminal result.
-- Bazel-backed gate jobs that can rebuild V8 from a cold cache have a 90-minute
-  job limit. This is a failure-containment bound rather than the 120-minute p95
-  feedback objective; cached runs should finish sooner, and every selected
-  check remains required.
+- Every pull request also calls `rust-ci-full.yml` with the `windows` scope. It
+  selects exactly four Cargo lint/build lanes, one x64 archive with four x64
+  shards, one ARM64 archive cross-built on x64 with four native ARM64 shards,
+  Windows runtime helpers, retry-free JUnit, and one Windows x64
+  argument-comment-lint job.
+- `v8-canary.yml` always builds the x64 and ARM64 Windows targets from pinned
+  source on `windows-2025`. Its eight-leg Linux matrix remains independently
+  Change-triggered; known irrelevant changes complete that Linux branch through
+  metadata while the mandatory Windows result still runs.
+- Windows Cargo and Bazel jobs use 60- or 90-minute containment limits; Windows
+  V8 source builds use 120 minutes. These are job limits, not the 120-minute p95
+  Merge feedback budget, which is evaluated after 20 eligible production runs.
 - Only root `README.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, and
   `SECURITY.md`; `docs/**`; and GitHub community metadata under
   `.github/CODEOWNERS`, `.github/ISSUE_TEMPLATE/**`,
@@ -162,14 +163,15 @@ Windows output together with Linux assets in one release.
   ARM64 musl dev, ARM64 GNU dev, and ARM64 musl release lint/build lanes plus
   ARM64 nextest. General checks, x64 nextest/PostgreSQL, promoted release lanes,
   Bazel no-debug release validation, and V8 are not repeated.
-- `rust-ci-full.yml` resolves `merge-gate`, `extended`, and `full` through the
+- `rust-ci-full.yml` resolves `merge-gate`, `extended`, `windows`, and `full` through the
   repository-owned planner. Empty direct-dispatch input resolves to `full`, and
   an unknown nonempty scope fails safe to `full`. Manual dispatch and the
   opt-in `**full-ci**` branch trigger therefore retain the complete suite for
-  Stability certification or diagnosis. Stability certification requires one
-  complete retry-free successful Merge gate run plus one successful run of
-  every retained Extended validation suite for the same rollout/workflow
-  version. The aggregate accepts only `success` for planned children and
+  Stability certification or diagnosis. `full` is exactly the union of the
+  Linux Merge gate, Extended validation, and Windows validation scopes.
+  Stability certification requires two complete retry-free Fresh merge gate
+  executions on one unchanged candidate, with at least one cold or isolated
+  cache path. The aggregate accepts only `success` for planned children and
   `skipped` for every unplanned child.
 - In `full` and `merge-gate`, native Linux x64 builds one archive and matching
   runtime-helper artifact identity for four
@@ -181,20 +183,24 @@ Windows output together with Linux assets in one release.
   consumers. Docker
   remote-executor validation is deferred under #41 until the pinned baseline's
   integration fixtures are consistently remote-safe.
+- Windows x64 follows the same one-producer/four-consumer shape on
+  `windows-2025`. Windows ARM64 is cross-built once on `windows-2025` and
+  replayed by four native `windows-11-arm` consumers. Both archives include the
+  matching sandbox setup and command-runner executables.
 - Linux archive producers discard unused hosted-image toolchains and omit
   debuginfo from test artifacts so the inherited full suite fits standard
   runner disks. Linux ARM64 also caps Cargo parallelism to fit its memory
   budget.
 - `v8-canary.yml` retains V8 version resolution, source builds, checksums,
   staging, and artifact-pair validation for Linux x64 and ARM64 GNU/musl
-  targets. Native Cargo smoke runs for the GNU targets; musl coverage ends at
-  the staged artifact pair. It remains Change-triggered in the Merge gate and
-  complete on manual dispatch, but is not called by postmerge.
+  targets plus mandatory Windows x64 and ARM64 source builds. Native Cargo smoke
+  runs for Linux GNU targets and both staged Windows artifacts; musl coverage
+  ends at the staged artifact pair. V8 is not called by postmerge.
 
 ### Validation Inventory
 
 `.github/ci-validation-inventory.json` is the machine-checked source that
-accounts for every active Full Rust family and all eight V8 legs exactly once.
+accounts for every active Full Rust, Windows Bazel, and V8 lane exactly once.
 
 | Family or lanes                                                            |   Cardinality | Disposition                         | Active scope                        |
 | -------------------------------------------------------------------------- | ------------: | ----------------------------------- | ----------------------------------- |
@@ -206,7 +212,12 @@ accounts for every active Full Rust family and all eight V8 legs exactly once.
 | x64 nextest four shards + PostgreSQL consumer                              |             5 | Promoted by #86                     | `merge-gate`, `full`                |
 | ARM64 nextest shards                                                       |             4 | Retained                            | `extended`, `full`                  |
 | x64/ARM64 x GNU/musl x release/ptrcomp-sandbox V8                          |             8 | Promoted by #88                     | Change-triggered Merge gate, manual |
-| macOS and Windows                                                          | 0 active legs | Out of boundary                     | None                                |
+| Windows x64 argument-comment-lint                                          |             1 | Promoted by #139                    | `windows`, `full`                   |
+| Windows x64/ARM64 dev and release Cargo lanes                              |             4 | Promoted by #136/#137               | `windows`, `full`                   |
+| Windows x64/ARM64 nextest archives and native shards                       |            10 | Promoted by #136/#137               | `windows`, `full`                   |
+| Windows x64 Bazel shards, results, clippy, and release                     |             8 | Promoted by #138/#139/#142          | `windows`, `full`                   |
+| Windows x64/ARM64 ptrcomp-sandbox V8                                       |             2 | Promoted by #140                    | `windows`, `full`                   |
+| macOS                                                                       | 0 active legs | Out of boundary                     | None                                |
 
 ## Test Signal Integrity
 
@@ -222,6 +233,12 @@ standalone PostgreSQL Merge-gate job is retired because eligible changes now reu
 `rust-test-policy.toml` inventories tracked Rust test ignores by source path, following test function, and normalized
 attribute or condition. New, changed, duplicate, stale, or unclassified occurrences fail repository checks. Review
 and assign every exact identity with its source change; names and reason text never classify it automatically.
+`.github/windows-rust-skip-baseline.json` additionally fixes the 84 Windows-effective inherited identities to upstream
+commit `6c108912eeacabfc82723bf44f8a23f6e2f86585`: 52 explicit Windows conditions, 28 generic predicates, two schema
+generation helpers, and two ConPTY runtime gaps. Any new or modified Windows-effective skip fails the same required
+repository policy check. A second canonical digest fixes all 136 unconditional ignores to the inspected Electivus
+baseline `fefc83aef97940a1ed918027c0499e5c4a672f46`, so an ordinary unconditional ignore cannot bypass the Windows
+baseline merely by adding a policy classification.
 
 ### #89 Test Reactivation Certification
 
@@ -275,6 +292,19 @@ Repository checks install pinned actionlint first; quarantine validation require
 before the Python policy helper verifies the named top-level job exists. Missing actionlint or lint failures fail closed.
 Identities must be unique; wildcard or blanket scopes fail. Expiry must be on or after the start, no more than seven
 days later, and not elapsed. Quarantine is temporary relocation, never a silent pass or stopped validation.
+
+## Post-Promotion Feedback Measurement
+
+Issue #145 starts only after the certified promotion is merged. Record the immutable run ID and URL for exactly the
+first 20 eligible `blocking-ci` Merge gate runs whose merge candidates include that merge. For each sample, retain the
+run creation/completion timestamps, the `CI required` conclusion and elapsed time, base freshness, cache evidence,
+retry/cancellation state, and any Windows ARM64 queue or zero-step startup failure.
+
+Compute p95 as the 19th value in the ascending list of 20 end-to-end `CI required` durations and compare it with the
+120-minute Merge feedback budget. Do not silently discard retries, cancellations, stale bases, capacity failures, or
+cache-state caveats; classify ARM64 public-preview capacity separately from workflow, test, and product failures. Post
+the inventory and conclusion on #145. If latency or runner sustainability misses the objective, open a separately
+scoped corrective issue without weakening the Merge gate.
 
 ## Rule Of Thumb
 
