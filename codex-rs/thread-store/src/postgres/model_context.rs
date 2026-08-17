@@ -85,14 +85,29 @@ impl ModelContextBudget {
     }
 
     fn account_expanded_items(&mut self, additional_items: usize) -> ThreadStoreResult<()> {
+        self.account_expansion(additional_items, /*additional_bytes*/ 0)
+    }
+
+    fn account_expansion(
+        &mut self,
+        additional_items: usize,
+        additional_bytes: usize,
+    ) -> ThreadStoreResult<()> {
         let next_items = self
             .items
             .checked_add(additional_items)
             .ok_or_else(|| self.limit_error("item count overflow"))?;
-        if next_items > self.max_items {
+        let additional_bytes = u64::try_from(additional_bytes)
+            .map_err(|_| self.limit_error("invalid expansion size"))?;
+        let next_bytes = self
+            .bytes
+            .checked_add(additional_bytes)
+            .ok_or_else(|| self.limit_error("byte count overflow"))?;
+        if next_items > self.max_items || next_bytes > self.max_bytes {
             return Err(self.limit_error("history exceeds the bounded read budget"));
         }
         self.items = next_items;
+        self.bytes = next_bytes;
         Ok(())
     }
 
@@ -171,13 +186,17 @@ fn validate_model_context_item(
 
 fn validate_response_item(
     item: &ResponseItem,
-    budget: &ModelContextBudget,
+    budget: &mut ModelContextBudget,
 ) -> ThreadStoreResult<()> {
-    let serialized_bytes = serialized_bytes(item)?;
-    if serialized_bytes <= max_model_context_item_bytes()
-        || has_discounted_model_payload(item)
-        || replay_truncatable_output_minimum_fits(item, budget)?
-    {
+    let item_bytes = serialized_bytes(item)?;
+    if item_bytes <= max_model_context_item_bytes() {
+        return Ok(());
+    }
+    if let Some(expansion) = replay_splittable_message_expansion(item, item_bytes, budget)? {
+        budget.account_expansion(expansion.additional_items, expansion.additional_bytes)?;
+        return Ok(());
+    }
+    if has_discounted_model_payload(item) || replay_truncatable_output_minimum_fits(item, budget)? {
         return Ok(());
     }
     Err(budget.limit_error(&format!(
@@ -201,7 +220,7 @@ fn validate_base_instructions(
     base_instructions: &codex_protocol::models::BaseInstructions,
     budget: &ModelContextBudget,
 ) -> ThreadStoreResult<()> {
-    validate_response_item(
+    validate_serialized_model_item(
         &ResponseItem::Message {
             id: None,
             role: "developer".to_string(),
@@ -217,7 +236,7 @@ fn validate_base_instructions(
 
 fn validate_dynamic_tools(
     tools: &[DynamicToolSpec],
-    budget: &ModelContextBudget,
+    budget: &mut ModelContextBudget,
 ) -> ThreadStoreResult<()> {
     let mut direct_specs = Vec::new();
     let mut direct_namespaces = BTreeMap::<String, ResponsesApiNamespace>::new();
@@ -328,6 +347,85 @@ fn append_dynamic_tool(
     } else {
         direct_specs.push(spec);
     }
+}
+
+struct ReplayMessageExpansion {
+    additional_items: usize,
+    additional_bytes: usize,
+}
+
+fn replay_splittable_message_expansion(
+    item: &ResponseItem,
+    item_bytes: usize,
+    budget: &ModelContextBudget,
+) -> ThreadStoreResult<Option<ReplayMessageExpansion>> {
+    let ResponseItem::Message {
+        id,
+        role,
+        content,
+        phase,
+        internal_chat_message_metadata_passthrough: metadata,
+    } = item
+    else {
+        return Ok(None);
+    };
+    if content.is_empty() {
+        return Ok(None);
+    }
+
+    let message_with_content = |content| ResponseItem::Message {
+        id: id.clone(),
+        role: role.clone(),
+        content: vec![content],
+        phase: phase.clone(),
+        internal_chat_message_metadata_passthrough: metadata.clone(),
+    };
+    let mut expanded_items = 0usize;
+    let mut expanded_bytes = 0usize;
+    for content in content {
+        let single_item = message_with_content(content.clone());
+        let single_item_bytes = serialized_bytes(&single_item)?;
+        let (item_count, split_item_bytes) = if single_item_bytes <= max_model_context_item_bytes()
+            || has_discounted_model_payload(&single_item)
+        {
+            (1, single_item_bytes)
+        } else {
+            let empty_content = match content {
+                ContentItem::InputText { .. } => ContentItem::InputText {
+                    text: String::new(),
+                },
+                ContentItem::OutputText { .. } => ContentItem::OutputText {
+                    text: String::new(),
+                },
+                ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => return Ok(None),
+            };
+            let empty_item_bytes = serialized_bytes(&message_with_content(empty_content))?;
+            // Leave enough room for any one JSON-escaped Unicode scalar at a chunk boundary.
+            let text_capacity = max_model_context_item_bytes()
+                .saturating_sub(empty_item_bytes)
+                .saturating_sub(12);
+            if text_capacity == 0 {
+                return Ok(None);
+            }
+            let text_bytes = single_item_bytes.saturating_sub(empty_item_bytes);
+            let item_count = text_bytes.div_ceil(text_capacity).max(1);
+            let split_item_bytes = empty_item_bytes
+                .checked_mul(item_count)
+                .and_then(|bytes| bytes.checked_add(text_bytes))
+                .ok_or_else(|| budget.limit_error("byte count overflow"))?;
+            (item_count, split_item_bytes)
+        };
+        expanded_items = expanded_items
+            .checked_add(item_count)
+            .ok_or_else(|| budget.limit_error("item count overflow"))?;
+        expanded_bytes = expanded_bytes
+            .checked_add(split_item_bytes)
+            .ok_or_else(|| budget.limit_error("byte count overflow"))?;
+    }
+    Ok(Some(ReplayMessageExpansion {
+        additional_items: expanded_items.saturating_sub(1),
+        additional_bytes: expanded_bytes.saturating_sub(item_bytes),
+    }))
 }
 
 fn has_discounted_model_payload(item: &ResponseItem) -> bool {

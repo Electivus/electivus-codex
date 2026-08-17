@@ -47,7 +47,7 @@ fn model_context_budget_rejects_unbounded_item_counts_and_bytes() {
 }
 
 #[test]
-fn model_context_validation_distinguishes_presentation_and_model_visible_items() {
+fn model_context_validation_distinguishes_replay_safe_and_rejected_items() {
     let thread_id = codex_protocol::ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f038")
         .expect("thread id");
     let presentation = RolloutItem::EventMsg(EventMsg::Warning(WarningEvent {
@@ -101,17 +101,45 @@ fn model_context_validation_distinguishes_presentation_and_model_visible_items()
         let mut budget = ModelContextBudget::new(thread_id);
         validate_model_context_item(accepted, &mut budget).expect("item should be accepted");
     }
+    let mut budget = ModelContextBudget::new(thread_id);
+    validate_model_context_item(&oversized_message, &mut budget)
+        .expect("splittable message should be accepted");
 
-    for rejected in [&oversized_message, &impossible_output] {
-        let mut budget = ModelContextBudget::new(thread_id);
-        let error = validate_model_context_item(rejected, &mut budget)
-            .expect_err("model-visible item should be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("individual model-visible history item")
-        );
-    }
+    let mut budget = ModelContextBudget::new(thread_id);
+    let error = validate_model_context_item(&impossible_output, &mut budget)
+        .expect_err("model-visible item should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("individual model-visible history item")
+    );
+}
+
+#[test]
+fn model_context_validation_accepts_replay_splittable_messages_and_accounts_expansion() {
+    let thread_id = codex_protocol::ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f038")
+        .expect("thread id");
+    let message = ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![
+            ContentItem::InputText {
+                text: "memory".repeat(4_000),
+            },
+            ContentItem::InputText {
+                text: "skills".repeat(4_000),
+            },
+        ],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    assert!(
+        serialized_bytes(&message).expect("serialize message") > max_model_context_item_bytes()
+    );
+    let mut budget = ModelContextBudget::new(thread_id);
+    validate_response_item(&message, &mut budget).expect("message should split during replay");
+    assert_eq!(budget.items, 1);
+    assert!(budget.bytes > 0);
 }
 
 #[test]
@@ -154,7 +182,7 @@ fn compacted_replacement_history_is_bounded_after_expansion() {
 fn session_metadata_limits_use_model_visible_instruction_and_tool_envelopes() {
     let thread_id = codex_protocol::ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f038")
         .expect("thread id");
-    let budget = ModelContextBudget::new(thread_id);
+    let mut budget = ModelContextBudget::new(thread_id);
     let mut instruction_length = max_model_context_item_bytes();
     let base_instructions = loop {
         let candidate = BaseInstructions {
@@ -181,7 +209,7 @@ fn session_metadata_limits_use_model_visible_instruction_and_tool_envelopes() {
             })
         })
         .collect::<Vec<_>>();
-    let direct_error = validate_dynamic_tools(&direct_tools, &budget)
+    let direct_error = validate_dynamic_tools(&direct_tools, &mut budget)
         .expect_err("Responses Lite must bound its aggregated AdditionalTools item");
 
     let deferred_tools = (0..500)
@@ -194,7 +222,7 @@ fn session_metadata_limits_use_model_visible_instruction_and_tool_envelopes() {
             })
         })
         .collect::<Vec<_>>();
-    let deferred_error = validate_dynamic_tools(&deferred_tools, &budget)
+    let deferred_error = validate_dynamic_tools(&deferred_tools, &mut budget)
         .expect_err("tool_search output must be bounded after coalescing deferred tools");
 
     for error in [instructions_error, direct_error, deferred_error] {

@@ -12,6 +12,7 @@ use app_test_support::create_mock_responses_server_repeating_assistant;
 use codex_app_server::in_process::InProcessClientHandle;
 use codex_app_server::in_process::InProcessServerEvent;
 use codex_app_server_protocol as api;
+use codex_features::Feature;
 use codex_protocol::ThreadId;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
@@ -29,6 +30,7 @@ use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::user_input::UserInput;
+use codex_rollout::CompactedItem;
 use codex_rollout::RolloutItem;
 use codex_state::PostgresNamespaceAction;
 use codex_state::PostgresNamespaceConfig;
@@ -486,6 +488,166 @@ plugins = false
     writer_runtime.close().await;
     reader_runtime.close().await;
     verifier_runtime.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_resume_splits_oversized_developer_bundle_without_loss() -> Result<()> {
+    let fixture = PostgresFixture::new()?;
+    fixture.migrate().await?;
+    let model_server = create_mock_responses_server_repeating_assistant("bounded resume").await;
+    let codex_home = TempDir::new()?;
+    app_test_support::MockResponsesConfig::new(&model_server.uri())
+        .disable_feature(Feature::Plugins)
+        .write(codex_home.path())?;
+    let writer_runtime = fixture.runtime(codex_home.path()).await?;
+    let writer = store::PostgresThreadStore::from_runtime(Arc::clone(&writer_runtime))?;
+    let thread_id = ThreadId::new();
+    seed_thread(&writer, thread_id, codex_home.path(), "mock_provider").await?;
+    writer
+        .resume_thread(store::ResumeThreadParams {
+            thread_id,
+            rollout_path: None,
+            history: None,
+            include_archived: false,
+            metadata: store::ThreadPersistenceMetadata {
+                cwd: Some(codex_home.path().to_path_buf()),
+                model_provider: "mock_provider".to_string(),
+                memory_mode: ThreadMemoryMode::Enabled,
+            },
+        })
+        .await?;
+    let section = |label: &str, bytes: usize| {
+        let prefix = format!("resume-limit-{label}:");
+        format!("{prefix}{}", "x".repeat(bytes - prefix.len()))
+    };
+    let sections = [
+        section("memory", 17_398),
+        section("skills", 19_822),
+        section("permissions", 362),
+        section("collaboration", 966),
+        section("apps", 646),
+        section("plugins", 1_014),
+    ];
+    let oversized_developer = ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: sections
+            .iter()
+            .cloned()
+            .map(|text| ContentItem::InputText { text })
+            .collect(),
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    assert!(serde_json::to_vec(&oversized_developer)?.len() > 40_000);
+    writer
+        .append_items(store::AppendThreadItemsParams {
+            thread_id,
+            items: vec![RolloutItem::Compacted(CompactedItem {
+                message: String::new(),
+                replacement_history: Some(vec![oversized_developer.into()]),
+                window_number: Some(1),
+                first_window_id: Some(Uuid::now_v7().to_string()),
+                previous_window_id: None,
+                window_id: Some(Uuid::now_v7().to_string()),
+            })],
+        })
+        .await?;
+    writer.shutdown_thread(thread_id).await?;
+
+    let reader_runtime = fixture.runtime(codex_home.path()).await?;
+    let thread_store: Arc<dyn store::ThreadStore> = Arc::new(
+        store::PostgresThreadStore::from_runtime(Arc::clone(&reader_runtime))?,
+    );
+    let mut client =
+        start_in_process_server_with_thread_store(codex_home.path(), thread_store).await?;
+    let thread_id = thread_id.to_string();
+    let _: api::ThreadResumeResponse = request(
+        &client,
+        api::ClientRequest::ThreadResume {
+            request_id: request_id(/*id*/ 100),
+            params: api::ThreadResumeParams {
+                thread_id: thread_id.clone(),
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    let continued: api::TurnStartResponse = request(
+        &client,
+        api::ClientRequest::TurnStart {
+            request_id: request_id(/*id*/ 101),
+            params: api::TurnStartParams {
+                thread_id: thread_id.clone(),
+                input: vec![api::UserInput::Text {
+                    text: "after bounded resume".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let Some(event) = client.next_event().await else {
+                anyhow::bail!("resumed replica stopped before turn/completed");
+            };
+            if let InProcessServerEvent::ServerNotification(notification) = event
+                && let api::ServerNotification::TurnCompleted(completed) = *notification
+                && completed.thread_id == thread_id
+                && completed.turn.id == continued.turn.id
+            {
+                return Ok::<(), anyhow::Error>(());
+            }
+        }
+    })
+    .await??;
+    let requests = model_server
+        .received_requests()
+        .await
+        .context("failed to read post-resume mock model requests")?;
+    let model_request = requests
+        .iter()
+        .rev()
+        .find(|request| request.url.path().ends_with("/responses"))
+        .context("missing post-resume model request")?
+        .body_json::<Value>()?;
+    let model_input = model_request["input"]
+        .as_array()
+        .context("post-resume model request must contain input")?;
+    let mut replayed_sections = Vec::new();
+    for item in model_input {
+        assert!(
+            serde_json::to_vec(item)?.len() <= 40_000,
+            "post-resume model input item exceeded 10,000 estimated tokens"
+        );
+        if item.get("role").and_then(Value::as_str) != Some("developer") {
+            continue;
+        }
+        for content in item
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(text) = content.get("text").and_then(Value::as_str)
+                && text.starts_with("resume-limit-")
+            {
+                replayed_sections.push(text);
+            }
+        }
+    }
+    assert_eq!(
+        replayed_sections,
+        sections.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+
+    client.shutdown().await?;
+    writer_runtime.close().await;
+    reader_runtime.close().await;
     fixture.cleanup().await
 }
 
