@@ -183,7 +183,7 @@ jobs:
               | python3 .github/scripts/windows_bazel_shards.py \
                 --shard "${BAZEL_TEST_SHARD}" \
                 --shard-count "${BAZEL_TEST_SHARD_COUNT}"
-          )
+          )"
           mapfile -t selected_targets <<< "${selected_output}"
           echo "Selected ${#selected_targets[@]} Bazel test targets for Windows shard ${BAZEL_TEST_SHARD}/${BAZEL_TEST_SHARD_COUNT}."
 

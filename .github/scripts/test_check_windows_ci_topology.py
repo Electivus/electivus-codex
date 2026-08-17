@@ -1,4 +1,7 @@
 from pathlib import Path
+import os
+import shutil
+import subprocess
 import unittest
 
 import check_windows_ci_topology as topology
@@ -14,6 +17,24 @@ class WindowsCiTopologyTests(unittest.TestCase):
 
     def test_current_windows_topology_is_complete(self) -> None:
         self.assertEqual([], topology.validate_topology(*self.sources))
+
+    def test_windows_bazel_shard_shell_is_valid(self) -> None:
+        bash = shutil.which("bash")
+        if os.name == "nt" and (git := shutil.which("git")) is not None:
+            git_bash = Path(git).parent.parent / "usr/bin/bash.exe"
+            if git_bash.is_file():
+                bash = str(git_bash)
+        if bash is None:
+            self.skipTest("bash is required to validate the Windows Bazel shard script")
+        step = topology._step(
+            topology._job(self.sources[0], "test-windows-shard"), "Bazel test shard"
+        )
+        body = step.split("        run: |\n", 1)[1]
+        script = "\n".join(line[10:] for line in body.splitlines())
+        result = subprocess.run(
+            [bash, "-n", "-c", script], check=False, capture_output=True, text=True
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
 
     def test_windows_topology_mutations_fail_closed(self) -> None:
         (
