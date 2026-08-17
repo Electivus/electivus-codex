@@ -2990,12 +2990,6 @@ impl Session {
         for item in &mut items {
             Self::stamp_response_item_for_history(item, &turn_context.sub_id);
         }
-        let items = Self::assign_missing_response_item_ids(Cow::Owned(items));
-        let items = items
-            .into_owned()
-            .into_iter()
-            .flat_map(crate::context_manager::updates::split_message_to_model_context_limit)
-            .collect::<Vec<_>>();
         (
             Self::assign_missing_response_item_ids(Cow::Owned(items)),
             image_preparations,
@@ -3064,15 +3058,27 @@ impl Session {
         items: Vec<ResponseItemEnvelope>,
         image_preparations: Vec<ImagePreparationMetadata>,
     ) {
-        let response_items = items
+        let raw_response_items = items
             .iter()
             .map(|envelope| envelope.item.clone())
+            .collect::<Vec<_>>();
+        let items = items
+            .into_iter()
+            .flat_map(|envelope| {
+                let mut metadata = envelope.metadata;
+                crate::context_manager::updates::split_message_to_model_context_limit(envelope.item)
+                    .into_iter()
+                    .map(move |item| ResponseItemEnvelope {
+                        item,
+                        metadata: metadata.take(),
+                    })
+            })
             .collect::<Vec<_>>();
         {
             let mut state = self.state.lock().await;
             state
                 .current_time_reminder
-                .note_recorded_items(&response_items);
+                .note_recorded_items(&raw_response_items);
             state
                 .history
                 .record_annotated_items(&items, turn_context.model_info.truncation_policy.into());
@@ -3088,7 +3094,7 @@ impl Session {
         let rollout_items: Vec<RolloutItem> =
             items.into_iter().map(RolloutItem::ResponseItem).collect();
         self.persist_rollout_items(&rollout_items).await;
-        self.send_raw_response_items(turn_context, &response_items)
+        self.send_raw_response_items(turn_context, &raw_response_items)
             .await;
     }
 

@@ -39,6 +39,7 @@ use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
 use codex_utils_output_truncation::truncate_function_output_items_with_policy;
 use codex_utils_output_truncation::truncate_text;
+use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -341,14 +342,14 @@ impl ContextManager {
     #[cfg(test)]
     pub(crate) fn replace_with_policy(&mut self, items: &[ResponseItem], policy: TruncationPolicy) {
         let start = items.len().saturating_sub(MAX_REPLAY_HISTORY_ITEMS);
-        let processed = items
-            .get(start..)
-            .unwrap_or_default()
-            .iter()
-            .filter(|item| is_api_message(item))
-            .flat_map(|item| process_replayed_item(item, policy))
-            .take(MAX_REPLAY_HISTORY_ITEMS)
-            .collect();
+        let processed = retain_latest_replay_groups(
+            items
+                .get(start..)
+                .unwrap_or_default()
+                .iter()
+                .filter(|item| is_api_message(item))
+                .map(|item| process_replayed_item(item, policy)),
+        );
         self.replace(processed);
         self.replay_prefix_items = self.items.len();
         self.replayed_history = true;
@@ -360,22 +361,23 @@ impl ContextManager {
         policy: TruncationPolicy,
     ) {
         let start = items.len().saturating_sub(MAX_REPLAY_HISTORY_ITEMS);
-        let processed = items
-            .get(start..)
-            .unwrap_or_default()
-            .iter()
-            .filter(|envelope| is_api_message(&envelope.item))
-            .flat_map(|envelope| {
-                let metadata = envelope.metadata.clone();
-                process_replayed_item(&envelope.item, policy)
-                    .into_iter()
-                    .map(move |item| ResponseItemEnvelope {
-                        item,
-                        metadata: metadata.clone(),
-                    })
-            })
-            .take(MAX_REPLAY_HISTORY_ITEMS)
-            .collect();
+        let processed = retain_latest_replay_groups(
+            items
+                .get(start..)
+                .unwrap_or_default()
+                .iter()
+                .filter(|envelope| is_api_message(&envelope.item))
+                .map(|envelope| {
+                    let metadata = envelope.metadata.clone();
+                    process_replayed_item(&envelope.item, policy)
+                        .into_iter()
+                        .map(move |item| ResponseItemEnvelope {
+                            item,
+                            metadata: metadata.clone(),
+                        })
+                        .collect()
+                }),
+        );
         self.replace_annotated(processed);
         self.replay_prefix_items = self.items.len();
         self.replayed_history = true;
@@ -726,6 +728,22 @@ pub(crate) fn truncate_function_output_payload(
         body,
         success: output.success,
     }
+}
+
+fn retain_latest_replay_groups<T>(groups: impl IntoIterator<Item = Vec<T>>) -> Vec<T> {
+    let mut retained = VecDeque::new();
+    let mut item_count = 0usize;
+    for group in groups {
+        item_count = item_count.saturating_add(group.len());
+        retained.push_back(group);
+        while item_count > MAX_REPLAY_HISTORY_ITEMS {
+            let Some(removed) = retained.pop_front() else {
+                break;
+            };
+            item_count = item_count.saturating_sub(removed.len());
+        }
+    }
+    retained.into_iter().flatten().collect()
 }
 
 /// API messages include every non-system item (user/assistant messages, reasoning,

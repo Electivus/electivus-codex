@@ -1762,6 +1762,25 @@ fn replace_with_policy_keeps_only_the_latest_bounded_replacement_items() {
     assert_eq!(history.raw_items().cloned().collect::<Vec<_>>(), items[1..]);
 }
 
+#[test]
+fn replace_annotated_with_policy_evicts_whole_oldest_split_message() {
+    let mut items = vec![user_msg(&"oldest".repeat(10_000))];
+    items.extend((1..MAX_REPLAY_HISTORY_ITEMS).map(|index| user_msg(&format!("message {index}"))));
+    let annotated = items
+        .iter()
+        .cloned()
+        .map(ResponseItemEnvelope::new)
+        .collect::<Vec<_>>();
+    let mut history = ContextManager::new();
+
+    history.replace_annotated_with_policy(&annotated, TruncationPolicy::Tokens(1_000));
+
+    let retained = history.raw_items().collect::<Vec<_>>();
+    assert_eq!(retained.last().copied(), items.last());
+    assert_eq!(retained.first().copied(), items.get(1));
+    assert_eq!(retained.len(), items.len() - 1);
+}
+
 fn assert_truncated_message_matches(message: &str, line: &str, expected_removed: usize) {
     let pattern = truncated_message_pattern(line);
     let regex = Regex::new(&pattern).unwrap_or_else(|err| {

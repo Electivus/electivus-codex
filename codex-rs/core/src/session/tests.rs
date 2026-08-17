@@ -2138,6 +2138,31 @@ async fn record_conversation_items_stamps_missing_turn_id_and_preserves_existing
 }
 
 #[tokio::test]
+async fn record_conversation_items_keeps_raw_response_item_unsplit() {
+    let (session, turn_context, rx) = make_session_and_context_with_rx().await;
+    let mut item = user_message(&"raw-event".repeat(7_000));
+    item.set_id(Some(ResponseItemId::with_suffix("msg", "raw-event")));
+
+    session
+        .record_conversation_items(&turn_context, std::slice::from_ref(&item))
+        .await;
+
+    let event = rx.recv().await.expect("raw response item event");
+    let EventMsg::RawResponseItem(raw) = event.msg else {
+        panic!("expected raw response item event");
+    };
+    assert!(
+        strip_metadata_from_items(&[raw.item]) == vec![item],
+        "raw response item was split or changed"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "expected one raw response item event"
+    );
+    assert!(raw_history_items(&session.clone_history().await).len() > 1);
+}
+
+#[tokio::test]
 async fn record_response_item_and_emit_turn_item_emits_hook_prompt_lifecycle() {
     let (session, turn_context, rx) = make_session_and_context_with_rx().await;
     let response_item = build_hook_prompt_message(&[HookPromptFragment::from_single_hook(
