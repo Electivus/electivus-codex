@@ -54,7 +54,14 @@ class WindowsCiTopologyTests(unittest.TestCase):
             baseline,
             bazelrc,
             fast_rust,
+            workspace_copy,
         ) = self.sources
+        cache_namespace = "windows-2025-sandbox-symbols0-"
+        before_restore_key, separator, after_restore_key = v8.rpartition(cache_namespace)
+        self.assertEqual(cache_namespace, separator)
+        v8_restore_key_drift = (
+            before_restore_key + "windows-2025-sandbox-" + after_restore_key
+        )
         cases = (
             ("exact Windows Cargo plan", 7, planner.replace("windows-11-arm", "windows-2025", 1)),
             ("explicit Windows planning outputs", 2, rust.replace("run_windows_arm64", "run_arm64")),
@@ -64,7 +71,28 @@ class WindowsCiTopologyTests(unittest.TestCase):
             ("Windows argument comment lint ownership", 2, rust.replace("  argument_comment_lint_windows:", "  missing_argument_comment_lint_windows:")),
             ("Windows argument comment lint ownership", 15, fast_rust + "\n# uses: ./.github/actions/run-argument-comment-lint\n"),
             ("Windows nextest producer and consumers", 3, platform.replace("shard: [1, 2, 3, 4]", "shard: [1, 2, 3]")),
+            (
+                "Windows nextest producer and consumers",
+                2,
+                rust.replace(
+                    "artifact_id: windows-x64\n      test_threads: 1",
+                    "artifact_id: windows-x64\n      test_threads: 8",
+                ),
+            ),
+            ("Windows nextest producer and consumers", 3, platform.replace("C:/codex-nextest-workspace/codex-rs", "codex-rs", 1)),
+            ("Windows nextest producer and consumers", 3, platform.replace("copy-windows-nextest-workspace.ps1", "missing-workspace-copy.ps1", 1)),
+            ("Windows nextest producer and consumers", 16, workspace_copy.replace("/COPY:DAT", "/COPYALL", 1)),
+            ("Windows nextest producer and consumers", 16, workspace_copy.replace("-gt 7", "-gt 8", 1)),
             ("retry-free JUnit evidence", 3, platform.replace("check_nextest_junit.py", "missing_junit_check.py")),
+            ("retry-free JUnit evidence", 3, platform.replace("--retries 0", "--retries 1")),
+            (
+                "retry-free JUnit evidence",
+                3,
+                platform.replace(
+                    'if [[ "${RUNNER_OS}" == "Windows" ]]; then\n            nextest_args+=(--retries 0)',
+                    'if [[ "${RUNNER_OS}" == "Linux" ]]; then\n            nextest_args+=(--retries 0)',
+                ),
+            ),
             ("Windows Cargo result fan-in", 8, rust_result.replace("tests_windows_arm64", "tests_windows_x64")),
             ("exact Windows Bazel topology", 0, bazel.replace("matrix:\n        shard: [1, 2, 3, 4]", "matrix:\n        shard: [1, 2, 3]")),
             ("exact Windows Bazel topology", 0, bazel.replace("fail-fast: false", "fail-fast: true")),
@@ -76,6 +104,9 @@ class WindowsCiTopologyTests(unittest.TestCase):
             ("optional BuildBuddy local fallback", 10, bazel_helper.replace('if [[ -n "${BUILDBUDDY_API_KEY:-}" || "${RUNNER_OS:-}" == "Windows" ]]; then', 'if [[ -n "${BUILDBUDDY_API_KEY:-}" || "${RUNNER_OS:-}" == "Linux" ]]; then')),
             ("optional BuildBuddy local fallback", 14, bazelrc.replace("--local_test_jobs=4", "--local_test_jobs=8")),
             ("mandatory Windows V8 parity", 4, v8.replace("- aarch64-pc-windows-msvc", "- x86_64-pc-windows-msvc", 1)),
+            ("mandatory Windows V8 parity", 4, v8.replace("symbol_level=0 v8_symbol_level=0", "symbol_level=2 v8_symbol_level=2")),
+            ("mandatory Windows V8 parity", 4, v8.replace(cache_namespace, "windows-2025-sandbox-", 1)),
+            ("mandatory Windows V8 parity", 4, v8_restore_key_drift),
             ("CI required Windows fan-in", 1, blocking.replace("- windows-cargo", "- deep-linux-cargo")),
             ("CI required Windows fan-in", 1, blocking.replace("      - windows-cargo", "      # - windows-cargo")),
             ("CI required Windows fan-in", 1, blocking.replace("      - windows-bazel\n", "")),
@@ -86,10 +117,10 @@ class WindowsCiTopologyTests(unittest.TestCase):
             ("required repository topology check", 6, repo_checks.replace("check_windows_ci_topology.py", "missing_windows_topology.py")),
             ("no postmerge Windows duplication", 5, postmerge + "\n# windows-2025\n"),
         )
-        for expected, index, changed in cases:
+        for case_number, (expected, index, changed) in enumerate(cases):
             mutated = list(self.sources)
             mutated[index] = changed
-            with self.subTest(expected=expected):
+            with self.subTest(expected=expected, case_number=case_number):
                 self.assertIn(
                     expected,
                     "\n".join(topology.validate_topology(*mutated)),

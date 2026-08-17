@@ -1,3 +1,6 @@
+from pathlib import Path
+import subprocess
+import sys
 import unittest
 
 from windows_bazel_shards import select_targets
@@ -27,6 +30,16 @@ class WindowsBazelShardsTests(unittest.TestCase):
             with self.subTest(targets=targets, shard=shard, shard_count=shard_count):
                 with self.assertRaisesRegex(ValueError, message):
                     select_targets(targets, shard, shard_count)
+
+    def test_cli_emits_lf_only_on_windows(self) -> None:
+        script = Path(__file__).with_name("windows_bazel_shards.py")
+        result = subprocess.run(
+            [sys.executable, str(script), "--shard", "1", "--shard-count", "1"],
+            input=b"//a:test\n//b:test\n",
+            check=True,
+            capture_output=True,
+        )
+        self.assertEqual(b"//a:test\n//b:test\n", result.stdout)
 
 
 if __name__ == "__main__":

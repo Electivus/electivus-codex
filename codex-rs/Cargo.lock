@@ -3151,6 +3151,7 @@ dependencies = [
  "codex-state",
  "codex-thread-store",
  "codex-utils-output-truncation",
+ "dunce",
  "pretty_assertions",
  "serde",
  "serde_json",

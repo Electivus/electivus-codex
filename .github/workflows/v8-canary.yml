@@ -393,9 +393,9 @@ jobs:
           path: |
             ${{ steps.setup_ci.outputs.cargo-target-dir }}/sccache
             ${{ steps.setup_ci.outputs.cargo-target-dir }}/${{ matrix.target }}/release/gn_out
-          key: rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-${{ hashFiles('upstream-rusty-v8/Cargo.lock', 'upstream-rusty-v8/build.rs', 'upstream-rusty-v8/git_submodule_status.txt') }}
+          key: rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-${{ hashFiles('upstream-rusty-v8/Cargo.lock', 'upstream-rusty-v8/build.rs', 'upstream-rusty-v8/git_submodule_status.txt') }}
           restore-keys: |
-            rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-
+            rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-
 
       - name: Install and start sccache
         shell: pwsh
@@ -422,6 +422,7 @@ jobs:
 
       - name: Build upstream rusty_v8 sandbox release pair
         env:
+          GN_ARGS: "symbol_level=0 v8_symbol_level=0"
           SCCACHE_IDLE_TIMEOUT: 0
           TARGET: ${{ matrix.target }}
           V8_FROM_SOURCE: "1"

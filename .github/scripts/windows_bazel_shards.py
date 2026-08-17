@@ -40,6 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as error:
         print(error, file=sys.stderr)
         return 1
+    sys.stdout.reconfigure(newline="\n")
     print("\n".join(selected))
     return 0
 

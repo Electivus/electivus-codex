@@ -41,6 +41,7 @@ SOURCES = (
     ".github/windows-rust-skip-baseline.json",
     ".bazelrc",
     ".github/workflows/rust-ci.yml",
+    ".github/scripts/copy-windows-nextest-workspace.ps1",
 )
 WINDOWS_SCOPE_IF = (
     "inputs.validation_scope != 'essential' && "
@@ -84,6 +85,7 @@ def validate_topology(
     baseline_source: str,
     bazelrc: str,
     fast_rust: str,
+    workspace_copy: str,
 ) -> list[str]:
     rust_windows_x64 = _job(rust, "tests_windows_x64")
     rust_windows_arm64 = _job(rust, "tests_windows_arm64")
@@ -91,6 +93,7 @@ def validate_topology(
     rust_results = _job(rust, "results")
     archive = _job(platform, "archive")
     shards = _job(platform, "shard")
+    shard_tests = _step(shards, "tests")
     platform_result = _job(platform, "result")
     bazel_shards = _job(bazel, "test-windows-shard")
     bazel_test_result = _job(bazel, "test-windows")
@@ -98,6 +101,7 @@ def validate_topology(
     bazel_release = _job(bazel, "verify-release-build-windows")
     bazel_result = _job(bazel, "windows-result")
     v8_windows = _job(v8, "build-windows-source")
+    v8_windows_cache = _step(v8_windows, "Restore upstream source-build cache")
     v8_terminal = _job(v8, "result")
     required = _job(blocking, "required")
     windows_cargo_call = _job(blocking, "windows-cargo")
@@ -180,9 +184,28 @@ def validate_topology(
             and "artifact_id: windows-x64" in rust_windows_x64
             and "target: aarch64-pc-windows-msvc" in rust_windows_arm64
             and "artifact_id: windows-arm64" in rust_windows_arm64
+            and "test_threads: 1" in rust_windows_x64
+            and "test_threads: 1" in rust_windows_arm64
             and "shard: [1, 2, 3, 4]" in shards
             and "uses: ./.github/actions/setup-msvc-env" in archive
             and "uses: ./.github/actions/setup-rusty-v8" in archive
+            and "C:/codex-nextest-workspace/codex-rs" in archive
+            and "C:/codex-nextest-workspace/codex-rs" in shards
+            and archive.count("Copy checkout to stable Windows nextest workspace") == 1
+            and shards.count("Copy checkout to stable Windows nextest workspace") == 1
+            and (archive + shards).count("copy-windows-nextest-workspace.ps1") == 2
+            and "ItemType Junction" not in platform
+            and all(
+                marker in workspace_copy
+                for marker in (
+                    "robocopy.exe",
+                    "/COPY:DAT",
+                    "/DCOPY:DAT",
+                    "$robocopyExitCode -gt 7",
+                    "Stable Windows nextest workspace is incomplete",
+                )
+            )
+            and "/COPYALL" not in workspace_copy
             and all(
                 marker in archive + shards
                 for marker in (
@@ -198,9 +221,15 @@ def validate_topology(
             and "NEXTEST_JUNIT_FILE" in shards
             and "Confirm nextest shard result" in shards
             and "needs: [shard, postgres-contracts]" in platform_result
-            and "continue-on-error:" not in _step(shards, "tests")
+            and "continue-on-error:" not in shard_tests
             and "continue-on-error:" not in _step(shards, "Inspect nextest JUnit signal")
-            and "--retries" not in shards,
+            and shard_tests.count("--retries 0") == 1
+            and re.search(
+                r'if \[\[ "\$\{RUNNER_OS\}" == "Windows" \]\]; then\s+'
+                r'nextest_args\+\=\(--retries 0\)\s+fi',
+                shard_tests,
+            )
+            is not None,
         ),
         (
             "Windows Cargo result fan-in",
@@ -257,6 +286,10 @@ def validate_topology(
             and v8_windows.count("- aarch64-pc-windows-msvc") == 1
             and "windows-11-arm" not in v8_windows
             and "V8_FROM_SOURCE: \"1\"" in v8_windows
+            and 'GN_ARGS: "symbol_level=0 v8_symbol_level=0"' in v8_windows
+            and v8_windows_cache.count("windows-2025-sandbox-symbols0-") == 2
+            and "key: rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-${{ hashFiles" in v8_windows_cache
+            and "rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-\n" in v8_windows_cache
             and "stage-upstream-release-pair" in v8_windows
             and "WINDOWS_BUILD_RESULT: ${{ needs.build-windows-source.result }}" in v8_terminal
             and "windows_build_result != \"success\"" in v8_result,

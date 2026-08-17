@@ -101,7 +101,7 @@ fn project_cwd_from_sessions(project_root: &Path) -> io::Result<Option<PathBuf>>
             if !cwd.is_absolute() {
                 continue;
             }
-            let Ok(cwd) = fs::canonicalize(cwd) else {
+            let Ok(cwd) = dunce::canonicalize(cwd) else {
                 continue;
             };
             if cwd.is_dir() {

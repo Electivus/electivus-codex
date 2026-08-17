@@ -482,6 +482,7 @@ jobs:
       target: x86_64-pc-windows-msvc
       profile: ci-test
       artifact_id: windows-x64
+      test_threads: 1
 
   tests_windows_arm64:
     name: Tests — Windows ARM64 - aarch64-pc-windows-msvc
@@ -494,6 +495,7 @@ jobs:
       target: aarch64-pc-windows-msvc
       profile: ci-test
       artifact_id: windows-arm64
+      test_threads: 1
     secrets: inherit
 
   # --- Gatherer job for the full post-merge workflow --------------------------

@@ -5737,7 +5737,7 @@ async fn postgresql_runtime_state_backend_uses_stable_config_and_warns_for_sqlit
     let sqlite_sentinel = codex_home.path().join("must-not-be-accessed");
     let config_toml = toml::from_str(&format!(
         r#"
-sqlite_home = "{}"
+sqlite_home = {sqlite_sentinel:?}
 
 [features]
 postgresql_state = true
@@ -5748,8 +5748,7 @@ backend = "postgresql"
 [state.postgresql]
 url_env = "CODEX_POSTGRES_URL"
 schema = "codex_test"
-"#,
-        sqlite_sentinel.display()
+"#
     ))
     .expect("parse config");
 

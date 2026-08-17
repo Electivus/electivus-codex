@@ -74,11 +74,14 @@ async fn shell_timeout_below_minimum_is_clamped_and_disclosed() -> Result<()> {
 
     skip_if_no_network!(Ok(()));
 
-    let command = match test_target_os() {
-        TestTargetOs::Windows => {
-            "Start-Sleep -Milliseconds 50; Write-Output tool-execution-complete"
+    let (command, minimum_ms) = match test_target_os() {
+        TestTargetOs::Windows => (
+            "Start-Sleep -Milliseconds 50; Write-Output tool-execution-complete",
+            5_000,
+        ),
+        TestTargetOs::Linux | TestTargetOs::MacOs => {
+            ("sleep 0.05; printf tool-execution-complete", 200)
         }
-        TestTargetOs::Linux | TestTargetOs::MacOs => "sleep 0.05; printf tool-execution-complete",
     };
     let arguments = serde_json::to_string(&json!({
         "command": command,
@@ -101,14 +104,18 @@ async fn shell_timeout_below_minimum_is_clamped_and_disclosed() -> Result<()> {
         ],
     )
     .await;
-    let mut builder = test_codex().with_model("gpt-5.4").with_config(|config| {
-        config.tool_execution = ToolExecutionPolicy::new(
-            timing_range(
-                /*min_ms*/ 200, /*default_ms*/ 300, /*max_ms*/ 500,
-            ),
-            config.tool_execution.yield_time(),
-        );
-    });
+    let mut builder = test_codex()
+        .with_model("gpt-5.4")
+        .with_config(move |config| {
+            config.tool_execution = ToolExecutionPolicy::new(
+                timing_range(
+                    /*min_ms*/ minimum_ms,
+                    /*default_ms*/ minimum_ms + 100,
+                    /*max_ms*/ minimum_ms + 300,
+                ),
+                config.tool_execution.yield_time(),
+            );
+        });
     let test = builder.build_with_auto_env(&server).await?;
 
     test.submit_turn("run the command").await?;
@@ -123,7 +130,9 @@ async fn shell_timeout_below_minimum_is_clamped_and_disclosed() -> Result<()> {
     assert_ne!(success, Some(false));
     assert!(output.contains("tool-execution-complete"), "{output}");
     assert!(
-        output.contains("Timing policy adjusted timeout_ms from 1 ms to 200 ms (minimum 200 ms)."),
+        output.contains(&format!(
+            "Timing policy adjusted timeout_ms from 1 ms to {minimum_ms} ms (minimum {minimum_ms} ms)."
+        )),
         "{output}"
     );
 
@@ -137,11 +146,14 @@ async fn non_interactive_exec_yield_below_minimum_is_clamped_and_disclosed() -> 
 
     skip_if_no_network!(Ok(()));
 
-    let command = match test_target_os() {
-        TestTargetOs::Windows => {
-            "Start-Sleep -Milliseconds 50; Write-Output tool-execution-complete"
+    let (command, yield_minimum_ms) = match test_target_os() {
+        TestTargetOs::Windows => (
+            "Start-Sleep -Milliseconds 50; Write-Output tool-execution-complete",
+            5_000,
+        ),
+        TestTargetOs::Linux | TestTargetOs::MacOs => {
+            ("sleep 0.05; printf tool-execution-complete", 1_000)
         }
-        TestTargetOs::Linux | TestTargetOs::MacOs => "sleep 0.05; printf tool-execution-complete",
     };
     let arguments = serde_json::to_string(&json!({
         "cmd": command,
@@ -171,18 +183,22 @@ async fn non_interactive_exec_yield_below_minimum_is_clamped_and_disclosed() -> 
         ],
     )
     .await;
-    let mut builder = test_codex().with_model("gpt-5.4").with_config(|config| {
-        config.tool_execution = ToolExecutionPolicy::new(
-            config.tool_execution.timeout(),
-            timing_range(
-                /*min_ms*/ 1_000, /*default_ms*/ 1_200, /*max_ms*/ 1_500,
-            ),
-        );
-        config
-            .features
-            .enable(Feature::UnifiedExec)
-            .expect("unified exec should be enableable");
-    });
+    let mut builder = test_codex()
+        .with_model("gpt-5.4")
+        .with_config(move |config| {
+            config.tool_execution = ToolExecutionPolicy::new(
+                config.tool_execution.timeout(),
+                timing_range(
+                    /*min_ms*/ yield_minimum_ms,
+                    /*default_ms*/ yield_minimum_ms + 200,
+                    /*max_ms*/ yield_minimum_ms + 500,
+                ),
+            );
+            config
+                .features
+                .enable(Feature::UnifiedExec)
+                .expect("unified exec should be enableable");
+        });
     let test = builder.build_with_auto_env(&server).await?;
 
     test.submit_turn("run the command").await?;
@@ -197,9 +213,9 @@ async fn non_interactive_exec_yield_below_minimum_is_clamped_and_disclosed() -> 
     assert_ne!(success, Some(false));
     assert!(output.contains("tool-execution-complete"), "{output}");
     assert!(
-        output.contains(
-            "Timing policy adjusted yield_time_ms from 1 ms to 1000 ms (minimum 1000 ms)."
-        ),
+        output.contains(&format!(
+            "Timing policy adjusted yield_time_ms from 1 ms to {yield_minimum_ms} ms (minimum {yield_minimum_ms} ms)."
+        )),
         "{output}"
     );
     let (interactive_output, interactive_success) = request
@@ -460,9 +476,14 @@ async fn nested_code_mode_shell_call_uses_timeout_policy() -> Result<()> {
 
     skip_if_no_network!(Ok(()));
 
-    let command = match test_target_os() {
-        TestTargetOs::Windows => "Start-Sleep -Milliseconds 50; Write-Output nested-shell-complete",
-        TestTargetOs::Linux | TestTargetOs::MacOs => "sleep 0.05; printf nested-shell-complete",
+    let (command, minimum_ms) = match test_target_os() {
+        TestTargetOs::Windows => (
+            "Start-Sleep -Milliseconds 50; Write-Output nested-shell-complete",
+            5_000,
+        ),
+        TestTargetOs::Linux | TestTargetOs::MacOs => {
+            ("sleep 0.05; printf nested-shell-complete", 200)
+        }
     };
     let command = serde_json::to_string(command)?;
     let code = format!(
@@ -491,10 +512,12 @@ text(result);
         .with_model_info_override("gpt-5.4", |model_info| {
             model_info.shell_type = ConfigShellToolType::ShellCommand;
         })
-        .with_config(|config| {
+        .with_config(move |config| {
             config.tool_execution = ToolExecutionPolicy::new(
                 timing_range(
-                    /*min_ms*/ 200, /*default_ms*/ 300, /*max_ms*/ 500,
+                    /*min_ms*/ minimum_ms,
+                    /*default_ms*/ minimum_ms + 100,
+                    /*max_ms*/ minimum_ms + 300,
                 ),
                 config.tool_execution.yield_time(),
             );
@@ -518,7 +541,9 @@ text(result);
     assert!(output.contains("nested-shell-complete"), "{output}");
     assert!(!output.contains("Script running with cell ID"), "{output}");
     assert!(
-        output.contains("Timing policy adjusted timeout_ms from 1 ms to 200 ms (minimum 200 ms)."),
+        output.contains(&format!(
+            "Timing policy adjusted timeout_ms from 1 ms to {minimum_ms} ms (minimum {minimum_ms} ms)."
+        )),
         "{output}"
     );
 
@@ -699,9 +724,9 @@ async fn refreshed_policy_updates_future_contracts_and_calls() -> Result<()> {
 
     skip_if_no_network!(Ok(()));
 
-    let command = match test_target_os() {
-        TestTargetOs::Windows => "Write-Output refreshed-policy",
-        TestTargetOs::Linux | TestTargetOs::MacOs => "printf refreshed-policy",
+    let (command, refreshed_minimum_ms) = match test_target_os() {
+        TestTargetOs::Windows => ("Write-Output refreshed-policy", 5_000),
+        TestTargetOs::Linux | TestTargetOs::MacOs => ("printf refreshed-policy", 500),
     };
     let arguments = serde_json::to_string(&json!({
         "command": command,
@@ -752,7 +777,9 @@ async fn refreshed_policy_updates_future_contracts_and_calls() -> Result<()> {
     let mut refreshed_config = test.config.clone();
     refreshed_config.tool_execution = ToolExecutionPolicy::new(
         timing_range(
-            /*min_ms*/ 500, /*default_ms*/ 600, /*max_ms*/ 700,
+            /*min_ms*/ refreshed_minimum_ms,
+            /*default_ms*/ refreshed_minimum_ms + 100,
+            /*max_ms*/ refreshed_minimum_ms + 200,
         ),
         refreshed_config.tool_execution.yield_time(),
     );
@@ -770,13 +797,19 @@ async fn refreshed_policy_updates_future_contracts_and_calls() -> Result<()> {
     let refreshed_description =
         tool_property_description(&requests[1], "shell_command", "timeout_ms")?;
     assert!(
-        refreshed_description.contains("default is 600 ms; effective range is 500-700 ms"),
+        refreshed_description.contains(&format!(
+            "default is {} ms; effective range is {refreshed_minimum_ms}-{} ms",
+            refreshed_minimum_ms + 100,
+            refreshed_minimum_ms + 200
+        )),
         "{refreshed_description}"
     );
     let output = function_output(&requests[2], CALL_ID)?;
     assert!(output.contains("refreshed-policy"), "{output}");
     assert!(
-        output.contains("Timing policy adjusted timeout_ms from 1 ms to 500 ms (minimum 500 ms)."),
+        output.contains(&format!(
+            "Timing policy adjusted timeout_ms from 1 ms to {refreshed_minimum_ms} ms (minimum {refreshed_minimum_ms} ms)."
+        )),
         "{output}"
     );
 

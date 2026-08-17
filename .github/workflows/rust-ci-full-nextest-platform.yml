@@ -59,7 +59,7 @@ jobs:
     timeout-minutes: 60
     defaults:
       run:
-        working-directory: codex-rs
+        working-directory: ${{ endsWith(inputs.target, '-pc-windows-msvc') && 'C:/codex-nextest-workspace/codex-rs' || 'codex-rs' }}
     env:
       # Windows ARM64 archives are built on Windows x64, while their shards run
       # on native Windows ARM64. Key producer-side caches by the archive runner
@@ -74,6 +74,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
+      - name: Copy checkout to stable Windows nextest workspace
+        if: runner.os == 'Windows'
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: >-
+          & "$env:GITHUB_WORKSPACE\.github\scripts\copy-windows-nextest-workspace.ps1"
+          -Source $env:GITHUB_WORKSPACE
+          -Destination 'C:\codex-nextest-workspace'
 
       - name: Free disk space for the Rust test archive (Linux)
         if: runner.os == 'Linux' && runner.environment == 'github-hosted'
@@ -312,10 +321,10 @@ jobs:
     timeout-minutes: 60
     defaults:
       run:
-        working-directory: codex-rs
+        working-directory: ${{ endsWith(inputs.target, '-pc-windows-msvc') && 'C:/codex-nextest-workspace/codex-rs' || 'codex-rs' }}
     env:
       NEXTEST_ARCHIVE_FILE: nextest-${{ inputs.artifact_id }}.tar.zst
-      NEXTEST_JUNIT_FILE: ${{ github.workspace }}/codex-rs/target/nextest/default/junit.xml
+      NEXTEST_JUNIT_FILE: ${{ endsWith(inputs.target, '-pc-windows-msvc') && 'C:/codex-nextest-workspace/codex-rs/target/nextest/default/junit.xml' || format('{0}/codex-rs/target/nextest/default/junit.xml', github.workspace) }}
       TEST_HELPERS_ARTIFACT: nextest-test-helpers-${{ inputs.artifact_id }}
     strategy:
       fail-fast: false
@@ -325,6 +334,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
+      - name: Copy checkout to stable Windows nextest workspace
+        if: runner.os == 'Windows'
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: >-
+          & "$env:GITHUB_WORKSPACE\.github\scripts\copy-windows-nextest-workspace.ps1"
+          -Source $env:GITHUB_WORKSPACE
+          -Destination 'C:\codex-nextest-workspace'
 
       - uses: ./.github/actions/setup-ci
 
@@ -447,6 +465,9 @@ jobs:
             # Dedicated V8 workflows test this feature contract with each intended variant.
             --filterset 'not (package(=codex-v8-poc) & test(=tests::sandbox_feature_matches_linked_v8))'
           )
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            nextest_args+=(--retries 0)
+          fi
           if [[ "${{ inputs.test_threads }}" != "0" ]]; then
             nextest_args+=(--test-threads "${{ inputs.test_threads }}")
           fi

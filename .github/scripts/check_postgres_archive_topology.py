@@ -49,6 +49,12 @@ NEXTEST_JUNIT_ENV = (
     "NEXTEST_JUNIT_FILE: "
     "${{ github.workspace }}/codex-rs/target/nextest/default/junit.xml"
 )
+PLATFORM_NEXTEST_JUNIT_ENV = (
+    "NEXTEST_JUNIT_FILE: "
+    "${{ endsWith(inputs.target, '-pc-windows-msvc') && "
+    "'C:/codex-nextest-workspace/codex-rs/target/nextest/default/junit.xml' || "
+    "format('{0}/codex-rs/target/nextest/default/junit.xml', github.workspace) }}"
+)
 NEXTEST_INSTALL_ACTION = (
     "taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532"
 )
@@ -264,7 +270,7 @@ def validate_topology(
     pg_confirm = _step(postgres_job, "Confirm archive PostgreSQL contract result")
     standalone = _step(postgres_job, "Run PostgreSQL Runtime State contracts")
     shard_junit_path = (
-        shard.count(NEXTEST_JUNIT_ENV) == 1
+        shard.count(PLATFORM_NEXTEST_JUNIT_ENV) == 1
         and ordinary_run.count('rm -f -- "${NEXTEST_JUNIT_FILE}"') == 1
         and shard_junit.count('"${NEXTEST_JUNIT_FILE}"') == 1
         and "path: ${{ env.NEXTEST_JUNIT_FILE }}" in shard_junit_upload

@@ -30,7 +30,8 @@ fn discovers_arbitrary_project_markdown() {
     fs::write(project_memory.join("ignored.txt"), "not markdown").expect("write ignored file");
     let discovered =
         discover_external_memory_files(&external_agent_home).expect("discover memories");
-    let project_cwd = fs::canonicalize(project_cwd).expect("canonicalize project cwd");
+    let project_cwd = dunce::canonicalize(project_cwd).expect("canonicalize project cwd");
+    let nested_relative_path = Path::new("topics").join("database.md");
 
     assert_eq!(
         discovered
@@ -57,7 +58,7 @@ fn discovers_arbitrary_project_markdown() {
             (
                 "opaque-project-key",
                 Some(project_cwd.as_path()),
-                Path::new("topics/database.md")
+                nested_relative_path.as_path()
             ),
         ]
     );
