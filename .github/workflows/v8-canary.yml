@@ -325,7 +325,7 @@ jobs:
     name: Build ptrcomp-sandbox ${{ matrix.target }} from source
     needs: metadata
     runs-on: windows-2025
-    timeout-minutes: 180
+    timeout-minutes: 210
     permissions:
       contents: read
     strategy:
@@ -393,9 +393,9 @@ jobs:
           path: |
             ${{ steps.setup_ci.outputs.cargo-target-dir }}/sccache
             ${{ steps.setup_ci.outputs.cargo-target-dir }}/${{ matrix.target }}/release/gn_out
-          key: rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-cert3-${{ hashFiles('upstream-rusty-v8/Cargo.lock', 'upstream-rusty-v8/build.rs', 'upstream-rusty-v8/git_submodule_status.txt') }}
+          key: rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-cert4-${{ hashFiles('upstream-rusty-v8/Cargo.lock', 'upstream-rusty-v8/build.rs', 'upstream-rusty-v8/git_submodule_status.txt') }}
           restore-keys: |
-            rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-cert3-
+            rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-cert4-
 
       - name: Install and start sccache
         shell: pwsh

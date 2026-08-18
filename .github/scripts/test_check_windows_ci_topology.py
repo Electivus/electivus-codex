@@ -56,11 +56,46 @@ class WindowsCiTopologyTests(unittest.TestCase):
             fast_rust,
             workspace_copy,
         ) = self.sources
-        cache_namespace = "windows-2025-sandbox-symbols0-cert3-"
+        cache_namespace = "windows-2025-sandbox-symbols0-cert4-"
         before_restore_key, separator, after_restore_key = v8.rpartition(cache_namespace)
         self.assertEqual(cache_namespace, separator)
         v8_restore_key_drift = (
-            before_restore_key + "windows-2025-sandbox-" + after_restore_key
+            before_restore_key
+            + "windows-2025-sandbox-symbols0-cert3-"
+            + after_restore_key
+        )
+        v8_windows = topology._job(v8, "build-windows-source")
+        v8_windows_cargo_echo = v8.replace(
+            v8_windows,
+            v8_windows.replace(
+                'cargo +1.95.0 test -p codex-v8-poc --target "${TARGET}" --features sandbox --no-run',
+                'echo cargo +1.95.0 test -p codex-v8-poc --target "${TARGET}" --features sandbox --no-run',
+                1,
+            ),
+            1,
+        )
+        v8_windows_missing_exit = v8.replace(
+            v8_windows,
+            v8_windows.replace("            exit 1", "            :", 1),
+            1,
+        )
+        v8_windows_unconditional_upload = v8.replace(
+            v8_windows,
+            v8_windows.replace(
+                "      - name: Upload staged artifacts\n        uses:",
+                "      - name: Upload staged artifacts\n        if: ${{ always() }}\n        uses:",
+                1,
+            ),
+            1,
+        )
+        v8_windows_missing_binding = v8.replace(
+            v8_windows,
+            v8_windows.replace(
+                '            RUSTY_V8_SRC_BINDING_PATH="${GITHUB_WORKSPACE}/${binding}"',
+                '            # RUSTY_V8_SRC_BINDING_PATH="${GITHUB_WORKSPACE}/${binding}"',
+                1,
+            ),
+            1,
         )
         cases = (
             ("exact Windows Cargo plan", 7, planner.replace("windows-11-arm", "windows-2025", 1)),
@@ -106,10 +141,14 @@ class WindowsCiTopologyTests(unittest.TestCase):
             ("optional BuildBuddy local fallback", 10, bazel_helper.replace('if [[ -n "${BUILDBUDDY_API_KEY:-}" || "${RUNNER_OS:-}" == "Windows" ]]; then', 'if [[ -n "${BUILDBUDDY_API_KEY:-}" || "${RUNNER_OS:-}" == "Linux" ]]; then')),
             ("optional BuildBuddy local fallback", 14, bazelrc.replace("--local_test_jobs=4", "--local_test_jobs=8")),
             ("mandatory Windows V8 parity", 4, v8.replace("- aarch64-pc-windows-msvc", "- x86_64-pc-windows-msvc", 1)),
-            ("mandatory Windows V8 parity", 4, v8.replace("timeout-minutes: 180", "timeout-minutes: 120", 1)),
+            ("mandatory Windows V8 parity", 4, v8.replace("timeout-minutes: 210", "timeout-minutes: 180", 1)),
             ("mandatory Windows V8 parity", 4, v8.replace("symbol_level=0 v8_symbol_level=0", "symbol_level=2 v8_symbol_level=2")),
-            ("mandatory Windows V8 parity", 4, v8.replace(cache_namespace, "windows-2025-sandbox-", 1)),
+            ("mandatory Windows V8 parity", 4, v8.replace(cache_namespace, "windows-2025-sandbox-symbols0-cert3-", 1)),
             ("mandatory Windows V8 parity", 4, v8_restore_key_drift),
+            ("mandatory Windows V8 parity", 4, v8_windows_cargo_echo),
+            ("mandatory Windows V8 parity", 4, v8_windows_missing_binding),
+            ("mandatory Windows V8 parity", 4, v8_windows_missing_exit),
+            ("mandatory Windows V8 parity", 4, v8_windows_unconditional_upload),
             ("CI required Windows fan-in", 1, blocking.replace("- windows-cargo", "- deep-linux-cargo")),
             ("CI required Windows fan-in", 1, blocking.replace("      - windows-cargo", "      # - windows-cargo")),
             ("CI required Windows fan-in", 1, blocking.replace("      - windows-bazel\n", "")),

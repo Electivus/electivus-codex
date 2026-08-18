@@ -147,7 +147,7 @@ Windows output together with Linux assets in one release.
   Change-triggered; known irrelevant changes complete that Linux branch through
   metadata while the mandatory Windows result still runs.
 - Windows Cargo and Bazel jobs use 60- or 90-minute containment limits; Windows
-  V8 source builds use 180 minutes. These are job limits, not the 120-minute p95
+  V8 source builds use 210 minutes. These are job limits, not the 120-minute p95
   Merge feedback budget, which is evaluated after 20 eligible production runs.
 - Only root `README.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, and
   `SECURITY.md`; `docs/**`; and GitHub community metadata under

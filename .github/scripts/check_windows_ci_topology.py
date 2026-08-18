@@ -103,6 +103,14 @@ def validate_topology(
     bazel_result = _job(bazel, "windows-result")
     v8_windows = _job(v8, "build-windows-source")
     v8_windows_cache = _step(v8_windows, "Restore upstream source-build cache")
+    v8_windows_smoke = _step(v8_windows, "Smoke link staged artifact with Cargo")
+    v8_windows_upload = _step(v8_windows, "Upload staged artifacts")
+    v8_windows_smoke_before_upload = (
+        "      - name: Smoke link staged artifact with Cargo" in v8_windows
+        and "      - name: Upload staged artifacts" in v8_windows
+        and v8_windows.index("      - name: Smoke link staged artifact with Cargo")
+        < v8_windows.index("      - name: Upload staged artifacts")
+    )
     v8_terminal = _job(v8, "result")
     required = _job(blocking, "required")
     windows_cargo_call = _job(blocking, "windows-cargo")
@@ -294,13 +302,34 @@ def validate_topology(
             v8_windows.count("- x86_64-pc-windows-msvc") == 1
             and v8_windows.count("- aarch64-pc-windows-msvc") == 1
             and "windows-11-arm" not in v8_windows
-            and "timeout-minutes: 180" in v8_windows
+            and "timeout-minutes: 210" in v8_windows
             and "V8_FROM_SOURCE: \"1\"" in v8_windows
             and 'GN_ARGS: "symbol_level=0 v8_symbol_level=0"' in v8_windows
-            and v8_windows_cache.count("windows-2025-sandbox-symbols0-cert3-") == 2
-            and "key: rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-cert3-${{ hashFiles" in v8_windows_cache
-            and "rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-cert3-\n" in v8_windows_cache
+            and v8_windows_cache.count("windows-2025-sandbox-symbols0-cert4-") == 2
+            and "key: rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-cert4-${{ hashFiles" in v8_windows_cache
+            and "rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-cert4-\n" in v8_windows_cache
             and "stage-upstream-release-pair" in v8_windows
+            and "rusty_v8_*.lib.gz" in v8_windows_smoke
+            and "src_binding_*.rs" in v8_windows_smoke
+            and (
+                '          if [[ -z "${archive}" || -z "${binding}" ]]; then\n'
+                '            echo "Missing staged archive or binding for ${TARGET}." >&2\n'
+                "            exit 1\n"
+                "          fi"
+            )
+            in v8_windows_smoke
+            and re.search(
+                r'^            RUSTY_V8_ARCHIVE="\$\{GITHUB_WORKSPACE\}/\$\{archive\}" \\\n'
+                r'            RUSTY_V8_SRC_BINDING_PATH="\$\{GITHUB_WORKSPACE\}/\$\{binding\}" \\\n'
+                r'            cargo \+1\.95\.0 test -p codex-v8-poc --target "\$\{TARGET\}" --features sandbox --no-run$',
+                v8_windows_smoke,
+                re.MULTILINE,
+            )
+            is not None
+            and "actions/upload-artifact@" in v8_windows_upload
+            and "path: dist/${{ matrix.target }}/*" in v8_windows_upload
+            and re.search(r"^        if:", v8_windows_upload, re.MULTILINE) is None
+            and v8_windows_smoke_before_upload
             and "WINDOWS_BUILD_RESULT: ${{ needs.build-windows-source.result }}" in v8_terminal
             and "windows_build_result != \"success\"" in v8_result,
         ),

@@ -22,6 +22,51 @@ class V8CanaryTopologyTests(unittest.TestCase):
 
     def test_v8_canary_mutations_fail_closed(self) -> None:
         canary, blocking, repo_checks, detector = self.sources
+        windows_build = topology._job(canary, "build-windows-source")
+        smoke_start = windows_build.index(
+            "      - name: Smoke link staged artifact with Cargo"
+        )
+        upload_start = windows_build.index("      - name: Upload staged artifacts")
+        cleanup_start = windows_build.index("      - name: Check for a clean worktree")
+        reordered_windows_build = (
+            windows_build[:smoke_start]
+            + windows_build[upload_start:cleanup_start]
+            + windows_build[smoke_start:upload_start]
+            + windows_build[cleanup_start:]
+        )
+        reordered_canary = canary.replace(windows_build, reordered_windows_build, 1)
+        windows_cargo_echo = canary.replace(
+            windows_build,
+            windows_build.replace(
+                'cargo +1.95.0 test -p codex-v8-poc --target "${TARGET}" --features sandbox --no-run',
+                'echo cargo +1.95.0 test -p codex-v8-poc --target "${TARGET}" --features sandbox --no-run',
+                1,
+            ),
+            1,
+        )
+        windows_missing_exit = canary.replace(
+            windows_build,
+            windows_build.replace("            exit 1", "            :", 1),
+            1,
+        )
+        windows_unconditional_upload = canary.replace(
+            windows_build,
+            windows_build.replace(
+                "      - name: Upload staged artifacts\n        uses:",
+                "      - name: Upload staged artifacts\n        if: ${{ always() }}\n        uses:",
+                1,
+            ),
+            1,
+        )
+        windows_missing_archive = canary.replace(
+            windows_build,
+            windows_build.replace(
+                '            RUSTY_V8_ARCHIVE="${GITHUB_WORKSPACE}/${archive}"',
+                '            # RUSTY_V8_ARCHIVE="${GITHUB_WORKSPACE}/${archive}"',
+                1,
+            ),
+            1,
+        )
         cases = (
             ("exact Linux matrix", 0, canary.replace("variant: ptrcomp-sandbox", "variant: release", 1)),
             ("exact Linux matrix", 0, canary.replace("runner: ubuntu-24.04-arm", "runner: macos-15", 1)),
@@ -39,6 +84,11 @@ class V8CanaryTopologyTests(unittest.TestCase):
             ("artifact and smoke integrity", 0, canary.replace("x86_64-unknown-linux-gnu:x86_64", "x86_64-unknown-linux-musl:x86_64")),
             ("artifact and smoke integrity", 3, detector.replace('"codex-rs/v8-poc/**"', '"codex-rs/core/**"')),
             ("Windows source integrity", 0, canary.replace("repository: denoland/rusty_v8", "repository: example/rusty_v8")),
+            ("Windows source integrity", 0, windows_cargo_echo),
+            ("Windows source integrity", 0, windows_missing_archive),
+            ("Windows source integrity", 0, windows_missing_exit),
+            ("Windows source integrity", 0, windows_unconditional_upload),
+            ("Windows source integrity", 0, reordered_canary),
             ("red matrix", 0, canary.replace("name: Build Bazel V8 release pair", "continue-on-error: true\n      - name: Build Bazel V8 release pair")),
             ("V8 caller required", 1, blocking.replace("uses: ./.github/workflows/v8-canary.yml", "uses: ./missing-v8.yml")),
             ("V8 caller required", 1, blocking.replace("- v8-canary", "- missing-v8")),

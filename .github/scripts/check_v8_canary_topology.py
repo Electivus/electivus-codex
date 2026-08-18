@@ -50,6 +50,14 @@ def validate_topology(
     version = _step(metadata, "Resolve exact v8 crate version")
     smoke = _step(build, "Smoke test staged artifact with Cargo")
     upload = _step(build, "Upload staged artifacts")
+    windows_smoke = _step(windows_build, "Smoke link staged artifact with Cargo")
+    windows_upload = _step(windows_build, "Upload staged artifacts")
+    windows_smoke_before_upload = (
+        "      - name: Smoke link staged artifact with Cargo" in windows_build
+        and "      - name: Upload staged artifacts" in windows_build
+        and windows_build.index("      - name: Smoke link staged artifact with Cargo")
+        < windows_build.index("      - name: Upload staged artifacts")
+    )
     caller = _job(blocking, "v8-canary")
     required = _job(blocking, "required")
     concurrency = _block(canary, r"^concurrency:\s*$", r"^jobs:\s*$")
@@ -70,7 +78,36 @@ def validate_topology(
         ("exact Windows matrix", windows_build.count("- x86_64-pc-windows-msvc") == 1 and windows_build.count("- aarch64-pc-windows-msvc") == 1 and "runs-on: windows-2025" in windows_build and "windows-11-arm" not in windows_build and "fail-fast: false" in windows_build and re.search(r"^    if:", windows_build, re.MULTILINE) is None),
         ("bounded result", "needs: [metadata, build, build-windows-source]" in result and "if: ${{ always() }}" in result and "BUILD_RESULT: ${{ needs.build.result }}" in result and "WINDOWS_BUILD_RESULT: ${{ needs.build-windows-source.result }}" in result and "CANARY_REASON: ${{ needs.metadata.outputs.canary_reason }}" in result and "CANARY_REQUIRED: ${{ needs.metadata.outputs.canary_required }}" in result and "METADATA_RESULT: ${{ needs.metadata.result }}" in result and "v8_canary_result.py | tee -a \"$GITHUB_STEP_SUMMARY\"" in result),
         ("artifact and smoke integrity", "Build Bazel V8 release pair" in build and "BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}" in build and "run_bazel_with_buildbuddy.py" in build and "rusty_v8_bazel.py stage-release-pair" in build and "x86_64-unknown-linux-gnu:x86_64|aarch64-unknown-linux-gnu:aarch64" in smoke and "Skipping non-native Cargo smoke" in smoke and "actions/upload-artifact@" in upload and "v8-canary-${{ needs.metadata.outputs.v8_version }}-${{ matrix.variant }}-${{ matrix.target }}" in upload and '"codex-rs/v8-poc/**"' in detector),
-        ("Windows source integrity", "repository: denoland/rusty_v8" in windows_build and "ref: v${{ needs.metadata.outputs.v8_version }}" in windows_build and "V8_FROM_SOURCE: \"1\"" in windows_build and "--features v8_enable_sandbox" in windows_build and "stage-upstream-release-pair" in windows_build and "Smoke link staged artifact with Cargo" in windows_build and "--features sandbox --no-run" in windows_build and "setup-msvc-env" in windows_build),
+        (
+            "Windows source integrity",
+            "repository: denoland/rusty_v8" in windows_build
+            and "ref: v${{ needs.metadata.outputs.v8_version }}" in windows_build
+            and "V8_FROM_SOURCE: \"1\"" in windows_build
+            and "--features v8_enable_sandbox" in windows_build
+            and "stage-upstream-release-pair" in windows_build
+            and "setup-msvc-env" in windows_build
+            and "rusty_v8_*.lib.gz" in windows_smoke
+            and "src_binding_*.rs" in windows_smoke
+            and (
+                '          if [[ -z "${archive}" || -z "${binding}" ]]; then\n'
+                '            echo "Missing staged archive or binding for ${TARGET}." >&2\n'
+                "            exit 1\n"
+                "          fi"
+            )
+            in windows_smoke
+            and re.search(
+                r'^            RUSTY_V8_ARCHIVE="\$\{GITHUB_WORKSPACE\}/\$\{archive\}" \\\n'
+                r'            RUSTY_V8_SRC_BINDING_PATH="\$\{GITHUB_WORKSPACE\}/\$\{binding\}" \\\n'
+                r'            cargo \+1\.95\.0 test -p codex-v8-poc --target "\$\{TARGET\}" --features sandbox --no-run$',
+                windows_smoke,
+                re.MULTILINE,
+            )
+            is not None
+            and "actions/upload-artifact@" in windows_upload
+            and "path: dist/${{ matrix.target }}/*" in windows_upload
+            and re.search(r"^        if:", windows_upload, re.MULTILINE) is None
+            and windows_smoke_before_upload,
+        ),
         ("red matrix", "continue-on-error:" not in build + windows_build),
         ("V8 caller required", blocking.count("uses: ./.github/workflows/v8-canary.yml") == 1 and "uses: ./.github/workflows/v8-canary.yml" in caller and "- v8-canary" in required),
         ("V8 caller permissions", "permissions:\n      contents: read\n      actions: read" in caller and "permissions:\n      contents: read\n      actions: read" in build),
