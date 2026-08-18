@@ -27,7 +27,7 @@ fn user_message(text: String) -> RolloutItem {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resumed_request_trims_only_replay_to_fit_exact_responses_lite_cardinality() -> Result<()> {
+async fn resumed_request_splits_messages_and_trims_only_replay_with_responses_lite() -> Result<()> {
     let server = responses::start_mock_server().await;
     let response_mock = responses::mount_sse_once(
         &server,
@@ -39,13 +39,14 @@ async fn resumed_request_trims_only_replay_to_fit_exact_responses_lite_cardinali
     .await;
     let mut builder = test_codex().with_model_info_override("gpt-5.4", |model| {
         model.use_responses_lite = true;
-        model.context_window = Some(1_000_000);
-        model.auto_compact_token_limit = Some(900_000);
+        model.context_window = Some(10_000_000);
+        model.auto_compact_token_limit = Some(9_000_000);
     });
     let test = builder.build_with_auto_env(&server).await?;
-    let history = (0..10_000)
-        .map(|index| user_message(format!("replayed-{index}")))
-        .collect();
+    let oversized_text = format!("oversized-replay:{}", "x".repeat(45_000));
+    let mut history = vec![user_message("oldest-replay-marker".to_string())];
+    history.extend(std::iter::repeat_n(user_message("f".repeat(35_000)), 500));
+    history.push(user_message(oversized_text.clone()));
     let thread = test
         .thread_manager
         .start_thread(StartThreadOptions {
@@ -67,10 +68,23 @@ async fn resumed_request_trims_only_replay_to_fit_exact_responses_lite_cardinali
     let input = request.input();
     assert!(input.len() <= 10_000);
     assert!(request.body_contains_text("new-live-message"));
+    let user_texts = request.message_input_texts("user");
+    assert!(!user_texts.iter().any(|text| text == "oldest-replay-marker"));
     assert_eq!(
         input.first().and_then(|item| item["type"].as_str()),
         Some("additional_tools")
     );
+    assert_eq!(
+        input.get(1).and_then(|item| item["role"].as_str()),
+        Some("developer")
+    );
+    assert!(
+        input
+            .iter()
+            .all(|item| serde_json::to_vec(item).is_ok_and(|item| item.len() <= 40_000))
+    );
+    let replayed_text = user_texts.concat();
+    assert!(replayed_text.contains(&oversized_text));
     Ok(())
 }
 

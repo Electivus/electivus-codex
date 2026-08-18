@@ -688,11 +688,7 @@ async fn remote_compact_v2_retains_only_client_developer_messages_when_enabled(
                 .is_some_and(|metadata| metadata.client_authored)
         })
         .count();
-    if enabled {
-        assert!(retained_client_developers > 1);
-    } else {
-        assert_eq!(retained_client_developers, 0);
-    }
+    assert_eq!(retained_client_developers, usize::from(enabled));
     let retained_sections = replacement_history
         .iter()
         .filter(|item| {

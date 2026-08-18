@@ -82,6 +82,14 @@ const SUBAGENT_START_CONTEXT: &str = "subagent start context reaches child";
 const SUBAGENT_STOP_CONTINUATION: &str = "continue only the child";
 const INTERNAL_SUBAGENT_PROMPT: &str = "internal subagent: review";
 
+fn oversized_subagent_developer_instructions() -> String {
+    format!(
+        "OVERSIZED_SUBAGENT_DEVELOPER_A:{}\nOVERSIZED_SUBAGENT_DEVELOPER_B:{}",
+        "a".repeat(25_000),
+        "b".repeat(25_000)
+    )
+}
+
 fn body_contains(req: &wiremock::Request, text: &str) -> bool {
     decoded_body(req)
         .and_then(|body| String::from_utf8(body).ok())
@@ -1048,12 +1056,14 @@ async fn spawned_child_receives_forked_parent_context(
 enum FullHistoryV2ModelSelection {
     ConfiguredDefault,
     ExplicitOverride,
+    OversizedDeveloperInstructions,
     WorldStateIdentity,
     CurrentTimeReminders,
 }
 
 #[test_case(FullHistoryV2ModelSelection::ConfiguredDefault; "configured default with omitted fork_turns")]
 #[test_case(FullHistoryV2ModelSelection::ExplicitOverride; "explicit override with fork_turns all")]
+#[test_case(FullHistoryV2ModelSelection::OversizedDeveloperInstructions; "oversized developer instructions with fork_turns all")]
 #[test_case(FullHistoryV2ModelSelection::WorldStateIdentity; "world state appends context window when agent identity changes")]
 #[test_case(FullHistoryV2ModelSelection::CurrentTimeReminders; "full fork drops inherited current-time reminders")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1094,6 +1104,15 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
             }),
             V2_REQUESTED_MODEL,
             V2_REQUESTED_REASONING_EFFORT,
+        ),
+        FullHistoryV2ModelSelection::OversizedDeveloperInstructions => (
+            json!({
+                "message": CHILD_PROMPT,
+                "task_name": "worker",
+                "fork_turns": "all",
+            }),
+            V2_DEFAULT_MODEL,
+            V2_DEFAULT_REASONING_EFFORT,
         ),
     };
     let spawn_args = serde_json::to_string(&spawn_args)?;
@@ -1184,6 +1203,13 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
         config.model_reasoning_effort = Some(INHERITED_REASONING_EFFORT);
         config.agent_default_subagent_model = Some(V2_DEFAULT_MODEL.to_string());
         config.agent_default_subagent_reasoning_effort = Some(V2_DEFAULT_REASONING_EFFORT);
+        if matches!(
+            selection,
+            FullHistoryV2ModelSelection::OversizedDeveloperInstructions
+        ) {
+            config.multi_agent_v2.subagent_developer_instructions =
+                Some(oversized_subagent_developer_instructions());
+        }
     });
     if matches!(selection, FullHistoryV2ModelSelection::WorldStateIdentity) {
         builder = builder.with_history_mode(ThreadHistoryMode::Paginated);
@@ -1216,6 +1242,22 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
         message.contains(&format!("{INHERITED_MODEL} root role."))
             || message.contains(&format!("{INHERITED_MODEL} subagent role."))
     }));
+    if matches!(
+        selection,
+        FullHistoryV2ModelSelection::OversizedDeveloperInstructions
+    ) {
+        let expected = oversized_subagent_developer_instructions();
+        assert_eq!(
+            child_developer_messages.concat().matches(&expected).count(),
+            1
+        );
+        assert!(
+            child_request
+                .input()
+                .iter()
+                .all(|item| serde_json::to_vec(item).is_ok_and(|item| item.len() <= 40_000))
+        );
+    }
     if matches!(selection, FullHistoryV2ModelSelection::CurrentTimeReminders) {
         let reminder_count = |request: &ResponsesRequest| {
             request

@@ -18,6 +18,7 @@ use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
@@ -541,13 +542,24 @@ async fn postgres_contract_resume_splits_oversized_developer_bundle_without_loss
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     };
+    let oversized_agent_text = format!("resume-limit-agent:{}", "y".repeat(45_000));
+    let oversized_agent = ResponseItem::AgentMessage {
+        id: None,
+        author: "parent".to_string(),
+        recipient: "child".to_string(),
+        content: vec![AgentMessageInputContent::InputText {
+            text: oversized_agent_text.clone(),
+        }],
+        internal_chat_message_metadata_passthrough: None,
+    };
     assert!(serde_json::to_vec(&oversized_developer)?.len() > 40_000);
+    assert!(serde_json::to_vec(&oversized_agent)?.len() > 40_000);
     writer
         .append_items(store::AppendThreadItemsParams {
             thread_id,
             items: vec![RolloutItem::Compacted(CompactedItem {
                 message: String::new(),
-                replacement_history: Some(vec![oversized_developer.into()]),
+                replacement_history: Some(vec![oversized_developer.into(), oversized_agent.into()]),
                 window_number: Some(1),
                 first_window_id: Some(Uuid::now_v7().to_string()),
                 previous_window_id: None,
@@ -644,6 +656,14 @@ async fn postgres_contract_resume_splits_oversized_developer_bundle_without_loss
         replayed_sections,
         sections.iter().map(String::as_str).collect::<Vec<_>>()
     );
+    let replayed_agent_text = model_input
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("agent_message"))
+        .filter_map(|item| item.get("content").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|content| content.get("text").and_then(Value::as_str))
+        .collect::<String>();
+    assert_eq!(replayed_agent_text, oversized_agent_text);
 
     client.shutdown().await?;
     writer_runtime.close().await;

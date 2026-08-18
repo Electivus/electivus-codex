@@ -5,7 +5,6 @@ use codex_utils_output_truncation::approx_bytes_for_tokens;
 use super::history::estimate_item_token_count;
 use super::history::truncate_function_output_payload;
 use super::updates::MAX_MODEL_CONTEXT_ITEM_TOKENS;
-use super::updates::split_message_to_model_context_limit;
 
 // Reserve stable headroom for live turn items, instructions, and tools added after reconstruction.
 pub(super) const MAX_REPLAY_HISTORY_ITEMS: usize = 8_000;
@@ -14,19 +13,13 @@ pub(super) const MAX_REPLAY_HISTORY_BYTES: u64 = 12 * 1024 * 1024;
 pub(crate) fn process_replayed_item(
     item: &ResponseItem,
     policy: TruncationPolicy,
-) -> Vec<ResponseItem> {
+) -> Option<ResponseItem> {
     match item {
         ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. } => {
             truncate_replayed_output_item(item, policy * 1.2)
-                .into_iter()
-                .collect()
         }
-        ResponseItem::Message { .. } => split_message_to_model_context_limit(item.clone())
-            .into_iter()
-            .filter(|item| estimate_item_token_count(item) <= MAX_MODEL_CONTEXT_ITEM_TOKENS)
-            .collect(),
+        ResponseItem::Message { .. } | ResponseItem::AgentMessage { .. } => Some(item.clone()),
         ResponseItem::AdditionalTools { .. }
-        | ResponseItem::AgentMessage { .. }
         | ResponseItem::Reasoning { .. }
         | ResponseItem::LocalShellCall { .. }
         | ResponseItem::FunctionCall { .. }
@@ -38,10 +31,9 @@ pub(crate) fn process_replayed_item(
         | ResponseItem::Compaction { .. }
         | ResponseItem::CompactionTrigger { .. }
         | ResponseItem::ContextCompaction { .. }
-        | ResponseItem::Other => (estimate_item_token_count(item) <= MAX_MODEL_CONTEXT_ITEM_TOKENS)
-            .then(|| item.clone())
-            .into_iter()
-            .collect(),
+        | ResponseItem::Other => {
+            (estimate_item_token_count(item) <= MAX_MODEL_CONTEXT_ITEM_TOKENS).then(|| item.clone())
+        }
     }
 }
 

@@ -3058,27 +3058,15 @@ impl Session {
         items: Vec<ResponseItemEnvelope>,
         image_preparations: Vec<ImagePreparationMetadata>,
     ) {
-        let raw_response_items = items
+        let response_items = items
             .iter()
             .map(|envelope| envelope.item.clone())
-            .collect::<Vec<_>>();
-        let items = items
-            .into_iter()
-            .flat_map(|envelope| {
-                let metadata = envelope.metadata;
-                crate::context_manager::updates::split_message_to_model_context_limit(envelope.item)
-                    .into_iter()
-                    .map(move |item| ResponseItemEnvelope {
-                        item,
-                        metadata: metadata.clone(),
-                    })
-            })
             .collect::<Vec<_>>();
         {
             let mut state = self.state.lock().await;
             state
                 .current_time_reminder
-                .note_recorded_items(&raw_response_items);
+                .note_recorded_items(&response_items);
             state
                 .history
                 .record_annotated_items(&items, turn_context.model_info.truncation_policy.into());
@@ -3094,7 +3082,7 @@ impl Session {
         let rollout_items: Vec<RolloutItem> =
             items.into_iter().map(RolloutItem::ResponseItem).collect();
         self.persist_rollout_items(&rollout_items).await;
-        self.send_raw_response_items(turn_context, &raw_response_items)
+        self.send_raw_response_items(turn_context, &response_items)
             .await;
     }
 
@@ -3470,19 +3458,23 @@ impl Session {
         }
 
         let mut items = Vec::with_capacity(3);
-        items.extend(
-            crate::context_manager::updates::build_developer_update_items(developer_sections),
-        );
-        for section in separate_developer_sections {
-            items.extend(
-                crate::context_manager::updates::build_developer_update_items(vec![section]),
-            );
+        if let Some(developer_message) =
+            crate::context_manager::updates::build_developer_update_item(developer_sections)
+        {
+            items.push(developer_message);
         }
-        items.extend(
-            crate::context_manager::updates::build_contextual_user_messages(
-                contextual_user_sections,
-            ),
-        );
+        for section in separate_developer_sections {
+            if let Some(developer_message) =
+                crate::context_manager::updates::build_developer_update_item(vec![section])
+            {
+                items.push(developer_message);
+            }
+        }
+        if let Some(contextual_user_message) =
+            crate::context_manager::updates::build_contextual_user_message(contextual_user_sections)
+        {
+            items.push(contextual_user_message);
+        }
         items
     }
 
@@ -3652,42 +3644,43 @@ impl Session {
         }
 
         let mut items = Vec::with_capacity(4);
-        items.extend(
-            crate::context_manager::updates::build_developer_update_items(developer_sections),
-        );
+        if let Some(developer_message) =
+            crate::context_manager::updates::build_developer_update_item(developer_sections)
+        {
+            items.push(developer_message);
+        }
         for section in separate_developer_sections {
-            items.extend(
-                crate::context_manager::updates::build_developer_update_items(vec![section]),
-            );
+            if let Some(developer_message) =
+                crate::context_manager::updates::build_developer_update_item(vec![section])
+            {
+                items.push(developer_message);
+            }
         }
         if let Some(initial_multi_agent_mode) = initial_multi_agent_mode {
             items.push(initial_multi_agent_mode.into_boxed_response_item());
         }
-        items.extend(
-            crate::context_manager::updates::build_contextual_user_messages(
-                contextual_user_sections,
-            ),
-        );
+        if let Some(contextual_user_message) =
+            crate::context_manager::updates::build_contextual_user_message(contextual_user_sections)
+        {
+            items.push(contextual_user_message);
+        }
         // Emit the guardian policy prompt as a separate developer item so the guardian
         // subagent sees a distinct, easy-to-audit instruction block.
         if separate_guardian_developer_message
             && let Some(developer_instructions) = turn_context.developer_instructions.as_deref()
             && !developer_instructions.is_empty()
-        {
-            items.extend(
-                crate::context_manager::updates::build_developer_update_items(vec![
+            && let Some(guardian_developer_message) =
+                crate::context_manager::updates::build_developer_update_item(vec![
                     developer_instructions.to_string(),
-                ]),
-            );
+                ])
+        {
+            items.push(guardian_developer_message);
         }
         // New context windows and compaction install these items directly into replacement history.
         for item in &mut items {
             item.set_turn_id_if_missing(&turn_context.sub_id);
         }
         items
-            .into_iter()
-            .flat_map(crate::context_manager::updates::split_message_to_model_context_limit)
-            .collect()
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]

@@ -1,12 +1,40 @@
 use super::*;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::WarningEvent;
 use codex_rollout::CompactedItem;
 use pretty_assertions::assert_eq;
+
+const TEST_WAV_SAMPLE_RATE: u32 = 8_000;
+
+fn pcm_wav_data_url(sample_count: u32) -> String {
+    let padding = sample_count % 2;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + sample_count + padding).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&TEST_WAV_SAMPLE_RATE.to_le_bytes());
+    bytes.extend_from_slice(&TEST_WAV_SAMPLE_RATE.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&8u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&sample_count.to_le_bytes());
+    bytes.resize(
+        bytes.len() + sample_count as usize + padding as usize,
+        /*value*/ 0,
+    );
+    format!("data:audio/wav;base64,{}", BASE64_STANDARD.encode(bytes))
+}
 
 #[test]
 fn model_context_budget_rejects_unbounded_item_counts_and_bytes() {
@@ -96,8 +124,27 @@ fn model_context_validation_distinguishes_replay_safe_and_rejected_items() {
         }
         .into(),
     );
+    let discounted_audio_item = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputAudio {
+            audio_url: pcm_wav_data_url(/*sample_count*/ 40_000),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    assert!(
+        serialized_bytes(&discounted_audio_item).expect("serialize discounted audio")
+            > max_model_context_item_bytes()
+    );
+    let discounted_audio = RolloutItem::ResponseItem(discounted_audio_item.into());
 
-    for accepted in [&presentation, &truncatable_output, &discounted_image] {
+    for accepted in [
+        &presentation,
+        &truncatable_output,
+        &discounted_image,
+        &discounted_audio,
+    ] {
         let mut budget = ModelContextBudget::new(thread_id);
         validate_model_context_item(accepted, &mut budget).expect("item should be accepted");
     }
@@ -140,6 +187,171 @@ fn model_context_validation_accepts_replay_splittable_messages_and_accounts_expa
     validate_response_item(&message, &mut budget).expect("message should split during replay");
     assert_eq!(budget.items, 1);
     assert!(budget.bytes > 0);
+}
+
+#[test]
+fn model_context_validation_accepts_replay_splittable_agent_messages() {
+    let thread_id = codex_protocol::ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f038")
+        .expect("thread id");
+    let message = ResponseItem::AgentMessage {
+        id: None,
+        author: "parent".to_string(),
+        recipient: "child".to_string(),
+        content: vec![
+            AgentMessageInputContent::InputText {
+                text: "first".repeat(5_000),
+            },
+            AgentMessageInputContent::InputText {
+                text: "second".repeat(5_000),
+            },
+        ],
+        internal_chat_message_metadata_passthrough: None,
+    };
+    assert!(
+        serialized_bytes(&message).expect("serialize agent message")
+            > max_model_context_item_bytes()
+    );
+    let mut budget = ModelContextBudget::new(thread_id);
+
+    validate_response_item(&message, &mut budget)
+        .expect("agent message should split during replay");
+
+    assert_eq!(budget.items, 1);
+    assert!(budget.bytes > 0);
+}
+
+#[test]
+fn model_context_validation_packs_discounted_media_with_small_text() {
+    let thread_id = codex_protocol::ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f038")
+        .expect("thread id");
+    let message = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![
+            ContentItem::InputImage {
+                image_url: format!("data:image/png;base64,{}", "a".repeat(50_000)),
+                detail: None,
+            },
+            ContentItem::InputText {
+                text: "small suffix".to_string(),
+            },
+        ],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    assert!(
+        serialized_bytes(&message).expect("serialize mixed media message")
+            > max_model_context_item_bytes()
+    );
+    let mut budget = ModelContextBudget::new(thread_id);
+
+    validate_response_item(&message, &mut budget)
+        .expect("discounted media and text should remain one projected item");
+
+    assert_eq!((budget.items, budget.bytes), (0, 0));
+}
+
+#[test]
+fn model_context_validation_accounts_multi_image_expansion_below_the_raw_limit() {
+    let thread_id = codex_protocol::ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f038")
+        .expect("thread id");
+    let message = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: (0..6)
+            .map(|index| ContentItem::InputImage {
+                image_url: format!("data:image/png;base64,image-{index}"),
+                detail: None,
+            })
+            .collect(),
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    assert!(
+        serialized_bytes(&message).expect("serialize multi-image message")
+            < max_model_context_item_bytes()
+    );
+    assert!(model_visible_item_bytes(&message) > max_model_context_item_bytes());
+    let mut budget = ModelContextBudget::new(thread_id);
+
+    validate_response_item(&message, &mut budget)
+        .expect("multi-image message should account its projected fragments");
+
+    assert_eq!(budget.items, 1);
+    assert!(budget.bytes > 0);
+}
+
+#[test]
+fn model_context_validation_accepts_discounted_encrypted_agent_messages() {
+    let thread_id = codex_protocol::ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f038")
+        .expect("thread id");
+    let message = ResponseItem::AgentMessage {
+        id: None,
+        author: "parent".to_string(),
+        recipient: "child".to_string(),
+        content: vec![AgentMessageInputContent::EncryptedContent {
+            encrypted_content: "encrypted".repeat(6_000),
+        }],
+        internal_chat_message_metadata_passthrough: None,
+    };
+    assert!(
+        serialized_bytes(&message).expect("serialize encrypted agent message")
+            > max_model_context_item_bytes()
+    );
+    let mut budget = ModelContextBudget::new(thread_id);
+
+    validate_response_item(&message, &mut budget)
+        .expect("encrypted agent message should use its discounted model size");
+
+    assert_eq!((budget.items, budget.bytes), (0, 0));
+}
+
+#[test]
+fn model_context_validation_rejects_discounted_payloads_that_still_exceed_the_limit() {
+    let thread_id = codex_protocol::ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f038")
+        .expect("thread id");
+    let encrypted_message = ResponseItem::AgentMessage {
+        id: None,
+        author: "parent".to_string(),
+        recipient: "child".to_string(),
+        content: vec![AgentMessageInputContent::EncryptedContent {
+            encrypted_content: "encrypted".repeat(10_000),
+        }],
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let invalid_audio = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputAudio {
+            audio_url: format!("data:audio/wav;base64,{}", "not-base64".repeat(5_000)),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let multi_image_output = ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: "call-images".to_string(),
+        output: FunctionCallOutputPayload::from_content_items(
+            (0..6)
+                .map(|index| FunctionCallOutputContentItem::InputImage {
+                    image_url: format!("data:image/png;base64,image-{index}"),
+                    detail: None,
+                })
+                .collect(),
+        ),
+        internal_chat_message_metadata_passthrough: None,
+    };
+
+    for rejected in [&encrypted_message, &invalid_audio, &multi_image_output] {
+        let mut budget = ModelContextBudget::new(thread_id);
+        let error = validate_response_item(rejected, &mut budget)
+            .expect_err("discounted payload must actually fit the model item limit");
+        assert!(
+            error
+                .to_string()
+                .contains("individual model-visible history item")
+        );
+    }
 }
 
 #[test]

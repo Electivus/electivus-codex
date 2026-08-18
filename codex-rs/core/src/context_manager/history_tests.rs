@@ -9,6 +9,7 @@ use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
@@ -34,10 +35,6 @@ use codex_protocol::protocol::TurnContextItem;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::truncate_text;
-use image::ImageBuffer;
-use image::ImageFormat;
-use image::Luma;
-use image::Rgba;
 use pretty_assertions::assert_eq;
 use regex_lite::Regex;
 
@@ -158,6 +155,24 @@ fn conversation_history_snapshot_excludes_contextual_user_messages() {
     assert_eq!(
         snapshot.items().cloned().collect::<Vec<_>>(),
         vec![user_message, assistant_message, developer_message],
+    );
+}
+
+#[test]
+fn replayed_oversized_contextual_user_message_keeps_its_classification() {
+    let contextual = crate::context::ContextualUserFragment::into(UserInstructions {
+        directory: None,
+        text: "contextual".repeat(10_000),
+    });
+    let mut history = ContextManager::new();
+    history.record_replayed_items([&contextual], TruncationPolicy::Tokens(100_000));
+
+    let snapshot = history.conversation_history_snapshot();
+
+    assert!(snapshot.items().next().is_none());
+    assert_eq!(
+        history.raw_items().cloned().collect::<Vec<_>>(),
+        vec![contextual]
     );
 }
 
@@ -1549,61 +1564,53 @@ fn record_replayed_items_caps_structured_text_outputs() {
 }
 
 #[test]
-fn record_replayed_items_splits_oversized_developer_bundle_without_losing_sections() {
-    let section = |label: &str, bytes: usize| {
-        let prefix = format!("resume-limit-{label}:");
-        format!("{prefix}{}", "x".repeat(bytes - prefix.len()))
-    };
-    let sections = [
-        format!("resume-limit-memory:{}", "á".repeat(21_000)),
-        section("skills", 19_822),
-        section("permissions", 362),
-        section("collaboration", 966),
-        section("apps", 646),
-        section("plugins", 1_014),
-    ];
-    let item = ResponseItem::Message {
-        id: None,
-        role: "developer".to_string(),
-        content: sections
-            .iter()
-            .cloned()
-            .map(|text| ContentItem::InputText { text })
-            .collect(),
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
-    let original_tokens = estimate_item_token_count(&item);
-    assert!(
-        original_tokens > 10_000,
-        "fixture must exceed the replay item limit, got {original_tokens} estimated tokens"
-    );
+fn record_replayed_items_preserves_oversized_messages_for_request_projection() {
+    let item = user_msg(&"oversized user message".repeat(50_000));
     let mut history = ContextManager::new();
 
     history.record_replayed_items([&item], TruncationPolicy::Tokens(100_000));
 
-    let replayed = history.raw_items().cloned().collect::<Vec<_>>();
-    let replayed_text = replayed
-        .iter()
-        .flat_map(|item| match item {
-            ResponseItem::Message { role, content, .. } if role == "developer" => {
-                content.as_slice()
-            }
-            other => panic!("expected developer message, got {other:?}"),
-        })
-        .filter_map(|content| match content {
-            ContentItem::InputText { text } => Some(text),
-            _ => None,
-        })
-        .map(String::as_str)
-        .collect::<String>();
+    assert_eq!(history.for_prompt(&default_input_modalities()), vec![item]);
+}
 
-    assert_eq!(replayed_text, sections.concat());
-    assert!(replayed.len() > 1);
-    assert!(
-        replayed
-            .iter()
-            .all(|item| estimate_item_token_count(item) <= 10_000)
+#[test]
+fn record_replayed_items_preserves_oversized_agent_messages_for_request_projection() {
+    let item = ResponseItem::AgentMessage {
+        id: None,
+        author: "parent".to_string(),
+        recipient: "child".to_string(),
+        content: vec![AgentMessageInputContent::InputText {
+            text: "oversized agent message".repeat(50_000),
+        }],
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut history = ContextManager::new();
+
+    history.record_replayed_items([&item], TruncationPolicy::Tokens(100_000));
+
+    assert_eq!(history.for_prompt(&default_input_modalities()), vec![item]);
+}
+
+#[test]
+fn rollback_treats_an_oversized_agent_message_as_one_turn() {
+    let agent_message = ResponseItem::AgentMessage {
+        id: None,
+        author: "parent".to_string(),
+        recipient: "child".to_string(),
+        content: vec![AgentMessageInputContent::InputText {
+            text: "oversized agent instruction".repeat(50_000),
+        }],
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let later = user_msg("later turn");
+    let mut history = ContextManager::new();
+    history.record_items([&agent_message, &later], TruncationPolicy::Tokens(100_000));
+
+    history.drop_last_n_user_turns(1);
+
+    assert_eq!(
+        history.raw_items().cloned().collect::<Vec<_>>(),
+        vec![agent_message]
     );
 }
 
@@ -1751,6 +1758,18 @@ fn rollback_preserves_the_retained_replay_marker() {
 }
 
 #[test]
+fn rollback_treats_an_oversized_user_message_as_one_turn() {
+    let user = user_msg(&"one turn".repeat(10_000));
+    let assistant = assistant_msg("reply");
+    let mut history = ContextManager::new();
+    history.record_items([&user, &assistant], TruncationPolicy::Tokens(100_000));
+
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+
+    assert!(history.raw_items().next().is_none());
+}
+
+#[test]
 fn replace_with_policy_keeps_only_the_latest_bounded_replacement_items() {
     let items = (0..=MAX_REPLAY_HISTORY_ITEMS)
         .map(|index| user_msg(&format!("message {index}")))
@@ -1760,42 +1779,6 @@ fn replace_with_policy_keeps_only_the_latest_bounded_replacement_items() {
     history.replace_with_policy(&items, TruncationPolicy::Tokens(1_000));
 
     assert_eq!(history.raw_items().cloned().collect::<Vec<_>>(), items[1..]);
-}
-
-#[test]
-fn replace_annotated_with_policy_evicts_whole_oldest_split_message() {
-    let mut items = vec![user_msg(&"oldest".repeat(10_000))];
-    items.extend((1..MAX_REPLAY_HISTORY_ITEMS).map(|index| user_msg(&format!("message {index}"))));
-    let annotated = items
-        .iter()
-        .cloned()
-        .map(ResponseItemEnvelope::new)
-        .collect::<Vec<_>>();
-    let mut history = ContextManager::new();
-
-    history.replace_annotated_with_policy(&annotated, TruncationPolicy::Tokens(1_000));
-
-    let retained = history.raw_items().collect::<Vec<_>>();
-    assert_eq!(retained.last().copied(), items.last());
-    assert_eq!(retained.first().copied(), items.get(1));
-    assert_eq!(retained.len(), items.len() - 1);
-}
-
-#[test]
-fn record_replayed_items_skips_a_split_group_that_does_not_fit() {
-    let prefix = (0..MAX_REPLAY_HISTORY_ITEMS - 2)
-        .map(|index| user_msg(&format!("prefix {index}")))
-        .collect::<Vec<_>>();
-    let oversized = user_msg(&"oversized".repeat(10_000));
-    let newest = user_msg("newest");
-    let mut history = ContextManager::new();
-    history.replace_replayed(prefix.clone());
-
-    history.record_replayed_items([&oversized, &newest], TruncationPolicy::Tokens(1_000));
-
-    let retained = history.raw_items().cloned().collect::<Vec<_>>();
-    assert_eq!(retained.len(), prefix.len() + 1);
-    assert_eq!(retained.last(), Some(&newest));
 }
 
 fn assert_truncated_message_matches(message: &str, line: &str, expected_removed: usize) {
@@ -2448,179 +2431,6 @@ fn normalize_mixed_inserts_and_removals_panics_in_debug() {
 }
 
 #[test]
-fn image_data_url_payload_does_not_dominate_message_estimate() {
-    let payload = "A".repeat(100_000);
-    let image_url = format!("data:image/png;base64,{payload}");
-    let image_item = ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![
-            ContentItem::InputText {
-                text: "Here is the screenshot".to_string(),
-            },
-            ContentItem::InputImage {
-                image_url,
-                detail: Some(DEFAULT_IMAGE_DETAIL),
-            },
-        ],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
-    let text_only_item = ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "Here is the screenshot".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    let raw_len = serde_json::to_string(&image_item).unwrap().len() as i64;
-    let estimated = estimate_response_item_model_visible_bytes(&image_item);
-    let expected = raw_len - payload.len() as i64 + RESIZED_IMAGE_BYTES_ESTIMATE;
-    let text_only_estimated = estimate_response_item_model_visible_bytes(&text_only_item);
-
-    assert_eq!(estimated, expected);
-    assert!(estimated < raw_len);
-    assert!(estimated > text_only_estimated);
-}
-
-#[test]
-fn image_data_url_payload_does_not_dominate_function_call_output_estimate() {
-    let payload = "B".repeat(50_000);
-    let image_url = format!("data:image/png;base64,{payload}");
-    let item = ResponseItem::FunctionCallOutput {
-        id: None,
-        call_id: "call-abc".to_string(),
-        output: FunctionCallOutputPayload::from_content_items(vec![
-            FunctionCallOutputContentItem::InputText {
-                text: "Screenshot captured".to_string(),
-            },
-            FunctionCallOutputContentItem::InputImage {
-                image_url,
-                detail: Some(DEFAULT_IMAGE_DETAIL),
-            },
-        ]),
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
-    let estimated = estimate_response_item_model_visible_bytes(&item);
-    let expected = raw_len - payload.len() as i64 + RESIZED_IMAGE_BYTES_ESTIMATE;
-
-    assert_eq!(estimated, expected);
-    assert!(estimated < raw_len);
-}
-
-#[test]
-fn image_data_url_payload_does_not_dominate_custom_tool_call_output_estimate() {
-    let payload = "C".repeat(50_000);
-    let image_url = format!("data:image/png;base64,{payload}");
-    let item = ResponseItem::CustomToolCallOutput {
-        id: None,
-        call_id: "call-js-repl".to_string(),
-        name: None,
-        output: FunctionCallOutputPayload::from_content_items(vec![
-            FunctionCallOutputContentItem::InputText {
-                text: "Screenshot captured".to_string(),
-            },
-            FunctionCallOutputContentItem::InputImage {
-                image_url,
-                detail: Some(DEFAULT_IMAGE_DETAIL),
-            },
-        ]),
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
-    let estimated = estimate_response_item_model_visible_bytes(&item);
-    let expected = raw_len - payload.len() as i64 + RESIZED_IMAGE_BYTES_ESTIMATE;
-
-    assert_eq!(estimated, expected);
-    assert!(estimated < raw_len);
-}
-
-#[test]
-fn audio_data_url_payload_does_not_dominate_message_estimate() {
-    let (audio_url, payload_len) = pcm_wav_data_url(/*sample_count*/ 801);
-    let item = ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputAudio { audio_url }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
-    let estimated = estimate_response_item_model_visible_bytes(&item);
-    let expected = raw_len - payload_len as i64 + approx_bytes_for_tokens(/*tokens*/ 2) as i64;
-
-    assert_eq!(estimated, expected);
-    assert!(estimated < raw_len);
-}
-
-#[test]
-fn audio_data_url_payload_does_not_dominate_function_call_output_estimate() {
-    let (audio_url, payload_len) = pcm_wav_data_url(/*sample_count*/ 800);
-    let item = ResponseItem::FunctionCallOutput {
-        id: None,
-        call_id: "call-audio".to_string(),
-        output: FunctionCallOutputPayload::from_content_items(vec![
-            FunctionCallOutputContentItem::InputAudio { audio_url },
-        ]),
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
-    let estimated = estimate_response_item_model_visible_bytes(&item);
-    let expected = raw_len - payload_len as i64 + approx_bytes_for_tokens(/*tokens*/ 1) as i64;
-
-    assert_eq!(estimated, expected);
-    assert!(estimated < raw_len);
-}
-
-#[test]
-fn audio_data_url_payload_does_not_dominate_custom_tool_call_output_estimate() {
-    let (audio_url, payload_len) = pcm_wav_data_url(/*sample_count*/ 80_000);
-    let item = ResponseItem::CustomToolCallOutput {
-        id: None,
-        call_id: "call-custom-audio".to_string(),
-        name: None,
-        output: FunctionCallOutputPayload::from_content_items(vec![
-            FunctionCallOutputContentItem::InputAudio { audio_url },
-        ]),
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
-    let estimated = estimate_response_item_model_visible_bytes(&item);
-    let expected = raw_len - payload_len as i64 + approx_bytes_for_tokens(/*tokens*/ 100) as i64;
-
-    assert_eq!(estimated, expected);
-    assert!(estimated < raw_len);
-}
-
-#[test]
-fn malformed_audio_data_url_falls_back_to_whole_url_size_cost() {
-    let payload = "A".repeat(/*n*/ 100_000);
-    let audio_url = format!("data:audio/wav;base64,{payload}");
-    let fallback_bytes = approx_bytes_for_tokens(approx_token_count(&audio_url)) as i64;
-    let item = ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputAudio { audio_url }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
-    let estimated = estimate_response_item_model_visible_bytes(&item);
-
-    assert_eq!(estimated, raw_len - payload.len() as i64 + fallback_bytes);
-}
-
-#[test]
 fn record_items_omits_audio_that_exceeds_the_output_budget() {
     let (audio_url, _) = pcm_wav_data_url(/*sample_count*/ 80_000);
     let item = ResponseItem::FunctionCallOutput {
@@ -2654,293 +2464,4 @@ fn record_items_omits_audio_that_exceeds_the_output_budget() {
             internal_chat_message_metadata_passthrough: None,
         }]
     );
-}
-
-#[test]
-fn non_base64_image_urls_are_unchanged() {
-    let message_item = ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputImage {
-            image_url: "https://example.com/foo.png".to_string(),
-            detail: Some(DEFAULT_IMAGE_DETAIL),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
-    let function_output_item = ResponseItem::FunctionCallOutput {
-        id: None,
-        call_id: "call-1".to_string(),
-        output: FunctionCallOutputPayload::from_content_items(vec![
-            FunctionCallOutputContentItem::InputImage {
-                image_url: "file:///tmp/foo.png".to_string(),
-                detail: Some(DEFAULT_IMAGE_DETAIL),
-            },
-        ]),
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    assert_eq!(
-        estimate_response_item_model_visible_bytes(&message_item),
-        serde_json::to_string(&message_item).unwrap().len() as i64
-    );
-    assert_eq!(
-        estimate_response_item_model_visible_bytes(&function_output_item),
-        serde_json::to_string(&function_output_item).unwrap().len() as i64
-    );
-}
-
-#[test]
-fn encrypted_function_output_uses_plaintext_byte_estimate() {
-    let encrypted_content = "A".repeat(1_868);
-    let item = ResponseItem::FunctionCallOutput {
-        id: None,
-        call_id: "call-encrypted".to_string(),
-        output: FunctionCallOutputPayload::from_content_items(vec![
-            FunctionCallOutputContentItem::EncryptedContent {
-                encrypted_content: encrypted_content.clone(),
-            },
-        ]),
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
-    let estimated = estimate_response_item_model_visible_bytes(&item);
-    let expected = raw_len - encrypted_content.len() as i64
-        + estimate_encrypted_function_output_length(encrypted_content.len()) as i64;
-
-    assert_eq!(estimated, expected);
-
-    let agent_message = InterAgentCommunication::new_encrypted(
-        AgentPath::root(),
-        AgentPath::root().join("worker").expect("valid worker path"),
-        Vec::new(),
-        encrypted_content.clone(),
-        /*trigger_turn*/ true,
-    )
-    .to_model_input_item();
-    let agent_raw_len = serde_json::to_string(&agent_message).unwrap().len() as i64;
-    let expected_agent = agent_raw_len - encrypted_content.len() as i64
-        + estimate_encrypted_function_output_length(encrypted_content.len()) as i64;
-
-    assert_eq!(
-        estimate_response_item_model_visible_bytes(&agent_message),
-        expected_agent
-    );
-}
-
-#[test]
-fn data_url_without_base64_marker_is_unchanged() {
-    let item = ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputImage {
-            image_url: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'/>".to_string(),
-            detail: Some(DEFAULT_IMAGE_DETAIL),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    assert_eq!(
-        estimate_response_item_model_visible_bytes(&item),
-        serde_json::to_string(&item).unwrap().len() as i64
-    );
-}
-
-#[test]
-fn non_image_base64_data_url_is_unchanged() {
-    let payload = "C".repeat(4_096);
-    let image_url = format!("data:application/octet-stream;base64,{payload}");
-    let item = ResponseItem::FunctionCallOutput {
-        id: None,
-        call_id: "call-octet".to_string(),
-        output: FunctionCallOutputPayload::from_content_items(vec![
-            FunctionCallOutputContentItem::InputImage {
-                image_url,
-                detail: Some(DEFAULT_IMAGE_DETAIL),
-            },
-        ]),
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
-    let estimated = estimate_response_item_model_visible_bytes(&item);
-
-    assert_eq!(estimated, raw_len);
-}
-
-#[test]
-fn mixed_case_data_url_markers_are_adjusted() {
-    let payload = "F".repeat(1_024);
-    let image_url = format!("DATA:image/png;BASE64,{payload}");
-    let item = ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputImage {
-            image_url,
-            detail: Some(DEFAULT_IMAGE_DETAIL),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
-    let estimated = estimate_response_item_model_visible_bytes(&item);
-    let expected = raw_len - payload.len() as i64 + RESIZED_IMAGE_BYTES_ESTIMATE;
-
-    assert_eq!(estimated, expected);
-}
-
-#[test]
-fn multiple_inline_images_apply_multiple_fixed_costs() {
-    let payload_one = "D".repeat(100);
-    let payload_two = "E".repeat(200);
-    let image_url_one = format!("data:image/png;base64,{payload_one}");
-    let image_url_two = format!("data:image/jpeg;base64,{payload_two}");
-    let item = ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![
-            ContentItem::InputText {
-                text: "images".to_string(),
-            },
-            ContentItem::InputImage {
-                image_url: image_url_one,
-                detail: Some(DEFAULT_IMAGE_DETAIL),
-            },
-            ContentItem::InputImage {
-                image_url: image_url_two,
-                detail: Some(DEFAULT_IMAGE_DETAIL),
-            },
-        ],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
-    let payload_sum = (payload_one.len() + payload_two.len()) as i64;
-    let estimated = estimate_response_item_model_visible_bytes(&item);
-    let expected = raw_len - payload_sum + (2 * RESIZED_IMAGE_BYTES_ESTIMATE);
-
-    assert_eq!(estimated, expected);
-}
-
-#[test]
-fn original_detail_images_scale_with_dimensions() {
-    // 2304x864 at 32px patches yields 72 * 27 = 1,944 patches.
-    // The byte heuristic uses 4 bytes per token, so the replacement cost is 7,776 bytes.
-    const EXPECTED_ORIGINAL_DETAIL_IMAGE_BYTES: i64 = 7_776;
-
-    let width = 2304;
-    let height = 864;
-    let image = ImageBuffer::from_pixel(width, height, Rgba([12u8, 34, 56, 255]));
-    let mut bytes = std::io::Cursor::new(Vec::new());
-    image
-        .write_to(&mut bytes, ImageFormat::Png)
-        .expect("encode png");
-    let payload = BASE64_STANDARD.encode(bytes.get_ref());
-    let image_url = format!("data:image/png;base64,{payload}");
-    let item = ResponseItem::FunctionCallOutput {
-        id: None,
-        call_id: "call-original".to_string(),
-        output: FunctionCallOutputPayload::from_content_items(vec![
-            FunctionCallOutputContentItem::InputImage {
-                image_url,
-                detail: Some(ImageDetail::Original),
-            },
-        ]),
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
-    let estimated = estimate_response_item_model_visible_bytes(&item);
-    let expected = raw_len - payload.len() as i64 + EXPECTED_ORIGINAL_DETAIL_IMAGE_BYTES;
-
-    assert_eq!(estimated, expected);
-}
-
-#[test]
-fn original_detail_images_are_capped_at_max_patch_count() {
-    // 3201x3201 at 32px patches yields 101 * 101 = 10,201 patches,
-    // which exceeds the original-detail patch budget.
-    let width = 3201;
-    let height = 3201;
-    let image = ImageBuffer::from_pixel(width, height, Luma([12u8]));
-    let mut bytes = std::io::Cursor::new(Vec::new());
-    image
-        .write_to(&mut bytes, ImageFormat::Png)
-        .expect("encode png");
-    let payload = BASE64_STANDARD.encode(bytes.get_ref());
-    let image_url = format!("data:image/png;base64,{payload}");
-    let item = ResponseItem::FunctionCallOutput {
-        id: None,
-        call_id: "call-original-capped".to_string(),
-        output: FunctionCallOutputPayload::from_content_items(vec![
-            FunctionCallOutputContentItem::InputImage {
-                image_url,
-                detail: Some(ImageDetail::Original),
-            },
-        ]),
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
-    let estimated = estimate_response_item_model_visible_bytes(&item);
-    let capped_original_detail_image_bytes =
-        i64::try_from(approx_bytes_for_tokens(ORIGINAL_IMAGE_MAX_PATCHES)).unwrap();
-    let expected = raw_len - payload.len() as i64 + capped_original_detail_image_bytes;
-
-    assert_eq!(estimated, expected);
-}
-
-#[test]
-fn original_detail_webp_images_scale_with_dimensions() {
-    // Same dimensions as the PNG case above, so the patch-based replacement cost is the same.
-    const EXPECTED_ORIGINAL_DETAIL_IMAGE_BYTES: i64 = 7_776;
-
-    let width = 2304;
-    let height = 864;
-    let image = ImageBuffer::from_pixel(width, height, Rgba([12u8, 34, 56, 255]));
-    let mut bytes = std::io::Cursor::new(Vec::new());
-    image
-        .write_to(&mut bytes, ImageFormat::WebP)
-        .expect("encode webp");
-    let payload = BASE64_STANDARD.encode(bytes.get_ref());
-    let image_url = format!("data:image/webp;base64,{payload}");
-    let item = ResponseItem::FunctionCallOutput {
-        id: None,
-        call_id: "call-original-webp".to_string(),
-        output: FunctionCallOutputPayload::from_content_items(vec![
-            FunctionCallOutputContentItem::InputImage {
-                image_url,
-                detail: Some(ImageDetail::Original),
-            },
-        ]),
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
-    let estimated = estimate_response_item_model_visible_bytes(&item);
-    let expected = raw_len - payload.len() as i64 + EXPECTED_ORIGINAL_DETAIL_IMAGE_BYTES;
-
-    assert_eq!(estimated, expected);
-}
-
-#[test]
-fn text_only_items_unchanged() {
-    let item = ResponseItem::Message {
-        id: None,
-        role: "assistant".to_string(),
-        content: vec![ContentItem::OutputText {
-            text: "Hello world, this is a response.".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    let estimated = estimate_response_item_model_visible_bytes(&item);
-    let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
-
-    assert_eq!(estimated, raw_len);
 }
