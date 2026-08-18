@@ -27,6 +27,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::account::PlanType;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -63,6 +64,7 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
+use test_case::test_case;
 use tracing::Instrument;
 use tracing_test::traced_test;
 
@@ -1952,14 +1954,47 @@ async fn responses_websocket_sends_canonical_turn_metadata() {
     server.shutdown().await;
 }
 
+#[derive(Clone, Copy)]
+enum OversizedWebsocketOutput {
+    Message,
+    AgentMessage,
+}
+
+#[test_case(OversizedWebsocketOutput::Message ; "message")]
+#[test_case(OversizedWebsocketOutput::AgentMessage ; "agent_message")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn responses_websocket_uses_previous_response_id_when_prefix_after_completed() {
+async fn responses_websocket_uses_previous_response_id_after_oversized_output(
+    output_kind: OversizedWebsocketOutput,
+) {
     skip_if_no_network!();
 
+    let oversized_output = format!(
+        "OVERSIZED_WEBSOCKET_OUTPUT_START:{}:OVERSIZED_WEBSOCKET_OUTPUT_END",
+        "0123456789".repeat(5_000)
+    );
+    let (output_event, prior_output) = match output_kind {
+        OversizedWebsocketOutput::Message => (
+            ev_assistant_message("msg_1", &oversized_output),
+            assistant_message_item("1", &oversized_output),
+        ),
+        OversizedWebsocketOutput::AgentMessage => (
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "agent_message",
+                    "id": "agent_message_1",
+                    "author": "child",
+                    "recipient": "parent",
+                    "content": [{"type": "input_text", "text": &oversized_output}]
+                }
+            }),
+            agent_message_item("1", &oversized_output),
+        ),
+    };
     let server = start_websocket_server(vec![vec![
         vec![
             ev_response_created("resp-1"),
-            ev_assistant_message("msg_1", "assistant output"),
+            output_event,
             ev_completed("resp-1"),
         ],
         vec![ev_response_created("resp-2"), ev_completed("resp-2")],
@@ -1971,7 +2006,7 @@ async fn responses_websocket_uses_previous_response_id_when_prefix_after_complet
     let prompt_one = prompt_with_input(vec![message_item("hello")]);
     let prompt_two = prompt_with_input(vec![
         message_item("hello"),
-        assistant_message_item("1", "assistant output"),
+        prior_output,
         message_item("second"),
     ]);
 
@@ -2338,6 +2373,16 @@ fn assistant_message_item(id: &str, text: &str) -> ResponseItem {
         role: "assistant".into(),
         content: vec![ContentItem::OutputText { text: text.into() }],
         phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn agent_message_item(id: &str, text: &str) -> ResponseItem {
+    ResponseItem::AgentMessage {
+        id: Some(ResponseItemId::with_suffix("agent_message", id)),
+        author: "child".into(),
+        recipient: "parent".into(),
+        content: vec![AgentMessageInputContent::InputText { text: text.into() }],
         internal_chat_message_metadata_passthrough: None,
     }
 }
