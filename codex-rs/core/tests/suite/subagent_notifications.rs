@@ -6,10 +6,12 @@ use codex_core::config::AgentRoleConfig;
 use codex_core::config::CurrentTimeReminderConfig;
 use codex_features::Feature;
 use codex_history::RolloutItem;
+use codex_model_context::estimate_response_item_model_visible_bytes;
 use codex_models_manager::bundled_models_response;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::MultiAgentMessages;
 use codex_protocol::openai_models::MultiAgentRoleMessages;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -81,6 +83,7 @@ const ROLE_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::High;
 const SUBAGENT_START_CONTEXT: &str = "subagent start context reaches child";
 const SUBAGENT_STOP_CONTINUATION: &str = "continue only the child";
 const INTERNAL_SUBAGENT_PROMPT: &str = "internal subagent: review";
+const MODEL_VISIBLE_ITEM_BYTES_LIMIT: i64 = 40_000;
 
 fn oversized_subagent_developer_instructions() -> String {
     format!(
@@ -1843,10 +1846,14 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
         ]),
     )
     .await;
+    let oversized_child_completion = format!(
+        "OVERSIZED_CHILD_COMPLETION_START:{}:OVERSIZED_CHILD_COMPLETION_END",
+        "0123456789".repeat(5_000)
+    );
     let child_events = match scenario {
         CompletionScenario::Completed => vec![
             ev_response_created("resp-child-1"),
-            ev_assistant_message("msg-child-1", "child done"),
+            ev_assistant_message("msg-child-1", &oversized_child_completion),
             ev_completed("resp-child-1"),
         ],
         CompletionScenario::TerminalError => vec![ev_response_created("resp-child-1")],
@@ -1871,7 +1878,9 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
     .await;
     let error = "stream disconnected before completion: stream closed before response.completed";
     let (payload, expected_text) = match scenario {
-        CompletionScenario::Completed => ("child done".to_string(), "child done"),
+        CompletionScenario::Completed => {
+            (oversized_child_completion, "OVERSIZED_CHILD_COMPLETION_END")
+        }
         CompletionScenario::TerminalError => (
             format!(
                 "Agent errored: {error}\n\nThis agent's turn failed. If you still need this agent, use the available collaboration tools to give it another task."
@@ -1942,20 +1951,31 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
         .await?
         .pop()
         .expect("agent message request");
-    assert_eq!(
-        strip_response_item_ids_from_json(strip_metadata_from_json(Value::Array(
-            request.inputs_of_type("agent_message"),
-        ))),
-        Value::Array(vec![json!({
-            "type": "agent_message",
-            "author": "/root/worker",
-            "recipient": "/root",
-            "content": [{
-                "type": "input_text",
-                "text": notification,
-            }],
-        })])
-    );
+    let agent_messages = request.inputs_of_type("agent_message");
+    let reconstructed = agent_messages
+        .iter()
+        .flat_map(|item| {
+            item["content"]
+                .as_array()
+                .expect("agent message content array")
+        })
+        .map(|content| content["text"].as_str().expect("agent message input text"))
+        .collect::<String>();
+
+    assert_eq!(reconstructed, notification);
+    for item in &agent_messages {
+        assert_eq!(item["author"], "/root/worker");
+        assert_eq!(item["recipient"], "/root");
+        let response_item: ResponseItem = serde_json::from_value(item.clone())?;
+        assert!(
+            estimate_response_item_model_visible_bytes(&response_item)
+                <= MODEL_VISIBLE_ITEM_BYTES_LIMIT
+        );
+    }
+    match scenario {
+        CompletionScenario::Completed => assert!(agent_messages.len() > 1),
+        CompletionScenario::TerminalError => assert_eq!(agent_messages.len(), 1),
+    }
 
     Ok(())
 }
