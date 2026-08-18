@@ -388,17 +388,16 @@ impl ContextManager {
         items: impl IntoIterator<Item = &'a ResponseItem>,
         policy: TruncationPolicy,
     ) {
-        let remaining = MAX_REPLAY_HISTORY_ITEMS.saturating_sub(self.items.len());
-        let processed_items = items
+        let processed_groups = items
             .into_iter()
             .filter(|item| is_api_message(item))
-            .flat_map(|item| {
+            .map(|item| {
                 process_replayed_item(item, policy)
                     .into_iter()
                     .map(ResponseItemEnvelope::new)
-            })
-            .take(remaining);
-        Arc::make_mut(&mut self.items).extend(processed_items);
+                    .collect()
+            });
+        append_replay_groups(Arc::make_mut(&mut self.items), processed_groups);
         self.replay_prefix_items = self.items.len();
         self.replayed_history = true;
     }
@@ -408,11 +407,10 @@ impl ContextManager {
         items: &[ResponseItemEnvelope],
         policy: TruncationPolicy,
     ) {
-        let remaining = MAX_REPLAY_HISTORY_ITEMS.saturating_sub(self.items.len());
-        let processed_items = items
+        let processed_groups = items
             .iter()
             .filter(|envelope| is_api_message(&envelope.item))
-            .flat_map(|envelope| {
+            .map(|envelope| {
                 let metadata = envelope.metadata.clone();
                 process_replayed_item(&envelope.item, policy)
                     .into_iter()
@@ -420,9 +418,9 @@ impl ContextManager {
                         item,
                         metadata: metadata.clone(),
                     })
-            })
-            .take(remaining);
-        Arc::make_mut(&mut self.items).extend(processed_items);
+                    .collect()
+            });
+        append_replay_groups(Arc::make_mut(&mut self.items), processed_groups);
         self.replay_prefix_items = self.items.len();
         self.replayed_history = true;
     }
@@ -744,6 +742,14 @@ fn retain_latest_replay_groups<T>(groups: impl IntoIterator<Item = Vec<T>>) -> V
         }
     }
     retained.into_iter().flatten().collect()
+}
+
+fn append_replay_groups<T>(items: &mut Vec<T>, groups: impl IntoIterator<Item = Vec<T>>) {
+    for group in groups {
+        if group.len() <= MAX_REPLAY_HISTORY_ITEMS.saturating_sub(items.len()) {
+            items.extend(group);
+        }
+    }
 }
 
 /// API messages include every non-system item (user/assistant messages, reasoning,

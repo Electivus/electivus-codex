@@ -2138,13 +2138,23 @@ async fn record_conversation_items_stamps_missing_turn_id_and_preserves_existing
 }
 
 #[tokio::test]
-async fn record_conversation_items_keeps_raw_response_item_unsplit() {
+async fn record_prepared_conversation_items_preserves_raw_item_and_fragment_metadata() {
     let (session, turn_context, rx) = make_session_and_context_with_rx().await;
     let mut item = user_message(&"raw-event".repeat(7_000));
     item.set_id(Some(ResponseItemId::with_suffix("msg", "raw-event")));
+    let metadata = Some(CodexHarnessMetadata {
+        client_authored: true,
+    });
 
     session
-        .record_conversation_items(&turn_context, std::slice::from_ref(&item))
+        .record_prepared_conversation_items(
+            &turn_context,
+            vec![ResponseItemEnvelope {
+                item: item.clone(),
+                metadata: metadata.clone(),
+            }],
+            Vec::new(),
+        )
         .await;
 
     let event = rx.recv().await.expect("raw response item event");
@@ -2159,7 +2169,16 @@ async fn record_conversation_items_keeps_raw_response_item_unsplit() {
         rx.try_recv().is_err(),
         "expected one raw response item event"
     );
-    assert!(raw_history_items(&session.clone_history().await).len() > 1);
+    let history = session.clone_history().await;
+    assert!(history.annotated_items().len() > 1);
+    assert_eq!(
+        history
+            .annotated_items()
+            .iter()
+            .map(|envelope| envelope.metadata.clone())
+            .collect::<Vec<_>>(),
+        vec![metadata; history.annotated_items().len()]
+    );
 }
 
 #[tokio::test]

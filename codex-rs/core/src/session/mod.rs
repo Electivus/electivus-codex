@@ -3065,12 +3065,12 @@ impl Session {
         let items = items
             .into_iter()
             .flat_map(|envelope| {
-                let mut metadata = envelope.metadata;
+                let metadata = envelope.metadata;
                 crate::context_manager::updates::split_message_to_model_context_limit(envelope.item)
                     .into_iter()
                     .map(move |item| ResponseItemEnvelope {
                         item,
-                        metadata: metadata.take(),
+                        metadata: metadata.clone(),
                     })
             })
             .collect::<Vec<_>>();

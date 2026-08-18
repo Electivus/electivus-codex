@@ -1781,6 +1781,23 @@ fn replace_annotated_with_policy_evicts_whole_oldest_split_message() {
     assert_eq!(retained.len(), items.len() - 1);
 }
 
+#[test]
+fn record_replayed_items_skips_a_split_group_that_does_not_fit() {
+    let prefix = (0..MAX_REPLAY_HISTORY_ITEMS - 2)
+        .map(|index| user_msg(&format!("prefix {index}")))
+        .collect::<Vec<_>>();
+    let oversized = user_msg(&"oversized".repeat(10_000));
+    let newest = user_msg("newest");
+    let mut history = ContextManager::new();
+    history.replace_replayed(prefix.clone());
+
+    history.record_replayed_items([&oversized, &newest], TruncationPolicy::Tokens(1_000));
+
+    let retained = history.raw_items().cloned().collect::<Vec<_>>();
+    assert_eq!(retained.len(), prefix.len() + 1);
+    assert_eq!(retained.last(), Some(&newest));
+}
+
 fn assert_truncated_message_matches(message: &str, line: &str, expected_removed: usize) {
     let pattern = truncated_message_pattern(line);
     let regex = Regex::new(&pattern).unwrap_or_else(|err| {
