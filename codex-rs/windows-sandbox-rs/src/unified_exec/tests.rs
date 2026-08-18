@@ -110,8 +110,15 @@ fn start_powershell_child(pwsh: &Path, child_command: &str, parent_tail: &str) -
             .collect::<Vec<_>>(),
     );
     format!(
-        "$psi=[Diagnostics.ProcessStartInfo]::new(); $psi.FileName='{}'; $psi.UseShellExecute=$false; $psi.CreateNoWindow=$true; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; $psi.ArgumentList.Add('-NoProfile'); $psi.ArgumentList.Add('-EncodedCommand'); $psi.ArgumentList.Add('{encoded}'); $child=[Diagnostics.Process]::Start($psi); {parent_tail}",
+        "& $env:ComSpec /d /s /c 'start \"\" /b \"{}\" -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded} >nul 2>nul'; {parent_tail}",
         powershell_literal(pwsh),
+    )
+}
+
+fn powershell_wait_for_path(path: &Path, max_attempts: u32) -> String {
+    format!(
+        "$found=$false; foreach ($attempt in 1..{max_attempts}) {{ & $env:ComSpec /d /c 'if exist \"{}\" (exit /b 0) else (exit /b 1)'; if ($LASTEXITCODE -eq 0) {{ $found=$true; break }}; & \"$env:SystemRoot\\System32\\ping.exe\" -4 -n 2 127.0.0.1 > $null }}; if (-not $found) {{ exit 3 }}",
+        powershell_literal(path),
     )
 }
 
@@ -396,9 +403,10 @@ fn legacy_non_tty_powershell_interrupt_terminates_process() {
             codex_home.path(),
             vec![
                 pwsh.display().to_string(),
+                "-NonInteractive".to_string(),
                 "-NoProfile".to_string(),
                 "-Command".to_string(),
-                "[Console]::Out.WriteLine('LEGACY-NONTTY-DIRECT'); [Threading.ManualResetEvent]::new($false).WaitOne()".to_string(),
+                "'LEGACY-NONTTY-DIRECT'; & \"$env:SystemRoot\\System32\\ping.exe\" -4 -t 127.0.0.1 > $null".to_string(),
             ],
             cwd.as_path(),
             HashMap::new(),
@@ -610,17 +618,14 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
     let release_marker = codex_home.path().join("release-descendant");
     let survival_marker = codex_home.path().join("descendant-survived");
     let descendant_command = format!(
-        "$deadline=[DateTime]::UtcNow.AddSeconds(30); [IO.File]::WriteAllText('{}', [string]$PID); while (-not [IO.File]::Exists('{}')) {{ if ([DateTime]::UtcNow -ge $deadline) {{ exit 3 }}; [Threading.Thread]::Sleep(25) }}; [IO.File]::WriteAllText('{}', 'survived')",
+        "$PID > '{}'; {}; 'survived' > '{}'",
         powershell_literal(&ready_marker),
-        powershell_literal(&release_marker),
+        powershell_wait_for_path(&release_marker, 30),
         powershell_literal(&survival_marker),
     );
-    let parent_tail = format!(
-        "while (-not [IO.File]::Exists('{}')) {{ [Threading.Thread]::Sleep(25) }}",
-        powershell_literal(&ready_marker),
-    );
+    let parent_tail = powershell_wait_for_path(&ready_marker, 10);
     let parent_command = format!(
-        "[Console]::Out.WriteLine('LEGACY-CAPTURE-DIRECT'); {}",
+        "'LEGACY-CAPTURE-DIRECT'; {}",
         start_powershell_child(&pwsh, &descendant_command, &parent_tail),
     );
     let permission_profile = PermissionProfile::workspace_write();
@@ -630,6 +635,7 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
         codex_home.path(),
         vec![
             pwsh.display().to_string(),
+            "-NonInteractive".to_string(),
             "-NoProfile".to_string(),
             "-Command".to_string(),
             parent_command,
@@ -670,9 +676,6 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
 
 #[test]
 fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
-    let Some(pwsh) = pwsh_path() else {
-        return;
-    };
     let _guard = legacy_process_test_guard();
     let runtime = current_thread_runtime();
     runtime.block_on(async move {
@@ -698,49 +701,43 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
         fs::write(&tmp_file, "tmp").expect("seed TMP file");
         fs::write(&outside_file, "outside").expect("seed outside file");
 
-        let delete_command = concat!(
-            "[IO.File]::Delete($env:WORKSPACE_DELETE); ",
-            "[IO.File]::Delete($env:TEMP_DELETE); ",
-            "[IO.File]::Delete($env:TMP_DELETE); ",
-            "try { [IO.File]::Delete($env:OUTSIDE_DELETE) } catch {}; ",
-            "try { [IO.Directory]::Delete($env:PROTECTED_GIT_DIR) } catch {}",
+        let workspace_delete = workspace_file.display();
+        let temp_delete = temp_file.display();
+        let tmp_delete = tmp_file.display();
+        let outside_delete = outside_file.display();
+        let protected_git_dir_display = protected_git_dir.display();
+        let delete_command = format!(
+            concat!(
+                "del /f /q \"{workspace_delete}\" & ",
+                "del /f /q \"{temp_delete}\" & ",
+                "del /f /q \"{tmp_delete}\" & ",
+                "del /f /q \"{outside_delete}\" & ",
+                "rmdir \"{protected_git_dir_display}\" & ",
+                "exit /b 0",
+            ),
+            workspace_delete = workspace_delete,
+            temp_delete = temp_delete,
+            tmp_delete = tmp_delete,
+            outside_delete = outside_delete,
+            protected_git_dir_display = protected_git_dir_display,
         );
-
         let env_map = HashMap::from([
+            ("CODEX_DELETE_COMMAND".to_string(), delete_command),
             ("TEMP".to_string(), temp_root.to_string_lossy().into_owned()),
             ("TMP".to_string(), tmp_root.to_string_lossy().into_owned()),
-            (
-                "WORKSPACE_DELETE".to_string(),
-                workspace_file.to_string_lossy().into_owned(),
-            ),
-            (
-                "TEMP_DELETE".to_string(),
-                temp_file.to_string_lossy().into_owned(),
-            ),
-            (
-                "TMP_DELETE".to_string(),
-                tmp_file.to_string_lossy().into_owned(),
-            ),
-            (
-                "OUTSIDE_DELETE".to_string(),
-                outside_file.to_string_lossy().into_owned(),
-            ),
-            (
-                "PROTECTED_GIT_DIR".to_string(),
-                protected_git_dir.to_string_lossy().into_owned(),
-            ),
         ]);
 
         let permission_profile = PermissionProfile::workspace_write();
+        let comspec = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
         let spawned = spawn_windows_sandbox_session_legacy(
             &permission_profile,
             workspace_roots_for(workspace.as_path()).as_slice(),
             codex_home.path(),
             vec![
-                pwsh.display().to_string(),
-                "-NoProfile".to_string(),
-                "-Command".to_string(),
-                delete_command.to_string(),
+                comspec,
+                "/d".to_string(),
+                "/c".to_string(),
+                "%CODEX_DELETE_COMMAND%".to_string(),
             ],
             workspace.as_path(),
             env_map,
@@ -786,14 +783,14 @@ fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
     let descendant_marker = codex_home.path().join("descendant-survived");
     let ready_marker = codex_home.path().join("descendant-started");
     let descendant_command = format!(
-        "[IO.File]::WriteAllText('{}', [string]$PID); [Threading.Thread]::Sleep(1000); [IO.File]::WriteAllText('{}', 'survived')",
+        "$PID > '{}'; & \"$env:SystemRoot\\System32\\ping.exe\" -4 -n 2 127.0.0.1 > $null; 'survived' > '{}'",
         powershell_literal(&ready_marker),
         powershell_literal(&descendant_marker),
     );
     let parent_command = start_powershell_child(
         &pwsh,
         &descendant_command,
-        "[Threading.Thread]::Sleep(30000)",
+        "& \"$env:SystemRoot\\System32\\ping.exe\" -4 -n 31 127.0.0.1 > $null",
     );
     let descendant_process = Arc::new(Mutex::new(None));
     let descendant_process_for_cancellation = Arc::clone(&descendant_process);
@@ -822,6 +819,7 @@ fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
         codex_home.path(),
         vec![
             pwsh.display().to_string(),
+            "-NonInteractive".to_string(),
             "-NoProfile".to_string(),
             "-Command".to_string(),
             parent_command,
@@ -875,23 +873,24 @@ async fn assert_legacy_tty_descendant_lifecycle(
     let release_marker = codex_home.path().join("release-descendant");
     let survival_marker = codex_home.path().join("descendant-survived");
     let child_tail = match lifecycle {
-        LegacyTtyDescendantLifecycle::Terminate => "[Threading.Thread]::Sleep(30000)".to_string(),
+        LegacyTtyDescendantLifecycle::Terminate => {
+            "& \"$env:SystemRoot\\System32\\ping.exe\" -4 -n 31 127.0.0.1 > $null".to_string()
+        }
         LegacyTtyDescendantLifecycle::Preserve => format!(
-            "$deadline=[DateTime]::UtcNow.AddSeconds(30); while (-not [IO.File]::Exists('{}')) {{ if ([DateTime]::UtcNow -ge $deadline) {{ exit 3 }}; [Threading.Thread]::Sleep(25) }}; [IO.File]::WriteAllText('{}', 'survived')",
-            powershell_literal(&release_marker),
+            "{}; 'survived' > '{}'",
+            powershell_wait_for_path(&release_marker, 30),
             powershell_literal(&survival_marker),
         ),
     };
     let child_command = format!(
-        "[IO.File]::WriteAllText('{}', [string]$PID); {child_tail}",
+        "$PID > '{}'; {child_tail}",
         powershell_literal(&ready_marker),
     );
     let parent_tail = match lifecycle {
-        LegacyTtyDescendantLifecycle::Terminate => "[Threading.Thread]::Sleep(30000)".to_string(),
-        LegacyTtyDescendantLifecycle::Preserve => format!(
-            "while (-not [IO.File]::Exists('{}')) {{ [Threading.Thread]::Sleep(25) }}",
-            powershell_literal(&ready_marker),
-        ),
+        LegacyTtyDescendantLifecycle::Terminate => {
+            "& \"$env:SystemRoot\\System32\\ping.exe\" -4 -n 31 127.0.0.1 > $null".to_string()
+        }
+        LegacyTtyDescendantLifecycle::Preserve => powershell_wait_for_path(&ready_marker, 10),
     };
     let parent_command = start_powershell_child(pwsh, &child_command, &parent_tail);
     let permission_profile = PermissionProfile::workspace_write();
@@ -901,6 +900,7 @@ async fn assert_legacy_tty_descendant_lifecycle(
         codex_home.path(),
         vec![
             pwsh.display().to_string(),
+            "-NonInteractive".to_string(),
             "-NoProfile".to_string(),
             "-Command".to_string(),
             parent_command,
@@ -985,9 +985,10 @@ fn legacy_tty_powershell_emits_output_and_accepts_input() {
                 pwsh.display().to_string(),
                 "-NoLogo".to_string(),
                 "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
                 "-NoExit".to_string(),
                 "-Command".to_string(),
-                "[Console]::Out.WriteLine($PID); [Console]::Out.WriteLine('ready')".to_string(),
+                "$PID; 'ready'".to_string(),
             ],
             cwd.as_path(),
             HashMap::new(),
@@ -1004,7 +1005,7 @@ fn legacy_tty_powershell_emits_output_and_accepts_input() {
 
         let writer = spawned.session.writer_sender();
         writer
-            .send(b"[Console]::Out.WriteLine('second')\n".to_vec())
+            .send(b"'second'\n".to_vec())
             .await
             .expect("send second command");
         writer

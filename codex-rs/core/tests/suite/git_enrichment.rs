@@ -20,6 +20,9 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_sse_sequence;
+use core_test_support::responses::sse;
+use core_test_support::responses::start_mock_server;
 use core_test_support::responses::start_websocket_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
@@ -355,33 +358,63 @@ async fn concurrent_turns_keep_distinct_worktree_and_repository_metadata() -> Re
     let worktree_head = run_git(&worktree, &["rev-parse", "HEAD"])?;
     let (other_repo, other_head) = create_git_repo()?;
 
-    let server = start_websocket_server(vec![
-        vec![vec![ev_response_created("warm-1"), ev_completed("warm-1")]],
-        vec![vec![ev_response_created("warm-2"), ev_completed("warm-2")]],
-        vec![vec![ev_response_created("warm-3"), ev_completed("warm-3")]],
-        vec![vec![
-            ev_response_created("resp-1"),
-            ev_assistant_message("msg-1", "done"),
-            ev_completed("resp-1"),
-        ]],
-        vec![vec![
-            ev_response_created("resp-2"),
-            ev_assistant_message("msg-2", "done"),
-            ev_completed("resp-2"),
-        ]],
-        vec![vec![
-            ev_response_created("resp-3"),
-            ev_assistant_message("msg-3", "done"),
-            ev_completed("resp-3"),
-        ]],
-    ])
+    let server = start_mock_server().await;
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(
+                    "wait-for-main-git",
+                    "test_sync_tool",
+                    r#"{"sleep_after_ms":5000,"barrier":{"id":"concurrent-git-enrichment","participants":3,"timeout_ms":30000}}"#,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_function_call(
+                    "wait-for-worktree-git",
+                    "test_sync_tool",
+                    r#"{"sleep_after_ms":5000,"barrier":{"id":"concurrent-git-enrichment","participants":3,"timeout_ms":30000}}"#,
+                ),
+                ev_completed("resp-2"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-3"),
+                ev_function_call(
+                    "wait-for-other-git",
+                    "test_sync_tool",
+                    r#"{"sleep_after_ms":5000,"barrier":{"id":"concurrent-git-enrichment","participants":3,"timeout_ms":30000}}"#,
+                ),
+                ev_completed("resp-3"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-1-follow-up"),
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-1-follow-up"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2-follow-up"),
+                ev_assistant_message("msg-2", "done"),
+                ev_completed("resp-2-follow-up"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-3-follow-up"),
+                ev_assistant_message("msg-3", "done"),
+                ev_completed("resp-3-follow-up"),
+            ]),
+        ],
+    )
     .await;
 
     let repo_cwd = repo.path().to_path_buf();
-    let mut builder = test_codex().with_config(move |config| {
-        config.cwd = repo_cwd.abs();
-    });
-    let test = builder.build_with_websocket_server(&server).await?;
+    let mut builder = test_codex()
+        .with_model("test-gpt-5.1-codex")
+        .with_config(move |config| {
+            config.cwd = repo_cwd.abs();
+        });
+    let test = builder.build(&server).await?;
 
     let mut worktree_config = test.config.clone();
     worktree_config.cwd = worktree.abs();
@@ -402,15 +435,6 @@ async fn concurrent_turns_keep_distinct_worktree_and_repository_metadata() -> Re
             ..StartThreadOptions::new(other_config)
         })
         .await?;
-
-    tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(
-            server.wait_for_request(/*connection_index*/ 0, /*request_index*/ 0),
-            server.wait_for_request(/*connection_index*/ 1, /*request_index*/ 0),
-            server.wait_for_request(/*connection_index*/ 2, /*request_index*/ 0)
-        )
-    })
-    .await?;
 
     std::fs::write(repo.path().join("untracked.txt"), "dirty\n")?;
     std::fs::write(other_repo.path().join("untracked.txt"), "dirty\n")?;
@@ -445,13 +469,33 @@ async fn concurrent_turns_keep_distinct_worktree_and_repository_metadata() -> Re
         ))
     );
 
-    let mut actual_workspaces = server
-        .connections()
+    let barrier_call_ids = [
+        "wait-for-main-git",
+        "wait-for-worktree-git",
+        "wait-for-other-git",
+    ];
+    let mut actual_workspaces = response_mock
+        .requests()
         .into_iter()
         .skip(3)
-        .map(|connection| {
-            let request = connection.first().context("turn request")?.body_json();
-            Ok(turn_metadata(&request)?["workspaces"].clone())
+        .map(|request| {
+            let barrier_output = request
+                .inputs_of_type("function_call_output")
+                .into_iter()
+                .find(|item| {
+                    barrier_call_ids
+                        .iter()
+                        .any(|call_id| item["call_id"] == *call_id)
+                })
+                .context("successful barrier output")?;
+            let barrier_success = barrier_output["output"]["success"].as_bool();
+            let barrier_output = barrier_output["output"]
+                .as_str()
+                .or_else(|| barrier_output["output"]["content"].as_str())
+                .context("barrier output should contain text")?;
+            assert_eq!(barrier_output, "ok");
+            assert_ne!(barrier_success, Some(false));
+            Ok(turn_metadata(&request.body_json())?["workspaces"].clone())
         })
         .collect::<Result<Vec<_>>>()?;
     let mut expected_workspaces = vec![
@@ -466,6 +510,6 @@ async fn concurrent_turns_keep_distinct_worktree_and_repository_metadata() -> Re
     worktree_thread.thread.shutdown_and_wait().await?;
     other_thread.thread.shutdown_and_wait().await?;
     test.codex.shutdown_and_wait().await?;
-    server.shutdown().await;
+    server.verify().await;
     Ok(())
 }

@@ -6,21 +6,32 @@ use crate::TerminalSize;
 use crate::spawn_pipe_process_no_stdin;
 use crate::spawn_pty_process;
 use std::collections::HashMap;
+use std::io::Write;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::io::FromRawHandle;
 use std::os::windows::io::OwnedHandle;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
 use tokio::process::Command;
+use winapi::shared::minwindef::BOOL;
+use winapi::um::consoleapi::SetConsoleCtrlHandler;
 use winapi::um::jobapi::IsProcessInJob;
 use winapi::um::processthreadsapi::OpenProcess;
+use winapi::um::wincon::CTRL_C_EVENT;
 use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
 
 const READY_MARKER: &str = "__CODEX_CHILD_READY__";
 const VALUE_MARKER: &str = "__CODEX_CHILD_VALUE__";
+const CTRL_C_READY_MARKER: &str = "__CODEX_CTRL_C_READY__";
+const CTRL_C_HANDLED_MARKER: &str = "__CODEX_CTRL_C_HANDLED__";
+const CTRL_C_CHILD_EXITED_MARKER: &str = "__CODEX_CTRL_C_CHILD_EXITED__";
+const CTRL_C_HELPER_ENV: &str = "CODEX_CONPTY_CTRL_C_HELPER";
+static CTRL_C_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 struct WindowsShell {
     name: &'static str,
@@ -30,16 +41,73 @@ struct WindowsShell {
 }
 
 fn find_powershell() -> Option<String> {
-    ["pwsh.exe", "powershell.exe"]
-        .into_iter()
-        .find_map(|candidate| {
-            std::process::Command::new(candidate)
+    for candidate in ["pwsh.exe", "powershell.exe"] {
+        let Ok(resolved) = std::process::Command::new("where.exe")
+            .arg(candidate)
+            .output()
+        else {
+            continue;
+        };
+        if !resolved.status.success() {
+            continue;
+        }
+        for resolved_path in String::from_utf8_lossy(&resolved.stdout).lines() {
+            let resolved_path = resolved_path.trim();
+            if Path::new(resolved_path).components().any(|component| {
+                component
+                    .as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("WindowsApps")
+            }) {
+                continue;
+            }
+            let available = std::process::Command::new(resolved_path)
                 .args(["-NoLogo", "-NoProfile", "-Command", "exit 0"])
                 .status()
                 .ok()
                 .filter(std::process::ExitStatus::success)
-                .map(|_| candidate.to_string())
-        })
+                .is_some();
+            if available {
+                return Some(resolved_path.to_string());
+            }
+        }
+    }
+    None
+}
+
+unsafe extern "system" fn ctrl_c_test_handler(ctrl_type: u32) -> BOOL {
+    if ctrl_type == CTRL_C_EVENT {
+        CTRL_C_RECEIVED.store(true, Ordering::SeqCst);
+        1
+    } else {
+        0
+    }
+}
+
+async fn run_ctrl_c_helper_if_requested() -> anyhow::Result<bool> {
+    if std::env::var(CTRL_C_HELPER_ENV).as_deref() != Ok("1") {
+        return Ok(false);
+    }
+
+    CTRL_C_RECEIVED.store(false, Ordering::SeqCst);
+    let reset = unsafe { SetConsoleCtrlHandler(None, 0) };
+    anyhow::ensure!(reset != 0, "failed to clear inherited Ctrl-C ignore state");
+    let registered = unsafe { SetConsoleCtrlHandler(Some(ctrl_c_test_handler), 1) };
+    anyhow::ensure!(registered != 0, "failed to register Ctrl-C test handler");
+
+    println!("{CTRL_C_READY_MARKER}");
+    std::io::stdout().flush()?;
+    let received = tokio::time::timeout(Duration::from_secs(30), async {
+        while !CTRL_C_RECEIVED.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    unsafe { SetConsoleCtrlHandler(Some(ctrl_c_test_handler), 0) };
+    received.map_err(|_| anyhow::anyhow!("timed out waiting for Ctrl-C"))?;
+    println!("{CTRL_C_HANDLED_MARKER}");
+    std::io::stdout().flush()?;
+    Ok(true)
 }
 
 fn utf8_hex(value: &str) -> String {
@@ -376,6 +444,9 @@ async fn conpty_delivers_input_to_foreground_children() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn conpty_ctrl_c_interrupts_cmd_foreground_child() -> anyhow::Result<()> {
+    if run_ctrl_c_helper_if_requested().await? {
+        return Ok(());
+    }
     let program = r"C:\Windows\System32\cmd.exe";
     let args = vec!["/Q".to_string(), "/D".to_string(), "/K".to_string()];
     let env: HashMap<String, String> = std::env::vars().collect();
@@ -391,11 +462,37 @@ async fn conpty_ctrl_c_interrupts_cmd_foreground_child() -> anyhow::Result<()> {
     .await?;
     let (session, mut output_rx, exit_rx) = combine_spawned_output(spawned);
     let writer = session.writer_sender();
-    writer.send(b"ping.exe -4 -t localhost\n".to_vec()).await?;
-    wait_for_output_contains(&mut output_rx, "127.0.0.1", /*timeout_ms*/ 10_000).await?;
+    let test_binary = std::env::current_exe()?;
+    writer
+        .send(
+            format!(
+                "set \"{CTRL_C_HELPER_ENV}=1\" && \"{}\" --exact tests::windows_tests::conpty_ctrl_c_interrupts_cmd_foreground_child --nocapture && echo {CTRL_C_CHILD_EXITED_MARKER}\n",
+                test_binary.display()
+            )
+            .into_bytes(),
+        )
+        .await?;
+    let mut ctrl_c_output = wait_for_output_contains(
+        &mut output_rx,
+        CTRL_C_READY_MARKER,
+        /*timeout_ms*/ 10_000,
+    )
+    .await?;
 
     writer.send(vec![0x03]).await?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    ctrl_c_output.extend_from_slice(
+        &wait_for_output_contains(
+            &mut output_rx,
+            CTRL_C_CHILD_EXITED_MARKER,
+            /*timeout_ms*/ 10_000,
+        )
+        .await?,
+    );
+    assert!(
+        String::from_utf8_lossy(&ctrl_c_output).contains(CTRL_C_HANDLED_MARKER),
+        "foreground child did not handle Ctrl-C: {:?}",
+        String::from_utf8_lossy(&ctrl_c_output)
+    );
     writer.send(b"ver\n".to_vec()).await?;
     let mut output = wait_for_output_contains(
         &mut output_rx,
@@ -419,11 +516,14 @@ async fn conpty_ctrl_c_interrupts_cmd_foreground_child() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn conpty_ctrl_c_interrupts_powershell_foreground_child() -> anyhow::Result<()> {
+    if run_ctrl_c_helper_if_requested().await? {
+        return Ok(());
+    }
     let Some(program) = find_powershell() else {
         return Ok(());
     };
     // Keep PSReadLine from consuming Ctrl-C so this isolates ConPTY delivery
-    // to the native foreground process for the product's preferred host.
+    // to the foreground process.
     let args = vec![
         "-NoLogo".to_string(),
         "-NoProfile".to_string(),
@@ -442,11 +542,32 @@ async fn conpty_ctrl_c_interrupts_powershell_foreground_child() -> anyhow::Resul
     .await?;
     let (session, mut output_rx, exit_rx) = combine_spawned_output(spawned);
     let writer = session.writer_sender();
-    writer.send(b"ping.exe -4 -t localhost\n".to_vec()).await?;
-    wait_for_output_contains(&mut output_rx, "127.0.0.1", /*timeout_ms*/ 10_000).await?;
+    let test_binary = std::env::current_exe()?;
+    writer
+        .send(
+            format!(
+                "$env:{CTRL_C_HELPER_ENV}='1'; & '{}' --exact 'tests::windows_tests::conpty_ctrl_c_interrupts_powershell_foreground_child' --nocapture\n",
+                test_binary.to_string_lossy().replace('\'', "''")
+            )
+            .into_bytes(),
+        )
+        .await?;
+    let mut ctrl_c_output = wait_for_output_contains(
+        &mut output_rx,
+        CTRL_C_READY_MARKER,
+        /*timeout_ms*/ 10_000,
+    )
+    .await?;
 
     writer.send(vec![0x03]).await?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    ctrl_c_output.extend_from_slice(
+        &wait_for_output_contains(&mut output_rx, "PS ", /*timeout_ms*/ 10_000).await?,
+    );
+    assert!(
+        String::from_utf8_lossy(&ctrl_c_output).contains(CTRL_C_HANDLED_MARKER),
+        "foreground child did not handle Ctrl-C: {:?}",
+        String::from_utf8_lossy(&ctrl_c_output)
+    );
     writer.send(b"cmd.exe /D /C ver\n".to_vec()).await?;
     let mut output = wait_for_output_contains(
         &mut output_rx,

@@ -101,7 +101,7 @@ fn command_response(response_id: &str, call_id: &str, command_tool: CommandTool)
         "prefix_rule": ["git", "version"],
     });
     args[command_key] = json!(TEST_COMMAND);
-    args[timeout_key] = json!(1_000);
+    args[timeout_key] = json!(10_000);
 
     Ok(sse(vec![
         ev_response_created(response_id),
