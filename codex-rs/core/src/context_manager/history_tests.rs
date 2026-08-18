@@ -1471,7 +1471,7 @@ fn record_replayed_items_caps_large_outputs_using_the_complete_item_estimate() {
                 output: FunctionCallOutputPayload::from_text("a".repeat(400_000)),
                 internal_chat_message_metadata_passthrough: None,
             },
-            "chars truncated",
+            "tokens truncated",
         ),
         (
             TruncationPolicy::Tokens(100_000),
@@ -1511,6 +1511,32 @@ fn record_replayed_items_caps_large_outputs_using_the_complete_item_estimate() {
             "expected {marker} marker in {output:?}"
         );
     }
+}
+
+#[test]
+fn live_and_replayed_large_outputs_share_the_same_hard_cap_projection() {
+    let item = ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: "large-byte-output".to_string(),
+        output: FunctionCallOutputPayload::from_text("output".repeat(100_000)),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let policy = TruncationPolicy::Bytes(400_000);
+    let mut live = ContextManager::new();
+    live.record_items([&item], policy);
+    let live_projection = crate::context_manager::truncate_output_item_to_limit(
+        live.raw_items().next().expect("live output"),
+    )
+    .expect("live output should fit after hard-cap projection");
+    let mut replayed = ContextManager::new();
+    replayed.record_replayed_items([&item], policy);
+    let replayed_projection = replayed
+        .raw_items()
+        .next()
+        .expect("replayed output")
+        .clone();
+
+    assert_eq!(live_projection, replayed_projection);
 }
 
 #[test]

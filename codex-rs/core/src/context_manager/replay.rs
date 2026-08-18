@@ -1,6 +1,5 @@
 use codex_protocol::models::ResponseItem;
 use codex_utils_output_truncation::TruncationPolicy;
-use codex_utils_output_truncation::approx_bytes_for_tokens;
 
 use super::history::estimate_item_token_count;
 use super::history::truncate_function_output_payload;
@@ -16,7 +15,8 @@ pub(crate) fn process_replayed_item(
 ) -> Option<ResponseItem> {
     match item {
         ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. } => {
-            truncate_replayed_output_item(item, policy * 1.2)
+            let preferred = truncate_output_item(item, policy * 1.2);
+            truncate_output_item_to_limit(&preferred)
         }
         ResponseItem::Message { .. } | ResponseItem::AgentMessage { .. } => Some(item.clone()),
         ResponseItem::AdditionalTools { .. }
@@ -67,33 +67,20 @@ pub(super) fn truncate_output_item(item: &ResponseItem, policy: TruncationPolicy
     }
 }
 
-fn truncate_replayed_output_item(
-    item: &ResponseItem,
-    preferred_policy: TruncationPolicy,
-) -> Option<ResponseItem> {
-    let preferred = truncate_output_item(item, preferred_policy);
-    if estimate_item_token_count(&preferred) <= MAX_MODEL_CONTEXT_ITEM_TOKENS {
-        return Some(preferred);
+pub(crate) fn truncate_output_item_to_limit(item: &ResponseItem) -> Option<ResponseItem> {
+    if estimate_item_token_count(item) <= MAX_MODEL_CONTEXT_ITEM_TOKENS {
+        return Some(item.clone());
     }
 
-    let max_budget = match preferred_policy {
-        TruncationPolicy::Bytes(bytes) => bytes.min(approx_bytes_for_tokens(
-            usize::try_from(MAX_MODEL_CONTEXT_ITEM_TOKENS).unwrap_or(usize::MAX),
-        )),
-        TruncationPolicy::Tokens(tokens) => {
-            tokens.min(usize::try_from(MAX_MODEL_CONTEXT_ITEM_TOKENS).unwrap_or(usize::MAX))
-        }
-    };
+    // Use one canonical token projection for both live and replayed history once the supplied
+    // item exceeds the hard cap. The caller applies any model-specific policy before this helper.
+    let max_budget = usize::try_from(MAX_MODEL_CONTEXT_ITEM_TOKENS).unwrap_or(usize::MAX);
     let mut lower = 0;
     let mut upper = max_budget;
     let mut best = None;
     while lower <= upper {
         let budget = lower + (upper - lower) / 2;
-        let policy = match preferred_policy {
-            TruncationPolicy::Bytes(_) => TruncationPolicy::Bytes(budget),
-            TruncationPolicy::Tokens(_) => TruncationPolicy::Tokens(budget),
-        };
-        let candidate = truncate_output_item(item, policy);
+        let candidate = truncate_output_item(item, TruncationPolicy::Tokens(budget));
         if estimate_item_token_count(&candidate) <= MAX_MODEL_CONTEXT_ITEM_TOKENS {
             best = Some(candidate);
             lower = budget.saturating_add(1);

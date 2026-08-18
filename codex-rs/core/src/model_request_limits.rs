@@ -10,6 +10,7 @@ use std::ops::Range;
 
 use crate::context_manager::estimate_item_token_count;
 use crate::context_manager::remove_corresponding_for;
+use crate::context_manager::truncate_output_item_to_limit;
 use crate::context_manager::updates::split_model_context_item_to_limit;
 
 const MAX_MODEL_REQUEST_ITEMS: usize = 10_000;
@@ -109,10 +110,19 @@ fn split_input_items(items: Vec<ResponseItem>) -> Result<Vec<ResponseItem>> {
 
 fn split_and_validate_input_item(item: ResponseItem) -> Result<Vec<ResponseItem>> {
     let items = split_model_context_item_to_limit(item);
-    for item in &items {
-        validate_response_item("input item", item)?;
+    let mut bounded_items = Vec::with_capacity(items.len());
+    for item in items {
+        let item = match &item {
+            ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. } => {
+                truncate_output_item_to_limit(&item)
+                    .ok_or_else(|| item_limit_error("input item"))?
+            }
+            _ => item,
+        };
+        validate_response_item("input item", &item)?;
+        bounded_items.push(item);
     }
-    Ok(items)
+    Ok(bounded_items)
 }
 
 fn validate_total_request_budget(request: &ResponsesApiRequest, tools: &[ToolSpec]) -> Result<()> {
