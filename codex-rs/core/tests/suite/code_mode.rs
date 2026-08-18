@@ -20,7 +20,10 @@ use codex_extension_api::ToolLifecycleFuture;
 use codex_extension_api::ToolStartInput;
 use codex_features::CurrentTimeSource;
 use codex_features::Feature;
+use codex_history::RolloutItem;
+use codex_history::RolloutLine;
 use codex_login::CodexAuth;
+use codex_model_context::estimate_response_item_model_visible_bytes;
 use codex_models_manager::bundled_models_response;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
@@ -4737,6 +4740,7 @@ text(JSON.stringify({
 struct NamespacedCustomTool {
     generation: usize,
     generations: Arc<AtomicUsize>,
+    oversized_output: bool,
 }
 
 impl ToolContributor for NamespacedCustomTool {
@@ -4757,6 +4761,7 @@ impl ToolContributor for NamespacedCustomTool {
         vec![Arc::new(Self {
             generation: self.generations.fetch_add(1, Ordering::Relaxed) + 1,
             generations: Arc::clone(&self.generations),
+            oversized_output: self.oversized_output,
         })]
     }
 }
@@ -4790,12 +4795,22 @@ impl ToolExecutor<ToolCall> for NamespacedCustomTool {
                     "expected custom tool payload".to_string(),
                 ));
             };
-            Ok(Box::new(JsonToolOutput::new(serde_json::json!({
-                "namespace": call.tool_name.namespace,
-                "name": call.tool_name.name,
-                "input": input,
-                "generation": self.generation,
-            }))) as Box<dyn ToolOutput>)
+            let output = if self.oversized_output {
+                serde_json::json!({
+                    "result": format!(
+                        "OVERSIZED-BEGIN-{}-OVERSIZED-END",
+                        "x".repeat(80_000)
+                    ),
+                })
+            } else {
+                serde_json::json!({
+                    "namespace": call.tool_name.namespace,
+                    "name": call.tool_name.name,
+                    "input": input,
+                    "generation": self.generation,
+                })
+            };
+            Ok(Box::new(JsonToolOutput::new(output)) as Box<dyn ToolOutput>)
         })
     }
 }
@@ -4809,6 +4824,7 @@ async fn code_mode_exposes_and_dispatches_namespaced_custom_tools() -> Result<()
     extensions.tool_contributor(Arc::new(NamespacedCustomTool {
         generation: 0,
         generations: Arc::new(AtomicUsize::new(0)),
+        oversized_output: false,
     }));
     let mut builder = test_codex()
         .with_model("test-gpt-5.1-codex")
@@ -4926,6 +4942,152 @@ text(JSON.stringify({
             },
         })
     );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_namespaced_custom_output_is_bounded_persisted_and_delivered() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    extensions.tool_contributor(Arc::new(NamespacedCustomTool {
+        generation: 0,
+        generations: Arc::new(AtomicUsize::new(0)),
+        oversized_output: true,
+    }));
+    let mut builder = test_codex()
+        .with_model(TOKEN_POLICY_TEST_MODEL)
+        .with_extensions(Arc::new(extensions.build()))
+        .with_config(|config| {
+            config.tool_output_token_limit = Some(100_000);
+        });
+    let test = builder.build(&server).await?;
+    let tool_call_mock = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-oversized-custom"),
+            responses::ev_custom_tool_call_with_namespace(
+                "call-oversized-custom",
+                "editor",
+                "apply_patch",
+                "small patch",
+            ),
+            ev_completed("resp-oversized-custom"),
+        ]),
+    )
+    .await;
+    let follow_up_mock = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-oversized-custom", "done"),
+            ev_completed("resp-oversized-custom-done"),
+        ]),
+    )
+    .await;
+
+    test.submit_turn("call the custom editor tool").await?;
+
+    tool_call_mock.single_request();
+    let request = follow_up_mock.single_request();
+    let request_input = request.input();
+    let call_indices = request_input
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            (item.get("type").and_then(Value::as_str) == Some("custom_tool_call")
+                && item.get("call_id").and_then(Value::as_str) == Some("call-oversized-custom"))
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let output_indices = request_input
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            (item.get("type").and_then(Value::as_str) == Some("custom_tool_call_output")
+                && item.get("call_id").and_then(Value::as_str) == Some("call-oversized-custom"))
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(call_indices.len(), 1);
+    assert_eq!(output_indices.len(), 1);
+    assert!(call_indices[0] < output_indices[0]);
+    let request_output_value = &request_input[output_indices[0]];
+    let request_output: ResponseItem = serde_json::from_value(request_output_value.clone())?;
+    assert!(estimate_response_item_model_visible_bytes(&request_output) <= 40_000);
+    assert!(matches!(
+        &request_output,
+        ResponseItem::CustomToolCallOutput { call_id, name: None, .. }
+            if call_id == "call-oversized-custom"
+    ));
+    let projected_text = request_output_value
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("custom output should remain text");
+    assert!(projected_text.starts_with(r#"{"result":"OVERSIZED-BEGIN-"#));
+    assert!(projected_text.ends_with(r#"-OVERSIZED-END"}"#));
+    assert_eq!(projected_text.matches("tokens truncated").count(), 1);
+
+    test.codex.flush_rollout().await?;
+    let rollout_path = test
+        .session_configured
+        .rollout_path
+        .as_ref()
+        .expect("rollout path");
+    let persisted_items = fs::read_to_string(rollout_path)?
+        .lines()
+        .map(serde_json::from_str::<RolloutLine>)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter_map(|line| match line.item {
+            RolloutItem::ResponseItem(envelope) => Some(envelope.item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let persisted_call_indices = persisted_items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            matches!(
+                item,
+                ResponseItem::CustomToolCall { call_id, .. }
+                    if call_id == "call-oversized-custom"
+            )
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let persisted_output_indices = persisted_items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            matches!(
+                item,
+                ResponseItem::CustomToolCallOutput { call_id, .. }
+                    if call_id == "call-oversized-custom"
+            )
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(persisted_call_indices.len(), 1);
+    assert_eq!(persisted_output_indices.len(), 1);
+    assert!(persisted_call_indices[0] < persisted_output_indices[0]);
+    let persisted_output = &persisted_items[persisted_output_indices[0]];
+    assert!(estimate_response_item_model_visible_bytes(persisted_output) > 40_000);
+    let ResponseItem::CustomToolCallOutput {
+        name: None, output, ..
+    } = persisted_output
+    else {
+        panic!("persisted custom output should preserve an empty name");
+    };
+    let expected_output = serde_json::json!({
+        "result": format!(
+            "OVERSIZED-BEGIN-{}-OVERSIZED-END",
+            "x".repeat(80_000)
+        ),
+    })
+    .to_string();
+    assert_eq!(output.text_content(), Some(expected_output.as_str()));
 
     Ok(())
 }
