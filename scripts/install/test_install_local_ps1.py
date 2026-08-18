@@ -48,6 +48,25 @@ class WindowsPowerShellCompatibilityTest(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt" and POWERSHELL, "requires PowerShell 7")
 class InstallLocalPowerShellTest(unittest.TestCase):
+    def test_default_build_uses_zero_version_and_dev_small_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            build_log = root / "build-version.txt"
+
+            result = run_installer(
+                root,
+                repo,
+                build_log,
+                use_upstream_version=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(
+                build_log.read_text(encoding="utf-8"),
+                "0.0.0\ndev-small\nfalse",
+            )
+
     def test_upstream_version_ignores_non_ancestor_and_restores_cargo_files(
         self,
     ) -> None:
@@ -65,7 +84,7 @@ class InstallLocalPowerShellTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(
                 build_log.read_text(encoding="utf-8"),
-                "0.148.0-alpha.12\nrelease",
+                "0.148.0-alpha.12\ndev-small\nfalse",
             )
             self.assertEqual(cargo_toml.read_bytes(), original_cargo_toml)
             self.assertEqual(cargo_lock.read_bytes(), original_cargo_lock)
@@ -89,7 +108,7 @@ class InstallLocalPowerShellTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(
                 build_log.read_text(encoding="utf-8"),
-                "0.148.0-alpha.12\nrelease",
+                "0.148.0-alpha.12\ndev-small\nfalse",
             )
             self.assertEqual(cargo_toml.read_bytes(), original_cargo_toml)
             self.assertEqual(
@@ -112,13 +131,37 @@ class InstallLocalPowerShellTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(
                 build_log.read_text(encoding="utf-8"),
-                "1.2.3-beta.4\nrelease",
+                "1.2.3-beta.4\ndev-small\nfalse",
             )
             self.assertEqual(cargo_toml.read_bytes(), original_cargo_toml)
             self.assertEqual(
                 (repo / "codex-rs" / "Cargo.lock").read_bytes(),
                 original_cargo_lock,
             )
+
+    def test_debug_assertions_environment_is_restored_after_build(self) -> None:
+        cases = ((None, "<unset>"), ("sentinel", "sentinel"))
+        for initial_value, expected_value in cases:
+            with self.subTest(initial_value=initial_value):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    repo = create_repo(root)
+                    build_log = root / "build-version.txt"
+                    restored_log = root / "restored-debug-assertions.txt"
+
+                    result = run_installer_with_debug_assertions_probe(
+                        root,
+                        repo,
+                        build_log,
+                        restored_log,
+                        initial_value=initial_value,
+                    )
+
+                    self.assertEqual(result.returncode, 0)
+                    self.assertEqual(
+                        restored_log.read_text(encoding="utf-8"),
+                        expected_value,
+                    )
 
 
 def create_repo(root: Path) -> Path:
@@ -143,7 +186,8 @@ def create_repo(root: Path) -> Path:
             arguments = os.sys.argv[1:]
             profile_index = arguments.index("--cargo-profile") + 1
             Path(os.environ["CODEX_TEST_BUILD_LOG"]).write_text(
-                f"{match.group(1)}\\n{arguments[profile_index]}",
+                f"{match.group(1)}\\n{arguments[profile_index]}\\n"
+                f"{os.environ.get('CARGO_PROFILE_DEV_SMALL_DEBUG_ASSERTIONS', 'unset')}",
                 encoding="utf-8",
             )
             raise SystemExit(23)
@@ -217,18 +261,80 @@ def git(
 
 
 def run_installer(
-    root: Path, repo: Path, build_log: Path
+    root: Path,
+    repo: Path,
+    build_log: Path,
+    *,
+    use_upstream_version: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    temp = root / "temp"
-    temp.mkdir()
-    env = {
-        **os.environ,
-        "CODEX_HOME": str(root / "codex-home"),
-        "CODEX_INSTALL_DIR": str(root / "install-bin"),
-        "CODEX_TEST_BUILD_LOG": str(build_log),
-        "TEMP": str(temp),
-        "TMP": str(temp),
-    }
+    arguments = [
+        str(POWERSHELL),
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(repo / "scripts" / "install" / INSTALL_SCRIPT.name),
+    ]
+    if use_upstream_version:
+        arguments.append("-UseUpstreamVersion")
+
+    return subprocess.run(
+        arguments,
+        cwd=repo,
+        env=installer_environment(root, build_log),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+
+
+def run_installer_with_debug_assertions_probe(
+    root: Path,
+    repo: Path,
+    build_log: Path,
+    restored_log: Path,
+    *,
+    initial_value: str | None,
+) -> subprocess.CompletedProcess[str]:
+    env = installer_environment(root, build_log)
+    env.update(
+        {
+            "CODEX_TEST_DEBUG_ASSERTIONS_INITIAL": initial_value or "<unset>",
+            "CODEX_TEST_INSTALL_SCRIPT": str(
+                repo / "scripts" / "install" / INSTALL_SCRIPT.name
+            ),
+            "CODEX_TEST_RESTORED_DEBUG_ASSERTIONS_LOG": str(restored_log),
+        }
+    )
+    command = textwrap.dedent(
+        """\
+        if ($env:CODEX_TEST_DEBUG_ASSERTIONS_INITIAL -eq "<unset>") {
+            Remove-Item Env:CARGO_PROFILE_DEV_SMALL_DEBUG_ASSERTIONS `
+                -ErrorAction SilentlyContinue
+        } else {
+            $env:CARGO_PROFILE_DEV_SMALL_DEBUG_ASSERTIONS = `
+                $env:CODEX_TEST_DEBUG_ASSERTIONS_INITIAL
+        }
+        try {
+            & $env:CODEX_TEST_INSTALL_SCRIPT -UseUpstreamVersion
+        } catch {
+        }
+        $restored = [Environment]::GetEnvironmentVariable(
+            "CARGO_PROFILE_DEV_SMALL_DEBUG_ASSERTIONS",
+            "Process"
+        )
+        if ($null -eq $restored) {
+            $restored = "<unset>"
+        }
+        [System.IO.File]::WriteAllText(
+            $env:CODEX_TEST_RESTORED_DEBUG_ASSERTIONS_LOG,
+            $restored
+        )
+        """
+    )
     return subprocess.run(
         [
             str(POWERSHELL),
@@ -236,9 +342,8 @@ def run_installer(
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
-            "-File",
-            str(repo / "scripts" / "install" / INSTALL_SCRIPT.name),
-            "-UseUpstreamVersion",
+            "-Command",
+            command,
         ],
         cwd=repo,
         env=env,
@@ -248,6 +353,19 @@ def run_installer(
         capture_output=True,
         check=False,
     )
+
+
+def installer_environment(root: Path, build_log: Path) -> dict[str, str]:
+    temp = root / "temp"
+    temp.mkdir()
+    return {
+        **os.environ,
+        "CODEX_HOME": str(root / "codex-home"),
+        "CODEX_INSTALL_DIR": str(root / "install-bin"),
+        "CODEX_TEST_BUILD_LOG": str(build_log),
+        "TEMP": str(temp),
+        "TMP": str(temp),
+    }
 
 
 if __name__ == "__main__":
