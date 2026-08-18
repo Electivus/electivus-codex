@@ -9,8 +9,6 @@ use crate::ipc_framed::Message;
 use crate::ipc_framed::decode_bytes;
 use crate::ipc_framed::read_frame;
 use crate::run_windows_sandbox_capture;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -27,6 +25,7 @@ use std::os::windows::io::FromRawHandle;
 use std::os::windows::io::OwnedHandle;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -98,27 +97,76 @@ fn workspace_roots_for(root: &Path) -> Vec<AbsolutePathBuf> {
     vec![AbsolutePathBuf::from_absolute_path(root).expect("absolute workspace root")]
 }
 
-fn powershell_literal(path: &Path) -> String {
-    path.to_string_lossy().replace('\'', "''")
+fn python_path() -> PathBuf {
+    for candidate in ["python3", "python"] {
+        let Ok(output) = Command::new(candidate)
+            .args(["-c", "import sys; print(sys.executable)"])
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        if path.is_file() {
+            return path;
+        }
+    }
+    panic!("Python must be installed for Windows sandbox process tests");
 }
 
-fn start_powershell_child(pwsh: &Path, child_command: &str, parent_tail: &str) -> String {
-    let encoded = BASE64.encode(
-        child_command
-            .encode_utf16()
-            .flat_map(u16::to_le_bytes)
-            .collect::<Vec<_>>(),
+fn python_descendant_invocation(
+    python: &Path,
+    ready_marker: &Path,
+    child_command: &str,
+    parent_tail: &str,
+    mut env_map: HashMap<String, String>,
+) -> (Vec<String>, HashMap<String, String>) {
+    let child_command = format!(
+        concat!(
+            "import os,pathlib\n",
+            "ready=pathlib.Path(os.environ['CODEX_DESCENDANT_READY'])\n",
+            "ready_tmp=ready.with_name(ready.name+'.tmp')\n",
+            "ready_tmp.write_text(str(os.getpid()))\n",
+            "os.replace(ready_tmp,ready)\n",
+            "{child_command}",
+        ),
+        child_command = child_command,
     );
-    format!(
-        "& $env:ComSpec /d /s /c 'start \"\" /b \"{}\" -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded} >nul 2>nul'; {parent_tail}",
-        powershell_literal(pwsh),
+    env_map.insert("CODEX_DESCENDANT_COMMAND".to_string(), child_command);
+    env_map.insert(
+        "CODEX_DESCENDANT_READY".to_string(),
+        ready_marker.to_string_lossy().into_owned(),
+    );
+    let parent_command = format!(
+        concat!(
+            "import os,subprocess,sys,time\n",
+            "child=subprocess.Popen([sys.executable,'-u','-c',os.environ['CODEX_DESCENDANT_COMMAND']],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,close_fds=True,creationflags=subprocess.DETACHED_PROCESS|subprocess.CREATE_NEW_PROCESS_GROUP)\n",
+            "{parent_tail}\n",
+        ),
+        parent_tail = parent_tail,
+    );
+    (
+        vec![
+            python.display().to_string(),
+            "-u".to_string(),
+            "-c".to_string(),
+            parent_command,
+        ],
+        env_map,
     )
 }
 
-fn powershell_wait_for_path(path: &Path, max_attempts: u32) -> String {
-    format!(
-        "$found=$false; foreach ($attempt in 1..{max_attempts}) {{ & $env:ComSpec /d /c 'if exist \"{}\" (exit /b 0) else (exit /b 1)'; if ($LASTEXITCODE -eq 0) {{ $found=$true; break }}; & \"$env:SystemRoot\\System32\\ping.exe\" -4 -n 2 127.0.0.1 > $null }}; if (-not $found) {{ exit 3 }}",
-        powershell_literal(path),
+fn python_release_child_command() -> &'static str {
+    concat!(
+        "import os,pathlib,time\n",
+        "release=pathlib.Path(os.environ['CODEX_DESCENDANT_RELEASE'])\n",
+        "deadline=time.time()+30\n",
+        "while not release.exists() and time.time()<deadline:\n",
+        "    time.sleep(.025)\n",
+        "if not release.exists(): raise SystemExit(3)\n",
+        "pathlib.Path(os.environ['CODEX_DESCENDANT_SURVIVED']).write_text('survived')\n",
     )
 }
 
@@ -607,46 +655,47 @@ fn runner_resizer_sends_resize_frame() {
 
 #[test]
 fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
-    let Some(pwsh) = pwsh_path() else {
-        return;
-    };
+    let python = python_path();
     let _guard = legacy_process_test_guard();
     let cwd = sandbox_cwd();
-    let codex_home = sandbox_home("legacy-capture-pwsh");
-    println!("capture pwsh codex_home={}", codex_home.path().display());
+    let codex_home = sandbox_home("legacy-capture-python");
+    println!("capture Python codex_home={}", codex_home.path().display());
     let ready_marker = codex_home.path().join("descendant-started");
     let release_marker = codex_home.path().join("release-descendant");
     let survival_marker = codex_home.path().join("descendant-survived");
-    let descendant_command = format!(
-        "$PID > '{}'; {}; 'survived' > '{}'",
-        powershell_literal(&ready_marker),
-        powershell_wait_for_path(&release_marker, 30),
-        powershell_literal(&survival_marker),
-    );
-    let parent_tail = powershell_wait_for_path(&ready_marker, 10);
-    let parent_command = format!(
-        "'LEGACY-CAPTURE-DIRECT'; {}",
-        start_powershell_child(&pwsh, &descendant_command, &parent_tail),
+    let (argv, env_map) = python_descendant_invocation(
+        &python,
+        &ready_marker,
+        python_release_child_command(),
+        "print('LEGACY-CAPTURE-DIRECT', flush=True)",
+        HashMap::from([
+            (
+                "CODEX_DESCENDANT_RELEASE".to_string(),
+                release_marker.to_string_lossy().into_owned(),
+            ),
+            (
+                "CODEX_DESCENDANT_SURVIVED".to_string(),
+                survival_marker.to_string_lossy().into_owned(),
+            ),
+        ]),
     );
     let permission_profile = PermissionProfile::workspace_write();
     let result = run_windows_sandbox_capture(
         &permission_profile,
         workspace_roots_for(cwd.as_path()).as_slice(),
         codex_home.path(),
-        vec![
-            pwsh.display().to_string(),
-            "-NonInteractive".to_string(),
-            "-NoProfile".to_string(),
-            "-Command".to_string(),
-            parent_command,
-        ],
+        argv,
         cwd.as_path(),
-        HashMap::new(),
+        env_map,
         Some(10_000),
         /*cancellation*/ None,
         /*use_private_desktop*/ true,
     )
-    .expect("run legacy capture powershell");
+    .expect("run legacy capture Python parent");
+    assert!(
+        wait_for_path(&ready_marker, Duration::from_secs(10)),
+        "sandbox descendant did not start"
+    );
     let descendant_pid = fs::read_to_string(&ready_marker)
         .expect("read descendant pid")
         .trim()
@@ -656,11 +705,11 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
     fs::write(&release_marker, "release").expect("release descendant after root exit");
     let descendant_process = descendant_process.expect("open descendant after normal capture exit");
 
-    println!("capture pwsh exit_code={}", result.exit_code);
-    println!("capture pwsh timed_out={}", result.timed_out);
+    println!("capture Python exit_code={}", result.exit_code);
+    println!("capture Python timed_out={}", result.timed_out);
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
-    println!("capture pwsh stderr={stderr:?}");
+    println!("capture Python stderr={stderr:?}");
     assert_eq!(result.exit_code, 0, "stdout={stdout:?} stderr={stderr:?}");
     assert!(
         stdout.contains("LEGACY-CAPTURE-DIRECT"),
@@ -773,24 +822,26 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
 
 #[test]
 fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
-    let Some(pwsh) = pwsh_path() else {
-        eprintln!("skipping cancellation regression test: PowerShell 7 is not installed");
-        return;
-    };
+    let python = python_path();
     let _guard = legacy_process_test_guard();
     let cwd = sandbox_cwd();
     let codex_home = sandbox_home("legacy-capture-cancel");
     let descendant_marker = codex_home.path().join("descendant-survived");
     let ready_marker = codex_home.path().join("descendant-started");
-    let descendant_command = format!(
-        "$PID > '{}'; & \"$env:SystemRoot\\System32\\ping.exe\" -4 -n 2 127.0.0.1 > $null; 'survived' > '{}'",
-        powershell_literal(&ready_marker),
-        powershell_literal(&descendant_marker),
+    let descendant_command = concat!(
+        "import os,pathlib,time\n",
+        "time.sleep(1)\n",
+        "pathlib.Path(os.environ['CODEX_DESCENDANT_SURVIVED']).write_text('survived')\n",
     );
-    let parent_command = start_powershell_child(
-        &pwsh,
-        &descendant_command,
-        "& \"$env:SystemRoot\\System32\\ping.exe\" -4 -n 31 127.0.0.1 > $null",
+    let (argv, env_map) = python_descendant_invocation(
+        &python,
+        &ready_marker,
+        descendant_command,
+        "time.sleep(30)",
+        HashMap::from([(
+            "CODEX_DESCENDANT_SURVIVED".to_string(),
+            descendant_marker.to_string_lossy().into_owned(),
+        )]),
     );
     let descendant_process = Arc::new(Mutex::new(None));
     let descendant_process_for_cancellation = Arc::clone(&descendant_process);
@@ -817,20 +868,14 @@ fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
         &permission_profile,
         workspace_roots_for(cwd.as_path()).as_slice(),
         codex_home.path(),
-        vec![
-            pwsh.display().to_string(),
-            "-NonInteractive".to_string(),
-            "-NoProfile".to_string(),
-            "-Command".to_string(),
-            parent_command,
-        ],
+        argv,
         cwd.as_path(),
-        HashMap::new(),
+        env_map,
         Some(30_000),
         /*cancellation*/ Some(cancellation),
         /*use_private_desktop*/ true,
     )
-    .expect("run legacy capture powershell with cancellation");
+    .expect("run legacy capture Python parent with cancellation");
 
     assert!(
         started_at.elapsed() < Duration::from_secs(10),
@@ -861,7 +906,7 @@ enum LegacyTtyDescendantLifecycle {
 }
 
 async fn assert_legacy_tty_descendant_lifecycle(
-    pwsh: &Path,
+    python: &Path,
     lifecycle: LegacyTtyDescendantLifecycle,
 ) {
     let cwd = sandbox_cwd();
@@ -872,41 +917,37 @@ async fn assert_legacy_tty_descendant_lifecycle(
     let ready_marker = codex_home.path().join("descendant-started");
     let release_marker = codex_home.path().join("release-descendant");
     let survival_marker = codex_home.path().join("descendant-survived");
-    let child_tail = match lifecycle {
-        LegacyTtyDescendantLifecycle::Terminate => {
-            "& \"$env:SystemRoot\\System32\\ping.exe\" -4 -n 31 127.0.0.1 > $null".to_string()
-        }
-        LegacyTtyDescendantLifecycle::Preserve => format!(
-            "{}; 'survived' > '{}'",
-            powershell_wait_for_path(&release_marker, 30),
-            powershell_literal(&survival_marker),
+    let (child_command, parent_tail, env_map) = match lifecycle {
+        LegacyTtyDescendantLifecycle::Terminate => (
+            "import time\ntime.sleep(30)\n",
+            "time.sleep(30)",
+            HashMap::new(),
+        ),
+        LegacyTtyDescendantLifecycle::Preserve => (
+            python_release_child_command(),
+            "raise SystemExit(0)",
+            HashMap::from([
+                (
+                    "CODEX_DESCENDANT_RELEASE".to_string(),
+                    release_marker.to_string_lossy().into_owned(),
+                ),
+                (
+                    "CODEX_DESCENDANT_SURVIVED".to_string(),
+                    survival_marker.to_string_lossy().into_owned(),
+                ),
+            ]),
         ),
     };
-    let child_command = format!(
-        "$PID > '{}'; {child_tail}",
-        powershell_literal(&ready_marker),
-    );
-    let parent_tail = match lifecycle {
-        LegacyTtyDescendantLifecycle::Terminate => {
-            "& \"$env:SystemRoot\\System32\\ping.exe\" -4 -n 31 127.0.0.1 > $null".to_string()
-        }
-        LegacyTtyDescendantLifecycle::Preserve => powershell_wait_for_path(&ready_marker, 10),
-    };
-    let parent_command = start_powershell_child(pwsh, &child_command, &parent_tail);
+    let (argv, env_map) =
+        python_descendant_invocation(python, &ready_marker, child_command, parent_tail, env_map);
     let permission_profile = PermissionProfile::workspace_write();
     let spawned = spawn_windows_sandbox_session_legacy(
         &permission_profile,
         workspace_roots_for(cwd.as_path()).as_slice(),
         codex_home.path(),
-        vec![
-            pwsh.display().to_string(),
-            "-NonInteractive".to_string(),
-            "-NoProfile".to_string(),
-            "-Command".to_string(),
-            parent_command,
-        ],
+        argv,
         cwd.as_path(),
-        HashMap::new(),
+        env_map,
         Some(30_000),
         &[],
         &[],
@@ -953,15 +994,13 @@ async fn assert_legacy_tty_descendant_lifecycle(
 
 #[test]
 fn legacy_tty_job_terminates_and_preserves_descendants() {
-    let Some(pwsh) = pwsh_path() else {
-        eprintln!("skipping sandbox ConPTY lifecycle test: PowerShell 7 is not installed");
-        return;
-    };
+    let python = python_path();
     let _guard = legacy_process_test_guard();
     current_thread_runtime().block_on(async move {
-        assert_legacy_tty_descendant_lifecycle(&pwsh, LegacyTtyDescendantLifecycle::Terminate)
+        assert_legacy_tty_descendant_lifecycle(&python, LegacyTtyDescendantLifecycle::Terminate)
             .await;
-        assert_legacy_tty_descendant_lifecycle(&pwsh, LegacyTtyDescendantLifecycle::Preserve).await;
+        assert_legacy_tty_descendant_lifecycle(&python, LegacyTtyDescendantLifecycle::Preserve)
+            .await;
     });
 }
 

@@ -297,9 +297,9 @@ def validate_topology(
             and "timeout-minutes: 180" in v8_windows
             and "V8_FROM_SOURCE: \"1\"" in v8_windows
             and 'GN_ARGS: "symbol_level=0 v8_symbol_level=0"' in v8_windows
-            and v8_windows_cache.count("windows-2025-sandbox-symbols0-cert1-") == 2
-            and "key: rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-cert1-${{ hashFiles" in v8_windows_cache
-            and "rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-cert1-\n" in v8_windows_cache
+            and v8_windows_cache.count("windows-2025-sandbox-symbols0-cert2-") == 2
+            and "key: rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-cert2-${{ hashFiles" in v8_windows_cache
+            and "rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-cert2-\n" in v8_windows_cache
             and "stage-upstream-release-pair" in v8_windows
             and "WINDOWS_BUILD_RESULT: ${{ needs.build-windows-source.result }}" in v8_terminal
             and "windows_build_result != \"success\"" in v8_result,

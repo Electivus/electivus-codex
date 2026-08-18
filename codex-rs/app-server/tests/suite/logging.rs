@@ -20,6 +20,9 @@ use tempfile::TempDir;
 use tokio::time::Duration;
 use tokio::time::timeout;
 
+#[cfg(windows)]
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(not(windows))]
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]

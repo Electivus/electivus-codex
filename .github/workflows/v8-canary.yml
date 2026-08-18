@@ -393,9 +393,9 @@ jobs:
           path: |
             ${{ steps.setup_ci.outputs.cargo-target-dir }}/sccache
             ${{ steps.setup_ci.outputs.cargo-target-dir }}/${{ matrix.target }}/release/gn_out
-          key: rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-cert1-${{ hashFiles('upstream-rusty-v8/Cargo.lock', 'upstream-rusty-v8/build.rs', 'upstream-rusty-v8/git_submodule_status.txt') }}
+          key: rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-cert2-${{ hashFiles('upstream-rusty-v8/Cargo.lock', 'upstream-rusty-v8/build.rs', 'upstream-rusty-v8/git_submodule_status.txt') }}
           restore-keys: |
-            rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-cert1-
+            rusty-v8-source-${{ matrix.target }}-windows-2025-sandbox-symbols0-cert2-
 
       - name: Install and start sccache
         shell: pwsh

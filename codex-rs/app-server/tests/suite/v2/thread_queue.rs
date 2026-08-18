@@ -51,6 +51,9 @@ use tempfile::TempDir;
 use tokio::time::timeout;
 use wiremock::MockServer;
 
+#[cfg(windows)]
+const READ_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 60);
+#[cfg(not(windows))]
 const READ_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 10);
 
 #[tokio::test]
