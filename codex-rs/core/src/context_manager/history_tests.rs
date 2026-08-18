@@ -1606,7 +1606,7 @@ fn rollback_treats_an_oversized_agent_message_as_one_turn() {
     let mut history = ContextManager::new();
     history.record_items([&agent_message, &later], TruncationPolicy::Tokens(100_000));
 
-    history.drop_last_n_user_turns(1);
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
 
     assert_eq!(
         history.raw_items().cloned().collect::<Vec<_>>(),
