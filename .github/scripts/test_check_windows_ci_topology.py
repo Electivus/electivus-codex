@@ -56,7 +56,7 @@ class WindowsCiTopologyTests(unittest.TestCase):
             fast_rust,
             workspace_copy,
         ) = self.sources
-        cache_namespace = "windows-2025-sandbox-symbols0-cert2-"
+        cache_namespace = "windows-2025-sandbox-symbols0-cert3-"
         before_restore_key, separator, after_restore_key = v8.rpartition(cache_namespace)
         self.assertEqual(cache_namespace, separator)
         v8_restore_key_drift = (

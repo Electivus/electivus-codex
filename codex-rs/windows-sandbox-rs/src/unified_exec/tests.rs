@@ -52,7 +52,7 @@ static LEGACY_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 fn legacy_process_test_guard() -> MutexGuard<'static, ()> {
     LEGACY_PROCESS_TEST_LOCK
         .lock()
-        .expect("legacy Windows sandbox process test lock poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn current_thread_runtime() -> tokio::runtime::Runtime {
@@ -952,7 +952,7 @@ async fn assert_legacy_tty_descendant_lifecycle(
         &[],
         &[],
         /*tty*/ true,
-        /*stdin_open*/ false,
+        /*stdin_open*/ true,
         /*use_private_desktop*/ true,
     )
     .await
@@ -993,12 +993,20 @@ async fn assert_legacy_tty_descendant_lifecycle(
 }
 
 #[test]
-fn legacy_tty_job_terminates_and_preserves_descendants() {
+fn legacy_tty_job_terminates_descendants() {
     let python = python_path();
     let _guard = legacy_process_test_guard();
     current_thread_runtime().block_on(async move {
         assert_legacy_tty_descendant_lifecycle(&python, LegacyTtyDescendantLifecycle::Terminate)
             .await;
+    });
+}
+
+#[test]
+fn legacy_tty_job_preserves_descendants_after_normal_exit() {
+    let python = python_path();
+    let _guard = legacy_process_test_guard();
+    current_thread_runtime().block_on(async move {
         assert_legacy_tty_descendant_lifecycle(&python, LegacyTtyDescendantLifecycle::Preserve)
             .await;
     });

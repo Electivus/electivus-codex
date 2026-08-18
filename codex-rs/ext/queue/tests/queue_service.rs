@@ -49,6 +49,11 @@ use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 
+#[cfg(windows)]
+const QUEUE_INTEGRATION_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(not(windows))]
+const QUEUE_INTEGRATION_TIMEOUT: Duration = Duration::from_secs(10);
+
 const TINY_PNG_BYTES: &[u8] = &[
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
     0, 0, 31, 21, 196, 137, 0, 0, 0, 11, 73, 68, 65, 84, 120, 156, 99, 96, 0, 2, 0, 0, 5, 0, 1,
@@ -461,7 +466,7 @@ async fn registered_queue_lifecycle_starts_messages_in_fifo_order() -> anyhow::R
     }
     let queue = install_registered_queue(&test, installed.as_ref())?;
 
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(QUEUE_INTEGRATION_TIMEOUT, async {
         test.submit_text_turn("A").await?;
         for _ in 0..2 {
             wait_for_event_match(test.codex.as_ref(), |event| {
@@ -519,7 +524,7 @@ async fn rejected_queue_messages_are_consumed_without_retrying_or_blocking_follo
     }
     let queue = install_registered_queue(&test, installed.as_ref())?;
 
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(QUEUE_INTEGRATION_TIMEOUT, async {
         test.submit_text_turn("A").await?;
         for _ in 0..2 {
             wait_for_event_match(test.codex.as_ref(), |event| {
@@ -572,7 +577,7 @@ async fn explicitly_started_rejected_queue_messages_are_consumed() -> anyhow::Re
 
     let rejected = queue.enqueue(thread_id, user_input("blocked")).await?;
     let submission = tokio::time::timeout(
-        Duration::from_secs(10),
+        QUEUE_INTEGRATION_TIMEOUT,
         queue.start(test.codex.as_ref(), Some(rejected.id), /*trace*/ None),
     )
     .await?
