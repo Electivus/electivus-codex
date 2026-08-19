@@ -485,7 +485,7 @@ build_local_package() {
     "$python_bin" "$REPO_ROOT/scripts/build_codex_package.py" \
       --target "$target" \
       --variant codex \
-      --cargo-profile dev \
+      --cargo-profile dev-small \
       --package-dir "$package_dir" \
       --rg-bin "$CODEX_LOCAL_RG" \
       --force
@@ -493,7 +493,7 @@ build_local_package() {
     "$python_bin" "$REPO_ROOT/scripts/build_codex_package.py" \
       --target "$target" \
       --variant codex \
-      --cargo-profile dev \
+      --cargo-profile dev-small \
       --package-dir "$package_dir" \
       --force
   fi
