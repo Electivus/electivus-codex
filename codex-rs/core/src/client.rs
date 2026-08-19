@@ -952,7 +952,6 @@ impl ModelClient {
                 &mut request,
                 model_visible_tools,
                 lite_prefix_items..lite_prefix_items.saturating_add(replay_prefix_items),
-                prompt.replayed_dynamic_tools,
             )?;
         } else {
             split_model_request_messages(&mut request, model_visible_tools)?;

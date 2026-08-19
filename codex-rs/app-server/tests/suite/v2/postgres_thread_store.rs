@@ -21,6 +21,8 @@ use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
@@ -489,6 +491,119 @@ plugins = false
     writer_runtime.close().await;
     reader_runtime.close().await;
     verifier_runtime.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_resume_accepts_oversized_tool_media_without_rewriting_history()
+-> Result<()> {
+    let fixture = PostgresFixture::new()?;
+    fixture.migrate().await?;
+    let model_server = create_mock_responses_server_repeating_assistant("unused").await;
+    let codex_home = TempDir::new()?;
+    app_test_support::MockResponsesConfig::new(&model_server.uri())
+        .disable_feature(Feature::Plugins)
+        .write(codex_home.path())?;
+    let writer_runtime = fixture.runtime(codex_home.path()).await?;
+    let writer = store::PostgresThreadStore::from_runtime(Arc::clone(&writer_runtime))?;
+    let thread_id = ThreadId::new();
+    seed_thread(&writer, thread_id, codex_home.path(), "mock_provider").await?;
+    writer
+        .resume_thread(store::ResumeThreadParams {
+            thread_id,
+            rollout_path: None,
+            history: None,
+            include_archived: false,
+            metadata: store::ThreadPersistenceMetadata {
+                cwd: Some(codex_home.path().to_path_buf()),
+                model_provider: "mock_provider".to_string(),
+                memory_mode: ThreadMemoryMode::Enabled,
+            },
+        })
+        .await?;
+    let media_call_id = "resume-limit-media-call";
+    let replacement_history = vec![
+        ResponseItem::CustomToolCall {
+            id: None,
+            status: Some("completed".to_string()),
+            call_id: media_call_id.to_string(),
+            name: "media_tool".to_string(),
+            namespace: None,
+            input: "{}".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        }
+        .into(),
+        ResponseItem::CustomToolCallOutput {
+            id: None,
+            call_id: media_call_id.to_string(),
+            name: Some("media_tool".to_string()),
+            output: FunctionCallOutputPayload::from_content_items(
+                (0..6)
+                    .map(|index| FunctionCallOutputContentItem::InputImage {
+                        image_url: format!("data:image/png;base64,resume-image-{index}"),
+                        detail: None,
+                    })
+                    .collect(),
+            ),
+            internal_chat_message_metadata_passthrough: None,
+        }
+        .into(),
+    ];
+    writer
+        .append_items(store::AppendThreadItemsParams {
+            thread_id,
+            items: vec![RolloutItem::Compacted(CompactedItem {
+                message: String::new(),
+                replacement_history: Some(replacement_history.clone()),
+                window_number: Some(1),
+                first_window_id: Some(Uuid::now_v7().to_string()),
+                previous_window_id: None,
+                window_id: Some(Uuid::now_v7().to_string()),
+            })],
+        })
+        .await?;
+    writer.shutdown_thread(thread_id).await?;
+
+    let reader_runtime = fixture.runtime(codex_home.path()).await?;
+    let reader_store = Arc::new(store::PostgresThreadStore::from_runtime(Arc::clone(
+        &reader_runtime,
+    ))?);
+    let thread_store: Arc<dyn store::ThreadStore> = reader_store.clone();
+    let client = start_in_process_server_with_thread_store(codex_home.path(), thread_store).await?;
+    let _: api::ThreadResumeResponse = request(
+        &client,
+        api::ClientRequest::ThreadResume {
+            request_id: request_id(/*id*/ 99),
+            params: api::ThreadResumeParams {
+                thread_id: thread_id.to_string(),
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    let stored = reader_store
+        .read_thread(store::ReadThreadParams {
+            thread_id,
+            include_archived: false,
+            include_history: true,
+        })
+        .await?;
+    let persisted_replacement = stored
+        .history
+        .context("resumed thread should retain canonical history")?
+        .items
+        .into_iter()
+        .find_map(|item| match item {
+            RolloutItem::Compacted(compacted) => compacted.replacement_history,
+            _ => None,
+        })
+        .context("resumed thread should retain compacted replacement history")?;
+    assert_eq!(persisted_replacement, replacement_history);
+
+    client.shutdown().await?;
+    writer_runtime.close().await;
+    reader_runtime.close().await;
     fixture.cleanup().await
 }
 

@@ -307,7 +307,7 @@ fn model_context_validation_accepts_discounted_encrypted_agent_messages() {
 }
 
 #[test]
-fn model_context_validation_rejects_discounted_payloads_that_still_exceed_the_limit() {
+fn model_context_validation_accepts_request_projectable_items_and_rejects_unsplittable_messages() {
     let thread_id = codex_protocol::ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f038")
         .expect("thread id");
     let encrypted_message = ResponseItem::AgentMessage {
@@ -341,8 +341,38 @@ fn model_context_validation_rejects_discounted_payloads_that_still_exceed_the_li
         ),
         internal_chat_message_metadata_passthrough: None,
     };
+    let encrypted_output = ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: "call-encrypted".to_string(),
+        output: FunctionCallOutputPayload::from_content_items(vec![
+            FunctionCallOutputContentItem::EncryptedContent {
+                encrypted_content: "encrypted".repeat(10_000),
+            },
+        ]),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let oversized_compaction = ResponseItem::Compaction {
+        id: None,
+        encrypted_content: "encrypted".repeat(10_000),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let oversized_context_compaction = ResponseItem::ContextCompaction {
+        id: None,
+        encrypted_content: Some("encrypted".repeat(10_000)),
+        internal_chat_message_metadata_passthrough: None,
+    };
 
-    for rejected in [&encrypted_message, &invalid_audio, &multi_image_output] {
+    for accepted in [
+        &multi_image_output,
+        &encrypted_output,
+        &oversized_compaction,
+        &oversized_context_compaction,
+    ] {
+        let mut budget = ModelContextBudget::new(thread_id);
+        validate_response_item(accepted, &mut budget)
+            .expect("item should be projectable at the request boundary");
+    }
+    for rejected in [&encrypted_message, &invalid_audio] {
         let mut budget = ModelContextBudget::new(thread_id);
         let error = validate_response_item(rejected, &mut budget)
             .expect_err("discounted payload must actually fit the model item limit");

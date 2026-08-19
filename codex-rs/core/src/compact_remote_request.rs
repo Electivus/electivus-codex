@@ -66,7 +66,6 @@ pub(super) async fn run_remote_compact_attempt(
         input: prompt_input,
         replay_prefix_items,
         replayed_history,
-        replayed_dynamic_tools: replayed_history && turn_context.replayed_dynamic_tools,
         tools: tool_router.model_visible_specs(),
         parallel_tool_calls: true,
         base_instructions,

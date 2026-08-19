@@ -1,14 +1,21 @@
 use crate::context::ContextualUserFragment;
+use codex_model_context::estimate_response_item_model_visible_bytes;
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
+use codex_utils_output_truncation::TruncationPolicy;
 
 use super::history::estimate_item_token_count;
 
 pub(super) const MAX_MODEL_CONTEXT_ITEM_TOKENS: i64 = 10_000;
+
+fn max_model_context_item_bytes() -> usize {
+    TruncationPolicy::Tokens(usize::try_from(MAX_MODEL_CONTEXT_ITEM_TOKENS).unwrap_or(usize::MAX))
+        .byte_budget()
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MessageGroup {
@@ -176,22 +183,11 @@ fn split_message(template: MessageTemplate, content: Vec<ContentItem>) -> Vec<Re
         .into_iter()
         .flat_map(|content| split_oversized_text_content(&template, content))
         .collect::<Vec<_>>();
-    let mut content_groups = Vec::new();
-    let mut current_group = Vec::new();
-    for content in content {
-        current_group.push(content);
-        if estimate_item_token_count(&template.item(current_group.clone()))
-            > MAX_MODEL_CONTEXT_ITEM_TOKENS
-            && current_group.len() > 1
-        {
-            let overflow = current_group.remove(current_group.len() - 1);
-            content_groups.push(std::mem::take(&mut current_group));
-            current_group.push(overflow);
-        }
-    }
-    if !current_group.is_empty() || content_groups.is_empty() {
-        content_groups.push(current_group);
-    }
+    let empty_item_bytes = estimate_response_item_model_visible_bytes(&template.item(Vec::new()));
+    let content_groups =
+        group_content_by_model_visible_bytes(content, empty_item_bytes, |content| {
+            estimate_response_item_model_visible_bytes(&template.item(vec![content.clone()]))
+        });
     template.into_items(content_groups)
 }
 
@@ -203,23 +199,44 @@ fn split_agent_message(
         .into_iter()
         .flat_map(|content| split_oversized_agent_text_content(&template, content))
         .collect::<Vec<_>>();
+    let empty_item_bytes = estimate_response_item_model_visible_bytes(&template.item(Vec::new()));
+    let content_groups =
+        group_content_by_model_visible_bytes(content, empty_item_bytes, |content| {
+            estimate_response_item_model_visible_bytes(&template.item(vec![content.clone()]))
+        });
+    template.into_items(content_groups)
+}
+
+fn group_content_by_model_visible_bytes<T>(
+    content: Vec<T>,
+    empty_item_bytes: i64,
+    mut single_item_bytes: impl FnMut(&T) -> i64,
+) -> Vec<Vec<T>> {
     let mut content_groups = Vec::new();
     let mut current_group = Vec::new();
+    let mut current_group_bytes = empty_item_bytes;
+    let max_item_bytes = i64::try_from(max_model_context_item_bytes()).unwrap_or(i64::MAX);
     for content in content {
-        current_group.push(content);
-        if estimate_item_token_count(&template.item(current_group.clone()))
-            > MAX_MODEL_CONTEXT_ITEM_TOKENS
-            && current_group.len() > 1
-        {
-            let overflow = current_group.remove(current_group.len() - 1);
+        let single_bytes = single_item_bytes(&content);
+        let candidate_bytes = if current_group.is_empty() {
+            single_bytes
+        } else {
+            current_group_bytes
+                .saturating_add(single_bytes.saturating_sub(empty_item_bytes))
+                .saturating_add(1)
+        };
+        if candidate_bytes > max_item_bytes && !current_group.is_empty() {
             content_groups.push(std::mem::take(&mut current_group));
-            current_group.push(overflow);
+            current_group_bytes = single_bytes;
+        } else {
+            current_group_bytes = candidate_bytes;
         }
+        current_group.push(content);
     }
     if !current_group.is_empty() || content_groups.is_empty() {
         content_groups.push(current_group);
     }
-    template.into_items(content_groups)
+    content_groups
 }
 
 fn build_text_message(role: &str, text_sections: Vec<String>) -> Option<ResponseItem> {
@@ -260,7 +277,7 @@ fn split_oversized_text_content(
     let mut remaining = text.as_str();
     while !remaining.is_empty() {
         let mut lower = 1;
-        let mut upper = remaining.len();
+        let mut upper = remaining.len().min(max_model_context_item_bytes());
         let mut best_end = None;
         while lower <= upper {
             let middle = lower + (upper - lower) / 2;
@@ -306,7 +323,7 @@ fn split_oversized_agent_text_content(
     let mut remaining = text.as_str();
     while !remaining.is_empty() {
         let mut lower = 1;
-        let mut upper = remaining.len();
+        let mut upper = remaining.len().min(max_model_context_item_bytes());
         let mut best_end = None;
         while lower <= upper {
             let middle = lower + (upper - lower) / 2;

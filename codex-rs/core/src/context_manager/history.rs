@@ -666,7 +666,11 @@ fn enforce_replay_limits(items: &mut Vec<ResponseItemEnvelope>) {
         estimate_item_token_count(&envelope.item) > 10_000
             && !matches!(
                 envelope.item,
-                ResponseItem::Message { .. } | ResponseItem::AgentMessage { .. }
+                ResponseItem::Message { .. }
+                    | ResponseItem::AgentMessage { .. }
+                    | ResponseItem::Reasoning { .. }
+                    | ResponseItem::Compaction { .. }
+                    | ResponseItem::ContextCompaction { .. }
             )
     }) {
         let removed = items.remove(index);

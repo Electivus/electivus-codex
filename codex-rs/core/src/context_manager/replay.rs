@@ -1,3 +1,6 @@
+use codex_model_context::estimate_response_item_model_visible_bytes;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_utils_output_truncation::TruncationPolicy;
 
@@ -8,6 +11,9 @@ use super::updates::MAX_MODEL_CONTEXT_ITEM_TOKENS;
 // Reserve stable headroom for live turn items, instructions, and tools added after reconstruction.
 pub(super) const MAX_REPLAY_HISTORY_ITEMS: usize = 8_000;
 pub(super) const MAX_REPLAY_HISTORY_BYTES: u64 = 12 * 1024 * 1024;
+const STRUCTURED_TOOL_OUTPUT_OMISSION_NOTICE: &str =
+    "[omitted structured tool output content to fit model context limit]";
+const STRUCTURED_OUTPUT_PROJECTION_HEADROOM_BYTES: i64 = 1_024;
 
 pub(crate) fn process_replayed_item(
     item: &ResponseItem,
@@ -19,8 +25,10 @@ pub(crate) fn process_replayed_item(
             truncate_output_item_to_limit(&preferred)
         }
         ResponseItem::Message { .. } | ResponseItem::AgentMessage { .. } => Some(item.clone()),
+        ResponseItem::Reasoning { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::ContextCompaction { .. } => Some(item.clone()),
         ResponseItem::AdditionalTools { .. }
-        | ResponseItem::Reasoning { .. }
         | ResponseItem::LocalShellCall { .. }
         | ResponseItem::FunctionCall { .. }
         | ResponseItem::ToolSearchCall { .. }
@@ -28,9 +36,7 @@ pub(crate) fn process_replayed_item(
         | ResponseItem::WebSearchCall { .. }
         | ResponseItem::ImageGenerationCall { .. }
         | ResponseItem::CustomToolCall { .. }
-        | ResponseItem::Compaction { .. }
         | ResponseItem::CompactionTrigger { .. }
-        | ResponseItem::ContextCompaction { .. }
         | ResponseItem::Other => {
             (estimate_item_token_count(item) <= MAX_MODEL_CONTEXT_ITEM_TOKENS).then(|| item.clone())
         }
@@ -72,6 +78,16 @@ pub(crate) fn truncate_output_item_to_limit(item: &ResponseItem) -> Option<Respo
         return Some(item.clone());
     }
 
+    truncate_output_text_to_limit(item).or_else(|| {
+        let projected = project_structured_output_fixed_content(item)?;
+        truncate_output_text_to_limit(&projected).or_else(|| {
+            let empty = with_structured_output_content(item, Vec::new())?;
+            (estimate_item_token_count(&empty) <= MAX_MODEL_CONTEXT_ITEM_TOKENS).then_some(empty)
+        })
+    })
+}
+
+fn truncate_output_text_to_limit(item: &ResponseItem) -> Option<ResponseItem> {
     // Use one canonical token projection for both live and replayed history once the supplied
     // item exceeds the hard cap. The caller applies any model-specific policy before this helper.
     let max_budget = usize::try_from(MAX_MODEL_CONTEXT_ITEM_TOKENS).unwrap_or(usize::MAX);
@@ -91,4 +107,79 @@ pub(crate) fn truncate_output_item_to_limit(item: &ResponseItem) -> Option<Respo
         }
     }
     best
+}
+
+fn project_structured_output_fixed_content(item: &ResponseItem) -> Option<ResponseItem> {
+    let original_content = match item {
+        ResponseItem::FunctionCallOutput { output, .. }
+        | ResponseItem::CustomToolCallOutput { output, .. } => output.content_items()?,
+        _ => return None,
+    };
+    let notice = FunctionCallOutputContentItem::InputText {
+        text: STRUCTURED_TOOL_OUTPUT_OMISSION_NOTICE.to_string(),
+    };
+    let empty = with_structured_output_content(item, Vec::new())?;
+    let empty_bytes = estimate_response_item_model_visible_bytes(&empty);
+    let notice_only = with_structured_output_content(item, vec![notice.clone()])?;
+    let max_bytes = i64::try_from(
+        TruncationPolicy::Tokens(
+            usize::try_from(MAX_MODEL_CONTEXT_ITEM_TOKENS).unwrap_or(usize::MAX),
+        )
+        .byte_budget(),
+    )
+    .unwrap_or(i64::MAX);
+    let mut remaining_fixed_bytes = max_bytes
+        .saturating_sub(STRUCTURED_OUTPUT_PROJECTION_HEADROOM_BYTES)
+        .saturating_sub(estimate_response_item_model_visible_bytes(&notice_only));
+    let mut projected_content = Vec::with_capacity(original_content.len().saturating_add(1));
+    projected_content.push(notice);
+    let mut omitted_fixed_content = false;
+
+    for content_item in original_content {
+        match content_item {
+            FunctionCallOutputContentItem::InputText { .. }
+            | FunctionCallOutputContentItem::InputAudio { .. } => {
+                projected_content.push(content_item.clone());
+            }
+            FunctionCallOutputContentItem::InputImage { .. }
+            | FunctionCallOutputContentItem::EncryptedContent { .. } => {
+                if omitted_fixed_content {
+                    continue;
+                }
+                let single = with_structured_output_content(&empty, vec![content_item.clone()])?;
+                let contribution = estimate_response_item_model_visible_bytes(&single)
+                    .saturating_sub(empty_bytes)
+                    .saturating_add(1);
+                if contribution <= remaining_fixed_bytes {
+                    projected_content.push(content_item.clone());
+                    remaining_fixed_bytes = remaining_fixed_bytes.saturating_sub(contribution);
+                } else {
+                    omitted_fixed_content = true;
+                }
+            }
+        }
+    }
+
+    if omitted_fixed_content {
+        with_structured_output_content(item, projected_content)
+    } else {
+        None
+    }
+}
+
+fn with_structured_output_content(
+    item: &ResponseItem,
+    content: Vec<FunctionCallOutputContentItem>,
+) -> Option<ResponseItem> {
+    let mut projected = item.clone();
+    let output = match &mut projected {
+        ResponseItem::FunctionCallOutput { output, .. }
+        | ResponseItem::CustomToolCallOutput { output, .. } => output,
+        _ => return None,
+    };
+    if !matches!(output.body, FunctionCallOutputBody::ContentItems(_)) {
+        return None;
+    }
+    output.body = FunctionCallOutputBody::ContentItems(content);
+    Some(projected)
 }

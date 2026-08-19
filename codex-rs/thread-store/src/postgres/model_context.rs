@@ -5,7 +5,6 @@ use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
-use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::TruncationPolicy;
@@ -202,13 +201,23 @@ fn validate_response_item(
         return Ok(());
     }
     if model_visible_bytes <= max_model_context_item_bytes()
-        || replay_truncatable_output_minimum_fits(item, budget)?
+        || replay_omits_oversized_context_item(item)
+        || replay_projectable_output_minimum_fits(item, budget)?
     {
         return Ok(());
     }
     Err(budget.limit_error(&format!(
         "an individual model-visible history item exceeds {MAX_MODEL_CONTEXT_ITEM_TOKENS} estimated tokens"
     )))
+}
+
+fn replay_omits_oversized_context_item(item: &ResponseItem) -> bool {
+    matches!(
+        item,
+        ResponseItem::Reasoning { .. }
+            | ResponseItem::Compaction { .. }
+            | ResponseItem::ContextCompaction { .. }
+    )
 }
 
 fn validate_serialized_model_item(
@@ -513,7 +522,7 @@ fn model_visible_item_bytes(item: &ResponseItem) -> usize {
     usize::try_from(estimate_response_item_model_visible_bytes(item)).unwrap_or(usize::MAX)
 }
 
-fn replay_truncatable_output_minimum_fits(
+fn replay_projectable_output_minimum_fits(
     item: &ResponseItem,
     budget: &ModelContextBudget,
 ) -> ThreadStoreResult<bool> {
@@ -525,21 +534,12 @@ fn replay_truncatable_output_minimum_fits(
     };
     match &mut output.body {
         FunctionCallOutputBody::Text(text) => text.clear(),
-        FunctionCallOutputBody::ContentItems(items) => {
-            for item in items {
-                match item {
-                    FunctionCallOutputContentItem::InputText { text } => text.clear(),
-                    FunctionCallOutputContentItem::InputImage { .. }
-                    | FunctionCallOutputContentItem::InputAudio { .. }
-                    | FunctionCallOutputContentItem::EncryptedContent { .. } => {}
-                }
-            }
-        }
+        FunctionCallOutputBody::ContentItems(items) => items.clear(),
     }
     let fits = model_visible_item_bytes(&minimum) <= max_model_context_item_bytes();
     if !fits {
         return Err(budget.limit_error(&format!(
-            "an individual model-visible history item exceeds {MAX_MODEL_CONTEXT_ITEM_TOKENS} estimated tokens and cannot be truncated safely"
+            "an individual model-visible history item exceeds {MAX_MODEL_CONTEXT_ITEM_TOKENS} estimated tokens and cannot be projected safely"
         )));
     }
     Ok(true)

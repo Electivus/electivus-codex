@@ -1618,6 +1618,35 @@ fn record_replayed_items_preserves_oversized_agent_messages_for_request_projecti
 }
 
 #[test]
+fn record_replayed_items_preserves_oversized_opaque_items_for_request_projection() {
+    let encrypted_content = "opaque".repeat(20_000);
+    let items = vec![
+        reasoning_with_encrypted_content(encrypted_content.len()),
+        ResponseItem::Compaction {
+            id: Some(ResponseItemId::with_suffix("cmp", "legacy-oversized")),
+            encrypted_content: encrypted_content.clone(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::ContextCompaction {
+            id: Some(ResponseItemId::with_suffix("cmp", "context-oversized")),
+            encrypted_content: Some(encrypted_content),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+    assert!(
+        items
+            .iter()
+            .all(|item| estimate_item_token_count(item) > 10_000)
+    );
+    let mut history = ContextManager::new();
+
+    history.record_replayed_items(&items, TruncationPolicy::Tokens(100_000));
+
+    assert_eq!(raw_items(&history), items);
+    assert_eq!(history.for_prompt(&default_input_modalities()), items);
+}
+
+#[test]
 fn rollback_treats_an_oversized_agent_message_as_one_turn() {
     let agent_message = ResponseItem::AgentMessage {
         id: None,

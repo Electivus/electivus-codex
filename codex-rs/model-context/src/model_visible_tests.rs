@@ -254,23 +254,35 @@ fn non_base64_image_urls_are_unchanged() {
 #[test]
 fn encrypted_function_output_uses_plaintext_byte_estimate() {
     let encrypted_content = "A".repeat(1_868);
-    let item = ResponseItem::FunctionCallOutput {
-        id: None,
-        call_id: "call-encrypted".to_string(),
-        output: FunctionCallOutputPayload::from_content_items(vec![
-            FunctionCallOutputContentItem::EncryptedContent {
-                encrypted_content: encrypted_content.clone(),
-            },
-        ]),
-        internal_chat_message_metadata_passthrough: None,
-    };
+    let output = FunctionCallOutputPayload::from_content_items(vec![
+        FunctionCallOutputContentItem::EncryptedContent {
+            encrypted_content: encrypted_content.clone(),
+        },
+    ]);
+    let items = [
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: "call-encrypted".to_string(),
+            output: output.clone(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::CustomToolCallOutput {
+            id: None,
+            call_id: "custom-encrypted".to_string(),
+            name: Some("encrypted-tool".to_string()),
+            output,
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
 
-    let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
-    let estimated = estimate_response_item_model_visible_bytes(&item);
-    let expected = raw_len - encrypted_content.len() as i64
-        + estimate_encrypted_function_output_length(encrypted_content.len()) as i64;
+    for item in items {
+        let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
+        let estimated = estimate_response_item_model_visible_bytes(&item);
+        let expected = raw_len - encrypted_content.len() as i64
+            + estimate_encrypted_function_output_length(encrypted_content.len()) as i64;
 
-    assert_eq!(estimated, expected);
+        assert_eq!(estimated, expected);
+    }
 
     let agent_message = InterAgentCommunication::new_encrypted(
         AgentPath::root(),

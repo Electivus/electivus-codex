@@ -29,24 +29,7 @@ pub(crate) fn bound_replayed_model_request(
     request: &mut ResponsesApiRequest,
     tools: &[ToolSpec],
     replay_range: Range<usize>,
-    validate_replayed_tools: bool,
 ) -> Result<()> {
-    if validate_replayed_tools {
-        if tools.is_empty() {
-            if let Some(additional_tools) = request
-                .input
-                .iter()
-                .find(|item| matches!(item, ResponseItem::AdditionalTools { .. }))
-            {
-                validate_response_item("tools item", additional_tools)?;
-            }
-        } else {
-            for tool in tools {
-                validate_serialized_item("tool definition", tool)?;
-            }
-        }
-    }
-
     let replay_start = replay_range.start.min(request.input.len());
     let replay_end = replay_range.end.min(request.input.len()).max(replay_start);
     let suffix = split_input_items(request.input.split_off(replay_end))?;
@@ -112,6 +95,16 @@ fn split_and_validate_input_item(item: ResponseItem) -> Result<Vec<ResponseItem>
     let items = split_model_context_item_to_limit(item);
     let mut bounded_items = Vec::with_capacity(items.len());
     for item in items {
+        if estimate_item_token_count(&item) > MAX_MODEL_REQUEST_ITEM_TOKENS as i64
+            && matches!(
+                item,
+                ResponseItem::Reasoning { .. }
+                    | ResponseItem::Compaction { .. }
+                    | ResponseItem::ContextCompaction { .. }
+            )
+        {
+            continue;
+        }
         let item = match &item {
             ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. } => {
                 truncate_output_item_to_limit(&item)
@@ -126,6 +119,15 @@ fn split_and_validate_input_item(item: ResponseItem) -> Result<Vec<ResponseItem>
 }
 
 fn validate_total_request_budget(request: &ResponsesApiRequest, tools: &[ToolSpec]) -> Result<()> {
+    if !request.instructions.is_empty() {
+        validate_serialized_item("instructions", &request.instructions)?;
+    }
+    for tool in tools {
+        validate_serialized_item("tool definition", tool)?;
+    }
+    if let Some(text) = &request.text {
+        validate_serialized_item("text controls", text)?;
+    }
     if request_item_count(request, tools) > MAX_MODEL_REQUEST_ITEMS
         || model_visible_request_bytes(request, &[], &[])? > MAX_MODEL_REQUEST_BYTES
     {

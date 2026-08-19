@@ -253,7 +253,8 @@ fn encrypted_function_output_estimate_adjustment(item: &ResponseItem) -> (i64, i
     };
 
     match item {
-        ResponseItem::FunctionCallOutput { output, .. } => {
+        ResponseItem::FunctionCallOutput { output, .. }
+        | ResponseItem::CustomToolCallOutput { output, .. } => {
             if let FunctionCallOutputBody::ContentItems(items) = &output.body {
                 for item in items {
                     if let FunctionCallOutputContentItem::EncryptedContent { encrypted_content } =

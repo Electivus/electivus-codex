@@ -115,6 +115,79 @@ fn splits_non_replayed_messages_without_losing_text() {
 }
 
 #[test]
+fn splits_utf8_messages_at_the_exact_item_boundary_without_losing_text() {
+    let unit = "é🦀\"\n";
+    let id = ResponseItemId::with_suffix("msg", "utf8-boundary");
+    let item = |text: String| ResponseItem::Message {
+        id: Some(id.clone()),
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText { text }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut lower = 0usize;
+    let mut upper = max_model_request_item_bytes();
+    while lower < upper {
+        let candidate = lower + (upper - lower).div_ceil(2);
+        if estimate_item_token_count(&item(unit.repeat(candidate)))
+            <= MAX_MODEL_REQUEST_ITEM_TOKENS as i64
+        {
+            lower = candidate;
+        } else {
+            upper = candidate - 1;
+        }
+    }
+    let mut exact_text = unit.repeat(lower);
+    while estimate_item_token_count(&item(exact_text.clone()))
+        < MAX_MODEL_REQUEST_ITEM_TOKENS as i64
+    {
+        exact_text.push('x');
+    }
+    let exact_item = item(exact_text.clone());
+    assert_eq!(
+        estimate_item_token_count(&exact_item),
+        MAX_MODEL_REQUEST_ITEM_TOKENS as i64
+    );
+    let mut exact_request = request(vec![exact_item.clone()], "", /*text*/ None);
+
+    split_model_request_messages(&mut exact_request, &[])
+        .expect("an item at the exact limit should remain valid");
+
+    assert_eq!(exact_request.input, vec![exact_item]);
+
+    let mut oversized_text = exact_text;
+    while estimate_item_token_count(&item(oversized_text.clone()))
+        <= MAX_MODEL_REQUEST_ITEM_TOKENS as i64
+    {
+        oversized_text.push('é');
+    }
+    let oversized_item = item(oversized_text.clone());
+    assert_eq!(
+        estimate_item_token_count(&oversized_item),
+        MAX_MODEL_REQUEST_ITEM_TOKENS as i64 + 1
+    );
+    let mut oversized_request = request(vec![oversized_item], "", /*text*/ None);
+
+    split_model_request_messages(&mut oversized_request, &[])
+        .expect("the first item above the boundary should split safely");
+
+    assert!(oversized_request.input.len() > 1);
+    assert_eq!(message_input_text(&oversized_request.input), oversized_text);
+    assert!(
+        oversized_request.input.iter().all(|item| {
+            estimate_item_token_count(item) <= MAX_MODEL_REQUEST_ITEM_TOKENS as i64
+        })
+    );
+    let ids = oversized_request
+        .input
+        .iter()
+        .map(ResponseItem::id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids.first().copied(), Some(Some(&id)));
+    assert!(ids.iter().skip(1).all(Option::is_none));
+}
+
+#[test]
 fn trims_only_replayed_prefix_for_exact_cardinality() {
     let prefix = message("prefix".to_string());
     let live = message("live".to_string());
@@ -126,7 +199,6 @@ fn trims_only_replayed_prefix_for_exact_cardinality() {
         &mut request,
         &[function("tool".to_string())],
         0..MAX_MODEL_REQUEST_ITEMS,
-        /*validate_replayed_tools*/ false,
     )
     .expect("replay prefix should make room for live request components");
 
@@ -141,13 +213,8 @@ fn trims_replayed_prefix_for_exact_model_visible_bytes() {
     let replay_item = message("x".repeat(35_000));
     let mut request = request(vec![replay_item; 500], "instructions", /*text*/ None);
 
-    bound_replayed_model_request(
-        &mut request,
-        &[],
-        0..500,
-        /*validate_replayed_tools*/ false,
-    )
-    .expect("replay prefix should be trimmed to the total byte budget");
+    bound_replayed_model_request(&mut request, &[], 0..500)
+        .expect("replay prefix should be trimmed to the total byte budget");
 
     assert!(model_visible_request_bytes(&request, &[], &[]).unwrap() <= MAX_MODEL_REQUEST_BYTES);
     assert!(request.input.len() < 500);
@@ -162,13 +229,8 @@ fn splits_live_suffix_messages_in_a_resumed_request() {
         /*text*/ None,
     );
 
-    bound_replayed_model_request(
-        &mut request,
-        &[],
-        0..1,
-        /*validate_replayed_tools*/ false,
-    )
-    .expect("live suffix message should be bounded");
+    bound_replayed_model_request(&mut request, &[], 0..1)
+        .expect("live suffix message should be bounded");
 
     assert_eq!(message_input_text(&request.input[1..]), live_text);
     assert!(
@@ -381,7 +443,38 @@ fn rejects_tool_outputs_with_unsplittable_fixed_overhead() {
 }
 
 #[test]
-fn rejects_tool_outputs_with_unsplittable_structured_content() {
+fn omits_oversized_compaction_items_only_from_the_model_request() {
+    let oversized = "encrypted".repeat(10_000);
+    let compacted = ResponseItem::Compaction {
+        id: Some(ResponseItemId::with_suffix("cmp", "legacy")),
+        encrypted_content: oversized.clone(),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let context_compacted = ResponseItem::ContextCompaction {
+        id: Some(ResponseItemId::with_suffix("cmp", "context")),
+        encrypted_content: Some(oversized),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    assert!(
+        [&compacted, &context_compacted]
+            .into_iter()
+            .all(|item| estimate_item_token_count(item) > MAX_MODEL_REQUEST_ITEM_TOKENS as i64)
+    );
+    let retained = message("retained user input".to_string());
+    let mut request = request(
+        vec![compacted, context_compacted, retained.clone()],
+        "",
+        /*text*/ None,
+    );
+
+    split_model_request_messages(&mut request, &[])
+        .expect("oversized context-only items should be omitted from the request");
+
+    assert_eq!(request.input, vec![retained]);
+}
+
+#[test]
+fn projects_tool_outputs_with_oversized_structured_content() {
     let sources = vec![
         ResponseItem::FunctionCallOutput {
             id: Some(ResponseItemId::with_suffix("fco", "encrypted")),
@@ -410,14 +503,147 @@ fn rejects_tool_outputs_with_unsplittable_structured_content() {
     ];
 
     for source in sources {
+        let source_fixed_content_count = match &source {
+            ResponseItem::FunctionCallOutput { output, .. }
+            | ResponseItem::CustomToolCallOutput { output, .. } => output
+                .content_items()
+                .expect("structured source")
+                .iter()
+                .filter(|item| {
+                    matches!(
+                        item,
+                        FunctionCallOutputContentItem::InputImage { .. }
+                            | FunctionCallOutputContentItem::EncryptedContent { .. }
+                    )
+                })
+                .count(),
+            other => panic!("expected tool output source, got {other:?}"),
+        };
         let mut request = request(vec![source.clone()], "", /*text*/ None);
         assert!(estimate_item_token_count(&source) > MAX_MODEL_REQUEST_ITEM_TOKENS as i64);
 
-        let error = split_model_request_messages(&mut request, &[])
-            .expect_err("fixed structured content should remain subject to the hard item cap");
+        split_model_request_messages(&mut request, &[])
+            .expect("oversized structured content should be projected");
 
-        assert!(error.to_string().contains("individual input item"));
+        let [projected] = request.input.as_slice() else {
+            panic!("tool output projection should remain atomic");
+        };
+        assert!(estimate_item_token_count(projected) <= MAX_MODEL_REQUEST_ITEM_TOKENS as i64);
+        let content = match (&source, projected) {
+            (
+                ResponseItem::FunctionCallOutput {
+                    id: source_id,
+                    call_id: source_call_id,
+                    output: source_output,
+                    internal_chat_message_metadata_passthrough: source_metadata,
+                },
+                ResponseItem::FunctionCallOutput {
+                    id,
+                    call_id,
+                    output,
+                    internal_chat_message_metadata_passthrough: metadata,
+                },
+            ) => {
+                assert_eq!(
+                    (id, call_id, output.success, metadata),
+                    (
+                        source_id,
+                        source_call_id,
+                        source_output.success,
+                        source_metadata
+                    )
+                );
+                output.content_items().expect("structured function output")
+            }
+            (
+                ResponseItem::CustomToolCallOutput {
+                    id: source_id,
+                    call_id: source_call_id,
+                    name: source_name,
+                    output: source_output,
+                    internal_chat_message_metadata_passthrough: source_metadata,
+                },
+                ResponseItem::CustomToolCallOutput {
+                    id,
+                    call_id,
+                    name,
+                    output,
+                    internal_chat_message_metadata_passthrough: metadata,
+                },
+            ) => {
+                assert_eq!(
+                    (id, call_id, name, output.success, metadata),
+                    (
+                        source_id,
+                        source_call_id,
+                        source_name,
+                        source_output.success,
+                        source_metadata
+                    )
+                );
+                output.content_items().expect("structured custom output")
+            }
+            other => panic!("tool output variant changed during projection: {other:?}"),
+        };
+        assert!(content.iter().any(|item| matches!(
+            item,
+            FunctionCallOutputContentItem::InputText { text }
+                if text.contains("omitted structured tool output content")
+        )));
+        assert!(
+            content
+                .iter()
+                .filter(|item| matches!(
+                    item,
+                    FunctionCallOutputContentItem::InputImage { .. }
+                        | FunctionCallOutputContentItem::EncryptedContent { .. }
+                ))
+                .count()
+                < source_fixed_content_count
+        );
     }
+}
+
+#[test]
+fn projects_many_fixed_tool_output_items_without_losing_atomicity() {
+    let source = ResponseItem::CustomToolCallOutput {
+        id: Some(ResponseItemId::with_suffix("ctco", "many-images")),
+        call_id: "many-images-call".to_string(),
+        name: Some("many-images-tool".to_string()),
+        output: FunctionCallOutputPayload::from_content_items(
+            std::iter::repeat_n(
+                FunctionCallOutputContentItem::InputImage {
+                    image_url: "data:image/png;base64,AAAA".to_string(),
+                    detail: None,
+                },
+                100_000,
+            )
+            .collect(),
+        ),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut request = request(vec![source], "", /*text*/ None);
+
+    split_model_request_messages(&mut request, &[])
+        .expect("many fixed output items should project without changing the envelope");
+
+    let [
+        ResponseItem::CustomToolCallOutput {
+            call_id, output, ..
+        },
+    ] = request.input.as_slice()
+    else {
+        panic!("projected custom output should remain atomic");
+    };
+    assert_eq!(call_id, "many-images-call");
+    assert!(estimate_item_token_count(&request.input[0]) <= MAX_MODEL_REQUEST_ITEM_TOKENS as i64);
+    let content = output.content_items().expect("structured projected output");
+    assert!(content.len() < 100_000);
+    assert!(content.iter().any(|item| matches!(
+        item,
+        FunctionCallOutputContentItem::InputText { text }
+            if text.contains("omitted structured tool output content")
+    )));
 }
 
 #[test]
@@ -429,6 +655,17 @@ fn preserves_bounded_structured_tool_outputs_exactly() {
             output: FunctionCallOutputPayload::from_content_items(vec![
                 FunctionCallOutputContentItem::EncryptedContent {
                     encrypted_content: "A".repeat(60_000),
+                },
+            ]),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::CustomToolCallOutput {
+            id: Some(ResponseItemId::with_suffix("ctco", "encrypted-bounded")),
+            call_id: "custom-encrypted-bounded-call".to_string(),
+            name: Some("encrypted-tool".to_string()),
+            output: FunctionCallOutputPayload::from_content_items(vec![
+                FunctionCallOutputContentItem::EncryptedContent {
+                    encrypted_content: "B".repeat(60_000),
                 },
             ]),
             internal_chat_message_metadata_passthrough: None,
@@ -521,13 +758,8 @@ fn replay_byte_bounding_evicts_an_entire_split_message_group() {
     let replay_items = input.len();
     let mut request = request(input, "", /*text*/ None);
 
-    bound_replayed_model_request(
-        &mut request,
-        &[],
-        0..replay_items,
-        /*validate_replayed_tools*/ false,
-    )
-    .expect("whole replay groups should be evicted to fit the byte limit");
+    bound_replayed_model_request(&mut request, &[], 0..replay_items)
+        .expect("whole replay groups should be evicted to fit the byte limit");
 
     assert!(!message_input_text(&request.input).contains(marker));
     assert!(model_visible_request_bytes(&request, &[], &[]).unwrap() <= MAX_MODEL_REQUEST_BYTES);
@@ -558,43 +790,25 @@ fn validates_an_empty_replay_prefix() {
         /*text*/ None,
     );
 
-    let error = bound_replayed_model_request(
-        &mut request,
-        &[],
-        0..0,
-        /*validate_replayed_tools*/ false,
-    )
-    .expect_err("empty replay still marks a resumed request for total-budget validation");
+    let error = bound_replayed_model_request(&mut request, &[], 0..0)
+        .expect_err("empty replay still marks a resumed request for total-budget validation");
 
     assert!(error.to_string().contains("bounded context budget"));
 }
 
 #[test]
-fn validates_tools_only_when_they_include_persisted_dynamic_tools() {
+fn validates_live_tools_in_resumed_requests() {
     let large_tool = function("x".repeat(max_model_request_item_bytes()));
     let mut request = request(vec![message("replay".to_string())], "", /*text*/ None);
 
-    bound_replayed_model_request(
-        &mut request,
-        std::slice::from_ref(&large_tool),
-        0..1,
-        /*validate_replayed_tools*/ false,
-    )
-    .expect("live tools keep upstream behavior");
-    let replay_end = request.input.len();
-    let error = bound_replayed_model_request(
-        &mut request,
-        &[large_tool],
-        0..replay_end,
-        /*validate_replayed_tools*/ true,
-    )
-    .expect_err("persisted dynamic tools must fit their final envelope");
+    let error = bound_replayed_model_request(&mut request, &[large_tool], 0..1)
+        .expect_err("live tools must fit their final envelope");
 
     assert!(error.to_string().contains("individual tool definition"));
 }
 
 #[test]
-fn leaves_live_output_schema_unchanged_in_a_resumed_request() {
+fn rejects_oversized_live_output_schema_in_a_resumed_request() {
     let text = codex_api::create_text_param_for_request(
         /*verbosity*/ None,
         &Some(serde_json::json!({
@@ -605,15 +819,25 @@ fn leaves_live_output_schema_unchanged_in_a_resumed_request() {
     );
     let mut request = request(vec![message("replay".to_string())], "", text.clone());
 
-    bound_replayed_model_request(
-        &mut request,
-        &[],
-        0..1,
-        /*validate_replayed_tools*/ false,
-    )
-    .expect("live output schemas keep upstream behavior");
+    let error = bound_replayed_model_request(&mut request, &[], 0..1)
+        .expect_err("live output schemas must fit their final envelope");
 
     assert_eq!(request.text, text);
+    assert!(error.to_string().contains("individual text controls"));
+}
+
+#[test]
+fn rejects_oversized_instructions_before_sampling() {
+    let mut request = request(
+        vec![message("user input".to_string())],
+        &"instructions".repeat(max_model_request_item_bytes()),
+        /*text*/ None,
+    );
+
+    let error = split_model_request_messages(&mut request, &[])
+        .expect_err("instructions must fit their final envelope");
+
+    assert!(error.to_string().contains("individual instructions"));
 }
 
 #[test]
@@ -625,13 +849,8 @@ fn ignores_non_model_visible_client_metadata() {
         "x".repeat(MAX_MODEL_REQUEST_BYTES),
     )]));
 
-    bound_replayed_model_request(
-        &mut request,
-        &[],
-        0..1,
-        /*validate_replayed_tools*/ false,
-    )
-    .expect("client metadata is not model-visible context");
+    bound_replayed_model_request(&mut request, &[], 0..1)
+        .expect("client metadata is not model-visible context");
 
     assert_eq!(request.input, vec![replay]);
 }
