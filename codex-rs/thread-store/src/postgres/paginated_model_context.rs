@@ -267,40 +267,79 @@ async fn projection_required(
         return Err(budget.limit_error("history exceeds the bounded read budget"));
     }
 
-    let summary = sqlx::query(AssertSqlSafe(format!(
-        "WITH bounded_suffix AS ( \
-             SELECT item FROM {history_table} \
-             WHERE thread_id = $1 AND ordinal >= $2 \
-             ORDER BY ordinal ASC LIMIT $3 \
-         ) \
-         SELECT COALESCE(SUM(octet_length(item::text)), 0)::bigint AS raw_bytes, \
-                COALESCE(SUM(CASE \
-                    WHEN item ->> 'type' = 'event_msg' \
-                         AND item #>> '{{payload,type}}' = 'item_completed' \
-                    THEN octet_length(COALESCE(item #>> '{{payload,turn_id}}', '')) \
-                       + octet_length(COALESCE(item #>> '{{payload,item,type}}', '')) + 32 \
-                    ELSE octet_length(item::text) END), 0)::bigint AS projected_bytes \
-         FROM bounded_suffix"
-    )))
-    .bind(thread_id.to_string())
-    .bind(cutoff_ordinal)
-    .bind(i64::try_from(item_count).unwrap_or(i64::MAX))
-    .fetch_one(transaction.as_mut())
-    .await
-    .map_err(|error| database_error("summarize latest model context", error))?;
-    let raw_bytes = summary_bytes(&summary, "raw_bytes", budget)?;
-    let projected_bytes = summary_bytes(&summary, "projected_bytes", budget)?;
     let remaining_bytes = MAX_MODEL_CONTEXT_BYTES.saturating_sub(budget.bytes);
-    let projection_required = raw_bytes > remaining_bytes;
-    let selected_bytes = if projection_required {
-        projected_bytes
-    } else {
-        raw_bytes
-    };
-    if selected_bytes > remaining_bytes {
-        return Err(budget.limit_error("history exceeds the bounded read budget"));
+    let exceeded_bytes = remaining_bytes.saturating_add(1);
+    let mut raw_bytes: u64 = 0;
+    let mut projected_bytes: u64 = 0;
+    let mut next_ordinal = cutoff_ordinal;
+    let mut summarized_items = 0;
+    while summarized_items < item_count {
+        let measure_raw = raw_bytes <= remaining_bytes;
+        let summary = sqlx::query(AssertSqlSafe(format!(
+            "WITH page AS ( \
+                 SELECT ordinal, item FROM {history_table} \
+                 WHERE thread_id = $1 AND ordinal >= $2 \
+                 ORDER BY ordinal ASC LIMIT $3 \
+             ) \
+             SELECT COUNT(*)::bigint AS item_count, MAX(ordinal)::bigint AS max_ordinal, \
+                    COALESCE(SUM(CASE WHEN $4::boolean \
+                         THEN octet_length(item::text) ELSE 0 END), 0)::bigint AS raw_bytes, \
+                    COALESCE(SUM(CASE \
+                        WHEN item ->> 'type' = 'event_msg' \
+                             AND item #>> '{{payload,type}}' = 'item_completed' \
+                        THEN octet_length(COALESCE(item #>> '{{payload,turn_id}}', '')) \
+                           + octet_length(COALESCE(item #>> '{{payload,item,type}}', '')) + 32 \
+                        ELSE octet_length(item::text) END), 0)::bigint AS projected_bytes \
+             FROM page"
+        )))
+        .bind(thread_id.to_string())
+        .bind(next_ordinal)
+        .bind(i64::try_from(MODEL_CONTEXT_PAGE_ITEMS).unwrap_or(i64::MAX))
+        .bind(measure_raw)
+        .fetch_one(transaction.as_mut())
+        .await
+        .map_err(|error| database_error("summarize latest model context page", error))?;
+        let page_items = summary_item_count(&summary, budget)?;
+        let max_ordinal: Option<i64> = summary
+            .try_get("max_ordinal")
+            .map_err(|error| database_error("summarize latest model context page", error))?;
+        let Some(max_ordinal) = max_ordinal else {
+            return Err(budget.limit_error("history changed during bounded read"));
+        };
+        if page_items == 0 {
+            return Err(budget.limit_error("history changed during bounded read"));
+        }
+        summarized_items = summarized_items.saturating_add(page_items);
+        if summarized_items > item_count {
+            return Err(budget.limit_error("invalid item count"));
+        }
+        if measure_raw {
+            raw_bytes = raw_bytes
+                .saturating_add(summary_bytes(&summary, "raw_bytes", budget)?)
+                .min(exceeded_bytes);
+        }
+        projected_bytes = projected_bytes
+            .saturating_add(summary_bytes(&summary, "projected_bytes", budget)?)
+            .min(exceeded_bytes);
+        if raw_bytes > remaining_bytes && projected_bytes > remaining_bytes {
+            return Err(budget.limit_error("history exceeds the bounded read budget"));
+        }
+        next_ordinal = max_ordinal
+            .checked_add(1)
+            .ok_or_else(|| budget.limit_error("history ordinal overflow"))?;
     }
+    let projection_required = raw_bytes > remaining_bytes;
     Ok(projection_required)
+}
+
+fn summary_item_count(
+    row: &sqlx::postgres::PgRow,
+    budget: &ModelContextBudget,
+) -> ThreadStoreResult<usize> {
+    let item_count: i64 = row
+        .try_get("item_count")
+        .map_err(|error| database_error("summarize latest model context page", error))?;
+    usize::try_from(item_count).map_err(|_| budget.limit_error("invalid item count"))
 }
 
 fn summary_bytes(
