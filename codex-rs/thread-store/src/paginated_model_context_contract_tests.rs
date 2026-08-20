@@ -137,6 +137,18 @@ async fn postgres_contract_paginated_model_context_pages_oversized_presentation_
     .await?;
     expected_items.extend([retained_page_end, retained_page_start, retained_after_gap]);
 
+    // SessionMeta consumes the first item in the 10,000-item budget. Fill the selected suffix to
+    // the remaining 9,999 rows so this contract also protects the constant-query maximum path.
+    append_repeated_item(
+        &pool,
+        &store.tables.history,
+        thread_id,
+        /*first_ordinal*/ 101,
+        /*count*/ 9_906,
+        &small_presentation,
+    )
+    .await?;
+
     let stored_bytes: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT SUM(octet_length(item::text))::bigint FROM {} WHERE thread_id = $1",
         store.tables.history
@@ -165,7 +177,7 @@ async fn postgres_contract_paginated_model_context_pages_oversized_presentation_
     .bind(thread_id.to_string())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(durable_presentation_items, 88);
+    assert_eq!(durable_presentation_items, 9_994);
 
     pool.close().await;
     fixture.cleanup().await

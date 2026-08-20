@@ -18,7 +18,13 @@ use super::database_error;
 use super::validate_model_context_item;
 use crate::ThreadStoreResult;
 
-const MODEL_CONTEXT_PAGE_ITEMS: usize = 64;
+#[derive(Clone, Copy, Debug)]
+struct SelectionPlan {
+    /// Exact number of suffix rows proven to fit the item budget.
+    item_count: usize,
+    /// Whether large presentation-only completion events must stay scan metadata during replay.
+    project_item_completed: bool,
+}
 
 pub(super) async fn load(
     history_table: &str,
@@ -29,7 +35,7 @@ pub(super) async fn load(
 ) -> ThreadStoreResult<Vec<RolloutItem>> {
     let cutoff_ordinal =
         scan_cutoff_ordinal(history_table, transaction, thread_id, &base_budget).await?;
-    let project_item_completed = projection_required(
+    let selection_plan = selection_plan(
         history_table,
         transaction,
         thread_id,
@@ -42,7 +48,7 @@ pub(super) async fn load(
         transaction,
         thread_id,
         cutoff_ordinal,
-        project_item_completed,
+        selection_plan,
         session_meta,
         base_budget,
     )
@@ -239,118 +245,100 @@ fn signal_from_row(
     Ok(Some(signal))
 }
 
-async fn projection_required(
+async fn selection_plan(
     history_table: &str,
     transaction: &mut Transaction<'_, sqlx::Postgres>,
     thread_id: ThreadId,
     cutoff_ordinal: i64,
     budget: &ModelContextBudget,
-) -> ThreadStoreResult<bool> {
+) -> ThreadStoreResult<SelectionPlan> {
     let remaining_items = budget.max_items.saturating_sub(budget.items);
     let sentinel_limit = remaining_items.saturating_add(1);
-    let item_count: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
-        "SELECT COUNT(*)::bigint FROM ( \
-             SELECT ordinal FROM {history_table} \
-             WHERE thread_id = $1 AND ordinal >= $2 \
-             ORDER BY ordinal ASC LIMIT $3 \
-         ) AS bounded_suffix"
+    let remaining_bytes = MAX_MODEL_CONTEXT_BYTES.saturating_sub(budget.bytes);
+    let exceeded_bytes = remaining_bytes.saturating_add(1);
+    // Recursive keyset traversal keeps the network round-trip count constant without aggregating
+    // an unbounded JSON suffix. Each representation stops evaluating item text once its saturated
+    // counter crosses the byte budget.
+    let summary = sqlx::query(AssertSqlSafe(format!(
+        "WITH RECURSIVE measured AS ( \
+             SELECT first.ordinal, 1::bigint AS item_count, \
+                    LEAST($5::bigint, octet_length(first.item::text)::bigint) AS raw_bytes, \
+                    LEAST($5::bigint, (CASE \
+                        WHEN first.item ->> 'type' = 'event_msg' \
+                             AND first.item #>> '{{payload,type}}' = 'item_completed' \
+                        THEN octet_length(COALESCE(first.item #>> '{{payload,turn_id}}', '')) \
+                           + octet_length(COALESCE(first.item #>> '{{payload,item,type}}', '')) + 32 \
+                        ELSE octet_length(first.item::text) END)::bigint) AS projected_bytes \
+             FROM ( \
+                 SELECT ordinal, item FROM {history_table} \
+                 WHERE thread_id = $1 AND ordinal >= $2 \
+                 ORDER BY ordinal ASC LIMIT 1 \
+             ) AS first \
+             UNION ALL \
+             SELECT next.ordinal, measured.item_count + 1, \
+                    CASE WHEN measured.raw_bytes > $4::bigint THEN measured.raw_bytes \
+                         ELSE LEAST($5::bigint, measured.raw_bytes \
+                              + octet_length(next.item::text)::bigint) END, \
+                    CASE WHEN measured.projected_bytes > $4::bigint \
+                         THEN measured.projected_bytes \
+                         ELSE LEAST($5::bigint, measured.projected_bytes + (CASE \
+                             WHEN next.item ->> 'type' = 'event_msg' \
+                                  AND next.item #>> '{{payload,type}}' = 'item_completed' \
+                             THEN octet_length(COALESCE(next.item #>> '{{payload,turn_id}}', '')) \
+                                + octet_length(COALESCE(next.item #>> '{{payload,item,type}}', '')) \
+                                + 32 \
+                             ELSE octet_length(next.item::text) END)::bigint) END \
+             FROM measured \
+             CROSS JOIN LATERAL ( \
+                 SELECT ordinal, item FROM {history_table} \
+                 WHERE thread_id = $1 AND ordinal > measured.ordinal \
+                 ORDER BY ordinal ASC LIMIT 1 \
+             ) AS next \
+             WHERE measured.item_count < $3::bigint \
+               AND (measured.raw_bytes <= $4::bigint \
+                    OR measured.projected_bytes <= $4::bigint) \
+         ) \
+         SELECT item_count, raw_bytes, projected_bytes FROM measured \
+         ORDER BY item_count DESC LIMIT 1"
     )))
     .bind(thread_id.to_string())
     .bind(cutoff_ordinal)
     .bind(i64::try_from(sentinel_limit).unwrap_or(i64::MAX))
-    .fetch_one(transaction.as_mut())
+    .bind(i64::try_from(remaining_bytes).unwrap_or(i64::MAX))
+    .bind(i64::try_from(exceeded_bytes).unwrap_or(i64::MAX))
+    .fetch_optional(transaction.as_mut())
     .await
-    .map_err(|error| database_error("count latest model context", error))?;
+    .map_err(|error| database_error("plan latest model context selection", error))?;
+    let Some(summary) = summary else {
+        return Ok(SelectionPlan {
+            item_count: 0,
+            project_item_completed: false,
+        });
+    };
+    let item_count: i64 = summary
+        .try_get("item_count")
+        .map_err(|error| database_error("plan latest model context selection", error))?;
     let item_count =
         usize::try_from(item_count).map_err(|_| budget.limit_error("invalid item count"))?;
-    if item_count > remaining_items {
+    let raw_bytes: i64 = summary
+        .try_get("raw_bytes")
+        .map_err(|error| database_error("plan latest model context selection", error))?;
+    let raw_bytes =
+        u64::try_from(raw_bytes).map_err(|_| budget.limit_error("invalid history size"))?;
+    let projected_bytes: i64 = summary
+        .try_get("projected_bytes")
+        .map_err(|error| database_error("plan latest model context selection", error))?;
+    let projected_bytes =
+        u64::try_from(projected_bytes).map_err(|_| budget.limit_error("invalid history size"))?;
+    if item_count > remaining_items
+        || (raw_bytes > remaining_bytes && projected_bytes > remaining_bytes)
+    {
         return Err(budget.limit_error("history exceeds the bounded read budget"));
     }
-
-    let remaining_bytes = MAX_MODEL_CONTEXT_BYTES.saturating_sub(budget.bytes);
-    let exceeded_bytes = remaining_bytes.saturating_add(1);
-    let mut raw_bytes: u64 = 0;
-    let mut projected_bytes: u64 = 0;
-    let mut next_ordinal = cutoff_ordinal;
-    let mut summarized_items = 0;
-    while summarized_items < item_count {
-        let measure_raw = raw_bytes <= remaining_bytes;
-        let summary = sqlx::query(AssertSqlSafe(format!(
-            "WITH page AS ( \
-                 SELECT ordinal, item FROM {history_table} \
-                 WHERE thread_id = $1 AND ordinal >= $2 \
-                 ORDER BY ordinal ASC LIMIT $3 \
-             ) \
-             SELECT COUNT(*)::bigint AS item_count, MAX(ordinal)::bigint AS max_ordinal, \
-                    COALESCE(SUM(CASE WHEN $4::boolean \
-                         THEN octet_length(item::text) ELSE 0 END), 0)::bigint AS raw_bytes, \
-                    COALESCE(SUM(CASE \
-                        WHEN item ->> 'type' = 'event_msg' \
-                             AND item #>> '{{payload,type}}' = 'item_completed' \
-                        THEN octet_length(COALESCE(item #>> '{{payload,turn_id}}', '')) \
-                           + octet_length(COALESCE(item #>> '{{payload,item,type}}', '')) + 32 \
-                        ELSE octet_length(item::text) END), 0)::bigint AS projected_bytes \
-             FROM page"
-        )))
-        .bind(thread_id.to_string())
-        .bind(next_ordinal)
-        .bind(i64::try_from(MODEL_CONTEXT_PAGE_ITEMS).unwrap_or(i64::MAX))
-        .bind(measure_raw)
-        .fetch_one(transaction.as_mut())
-        .await
-        .map_err(|error| database_error("summarize latest model context page", error))?;
-        let page_items = summary_item_count(&summary, budget)?;
-        let max_ordinal: Option<i64> = summary
-            .try_get("max_ordinal")
-            .map_err(|error| database_error("summarize latest model context page", error))?;
-        let Some(max_ordinal) = max_ordinal else {
-            return Err(budget.limit_error("history changed during bounded read"));
-        };
-        if page_items == 0 {
-            return Err(budget.limit_error("history changed during bounded read"));
-        }
-        summarized_items = summarized_items.saturating_add(page_items);
-        if summarized_items > item_count {
-            return Err(budget.limit_error("invalid item count"));
-        }
-        if measure_raw {
-            raw_bytes = raw_bytes
-                .saturating_add(summary_bytes(&summary, "raw_bytes", budget)?)
-                .min(exceeded_bytes);
-        }
-        projected_bytes = projected_bytes
-            .saturating_add(summary_bytes(&summary, "projected_bytes", budget)?)
-            .min(exceeded_bytes);
-        if raw_bytes > remaining_bytes && projected_bytes > remaining_bytes {
-            return Err(budget.limit_error("history exceeds the bounded read budget"));
-        }
-        next_ordinal = max_ordinal
-            .checked_add(1)
-            .ok_or_else(|| budget.limit_error("history ordinal overflow"))?;
-    }
-    let projection_required = raw_bytes > remaining_bytes;
-    Ok(projection_required)
-}
-
-fn summary_item_count(
-    row: &sqlx::postgres::PgRow,
-    budget: &ModelContextBudget,
-) -> ThreadStoreResult<usize> {
-    let item_count: i64 = row
-        .try_get("item_count")
-        .map_err(|error| database_error("summarize latest model context page", error))?;
-    usize::try_from(item_count).map_err(|_| budget.limit_error("invalid item count"))
-}
-
-fn summary_bytes(
-    row: &sqlx::postgres::PgRow,
-    column: &str,
-    budget: &ModelContextBudget,
-) -> ThreadStoreResult<u64> {
-    let bytes: i64 = row
-        .try_get(column)
-        .map_err(|error| database_error("summarize latest model context", error))?;
-    u64::try_from(bytes).map_err(|_| budget.limit_error("invalid history size"))
+    Ok(SelectionPlan {
+        item_count,
+        project_item_completed: raw_bytes > remaining_bytes,
+    })
 }
 
 async fn load_selected_items(
@@ -358,81 +346,70 @@ async fn load_selected_items(
     transaction: &mut Transaction<'_, sqlx::Postgres>,
     thread_id: ThreadId,
     cutoff_ordinal: i64,
-    project_item_completed: bool,
+    selection_plan: SelectionPlan,
     session_meta: SessionMetaLine,
     mut budget: ModelContextBudget,
 ) -> ThreadStoreResult<Vec<RolloutItem>> {
     let mut items = vec![RolloutItem::SessionMeta(session_meta)];
-    let mut next_ordinal = cutoff_ordinal;
-    loop {
-        let mut rows = sqlx::query(AssertSqlSafe(format!(
-            "WITH selected AS ( \
-                 SELECT ordinal, item, octet_length(item::text)::bigint AS raw_bytes, \
-                        $2::boolean AND item ->> 'type' = 'event_msg' \
-                            AND item #>> '{{payload,type}}' = 'item_completed' AS scan_event, \
-                        item #>> '{{payload,turn_id}}' AS event_turn_id, \
-                        item #>> '{{payload,item,type}}' AS event_item_type \
-                 FROM {history_table} WHERE thread_id = $1 AND ordinal >= $4 \
-                 ORDER BY ordinal ASC LIMIT $5 \
-             ), sized AS ( \
-                 SELECT *, (octet_length(COALESCE(event_turn_id, '')) \
-                            + octet_length(COALESCE(event_item_type, '')) + 32)::bigint \
-                               AS scan_bytes \
-                 FROM selected \
-             ) \
-             SELECT ordinal, CASE WHEN NOT scan_event AND raw_bytes <= $3 THEN item END AS item, \
-                    scan_event, event_turn_id AS scan_turn_id, \
-                    CASE WHEN scan_event THEN scan_bytes ELSE raw_bytes END AS item_bytes \
-             FROM sized ORDER BY ordinal ASC"
-        )))
-        .bind(thread_id.to_string())
-        .bind(project_item_completed)
-        .bind(i64::try_from(MAX_MODEL_CONTEXT_BYTES).unwrap_or(i64::MAX))
-        .bind(next_ordinal)
-        .bind(i64::try_from(MODEL_CONTEXT_PAGE_ITEMS).unwrap_or(i64::MAX))
-        .fetch(transaction.as_mut());
-        let mut page_items = 0;
-        let mut next_page_ordinal = None;
-        while let Some(row) = rows
-            .try_next()
-            .await
-            .map_err(|error| database_error("load latest model context", error))?
-        {
-            page_items += 1;
-            let ordinal: i64 = row
-                .try_get("ordinal")
+    let mut rows = sqlx::query(AssertSqlSafe(format!(
+        "WITH selected AS ( \
+             SELECT ordinal, item, \
+                    $2::boolean AND item ->> 'type' = 'event_msg' \
+                        AND item #>> '{{payload,type}}' = 'item_completed' AS scan_event, \
+                    item #>> '{{payload,turn_id}}' AS event_turn_id, \
+                    item #>> '{{payload,item,type}}' AS event_item_type \
+             FROM {history_table} WHERE thread_id = $1 AND ordinal >= $4 \
+             ORDER BY ordinal ASC LIMIT $5 \
+         ), sized AS ( \
+             SELECT *, CASE WHEN scan_event THEN 0 \
+                            ELSE octet_length(item::text)::bigint END AS raw_bytes, \
+                    (octet_length(COALESCE(event_turn_id, '')) \
+                     + octet_length(COALESCE(event_item_type, '')) + 32)::bigint AS scan_bytes \
+             FROM selected \
+         ) \
+         SELECT CASE WHEN NOT scan_event AND raw_bytes <= $3 THEN item END AS item, \
+                scan_event, event_turn_id AS scan_turn_id, \
+                CASE WHEN scan_event THEN scan_bytes ELSE raw_bytes END AS item_bytes \
+         FROM sized ORDER BY ordinal ASC"
+    )))
+    .bind(thread_id.to_string())
+    .bind(selection_plan.project_item_completed)
+    .bind(i64::try_from(MAX_MODEL_CONTEXT_BYTES).unwrap_or(i64::MAX))
+    .bind(cutoff_ordinal)
+    .bind(i64::try_from(selection_plan.item_count).unwrap_or(i64::MAX))
+    .fetch(transaction.as_mut());
+    let mut loaded_items = 0;
+    while let Some(row) = rows
+        .try_next()
+        .await
+        .map_err(|error| database_error("load latest model context", error))?
+    {
+        loaded_items += 1;
+        let item_bytes: i64 = row
+            .try_get("item_bytes")
+            .map_err(|error| database_error("load latest model context", error))?;
+        budget.account_item(item_bytes)?;
+        let scan_event: bool = row
+            .try_get("scan_event")
+            .map_err(|error| database_error("load latest model context", error))?;
+        if scan_event {
+            let turn_id: Option<String> = row
+                .try_get("scan_turn_id")
                 .map_err(|error| database_error("load latest model context", error))?;
-            next_page_ordinal = ordinal.checked_add(1);
-            let item_bytes: i64 = row
-                .try_get("item_bytes")
-                .map_err(|error| database_error("load latest model context", error))?;
-            budget.account_item(item_bytes)?;
-            let scan_event: bool = row
-                .try_get("scan_event")
-                .map_err(|error| database_error("load latest model context", error))?;
-            if scan_event {
-                let turn_id: Option<String> = row
-                    .try_get("scan_turn_id")
-                    .map_err(|error| database_error("load latest model context", error))?;
-                if turn_id.is_none() {
-                    return Err(budget.limit_error("item_completed scan event has no turn id"));
-                }
-                continue;
+            if turn_id.is_none() {
+                return Err(budget.limit_error("item_completed scan event has no turn id"));
             }
-            let item = bounded_item_from_row(&row, &budget)?;
-            if !matches!(&item, RolloutItem::SessionMeta(_)) {
-                validate_model_context_item(&item, &mut budget)?;
-            }
-            items.push(item);
+            continue;
         }
-        drop(rows);
-        if page_items < MODEL_CONTEXT_PAGE_ITEMS {
-            break;
+        let item = bounded_item_from_row(&row, &budget)?;
+        if !matches!(&item, RolloutItem::SessionMeta(_)) {
+            validate_model_context_item(&item, &mut budget)?;
         }
-        let Some(ordinal) = next_page_ordinal else {
-            break;
-        };
-        next_ordinal = ordinal;
+        items.push(item);
+    }
+    drop(rows);
+    if loaded_items != selection_plan.item_count {
+        return Err(budget.limit_error("history changed during bounded read"));
     }
     Ok(items)
 }
