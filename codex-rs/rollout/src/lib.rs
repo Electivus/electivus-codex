@@ -117,6 +117,7 @@ pub use metadata::builder_from_items;
 pub use metadata::rollout_id_from_path;
 pub use model_context::ModelContextScan;
 pub use model_context::ModelContextScanProgress;
+pub use model_context::ModelContextScanSignal;
 pub use persistence_metrics::RolloutPersistenceBatchMeasurement;
 pub use persistence_metrics::RolloutPersistenceTelemetry;
 pub use persistence_metrics::measure_and_filter_rollout_items;
