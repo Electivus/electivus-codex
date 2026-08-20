@@ -8,8 +8,6 @@ use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::TruncationPolicy;
-use codex_rollout::ModelContextScan;
-use codex_rollout::ModelContextScanProgress;
 use codex_rollout::RolloutItem;
 use codex_tools::LoadableToolSpec;
 use codex_tools::ResponsesApiNamespace;
@@ -34,6 +32,9 @@ use crate::StoredModelContext;
 use crate::StoredThread;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
+
+#[path = "paginated_model_context.rs"]
+mod paginated_model_context;
 
 const MAX_MODEL_CONTEXT_ITEMS: usize = 10_000;
 const MAX_MODEL_CONTEXT_BYTES: u64 = 16 * 1024 * 1024;
@@ -617,42 +618,14 @@ pub(super) async fn load_latest_model_context(
     }
 
     let items = if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Paginated) {
-        let mut scan = ModelContextScan::default();
-        let mut reached_bounded_cutoff = false;
-        let mut rows = sqlx::query(AssertSqlSafe(format!(
-            "SELECT ordinal, CASE WHEN octet_length(item::text) <= $3 THEN item END AS item, \
-             octet_length(item::text)::bigint AS item_bytes \
-             FROM {} WHERE thread_id = $1 AND ordinal > 0 ORDER BY ordinal DESC LIMIT $2",
-            store.tables.history
-        )))
-        .bind(params.thread_id.to_string())
-        .bind(i64::try_from(MAX_MODEL_CONTEXT_ITEMS).unwrap_or(i64::MAX))
-        .bind(i64::try_from(MAX_MODEL_CONTEXT_BYTES).unwrap_or(i64::MAX))
-        .fetch(transaction.as_mut());
-        while let Some(row) = rows
-            .try_next()
-            .await
-            .map_err(|error| database_error("load latest model context", error))?
-        {
-            let item_bytes: i64 = row
-                .try_get("item_bytes")
-                .map_err(|error| database_error("load latest model context", error))?;
-            budget.account_item(item_bytes)?;
-            let item = bounded_item_from_row(&row, &budget)?;
-            if !matches!(&item, RolloutItem::SessionMeta(_)) {
-                validate_model_context_item(&item, &mut budget)?;
-            }
-            if matches!(scan.push(item), ModelContextScanProgress::Complete) {
-                reached_bounded_cutoff = true;
-                break;
-            }
-        }
-        drop(rows);
-        let mut items = scan.finish(session_meta.clone());
-        if !reached_bounded_cutoff {
-            items.insert(0, RolloutItem::SessionMeta(session_meta));
-        }
-        items
+        paginated_model_context::load(
+            &store.tables.history,
+            &mut transaction,
+            params.thread_id,
+            session_meta,
+            budget,
+        )
+        .await?
     } else {
         let mut rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT ordinal, CASE WHEN octet_length(item::text) <= $3 THEN item END AS item, \
