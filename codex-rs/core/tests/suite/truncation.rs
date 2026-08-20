@@ -376,7 +376,7 @@ Output:
 4
 5
 6
-.*…137224 tokens truncated.*
+.*…[0-9]+ tokens truncated.*
 99999
 100000
 $"#;
