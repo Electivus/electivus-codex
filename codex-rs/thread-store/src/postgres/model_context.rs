@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 
+use codex_model_context::estimate_response_item_model_visible_bytes;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
-use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::TruncationPolicy;
@@ -85,14 +86,29 @@ impl ModelContextBudget {
     }
 
     fn account_expanded_items(&mut self, additional_items: usize) -> ThreadStoreResult<()> {
+        self.account_expansion(additional_items, /*additional_bytes*/ 0)
+    }
+
+    fn account_expansion(
+        &mut self,
+        additional_items: usize,
+        additional_bytes: usize,
+    ) -> ThreadStoreResult<()> {
         let next_items = self
             .items
             .checked_add(additional_items)
             .ok_or_else(|| self.limit_error("item count overflow"))?;
-        if next_items > self.max_items {
+        let additional_bytes = u64::try_from(additional_bytes)
+            .map_err(|_| self.limit_error("invalid expansion size"))?;
+        let next_bytes = self
+            .bytes
+            .checked_add(additional_bytes)
+            .ok_or_else(|| self.limit_error("byte count overflow"))?;
+        if next_items > self.max_items || next_bytes > self.max_bytes {
             return Err(self.limit_error("history exceeds the bounded read budget"));
         }
         self.items = next_items;
+        self.bytes = next_bytes;
         Ok(())
     }
 
@@ -171,18 +187,37 @@ fn validate_model_context_item(
 
 fn validate_response_item(
     item: &ResponseItem,
-    budget: &ModelContextBudget,
+    budget: &mut ModelContextBudget,
 ) -> ThreadStoreResult<()> {
-    let serialized_bytes = serialized_bytes(item)?;
-    if serialized_bytes <= max_model_context_item_bytes()
-        || has_discounted_model_payload(item)
-        || replay_truncatable_output_minimum_fits(item, budget)?
+    let item_bytes = serialized_bytes(item)?;
+    let model_visible_bytes = model_visible_item_bytes(item);
+    if item_bytes <= max_model_context_item_bytes()
+        && model_visible_bytes <= max_model_context_item_bytes()
+    {
+        return Ok(());
+    }
+    if let Some(expansion) = replay_splittable_item_expansion(item, item_bytes, budget)? {
+        budget.account_expansion(expansion.additional_items, expansion.additional_bytes)?;
+        return Ok(());
+    }
+    if model_visible_bytes <= max_model_context_item_bytes()
+        || replay_omits_oversized_context_item(item)
+        || replay_projectable_output_minimum_fits(item, budget)?
     {
         return Ok(());
     }
     Err(budget.limit_error(&format!(
         "an individual model-visible history item exceeds {MAX_MODEL_CONTEXT_ITEM_TOKENS} estimated tokens"
     )))
+}
+
+fn replay_omits_oversized_context_item(item: &ResponseItem) -> bool {
+    matches!(
+        item,
+        ResponseItem::Reasoning { .. }
+            | ResponseItem::Compaction { .. }
+            | ResponseItem::ContextCompaction { .. }
+    )
 }
 
 fn validate_serialized_model_item(
@@ -201,7 +236,7 @@ fn validate_base_instructions(
     base_instructions: &codex_protocol::models::BaseInstructions,
     budget: &ModelContextBudget,
 ) -> ThreadStoreResult<()> {
-    validate_response_item(
+    validate_serialized_model_item(
         &ResponseItem::Message {
             id: None,
             role: "developer".to_string(),
@@ -217,7 +252,7 @@ fn validate_base_instructions(
 
 fn validate_dynamic_tools(
     tools: &[DynamicToolSpec],
-    budget: &ModelContextBudget,
+    budget: &mut ModelContextBudget,
 ) -> ThreadStoreResult<()> {
     let mut direct_specs = Vec::new();
     let mut direct_namespaces = BTreeMap::<String, ResponsesApiNamespace>::new();
@@ -330,53 +365,164 @@ fn append_dynamic_tool(
     }
 }
 
-fn has_discounted_model_payload(item: &ResponseItem) -> bool {
-    match item {
-        ResponseItem::Message { content, .. } => content.iter().any(|content| {
-            matches!(
-                content,
-                ContentItem::InputImage { .. } | ContentItem::InputAudio { .. }
-            )
-        }),
-        ResponseItem::Reasoning {
-            encrypted_content: Some(_),
-            ..
-        }
-        | ResponseItem::Compaction { .. }
-        | ResponseItem::ContextCompaction {
-            encrypted_content: Some(_),
-            ..
-        } => true,
-        ResponseItem::FunctionCallOutput { output, .. }
-        | ResponseItem::CustomToolCallOutput { output, .. } => {
-            output.content_items().is_some_and(|items| {
-                items.iter().any(|item| {
-                    matches!(
-                        item,
-                        FunctionCallOutputContentItem::InputImage { .. }
-                            | FunctionCallOutputContentItem::InputAudio { .. }
-                            | FunctionCallOutputContentItem::EncryptedContent { .. }
-                    )
-                })
-            })
-        }
-        ResponseItem::AdditionalTools { .. }
-        | ResponseItem::AgentMessage { .. }
-        | ResponseItem::Reasoning { .. }
-        | ResponseItem::LocalShellCall { .. }
-        | ResponseItem::FunctionCall { .. }
-        | ResponseItem::ToolSearchCall { .. }
-        | ResponseItem::CustomToolCall { .. }
-        | ResponseItem::ToolSearchOutput { .. }
-        | ResponseItem::WebSearchCall { .. }
-        | ResponseItem::ImageGenerationCall { .. }
-        | ResponseItem::ContextCompaction { .. }
-        | ResponseItem::CompactionTrigger { .. }
-        | ResponseItem::Other => false,
-    }
+struct ReplayMessageExpansion {
+    additional_items: usize,
+    additional_bytes: usize,
 }
 
-fn replay_truncatable_output_minimum_fits(
+fn replay_splittable_item_expansion(
+    item: &ResponseItem,
+    item_bytes: usize,
+    budget: &ModelContextBudget,
+) -> ThreadStoreResult<Option<ReplayMessageExpansion>> {
+    let content_len = match item {
+        ResponseItem::Message { content, .. } => content.len(),
+        ResponseItem::AgentMessage { content, .. } => content.len(),
+        _ => return Ok(None),
+    };
+    if content_len == 0 {
+        return Ok(None);
+    }
+
+    let item_with_content = |index: Option<usize>, empty_text: bool| match item {
+        ResponseItem::Message {
+            id,
+            role,
+            content,
+            phase,
+            internal_chat_message_metadata_passthrough: metadata,
+        } => {
+            let content = match index {
+                Some(index) => {
+                    let mut content = content[index].clone();
+                    if empty_text {
+                        match &mut content {
+                            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                                text.clear();
+                            }
+                            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {
+                                return None;
+                            }
+                        }
+                    }
+                    vec![content]
+                }
+                None => Vec::new(),
+            };
+            Some(ResponseItem::Message {
+                id: id.clone(),
+                role: role.clone(),
+                content,
+                phase: phase.clone(),
+                internal_chat_message_metadata_passthrough: metadata.clone(),
+            })
+        }
+        ResponseItem::AgentMessage {
+            id,
+            author,
+            recipient,
+            content,
+            internal_chat_message_metadata_passthrough: metadata,
+        } => {
+            let content = match index {
+                Some(index) => {
+                    let mut content = content[index].clone();
+                    if empty_text {
+                        match &mut content {
+                            AgentMessageInputContent::InputText { text } => text.clear(),
+                            AgentMessageInputContent::EncryptedContent { .. } => return None,
+                        }
+                    }
+                    vec![content]
+                }
+                None => Vec::new(),
+            };
+            Some(ResponseItem::AgentMessage {
+                id: id.clone(),
+                author: author.clone(),
+                recipient: recipient.clone(),
+                content,
+                internal_chat_message_metadata_passthrough: metadata.clone(),
+            })
+        }
+        _ => None,
+    };
+    let mut expanded_items = 0usize;
+    let mut expanded_bytes = 0usize;
+    let mut account = |item_count: usize, item_bytes: usize| -> ThreadStoreResult<()> {
+        expanded_items = expanded_items
+            .checked_add(item_count)
+            .ok_or_else(|| budget.limit_error("item count overflow"))?;
+        expanded_bytes = expanded_bytes
+            .checked_add(item_bytes)
+            .ok_or_else(|| budget.limit_error("byte count overflow"))?;
+        Ok(())
+    };
+    let empty_group = item_with_content(/*index*/ None, /*empty_text*/ false)
+        .ok_or_else(|| budget.limit_error("message template cannot be projected"))?;
+    let empty_group_model_bytes = model_visible_item_bytes(&empty_group);
+    let mut current_group_model_bytes: Option<usize> = None;
+    for index in 0..content_len {
+        let single_item = item_with_content(Some(index), /*empty_text*/ false)
+            .ok_or_else(|| budget.limit_error("message content cannot be projected"))?;
+        let single_item_bytes = serialized_bytes(&single_item)?;
+        let single_item_model_bytes = model_visible_item_bytes(&single_item);
+        if single_item_model_bytes <= max_model_context_item_bytes() {
+            let content_model_bytes =
+                single_item_model_bytes.saturating_sub(empty_group_model_bytes);
+            let candidate_model_bytes = match current_group_model_bytes {
+                Some(group_bytes) => group_bytes
+                    .checked_add(content_model_bytes)
+                    .and_then(|bytes| bytes.checked_add(1))
+                    .ok_or_else(|| budget.limit_error("byte count overflow"))?,
+                None => single_item_model_bytes,
+            };
+            if candidate_model_bytes <= max_model_context_item_bytes() {
+                current_group_model_bytes = Some(candidate_model_bytes);
+                continue;
+            }
+            if let Some(group_bytes) = current_group_model_bytes.replace(single_item_model_bytes) {
+                account(/*item_count*/ 1, group_bytes)?;
+            }
+            continue;
+        }
+
+        if let Some(group_bytes) = current_group_model_bytes.take() {
+            account(/*item_count*/ 1, group_bytes)?;
+        }
+        let Some(empty_item) = item_with_content(Some(index), /*empty_text*/ true) else {
+            return Ok(None);
+        };
+        let empty_item_bytes = serialized_bytes(&empty_item)?;
+        // Leave enough room for any one JSON-escaped Unicode scalar at a chunk boundary.
+        let text_capacity = max_model_context_item_bytes()
+            .saturating_sub(empty_item_bytes)
+            .saturating_sub(12);
+        if text_capacity == 0 {
+            return Ok(None);
+        }
+        let text_bytes = single_item_bytes.saturating_sub(empty_item_bytes);
+        let item_count = text_bytes.div_ceil(text_capacity).max(1);
+        let split_item_bytes = empty_item_bytes
+            .checked_mul(item_count)
+            .and_then(|bytes| bytes.checked_add(text_bytes))
+            .ok_or_else(|| budget.limit_error("byte count overflow"))?;
+        account(item_count, split_item_bytes)?;
+    }
+    if let Some(group_bytes) = current_group_model_bytes {
+        account(/*item_count*/ 1, group_bytes)?;
+    }
+    Ok(Some(ReplayMessageExpansion {
+        additional_items: expanded_items.saturating_sub(1),
+        additional_bytes: expanded_bytes.saturating_sub(item_bytes),
+    }))
+}
+
+fn model_visible_item_bytes(item: &ResponseItem) -> usize {
+    usize::try_from(estimate_response_item_model_visible_bytes(item)).unwrap_or(usize::MAX)
+}
+
+fn replay_projectable_output_minimum_fits(
     item: &ResponseItem,
     budget: &ModelContextBudget,
 ) -> ThreadStoreResult<bool> {
@@ -388,21 +534,12 @@ fn replay_truncatable_output_minimum_fits(
     };
     match &mut output.body {
         FunctionCallOutputBody::Text(text) => text.clear(),
-        FunctionCallOutputBody::ContentItems(items) => {
-            for item in items {
-                match item {
-                    FunctionCallOutputContentItem::InputText { text } => text.clear(),
-                    FunctionCallOutputContentItem::InputImage { .. }
-                    | FunctionCallOutputContentItem::InputAudio { .. }
-                    | FunctionCallOutputContentItem::EncryptedContent { .. } => {}
-                }
-            }
-        }
+        FunctionCallOutputBody::ContentItems(items) => items.clear(),
     }
-    let fits = serialized_bytes(&minimum)? <= max_model_context_item_bytes();
+    let fits = model_visible_item_bytes(&minimum) <= max_model_context_item_bytes();
     if !fits {
         return Err(budget.limit_error(&format!(
-            "an individual model-visible history item exceeds {MAX_MODEL_CONTEXT_ITEM_TOKENS} estimated tokens and cannot be truncated safely"
+            "an individual model-visible history item exceeds {MAX_MODEL_CONTEXT_ITEM_TOKENS} estimated tokens and cannot be projected safely"
         )));
     }
     Ok(true)

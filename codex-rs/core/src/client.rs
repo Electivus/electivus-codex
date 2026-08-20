@@ -115,8 +115,10 @@ use crate::attestation::X_OAI_ATTESTATION_HEADER;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
+use crate::context_manager::updates::split_model_context_item_to_limit;
 use crate::feedback_tags;
 use crate::model_request_limits::bound_replayed_model_request;
+use crate::model_request_limits::split_model_request_messages;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::subagent_header_value;
 use crate::util::emit_feedback_auth_recovery_tags;
@@ -291,7 +293,7 @@ pub struct ModelClientSession {
 #[derive(Debug, Clone)]
 struct LastResponse {
     response_id: String,
-    items_added: Vec<ResponseItem>,
+    projected_items_added: Vec<ResponseItem>,
 }
 
 #[derive(Debug, Default)]
@@ -939,19 +941,20 @@ impl ModelClient {
             client_metadata: Some(responses_metadata.client_metadata()),
         };
         let replay_prefix_items = prompt.replay_prefix_items.min(prompt.input.len());
+        let model_visible_tools = if model_info.use_responses_lite {
+            &[]
+        } else {
+            prompt.tools.as_ref()
+        };
         if prompt.replayed_history {
             let lite_prefix_items = request.input.len().saturating_sub(prompt.input.len());
-            let model_visible_tools = if model_info.use_responses_lite {
-                &[]
-            } else {
-                prompt.tools.as_ref()
-            };
             bound_replayed_model_request(
                 &mut request,
                 model_visible_tools,
                 lite_prefix_items..lite_prefix_items.saturating_add(replay_prefix_items),
-                prompt.replayed_dynamic_tools,
             )?;
+        } else {
+            split_model_request_messages(&mut request, model_visible_tools)?;
         }
         Ok(request)
     }
@@ -1246,8 +1249,9 @@ impl ModelClientSession {
             return None;
         }
 
-        let response_items =
-            last_response.map_or(&[][..], |response| response.items_added.as_slice());
+        let response_items = last_response.map_or(&[][..], |response| {
+            response.projected_items_added.as_slice()
+        });
         let previous_items_len = previous_request
             .input
             .len()
@@ -2088,9 +2092,13 @@ where
                         &items_added,
                     );
                     if let Some(sender) = tx_last_response.take() {
+                        let projected_items_added = std::mem::take(&mut items_added)
+                            .into_iter()
+                            .flat_map(split_model_context_item_to_limit)
+                            .collect();
                         let _ = sender.send(LastResponse {
                             response_id: response_id.clone(),
-                            items_added: std::mem::take(&mut items_added),
+                            projected_items_added,
                         });
                     }
                     if tx_event

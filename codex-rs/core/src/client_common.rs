@@ -28,9 +28,6 @@ pub struct Prompt {
     /// is empty after filtering or rollback.
     pub(crate) replayed_history: bool,
 
-    /// Whether the resumed session contributes persisted dynamic tools to the request tool plan.
-    pub(crate) replayed_dynamic_tools: bool,
-
     /// Tools available to the model, including additional tools sourced from
     /// external MCP servers.
     pub(crate) tools: Arc<[ToolSpec]>,
@@ -53,7 +50,6 @@ impl Default for Prompt {
             input: Vec::new(),
             replay_prefix_items: 0,
             replayed_history: false,
-            replayed_dynamic_tools: false,
             tools: Arc::default(),
             parallel_tool_calls: false,
             base_instructions: BaseInstructions::default(),

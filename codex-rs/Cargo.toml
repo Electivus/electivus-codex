@@ -78,6 +78,7 @@ members = [
     "mcp-server",
     "memories/read",
     "memories/write",
+    "model-context",
     "model-provider-info",
     "models-manager",
     "network-proxy",
@@ -223,6 +224,7 @@ codex-memories-write = { path = "memories/write" }
 codex-mcp = { path = "codex-mcp" }
 codex-mcp-extension = { path = "ext/mcp" }
 codex-mcp-server = { path = "mcp-server" }
+codex-model-context = { path = "model-context" }
 codex-model-provider-info = { path = "model-provider-info" }
 codex-models-manager = { path = "models-manager" }
 codex-network-proxy = { path = "network-proxy" }

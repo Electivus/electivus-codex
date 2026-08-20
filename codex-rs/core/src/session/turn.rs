@@ -1310,7 +1310,6 @@ pub(crate) fn build_prompt(
         input,
         replay_prefix_items,
         replayed_history,
-        replayed_dynamic_tools: replayed_history && turn_context.replayed_dynamic_tools,
         tools: router.model_visible_specs(),
         parallel_tool_calls: true,
         base_instructions,

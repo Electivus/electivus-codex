@@ -280,7 +280,6 @@ async fn run_compact_task_inner_impl(
             input: turn_input,
             replay_prefix_items,
             replayed_history,
-            replayed_dynamic_tools: replayed_history && turn_context.replayed_dynamic_tools,
             base_instructions: sess.get_base_instructions().await,
             ..Default::default()
         };

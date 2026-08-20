@@ -2990,9 +2990,8 @@ impl Session {
         for item in &mut items {
             Self::stamp_response_item_for_history(item, &turn_context.sub_id);
         }
-        let items = Cow::Owned(items);
         (
-            Self::assign_missing_response_item_ids(items),
+            Self::assign_missing_response_item_ids(Cow::Owned(items)),
             image_preparations,
         )
     }

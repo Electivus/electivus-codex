@@ -2138,6 +2138,45 @@ async fn record_conversation_items_stamps_missing_turn_id_and_preserves_existing
 }
 
 #[tokio::test]
+async fn record_prepared_conversation_items_preserves_atomic_history_and_raw_item() {
+    let (session, turn_context, rx) = make_session_and_context_with_rx().await;
+    let mut item = user_message(&"raw-event".repeat(7_000));
+    item.set_id(Some(ResponseItemId::with_suffix("msg", "raw-event")));
+    let metadata = Some(CodexHarnessMetadata {
+        client_authored: true,
+    });
+
+    session
+        .record_prepared_conversation_items(
+            &turn_context,
+            vec![ResponseItemEnvelope {
+                item: item.clone(),
+                metadata: metadata.clone(),
+            }],
+            Vec::new(),
+        )
+        .await;
+
+    let event = rx.recv().await.expect("raw response item event");
+    let EventMsg::RawResponseItem(raw) = event.msg else {
+        panic!("expected raw response item event");
+    };
+    assert!(
+        strip_metadata_from_items(&[raw.item]) == vec![item.clone()],
+        "raw response item was split or changed"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "expected one raw response item event"
+    );
+    let history = session.clone_history().await;
+    assert_eq!(
+        history.annotated_items(),
+        &[ResponseItemEnvelope { item, metadata }]
+    );
+}
+
+#[tokio::test]
 async fn record_response_item_and_emit_turn_item_emits_hook_prompt_lifecycle() {
     let (session, turn_context, rx) = make_session_and_context_with_rx().await;
     let response_item = build_hook_prompt_message(&[HookPromptFragment::from_single_hook(
