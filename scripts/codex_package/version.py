@@ -33,7 +33,11 @@ class SemVer:
         if not isinstance(other, SemVer):
             return NotImplemented
 
-        if (self.major, self.minor, self.patch) != (other.major, other.minor, other.patch):
+        if (self.major, self.minor, self.patch) != (
+            other.major,
+            other.minor,
+            other.patch,
+        ):
             return (self.major, self.minor, self.patch) < (
                 other.major,
                 other.minor,
@@ -111,7 +115,9 @@ def replace_workspace_version(cargo_manifest_path: Path, version: str) -> None:
 
     version_start = match.start(2)
     version_end = match.end(2)
-    updated_text = f"{manifest_text[:version_start]}{version}{manifest_text[version_end:]}"
+    updated_text = (
+        f"{manifest_text[:version_start]}{version}{manifest_text[version_end:]}"
+    )
     cargo_manifest_path.write_text(updated_text, encoding="utf-8", newline="")
 
 
@@ -133,7 +139,14 @@ def resolve_upstream_build_version() -> str:
         return current_workspace_version
 
     log_output = _run_git(
-        ["log", "--full-history", "--format=%H%x09%s", "HEAD", "--", "codex-rs/Cargo.toml"],
+        [
+            "log",
+            "--full-history",
+            "--format=%H%x09%s",
+            "HEAD",
+            "--",
+            "codex-rs/Cargo.toml",
+        ],
         "Could not inspect repository history for the upstream release version.",
     )
 

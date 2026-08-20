@@ -181,7 +181,8 @@ impl TestToolServer {
             "type": "object",
             "properties": {
                 "message": { "type": "string" },
-                "env_var": { "type": "string" }
+                "env_var": { "type": "string" },
+                "repeat": { "type": "integer", "minimum": 1 }
             },
             "required": ["message"],
             "additionalProperties": false
@@ -411,6 +412,7 @@ impl TestToolServer {
 struct EchoArgs {
     message: String,
     env_var: Option<String>,
+    repeat: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -705,8 +707,9 @@ impl ServerHandler for TestToolServer {
 
                 let env_snapshot: HashMap<String, String> = std::env::vars().collect();
                 let env_name = args.env_var.as_deref().unwrap_or("MCP_TEST_VALUE");
-                let echo = dynamic_server_process_label()
-                    .unwrap_or_else(|| format!("ECHOING: {}", args.message));
+                let echo = dynamic_server_process_label().unwrap_or_else(|| {
+                    format!("ECHOING: {}", args.message.repeat(args.repeat.unwrap_or(1)))
+                });
                 let structured_content = json!({
                     "echo": echo,
                     "env": env_snapshot.get(env_name),

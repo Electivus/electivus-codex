@@ -34,7 +34,9 @@ class VersionTest(unittest.TestCase):
 
             version.replace_workspace_version(manifest, "1.2.3-beta.4")
 
-            self.assertIn('version = "1.2.3-beta.4"', manifest.read_text(encoding="utf-8"))
+            self.assertIn(
+                'version = "1.2.3-beta.4"', manifest.read_text(encoding="utf-8")
+            )
 
     def test_resolve_upstream_build_version_uses_current_non_placeholder(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -43,7 +45,9 @@ class VersionTest(unittest.TestCase):
             with patch.object(version, "REPO_ROOT", repo):
                 self.assertEqual(version.resolve_upstream_build_version(), "1.2.3")
 
-    def test_resolve_upstream_build_version_uses_highest_release_in_ancestry(self) -> None:
+    def test_resolve_upstream_build_version_uses_highest_release_in_ancestry(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = create_repo(Path(temp_dir), initial_version="0.0.0")
             cargo_toml = repo / "codex-rs" / "Cargo.toml"

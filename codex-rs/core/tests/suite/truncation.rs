@@ -457,9 +457,11 @@ async fn mcp_tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> 
     let server_name = "rmcp";
     let namespace = format!("mcp__{server_name}");
 
-    // Build a very large message to exceed 10KiB once serialized.
-    let large_msg = "long-message-with-newlines-".repeat(6000);
-    let args_json = serde_json::json!({ "message": large_msg });
+    // Keep the model-emitted arguments bounded while the test server expands the result.
+    let args_json = serde_json::json!({
+        "message": "long-message-with-newlines-",
+        "repeat": 6000,
+    });
 
     mount_sse_once(
         &server,
@@ -849,8 +851,7 @@ async fn mcp_tool_call_output_obeys_hard_cap_with_custom_limit() -> Result<()> {
     let call_id = "rmcp-untruncated";
     let server_name = "rmcp";
     let namespace = format!("mcp__{server_name}");
-    let large_msg = "a".repeat(80_000);
-    let args_json = serde_json::json!({ "message": large_msg });
+    let args_json = serde_json::json!({ "message": "a", "repeat": 80_000 });
 
     mount_sse_once(
         &server,
