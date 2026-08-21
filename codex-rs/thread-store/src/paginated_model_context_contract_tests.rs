@@ -9,7 +9,6 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ThreadHistoryMode;
-use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_rollout::RolloutItem;
 use pretty_assertions::assert_eq;
@@ -18,6 +17,7 @@ use crate::AppendThreadItemsParams;
 use crate::LoadThreadHistoryParams;
 use crate::PostgresThreadStore;
 use crate::ThreadStore;
+use crate::model_context_contract_tests::model_context_turn;
 use crate::postgres_contract_tests::PostgresThreadStoreFixture;
 use crate::postgres_contract_tests::create_thread_params;
 
@@ -26,9 +26,16 @@ use crate::postgres_contract_tests::create_thread_params;
 async fn postgres_contract_paginated_model_context_pages_oversized_presentation_suffix()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("paginated_model_context_pages")?;
-    fixture.migrate().await?;
-    let pool = fixture.connect_pool().await?;
-    let store = PostgresThreadStore::new(pool.clone(), fixture.schema.clone());
+    codex_state::initialize_postgres_runtime_state(fixture.config.clone()).await?;
+    let runtime_pool =
+        codex_state::PostgresRuntimeStatePool::connect(fixture.config.clone()).await?;
+    let (pool, schema) = runtime_pool.thread_store_connection();
+    let store = PostgresThreadStore::new(pool.clone(), schema);
+    let statement_timeout: String =
+        sqlx::query_scalar("SELECT current_setting('statement_timeout')")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(statement_timeout, "30s");
     let thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f050")?;
     let cwd = Path::new("/paginated-model-context-pages");
     let mut params = create_thread_params(thread_id);
@@ -53,18 +60,19 @@ async fn postgres_contract_paginated_model_context_pages_oversized_presentation_
         })
         .await?;
 
-    let rollback = RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
-        num_turns: 1,
-    }));
-    append_repeated_item(
-        &pool,
-        &store.tables.history,
-        thread_id,
-        /*first_ordinal*/ 2,
-        /*count*/ 1,
-        &rollback,
-    )
-    .await?;
+    let checkpoint_turn =
+        model_context_turn(thread_id, cwd, "presentation", /*window_number*/ 1);
+    for (ordinal, item) in (2..).zip(&checkpoint_turn) {
+        append_repeated_item(
+            &pool,
+            &store.tables.history,
+            thread_id,
+            ordinal,
+            /*count*/ 1,
+            item,
+        )
+        .await?;
+    }
     let mut expected_items = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id,
@@ -72,6 +80,9 @@ async fn postgres_contract_paginated_model_context_pages_oversized_presentation_
         })
         .await?
         .items;
+    assert_eq!(expected_items.len(), 7);
+    expected_items
+        .retain(|item| !matches!(item, RolloutItem::EventMsg(EventMsg::ItemCompleted(_))));
 
     let large_presentation = completed_agent_message(
         thread_id,
@@ -82,7 +93,7 @@ async fn postgres_contract_paginated_model_context_pages_oversized_presentation_
         &pool,
         &store.tables.history,
         thread_id,
-        /*first_ordinal*/ 3,
+        /*first_ordinal*/ 8,
         /*count*/ 18,
         &large_presentation,
     )
@@ -93,8 +104,8 @@ async fn postgres_contract_paginated_model_context_pages_oversized_presentation_
         &pool,
         &store.tables.history,
         thread_id,
-        /*first_ordinal*/ 21,
-        /*count*/ 43,
+        /*first_ordinal*/ 26,
+        /*count*/ 38,
         &small_presentation,
     )
     .await?;
@@ -102,6 +113,7 @@ async fn postgres_contract_paginated_model_context_pages_oversized_presentation_
     let retained_page_end = warning("retained at page end");
     let retained_page_start = warning("retained at page start");
     let retained_after_gap = warning("retained after ordinal gap");
+    let retained_suffix_end = warning("retained at selected suffix end");
     for (ordinal, item) in [
         (64, &retained_page_end),
         (65, &retained_page_start),
@@ -135,7 +147,12 @@ async fn postgres_contract_paginated_model_context_pages_oversized_presentation_
         &small_presentation,
     )
     .await?;
-    expected_items.extend([retained_page_end, retained_page_start, retained_after_gap]);
+    expected_items.extend([
+        retained_page_end,
+        retained_page_start,
+        retained_after_gap,
+        retained_suffix_end.clone(),
+    ]);
 
     // SessionMeta consumes the first item in the 10,000-item budget. Fill the selected suffix to
     // the remaining 9,999 rows so this contract also protects the constant-query maximum path.
@@ -148,15 +165,21 @@ async fn postgres_contract_paginated_model_context_pages_oversized_presentation_
         &small_presentation,
     )
     .await?;
-
-    let stored_bytes: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT SUM(octet_length(item::text))::bigint FROM {} WHERE thread_id = $1",
-        store.tables.history
-    )))
-    .bind(thread_id.to_string())
-    .fetch_one(&pool)
+    append_repeated_item(
+        &pool,
+        &store.tables.history,
+        thread_id,
+        /*first_ordinal*/ 10_007,
+        /*count*/ 1,
+        &retained_suffix_end,
+    )
     .await?;
-    assert!(stored_bytes > 16 * 1024 * 1024);
+
+    let durable_history_before =
+        durable_history_digest(&pool, &store.tables.history, thread_id).await?;
+    // SessionMeta and the old user message precede the 9,999-row selected suffix.
+    assert_eq!(durable_history_before.0, 10_001);
+    assert!(durable_history_before.1 > 16 * 1024 * 1024);
 
     let actual_items = store
         .load_latest_model_context(LoadThreadHistoryParams {
@@ -169,18 +192,28 @@ async fn postgres_contract_paginated_model_context_pages_oversized_presentation_
         serde_json::to_value(actual_items)?,
         serde_json::to_value(expected_items)?
     );
-    let durable_presentation_items: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT COUNT(*)::bigint FROM {} \
-         WHERE thread_id = $1 AND item #>> '{{payload,type}}' = 'item_completed'",
-        store.tables.history
+    let durable_history_after =
+        durable_history_digest(&pool, &store.tables.history, thread_id).await?;
+    assert_eq!(durable_history_after, durable_history_before);
+
+    runtime_pool.close().await;
+    fixture.cleanup().await
+}
+
+async fn durable_history_digest(
+    pool: &sqlx::PgPool,
+    history_table: &str,
+    thread_id: ThreadId,
+) -> Result<(i64, i64, String), Box<dyn std::error::Error>> {
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT COUNT(*)::bigint, SUM(octet_length(item::text))::bigint, \
+         md5(string_agg(ordinal::text || ':' || item::text, E'\\n' ORDER BY ordinal)) \
+         FROM {history_table} WHERE thread_id = $1"
     )))
     .bind(thread_id.to_string())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(durable_presentation_items, 9_994);
-
-    pool.close().await;
-    fixture.cleanup().await
+    .fetch_one(pool)
+    .await
+    .map_err(Into::into)
 }
 
 fn completed_agent_message(thread_id: ThreadId, turn_id: &str, text: String) -> RolloutItem {

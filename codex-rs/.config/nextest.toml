@@ -37,6 +37,11 @@ filter = 'test(rmcp_client) | test(humanlike_typing_1000_chars_appears_live_no_p
 slow-timeout = { period = "1m", terminate-after = 4 }
 
 [[profile.default.overrides]]
+# This PostgreSQL contract migrates a namespace and loads a 9,999-row bounded suffix.
+filter = 'test(postgres_contract_paginated_model_context_pages_oversized_presentation_suffix)'
+slow-timeout = { period = "1m", terminate-after = 2 }
+
+[[profile.default.overrides]]
 filter = 'test(approval_matrix_covers_all_modes)'
 slow-timeout = { period = "30s", terminate-after = 2 }
 
