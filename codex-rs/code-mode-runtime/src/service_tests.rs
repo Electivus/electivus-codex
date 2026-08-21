@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::Instant;
 
 use super::CellId;
 use super::CodeModeNestedToolCall;
@@ -25,6 +26,8 @@ use pretty_assertions::assert_eq;
 use serde_json::Value as JsonValue;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+
+const ASYNC_PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[test]
 fn resolve_yield_timeout_applies_grace_before_session_limits() {
@@ -278,20 +281,24 @@ async fn zero_yield_limit_is_immediate_and_scoped_to_its_session() {
 }
 
 async fn wait_until_finished<T>(task: &tokio::task::JoinHandle<T>) {
-    for _ in 0..10_000 {
+    let deadline = Instant::now() + ASYNC_PROGRESS_TIMEOUT;
+    while Instant::now() < deadline {
         if task.is_finished() {
             return;
         }
+        std::thread::yield_now();
         tokio::task::yield_now().await;
     }
     panic!("code-mode response did not finish while virtual time was held in the grace period");
 }
 
 async fn wait_until_tool_started(delegate: &ReleasableToolDelegate) {
-    for _ in 0..10_000 {
+    let deadline = Instant::now() + ASYNC_PROGRESS_TIMEOUT;
+    while Instant::now() < deadline {
         if delegate.tool_started.load(Ordering::Acquire) {
             return;
         }
+        std::thread::yield_now();
         tokio::task::yield_now().await;
     }
     panic!("nested code-mode tool did not start");
