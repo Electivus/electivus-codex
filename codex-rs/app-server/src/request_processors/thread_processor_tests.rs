@@ -68,9 +68,9 @@ mod persisted_resume_approval_policy_tests {
                     service_tier: None,
                     approval_policy,
                     approvals_reviewer: ApprovalsReviewer::User,
-                    permission_profile: PermissionProfile::read_only(),
+                    permission_profile: PermissionProfile::read_only().into(),
                     active_permission_profile: None,
-                    cwd: cwd(),
+                    cwd: cwd().into(),
                     reasoning_effort: None,
                     reasoning_summary: None,
                     personality: None,
@@ -100,13 +100,13 @@ mod persisted_resume_approval_policy_tests {
     fn turn_context_item(turn_id: &str, approval_policy: AskForApproval) -> RolloutItem {
         RolloutItem::TurnContext(TurnContextItem {
             turn_id: Some(turn_id.to_string()),
-            cwd: cwd(),
+            cwd: cwd().into(),
             workspace_roots: None,
             current_date: None,
             timezone: None,
             approval_policy,
             approvals_reviewer: None,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            sandbox_policy: SandboxPolicy::new_read_only_policy().into(),
             permission_profile: None,
             network: None,
             file_system_sandbox_policy: None,
@@ -615,8 +615,9 @@ mod thread_processor_behavior_tests {
             agent_role: None,
             agent_path: None,
             git_info: None,
+            repository_identity: None,
             approval_mode: AskForApproval::OnRequest,
-            permission_profile: PermissionProfile::read_only(),
+            permission_profile: PermissionProfile::read_only().into(),
             token_usage: None,
             first_user_message: Some("first user message".to_string()),
             history: None,
@@ -1143,8 +1144,7 @@ mod thread_processor_behavior_tests {
         fs::write(&path, format!("{}\n", serde_json::to_string(&line)?))?;
 
         let summary = read_summary_from_rollout(path.as_path(), "fallback").await?;
-        let fallback_cwd = AbsolutePathBuf::from_absolute_path("/")?;
-        let thread = summary_to_thread(summary, &fallback_cwd);
+        let thread = summary_to_thread(summary);
 
         assert_eq!(thread.agent_nickname, Some("atlas".to_string()));
         assert_eq!(thread.agent_role, Some("explorer".to_string()));
@@ -1288,8 +1288,7 @@ mod thread_processor_behavior_tests {
             /*git_origin_url*/ None,
         );
 
-        let fallback_cwd = AbsolutePathBuf::from_absolute_path("/")?;
-        let thread = summary_to_thread(summary, &fallback_cwd);
+        let thread = summary_to_thread(summary);
 
         assert_eq!(thread.agent_nickname, Some("atlas".to_string()));
         assert_eq!(thread.agent_role, Some("explorer".to_string()));

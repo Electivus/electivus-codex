@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::Path;
+use std::path::PathBuf;
 
 use super::TranscriptPreviewLine;
 use super::TranscriptPreviewSpeaker;
@@ -40,7 +41,10 @@ pub(crate) async fn load_transcript_preview(
             .await
             .map_err(std::io::Error::other)?;
     }
-    let cwd = thread.cwd.as_path();
+    // The markdown parser treats this as lexical display context only; it must never be used for
+    // host filesystem access.
+    let cwd = PathBuf::from(thread.cwd.render_for_ui());
+    let cwd = cwd.as_path();
     let inline_visualization_context = config.and_then(|config| {
         ThreadId::from_string(&thread.id)
             .ok()

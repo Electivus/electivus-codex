@@ -963,6 +963,7 @@ impl AppServerSession {
                         branch: Some(Some(branch)),
                         origin_url: None,
                     }),
+                    is_pinned: None,
                 },
             })
             .await
@@ -3162,6 +3163,7 @@ mod tests {
                 parent_thread_id: None,
                 preview: "hello".to_string(),
                 ephemeral: false,
+                is_pinned: false,
                 section: None,
                 section_entered_at: None,
                 history_mode: Default::default(),
@@ -3171,7 +3173,7 @@ mod tests {
                 recency_at: Some(2),
                 status: ThreadStatus::Idle,
                 path: None,
-                cwd: test_path_buf("/tmp/project").abs(),
+                cwd: test_path_buf("/tmp/project").abs().into(),
                 cli_version: "0.0.0".to_string(),
                 source: codex_app_server_protocol::SessionSource::Cli,
                 can_accept_direct_input: None,

@@ -23,6 +23,7 @@ use codex_protocol::user_input::UserInput;
 use codex_rollout::CompactedItem;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
+use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -595,13 +596,13 @@ fn agent_message(message: &str) -> RolloutItem {
 fn turn_context(root: &Path, turn_id: &str) -> RolloutItem {
     RolloutItem::TurnContext(TurnContextItem {
         turn_id: Some(turn_id.to_string()),
-        cwd: serde_json::from_value(serde_json::json!(root)).expect("absolute cwd"),
+        cwd: PathUri::from_host_native_path(root).expect("absolute cwd"),
         workspace_roots: None,
         current_date: None,
         timezone: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: None,
-        sandbox_policy: SandboxPolicy::new_read_only_policy(),
+        sandbox_policy: SandboxPolicy::new_read_only_policy().into(),
         permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,

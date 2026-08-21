@@ -1,0 +1,517 @@
+# Electivus Linux and Windows release; see .github/workflows/README.md.
+
+name: electivus-release
+
+on:
+  push:
+    tags:
+      - "electivus-v*.*.*"
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    name: Validate Electivus release metadata
+    if: github.repository == 'Electivus/electivus-codex'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      make_latest: ${{ steps.release.outputs.make_latest }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      release_commit: ${{ steps.release.outputs.release_commit }}
+      source_commit: ${{ steps.release.outputs.source_commit }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate tag, version, and release-only commit
+        id: release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+            echo "Electivus releases must run from a tag." >&2
+            exit 1
+          fi
+          if [[ ! "${RELEASE_TAG}" =~ ^electivus-v[0-9]+\.[0-9]+\.[0-9]+(-(alpha(\.[0-9]+){0,2}|beta(\.[0-9]+)?))?$ ]]; then
+            echo "Release tag '${RELEASE_TAG}' does not match electivus-vX.Y.Z[-alpha.N[.N]|-beta[.N]]." >&2
+            exit 1
+          fi
+
+          version="${RELEASE_TAG#electivus-v}"
+          cargo_version="$(sed -nE 's/^version = "([^"]+)"/\1/p' codex-rs/Cargo.toml | head -n1)"
+          if [[ "${version}" != "${cargo_version}" ]]; then
+            echo "Release tag version ${version} does not match Cargo version ${cargo_version}." >&2
+            exit 1
+          fi
+
+          release_commit="$(git rev-list -n1 "${RELEASE_TAG}")"
+          checkout_commit="$(git rev-parse HEAD)"
+          if [[ "${release_commit}" != "${checkout_commit}" ]]; then
+            echo "Checked out ${checkout_commit} instead of release commit ${release_commit}." >&2
+            exit 1
+          fi
+
+          parent_count="$(git rev-list --parents -n1 HEAD | awk '{ print NF - 1 }')"
+          if [[ "${parent_count}" != "1" ]]; then
+            echo "The release-only commit must have exactly one parent." >&2
+            exit 1
+          fi
+          source_commit="$(git rev-parse HEAD^)"
+          source_version="$(git show "${source_commit}:codex-rs/Cargo.toml" | sed -nE 's/^version = "([^"]+)"/\1/p' | head -n1)"
+          if [[ "${source_version}" != "0.0.0" ]]; then
+            echo "The source commit must retain the fork development version 0.0.0." >&2
+            exit 1
+          fi
+
+          mapfile -t changed_files < <(git diff --name-only "${source_commit}" "${release_commit}")
+          if [[ "${#changed_files[@]}" != "1" || "${changed_files[0]}" != "codex-rs/Cargo.toml" ]]; then
+            echo "The release-only commit must change only codex-rs/Cargo.toml." >&2
+            printf 'Changed file: %s\n' "${changed_files[@]}" >&2
+            exit 1
+          fi
+          read -r additions deletions changed_path < <(git diff --numstat "${source_commit}" "${release_commit}")
+          if [[ "${additions}" != "1" || "${deletions}" != "1" || "${changed_path}" != "codex-rs/Cargo.toml" ]]; then
+            echo "The release-only commit must replace only the workspace version line." >&2
+            exit 1
+          fi
+
+          if [[ "${version}" == *-* ]]; then
+            prerelease=true
+            make_latest=false
+          else
+            prerelease=false
+            make_latest=true
+          fi
+
+          {
+            echo "make_latest=${make_latest}"
+            echo "prerelease=${prerelease}"
+            echo "release_commit=${release_commit}"
+            echo "source_commit=${source_commit}"
+            echo "version=${version}"
+          } >> "${GITHUB_OUTPUT}"
+
+  build-linux:
+    name: Build Linux - ${{ matrix.target }} - ${{ matrix.bundle }}
+    needs: metadata
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            bundle: primary
+            artifact_name: x86_64-unknown-linux-musl
+            binaries: "codex codex-code-mode-host codex-responses-api-proxy bwrap"
+            wheel_platform: manylinux_2_17_x86_64
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            bundle: app-server
+            artifact_name: x86_64-unknown-linux-musl-app-server
+            binaries: "codex-app-server codex-code-mode-host"
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            bundle: primary
+            artifact_name: aarch64-unknown-linux-musl
+            binaries: "codex codex-code-mode-host codex-responses-api-proxy bwrap"
+            wheel_platform: manylinux_2_17_aarch64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            bundle: app-server
+            artifact_name: aarch64-unknown-linux-musl-app-server
+            binaries: "codex-app-server codex-code-mode-host"
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ needs.metadata.outputs.release_commit }}
+
+      - name: Install Linux release dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            binutils \
+            libcap-dev \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Use hermetic Cargo home
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_home="${GITHUB_WORKSPACE}/.cargo-home"
+          mkdir -p "${cargo_home}/bin"
+          echo "CARGO_HOME=${cargo_home}" >> "${GITHUB_ENV}"
+          echo "${cargo_home}/bin" >> "${GITHUB_PATH}"
+          : > "${cargo_home}/config.toml"
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.0
+          use-cache: false
+
+      - name: Install musl build tools
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Disable aws-lc jitter entropy
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "${GITHUB_ENV}"
+          target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET}"
+          target_no_jitter="${target_no_jitter//-/_}"
+          echo "${target_no_jitter}=1" >> "${GITHUB_ENV}"
+
+      - name: Configure rusty_v8 artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Build bwrap and export digest
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo build --target "${TARGET}" --release --timings --bin bwrap
+
+          bwrap_path="target/${TARGET}/release/bwrap"
+          test -f "${bwrap_path}"
+          strip --strip-debug --strip-unneeded "${bwrap_path}"
+          digest="$(sha256sum "${bwrap_path}" | awk '{ print $1 }')"
+          echo "CODEX_BWRAP_SHA256=${digest}" >> "${GITHUB_ENV}"
+
+      - name: Build release binaries
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          build_args=()
+          for binary in ${{ matrix.binaries }}; do
+            if [[ "${binary}" != "bwrap" ]]; then
+              build_args+=(--bin "${binary}")
+            fi
+          done
+          cargo build --target "${TARGET}" --release --timings "${build_args[@]}"
+
+      - name: Upload Cargo timings
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: cargo-timings-electivus-${{ matrix.target }}-${{ matrix.bundle }}
+          path: codex-rs/target/**/cargo-timings/cargo-timing.html
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Archive symbols and strip binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          binaries=()
+          for binary in ${{ matrix.binaries }}; do
+            if [[ "${binary}" != "bwrap" ]]; then
+              binaries+=("${binary}")
+            fi
+          done
+          bash "${GITHUB_WORKSPACE}/.github/scripts/archive-release-symbols-and-strip-binaries.sh" \
+            --target "${{ matrix.target }}" \
+            --artifact-name "${{ matrix.artifact_name }}" \
+            --release-dir "target/${{ matrix.target }}/release" \
+            --archive-dir "symbols-dist/${{ matrix.artifact_name }}" \
+            --binaries "${binaries[*]}"
+
+      - name: Upload symbols
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: electivus-linux-${{ matrix.artifact_name }}-symbols
+          path: codex-rs/symbols-dist/${{ matrix.artifact_name }}/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Sign Linux binaries
+        uses: ./.github/actions/linux-code-sign
+        with:
+          target: ${{ matrix.target }}
+          artifacts-dir: ${{ github.workspace }}/codex-rs/target/${{ matrix.target }}/release
+          binaries: ${{ matrix.binaries }}
+
+      - name: Stage Linux artifacts
+        shell: bash
+        env:
+          BUNDLE: ${{ matrix.bundle }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          dest="dist/${TARGET}"
+          mkdir -p "${dest}"
+
+          for binary in ${{ matrix.binaries }}; do
+            if [[ "${BUNDLE}" == "app-server" && "${binary}" == "codex-code-mode-host" ]]; then
+              continue
+            fi
+            cp "target/${TARGET}/release/${binary}" "${dest}/${binary}-${TARGET}"
+            cp "target/${TARGET}/release/${binary}.sigstore" \
+              "${dest}/${binary}-${TARGET}.sigstore"
+          done
+
+      - name: Build Codex package archives
+        shell: bash
+        env:
+          BUNDLE: ${{ matrix.bundle }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          bash "${GITHUB_WORKSPACE}/.github/scripts/build-codex-package-archive.sh" \
+            --target "${TARGET}" \
+            --bundle "${BUNDLE}" \
+            --entrypoint-dir "target/${TARGET}/release" \
+            --archive-dir "dist/${TARGET}"
+
+      - name: Build Python runtime wheel
+        if: matrix.bundle == 'primary'
+        shell: bash
+        env:
+          CODEX_VERSION: ${{ needs.metadata.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          WHEEL_PLATFORM: ${{ matrix.wheel_platform }}
+        run: |
+          set -euo pipefail
+          python3 -m venv "${RUNNER_TEMP}/python-runtime-build-venv"
+          "${RUNNER_TEMP}/python-runtime-build-venv/bin/python" -m pip install build
+
+          stage_dir="${RUNNER_TEMP}/openai-codex-cli-bin-${TARGET}"
+          wheel_dir="${GITHUB_WORKSPACE}/python-runtime-dist/${TARGET}"
+          python3 "${GITHUB_WORKSPACE}/sdk/python/scripts/update_sdk_artifacts.py" \
+            stage-runtime \
+            "${stage_dir}" \
+            "dist/${TARGET}/codex-package-${TARGET}.tar.gz" \
+            --codex-version "${CODEX_VERSION}" \
+            --platform-tag "${WHEEL_PLATFORM}"
+          "${RUNNER_TEMP}/python-runtime-build-venv/bin/python" \
+            -m build --wheel --outdir "${wheel_dir}" "${stage_dir}"
+
+      - name: Upload Python runtime wheel
+        if: matrix.bundle == 'primary'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: electivus-python-runtime-${{ matrix.target }}
+          path: python-runtime-dist/${{ matrix.target }}/*.whl
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Compress standalone binaries
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          dest="dist/${TARGET}"
+          for path in "${dest}"/*; do
+            name="$(basename "${path}")"
+            if [[ "${name}" == *.tar.gz || "${name}" == *.tar.zst || "${name}" == *.sigstore ]]; then
+              continue
+            fi
+            tar -C "${dest}" -czf "${dest}/${name}.tar.gz" "${name}"
+            zstd -T0 -19 --rm "${path}"
+          done
+
+      - name: Upload Linux release assets
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: electivus-linux-${{ matrix.artifact_name }}
+          path: codex-rs/dist/${{ matrix.target }}/*
+          if-no-files-found: error
+          retention-days: 30
+
+  build-windows:
+    name: Build unsigned Windows assets
+    needs: metadata
+    permissions:
+      contents: write
+    uses: ./.github/workflows/rust-release-windows-unsigned.yml
+    with:
+      release_tag: ${{ github.ref_name }}
+      publish_release: false
+
+  publish:
+    name: Publish Electivus GitHub release
+    needs:
+      - metadata
+      - build-linux
+      - build-windows
+    if: >-
+      ${{
+        always() &&
+        needs.metadata.result == 'success' &&
+        needs.build-linux.result == 'success' &&
+        needs.build-windows.result == 'success'
+      }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      release_url: ${{ steps.publish.outputs.url }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ needs.metadata.outputs.release_commit }}
+
+      - name: Download Linux release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: electivus-linux-*
+          merge-multiple: true
+          path: dist
+
+      - name: Download Windows release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: "*-pc-windows-msvc-unsigned"
+          merge-multiple: true
+          path: dist
+
+      - name: Download Python runtime wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: "*python-runtime*"
+          merge-multiple: true
+          path: dist
+
+      - name: Add package checksums and config schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="dist/codex-package_SHA256SUMS"
+          find dist -type f \
+            \( -name 'codex-package-*.tar.gz' -o -name 'codex-app-server-package-*.tar.gz' \) \
+            -print |
+            sort |
+            while IFS= read -r archive; do
+              sha256sum "${archive}" |
+                awk -v name="$(basename "${archive}")" '{ print $1 "  " name }'
+            done > "${manifest}"
+          test -s "${manifest}"
+          cp codex-rs/core/config.schema.json dist/config-schema.json
+
+      - name: Write release notes
+        shell: bash
+        env:
+          RELEASE_COMMIT: ${{ needs.metadata.outputs.release_commit }}
+          SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          git log -1 --format=%B "${RELEASE_COMMIT}" > release-notes.md
+          printf "%s\n" \
+            "" \
+            "## Build scope" \
+            "" \
+            "- Linux x86_64 and ARM64 MUSL artifacts are keylessly signed with Sigstore." \
+            "- Windows x64 and ARM64 artifacts are unsigned; Windows may show an unverified-publisher warning." \
+            "- macOS artifacts and external package-registry publication are intentionally outside this release." \
+            >> release-notes.md
+          printf "\nSource commit: %s  \nRelease commit: %s\n" \
+            "${SOURCE_COMMIT}" \
+            "${RELEASE_COMMIT}" >> release-notes.md
+
+      - name: Publish GitHub release
+        id: publish
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
+        with:
+          body_path: release-notes.md
+          fail_on_unmatched_files: true
+          files: dist/**
+          make_latest: ${{ needs.metadata.outputs.make_latest }}
+          name: Electivus Codex ${{ needs.metadata.outputs.version }}
+          overwrite_files: true
+          prerelease: ${{ needs.metadata.outputs.prerelease }}
+          tag_name: ${{ github.ref_name }}
+
+  verify:
+    name: Verify published Electivus release
+    needs:
+      - metadata
+      - publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Verify release classification and required assets
+        shell: bash
+        env:
+          EXPECTED_PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
+          jq -e \
+            --arg tag "${RELEASE_TAG}" \
+            --argjson prerelease "${EXPECTED_PRERELEASE}" \
+            '.tag_name == $tag and .draft == false and .prerelease == $prerelease' \
+            <<< "${release}" > /dev/null
+
+          required_assets=(
+            codex-package_SHA256SUMS
+            config-schema.json
+            codex-package-aarch64-pc-windows-msvc.tar.gz
+            codex-package-aarch64-unknown-linux-musl.tar.gz
+            codex-package-x86_64-pc-windows-msvc.tar.gz
+            codex-package-x86_64-unknown-linux-musl.tar.gz
+            codex-aarch64-pc-windows-msvc.exe.zip
+            codex-aarch64-unknown-linux-musl.zst
+            codex-x86_64-pc-windows-msvc.exe.zip
+            codex-x86_64-unknown-linux-musl.zst
+          )
+          for asset in "${required_assets[@]}"; do
+            jq -e --arg asset "${asset}" \
+              'any(.assets[]; .name == $asset and .state == "uploaded")' \
+              <<< "${release}" > /dev/null
+          done
+          jq -e '[.assets[].name | select(contains("apple-darwin"))] | length == 0' \
+            <<< "${release}" > /dev/null
+
+          release_url="$(jq -r '.html_url' <<< "${release}")"
+          asset_count="$(jq '.assets | length' <<< "${release}")"
+          {
+            echo "## Electivus release verified"
+            echo
+            echo "- Release: ${release_url}"
+            echo "- Assets: ${asset_count}"
+            echo "- Prerelease: ${EXPECTED_PRERELEASE}"
+          } >> "${GITHUB_STEP_SUMMARY}"

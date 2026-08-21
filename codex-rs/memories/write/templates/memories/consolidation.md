@@ -116,6 +116,23 @@ Phase 2 has two operating styles:
 - INIT phase: first-time build of Phase 2 artifacts.
 - INCREMENTAL UPDATE: integrate new memory into existing artifacts.
 
+Repository and checkout scoping:
+
+- Repository identity is the credential-free canonical `repository` value in mechanical rollout
+  metadata.
+- Repository scope is applicability shared by rollouts with the same Repository identity.
+- Checkout scope is applicability specific to a rollout's `cwd`; it remains a qualifier whenever
+  known and is the complete fallback when `repository` is absent.
+- Matching Repository identity removes `cwd` as an automatic barrier, but it is permission to
+  consolidate, not an instruction to merge. Task or workflow affinity is still required, and
+  unrelated task families in the same Repository scope must remain independently routable.
+- Different Repository identities, including fork and upstream origins, remain separate for
+  repository-specific knowledge. Evidence may cross Repository scopes only when it is explicitly
+  repository-agnostic, such as a stable global workflow preference.
+- Current mechanical repository provenance is authoritative over repository values in generated
+  extraction-time frontmatter. Never synthesize `unknown`, an empty identity, a local path, or a
+  cwd-derived repository.
+
 Primary inputs (always read these, if exists):
 Under `{{ memory_root }}/`:
 
@@ -128,7 +145,8 @@ Under `{{ memory_root }}/`:
     important older context.
   - source of rollout-level metadata needed for MEMORY.md `### rollout_summary_files`
     annotations;
-    you should be able to find `cwd`, `rollout_path`, and `updated_at` there.
+    you should be able to find `repository` (when known), `cwd`, `rollout_path`, and `updated_at`
+    there.
 - `MEMORY.md`
   - merged memories; produce a lightly clustered version if applicable
 - `rollout_summaries/*.md`
@@ -205,16 +223,16 @@ and rich enough to reuse without reopening raw rollout logs.
 
 Each memory block MUST start with:
 
-# Task Group: <cwd / project / workflow / detail-task family; broad but distinguishable>
+# Task Group: <repository / project / workflow / detail-task family; broad but distinguishable>
 
 scope: <what this block covers, when to use it, and notable boundaries>
-applies_to: cwd=<primary working directory, cwd family, or workflow scope>; reuse_rule=<when this memory is safe to reuse vs when to treat it as checkout-specific or time specific>
+applies_to: repository=<Repository identity when known>; cwd=<primary working directory or Checkout scope when known>; reuse_rule=<when this memory is safe to reuse vs when to treat it as checkout-specific or time specific>
 
 - `Task Group` is for retrieval. Choose granularity based on memory density:
-  cwd / project / workflow / detail-task family.
+  repository / project / workflow / detail-task family.
 - `scope:` is for scanning. Keep it short and operational.
-- `applies_to:` is mandatory. Use it to preserve cwd / checkout boundaries so future
-  agents do not confuse similar tasks from different working directories.
+- `applies_to:` is mandatory. Repository-backed blocks require repository, cwd, and reuse_rule
+  whenever those values are known. When repository is absent, use cwd as the complete scope.
 
 Body format (strict):
 
@@ -301,7 +319,11 @@ Schema rules (strict):
   - If a rollout summary is reused across tasks/blocks, each placement should add distinct
     task-local routing value or support a distinct block-level preference / reusable-knowledge / failure-shield cluster (not copy-pasted repetition).
   - Do not cluster on keyword overlap alone.
-  - Default to separating memories across different cwd contexts when the task wording looks similar.
+  - Different Checkout scopes may be consolidated when Repository identity matches and task or
+    workflow affinity exists; matching repository alone never forces a merge.
+  - Default to separating repository-specific memories across different Repository identities,
+    including fork and upstream origins.
+  - Cross-repository consolidation is allowed only for explicitly repository-agnostic evidence.
   - When in doubt, preserve boundaries (separate tasks/blocks) rather than over-cluster.
 - C) Provenance and metadata
   - Every `## Task <n>` section must include `### rollout_summary_files` and `### keywords`.
@@ -314,8 +336,9 @@ Schema rules (strict):
   - Treat task-level `Failures and how to do differently:` from Phase 1 as the main source for
     block-level `## Failures and how to do differently`.
   - `### rollout_summary_files` must be task-local (not a block-wide catch-all list).
-  - Each rollout annotation must include `cwd=<path>`, `rollout_path=<path>`, and
-    `updated_at=<timestamp>`.
+  - Each rollout annotation must include `repository=<Repository identity>` when supplied by
+    mechanical rollout metadata, plus `cwd=<path>`, `rollout_path=<path>`,
+    `updated_at=<timestamp>`, and `thread_id=<thread_id>`.
     If missing from a rollout summary, recover them from `raw_memories.md`.
   - Major block-level guidance should be traceable to rollout summaries listed in the task
     sections and, when useful, should include task refs.
@@ -578,7 +601,9 @@ Treat it as a dense routing/index layer, not a mini-handbook:
 
 Topic selection and quality rules:
 
-- Organize the index first by cwd / project scope, then by topic.
+- For repository-backed memory, organize the index by repository or practical project scope first,
+  then by topic. Include raw `cwd` only when it improves routing or communicates Checkout
+  sensitivity. For memory without repository, use cwd as the complete scope.
 - Split the index into a recent high-utility window and older topics.
 - Do not target a fixed topic count. Include informative topics and omit low-signal noise.
 - Keep the index current. Feel free to restructure, rename, merge, or delete topics when the
@@ -590,10 +615,11 @@ Topic selection and quality rules:
 - Keywords must be representative and directly searchable in `MEMORY.md`.
   Prefer exact strings that a future agent can grep for (repo/project names, user query phrases,
   tool names, error strings, commands, file paths, APIs/contracts). Avoid vague synonyms.
-- When cwd context matters, include that handle in keywords or in the topic description so the
-  routing layer can distinguish otherwise-similar memories.
-- Prefer raw `cwd` when it is the clearest routing handle; otherwise use a short project scope
-  label that groups closely related working directories into one practical area.
+- For repository-backed memory, prefer a Repository identity or short practical-project label as
+  the scope heading. Include raw `cwd` in keywords or descriptions only when Checkout scope
+  distinguishes otherwise-similar memories.
+- For memory without Repository identity, use raw `cwd` as the complete scope and primary routing
+  handle.
 - Use source-faithful topic labels and descriptions:
   - prefer labels built from the rollout/task wording over newly invented abstract categories;
   - prefer exact phrases from `description:`, `task:`, and user wording when those phrases are
@@ -606,7 +632,7 @@ Required subsection structure (in this order):
 After the top-level sections `## User Profile`, `## User preferences`, and `## General Tips`,
 structure `## What's in Memory` like this:
 
-### <cwd / project scope>
+### <repository / practical project scope, or cwd fallback>
 
 #### <most recent memory day within this scope: YYYY-MM-DD>
 
@@ -614,8 +640,8 @@ Recent Active Memory Window behavior (scope-first, then day-ordered):
 
 - Define a "memory day" as a calendar date (derived from `updated_at`) that has at least one
   represented memory/rollout in the current memory set.
-- Build the recent window from the most recent meaningful topics first, then group those topics
-  by their best cwd / project scope.
+- Build the recent window from the most recent meaningful topics first, then group repository-backed
+  topics by Repository identity or practical project scope and repository-less topics by cwd.
 - Within each scope, order day subsections by recency.
 - If a scope has only one meaningful recent day, include only that day for that scope.
 - For each recent-day subsection inside a scope, prioritize informative, likely-to-recur topics and make
@@ -635,16 +661,16 @@ Recent Active Memory Window behavior (scope-first, then day-ordered):
 Recent-topic format:
 
 - <topic>: <keyword1>, <keyword2>, <keyword3>, ...
-  - desc: <brief description of what is inside this topic, when to search it first, and any cwd applicability needed for routing>
+  - desc: <brief description of what is inside this topic, when to search it first, and any repository/project applicability or checkout-sensitive cwd needed for routing>
   - learnings: <one dense line of topic-local takeaways / decision triggers / updates worth checking first; avoid overlap with `## User preferences` and `## General Tips`>
 
-### <cwd / project scope>
+### <repository / practical project scope, or cwd fallback>
 
 #### <most recent memory day within this scope: YYYY-MM-DD>
 
 Use the same format and keep it informative.
 
-### <cwd / project scope>
+### <repository / practical project scope, or cwd fallback>
 
 #### <most recent memory day within this scope: YYYY-MM-DD>
 
@@ -654,14 +680,15 @@ Use the same format and keep it informative.
 
 All remaining high-signal topics not placed in the recent scope/day subsections.
 Avoid duplicating recent topics. Keep these compact and retrieval-oriented.
-Organize this section by cwd / project scope, then by durable task family.
+Organize repository-backed topics by Repository identity or practical project scope, then by
+durable task family. Organize repository-less topics by cwd fallback, then by durable task family.
 
 Older-topic format (compact):
 
-#### <cwd / project scope>
+#### <repository / practical project scope, or cwd fallback>
 
 - <topic>: <keyword1>, <keyword2>, <keyword3>, ...
-  - desc: <clear and specific description of what is inside this topic, when to use it, and explicit applicability text including `cwd=...` when checkout-sensitive>
+  - desc: <clear and specific description of what is inside this topic, when to use it, and explicit repository/project applicability plus `cwd=...` when checkout-sensitive>
 
 Notes:
 

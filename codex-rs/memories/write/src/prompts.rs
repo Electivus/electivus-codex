@@ -1,4 +1,5 @@
 use crate::memory_extensions_root;
+use crate::repository::RepositoryIdentity;
 use codex_protocol::openai_models::ModelInfo;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::truncate_text;
@@ -105,6 +106,28 @@ pub fn build_stage_one_input_message(
     rollout_cwd: &Path,
     rollout_contents: &str,
 ) -> anyhow::Result<String> {
+    build_stage_one_input_message_with_context(
+        model_info,
+        StageOneRolloutContext {
+            rollout_path,
+            rollout_cwd,
+            repository: None,
+        },
+        rollout_contents,
+    )
+}
+
+pub(crate) struct StageOneRolloutContext<'a> {
+    pub(crate) rollout_path: &'a Path,
+    pub(crate) rollout_cwd: &'a Path,
+    pub(crate) repository: Option<&'a RepositoryIdentity>,
+}
+
+pub(crate) fn build_stage_one_input_message_with_context(
+    model_info: &ModelInfo,
+    context: StageOneRolloutContext<'_>,
+    rollout_contents: &str,
+) -> anyhow::Result<String> {
     let rollout_token_limit = model_info
         .resolved_context_window()
         .and_then(|limit| (limit > 0).then_some(limit))
@@ -117,11 +140,16 @@ pub fn build_stage_one_input_message(
         TruncationPolicy::Tokens(rollout_token_limit),
     );
 
-    let rollout_path = rollout_path.display().to_string();
-    let rollout_cwd = rollout_cwd.display().to_string();
+    let rollout_path = context.rollout_path.display().to_string();
+    let rollout_cwd = context.rollout_cwd.display().to_string();
+    let repository_context = context
+        .repository
+        .map(|repository| format!("- repository: {}\n", repository.as_str()))
+        .unwrap_or_default();
     Ok(STAGE_ONE_INPUT_TEMPLATE.render([
         ("rollout_path", rollout_path.as_str()),
         ("rollout_cwd", rollout_cwd.as_str()),
+        ("repository_context", repository_context.as_str()),
         ("rollout_contents", truncated_rollout_contents.as_str()),
     ])?)
 }

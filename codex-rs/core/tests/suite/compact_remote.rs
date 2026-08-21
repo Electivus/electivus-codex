@@ -23,6 +23,7 @@ use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::AgentPath;
+use codex_protocol::ResponseItemId;
 use codex_protocol::account::PlanType as AccountPlanType;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
@@ -580,7 +581,7 @@ async fn remote_compact_v2_retains_only_client_developer_messages_when_enabled(
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = TestCodexHarness::with_auto_env_builder(
+    let builder = || {
         test_codex()
             .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
             .with_config(move |config| {
@@ -594,41 +595,65 @@ async fn remote_compact_v2_retains_only_client_developer_messages_when_enabled(
                         .enable(Feature::RetainClientDeveloperMessages)
                         .expect("client developer retention should be configurable");
                 }
-            }),
-    )
-    .await?;
-    let developer = |text: &str| ResponseItem::Message {
-        id: None,
+            })
+    };
+    let harness = TestCodexHarness::with_auto_env_builder(builder()).await?;
+    let injected_sections = [
+        format!("INJECTED_CLIENT_DEVELOPER_A:{}", "a".repeat(25_000)),
+        format!("INJECTED_CLIENT_DEVELOPER_B:{}", "b".repeat(25_000)),
+    ];
+    let developer = ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "client-developer")),
         role: "developer".to_string(),
-        content: vec![ContentItem::InputText {
-            text: text.to_string(),
-        }],
+        content: injected_sections
+            .iter()
+            .cloned()
+            .map(|text| ContentItem::InputText { text })
+            .collect(),
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     };
+    assert!(serde_json::to_vec(&developer)?.len() > 40_000);
     let codex = &harness.test().codex;
     let rollout_path = codex.rollout_path().context("rollout path")?;
-    codex
-        .inject_response_items(vec![developer("INJECTED_CLIENT_DEVELOPER")])
-        .await?;
-    let response_mock = responses::mount_sse_sequence(
-        harness.server(),
-        vec![
-            sse(vec![responses::ev_completed("before-compact")]),
-            sse(vec![
-                json!({
-                    "type": "response.output_item.done",
-                    "item": {
-                        "type": "compaction",
-                        "encrypted_content": "CLIENT_RETENTION_SUMMARY",
-                    },
-                }),
-                responses::ev_completed("compact"),
-            ]),
-            sse(vec![responses::ev_completed("after-compact")]),
-        ],
-    )
+    let home = harness.test().home.clone();
+    codex.inject_response_items(vec![developer.clone()]).await?;
+    let raw_item = wait_for_event_match(codex, |event| match event {
+        EventMsg::RawResponseItem(raw)
+            if matches!(
+                &raw.item,
+                ResponseItem::Message { content, .. }
+                    if content.iter().any(|content| matches!(
+                        content,
+                        ContentItem::InputText { text }
+                            if text.starts_with("INJECTED_CLIENT_DEVELOPER_A")
+                    ))
+            ) =>
+        {
+            Some(raw.item.clone())
+        }
+        _ => None,
+    })
     .await;
+    assert_eq!(responses::strip_metadata(raw_item), developer);
+    let mut response_sequence = vec![
+        sse(vec![responses::ev_completed("before-compact")]),
+        sse(vec![
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "compaction",
+                    "encrypted_content": "CLIENT_RETENTION_SUMMARY",
+                },
+            }),
+            responses::ev_completed("compact"),
+        ]),
+        sse(vec![responses::ev_completed("after-compact")]),
+    ];
+    if enabled {
+        response_sequence.push(sse(vec![responses::ev_completed("after-resume")]));
+    }
+    let response_mock = responses::mount_sse_sequence(harness.server(), response_sequence).await;
 
     harness.test().submit_turn("before compact").await?;
     codex.submit(Op::Compact).await?;
@@ -638,7 +663,7 @@ async fn remote_compact_v2_retains_only_client_developer_messages_when_enabled(
     let requests = response_mock.requests();
     let follow_up = requests.last().context("follow-up request")?;
     assert_eq!(
-        follow_up.body_contains_text("INJECTED_CLIENT_DEVELOPER"),
+        follow_up.body_contains_text("INJECTED_CLIENT_DEVELOPER_A"),
         enabled
     );
     requests
@@ -664,6 +689,64 @@ async fn remote_compact_v2_retains_only_client_developer_messages_when_enabled(
         })
         .count();
     assert_eq!(retained_client_developers, usize::from(enabled));
+    let retained_sections = replacement_history
+        .iter()
+        .filter(|item| {
+            item.metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.client_authored)
+        })
+        .filter_map(|item| match &item.item {
+            ResponseItem::Message { content, .. } => Some(content),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|content| match content {
+            ContentItem::InputText { text } if text.starts_with("INJECTED_CLIENT_DEVELOPER_") => {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained_sections,
+        if enabled {
+            injected_sections.iter().map(String::as_str).collect()
+        } else {
+            Vec::new()
+        }
+    );
+
+    if enabled {
+        let resumed = builder()
+            .resume(harness.server(), home, rollout_path)
+            .await?;
+        resumed.submit_turn("after resume").await?;
+        let requests = response_mock.requests();
+        let resumed_request = requests.last().context("resumed request")?;
+        let resumed_input = resumed_request.input();
+        assert!(
+            resumed_input
+                .iter()
+                .all(|item| serde_json::to_vec(item).is_ok_and(|item| item.len() <= 40_000))
+        );
+        let resumed_sections = resumed_input
+            .iter()
+            .filter(|item| item.get("role").and_then(Value::as_str) == Some("developer"))
+            .filter_map(|item| item.get("content").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|content| content.get("text").and_then(Value::as_str))
+            .filter(|text| text.starts_with("INJECTED_CLIENT_DEVELOPER_"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            resumed_sections,
+            injected_sections
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        resumed.codex.shutdown_and_wait().await?;
+    }
 
     Ok(())
 }

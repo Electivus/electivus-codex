@@ -4,6 +4,7 @@ use pretty_assertions::assert_eq;
 
 use super::MAX_CACHED_RUSTLS_DESTINATIONS;
 use super::RustlsClientCache;
+use super::SCHANNEL_ILLEGAL_MESSAGE_ERROR;
 use super::SCHANNEL_PROTOCOL_VERSION_ERROR;
 use super::has_retryable_tls_error;
 use crate::HttpClientBuilder;
@@ -25,6 +26,11 @@ fn recognizes_platform_specific_tls_protocol_negotiation_failures() {
         ),
         ("Schannel protocol error 0x80090302", true),
         ("SCHANNEL PROTOCOL ERROR 0X80090302", true),
+        (
+            "The message received was unexpected or badly formatted. (os error -2146893018)",
+            true,
+        ),
+        ("Schannel protocol error 0x80090326", true),
         ("certificate validation failed: bad protocol version", false),
         ("bad protocol version: certificate has expired", false),
         (
@@ -40,6 +46,7 @@ fn recognizes_platform_specific_tls_protocol_negotiation_failures() {
             false,
         ),
         ("certificate validation failed: 0x80090302", false),
+        ("certificate validation failed: 0x80090326", false),
         ("unknown issuer", false),
         ("self-signed certificate", false),
         ("hostname mismatch", false),
@@ -67,14 +74,16 @@ fn recognizes_platform_specific_tls_protocol_negotiation_failures() {
 #[test]
 fn recognizes_schannel_protocol_version_error_codes() {
     let protocol_error = io::Error::from_raw_os_error(SCHANNEL_PROTOCOL_VERSION_ERROR);
+    let illegal_message_error = io::Error::from_raw_os_error(SCHANNEL_ILLEGAL_MESSAGE_ERROR);
     let another_schannel_error = io::Error::from_raw_os_error(/*code*/ -2_146_893_007);
 
     assert_eq!(
         (
             has_retryable_tls_error(&protocol_error),
+            has_retryable_tls_error(&illegal_message_error),
             has_retryable_tls_error(&another_schannel_error),
         ),
-        (true, false)
+        (true, true, false)
     );
 }
 
@@ -85,6 +94,8 @@ fn certificate_errors_in_an_error_source_never_enable_fallback() {
         "certificate verification failed: tlsv1 alert protocol version",
         "certificate verification failed (os error -2146893054)",
         "certificate verification failed: 0x80090302",
+        "certificate verification failed (os error -2146893018)",
+        "certificate verification failed: 0x80090326",
     ] {
         let error = io::Error::other(io::Error::other(message));
 

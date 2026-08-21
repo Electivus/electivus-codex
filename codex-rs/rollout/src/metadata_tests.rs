@@ -14,6 +14,8 @@ use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_state::BackfillClaimOutcome;
+use codex_state::BackfillLeaseUpdate;
 use codex_state::BackfillStatus;
 use codex_state::ThreadMetadataBuilder;
 use codex_utils_absolute_path::test_support::PathExt;
@@ -22,6 +24,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -162,6 +165,11 @@ async fn extract_metadata_from_rollout_returns_latest_memory_mode() {
         multi_agent_version: None,
         ..session_meta.clone()
     };
+    let ancestor_meta = SessionMeta {
+        id: ThreadId::from_string(&Uuid::new_v4().to_string()).expect("ancestor thread id"),
+        memory_mode: Some("disabled".to_string()),
+        ..session_meta.clone()
+    };
     let lines = vec![
         RolloutLine {
             timestamp: "2026-01-27T12:34:56Z".to_string(),
@@ -176,6 +184,14 @@ async fn extract_metadata_from_rollout_returns_latest_memory_mode() {
             ordinal: None,
             item: RolloutItem::SessionMeta(SessionMetaLine {
                 meta: polluted_meta,
+                git: None,
+            }),
+        },
+        RolloutLine {
+            timestamp: "2026-01-27T12:36:00Z".to_string(),
+            ordinal: None,
+            item: RolloutItem::SessionMeta(SessionMetaLine {
+                meta: ancestor_meta,
                 git: None,
             }),
         },
@@ -257,17 +273,32 @@ async fn backfill_sessions_resumes_from_watermark_and_marks_complete() {
     .await
     .expect("initialize runtime");
     let first_watermark = backfill_watermark_for_path(codex_home.as_path(), first_path.as_path());
-    runtime.mark_backfill_running().await.expect("mark running");
-    runtime
-        .checkpoint_backfill(first_watermark.as_str())
+    let coordinator = runtime.backfill_coordinator();
+    let lease = match coordinator
+        .try_claim("previous-worker", Duration::from_secs(60))
         .await
-        .expect("checkpoint first watermark");
-    tokio::time::sleep(std::time::Duration::from_secs(
-        (BACKFILL_LEASE_SECONDS + 1) as u64,
-    ))
-    .await;
+        .expect("claim previous worker")
+    {
+        BackfillClaimOutcome::Claimed { lease, .. } => lease,
+        outcome => panic!("expected claimed lease, got {outcome:?}"),
+    };
+    assert_eq!(
+        coordinator
+            .checkpoint(&lease, first_watermark.as_str(), Duration::ZERO)
+            .await
+            .expect("checkpoint first watermark"),
+        BackfillLeaseUpdate::Applied
+    );
 
-    backfill_sessions(runtime.as_ref(), codex_home.as_path(), "test-provider").await;
+    let outcome = backfill_sessions_with_lease(
+        runtime.as_ref(),
+        codex_home.as_path(),
+        "test-provider",
+        Duration::from_secs(60),
+        "resume-worker",
+    )
+    .await;
+    assert_eq!(outcome, BackfillRunOutcome::Completed);
 
     let first_id = ThreadId::from_string(&first_uuid.to_string()).expect("first thread id");
     let second_id = ThreadId::from_string(&second_uuid.to_string()).expect("second thread id");
@@ -287,7 +318,8 @@ async fn backfill_sessions_resumes_from_watermark_and_marks_complete() {
     );
 
     let state = runtime
-        .get_backfill_state()
+        .backfill_coordinator()
+        .state()
         .await
         .expect("get backfill state");
     assert_eq!(state.status, BackfillStatus::Complete);
@@ -299,6 +331,284 @@ async fn backfill_sessions_resumes_from_watermark_and_marks_complete() {
         ))
     );
     assert!(state.last_success_at.is_some());
+}
+
+#[tokio::test]
+async fn backfill_runner_skips_busy_owner_then_takes_over_expired_lease() {
+    let dir = tempdir().expect("tempdir");
+    let codex_home = dir.path().to_path_buf();
+    let thread_uuid = Uuid::new_v4();
+    write_rollout_in_sessions(
+        codex_home.as_path(),
+        "2026-01-27T12-34-56",
+        "2026-01-27T12:34:56Z",
+        thread_uuid,
+        /*git*/ None,
+    );
+    let first =
+        codex_state::StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize first runtime");
+    let second =
+        codex_state::StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize second runtime");
+    let coordinator = first.backfill_coordinator();
+    let active_lease = match coordinator
+        .try_claim("active-worker", Duration::from_secs(60))
+        .await
+        .expect("claim active lease")
+    {
+        BackfillClaimOutcome::Claimed { lease, .. } => lease,
+        outcome => panic!("expected active lease, got {outcome:?}"),
+    };
+
+    let busy_outcome = backfill_sessions_with_lease(
+        second.as_ref(),
+        codex_home.as_path(),
+        "test-provider",
+        Duration::from_secs(60),
+        "contending-worker",
+    )
+    .await;
+    assert_eq!(busy_outcome, BackfillRunOutcome::Busy);
+    let thread_id = ThreadId::from_string(&thread_uuid.to_string()).expect("thread id");
+    assert_eq!(
+        second.get_thread(thread_id).await.expect("get thread"),
+        None
+    );
+
+    assert_eq!(
+        coordinator
+            .release(&active_lease)
+            .await
+            .expect("release lease"),
+        BackfillLeaseUpdate::Applied
+    );
+    let expired_lease = match coordinator
+        .try_claim("failed-worker", Duration::ZERO)
+        .await
+        .expect("claim expiring lease")
+    {
+        BackfillClaimOutcome::Claimed { lease, .. } => lease,
+        outcome => panic!("expected expiring lease, got {outcome:?}"),
+    };
+
+    let retry_outcome = backfill_sessions_with_lease(
+        second.as_ref(),
+        codex_home.as_path(),
+        "test-provider",
+        Duration::from_secs(60),
+        "retry-worker",
+    )
+    .await;
+    assert_eq!(retry_outcome, BackfillRunOutcome::Completed);
+
+    assert!(
+        second
+            .get_thread(thread_id)
+            .await
+            .expect("get thread")
+            .is_some()
+    );
+    assert_eq!(
+        second
+            .backfill_coordinator()
+            .state()
+            .await
+            .expect("get backfill state")
+            .status,
+        BackfillStatus::Complete
+    );
+    assert_eq!(
+        coordinator
+            .complete(&expired_lease, /*last_watermark*/ None)
+            .await
+            .expect("reject stale completion"),
+        BackfillLeaseUpdate::Rejected
+    );
+    assert_eq!(
+        backfill_sessions_with_lease(
+            second.as_ref(),
+            codex_home.as_path(),
+            "test-provider",
+            Duration::from_secs(60),
+            "late-worker",
+        )
+        .await,
+        BackfillRunOutcome::AlreadyComplete
+    );
+}
+
+#[tokio::test]
+async fn backfill_runner_heartbeats_while_processing_a_long_batch() {
+    let dir = tempdir().expect("tempdir");
+    let codex_home = dir.path().to_path_buf();
+    let mut last_thread_id = None;
+    for _ in 0..=BACKFILL_BATCH_SIZE {
+        let thread_uuid = Uuid::new_v4();
+        write_rollout_in_sessions(
+            codex_home.as_path(),
+            "2026-01-27T12-34-56",
+            "2026-01-27T12:34:56Z",
+            thread_uuid,
+            /*git*/ None,
+        );
+        last_thread_id = Some(ThreadId::from_string(&thread_uuid.to_string()).expect("thread id"));
+    }
+    let runtime =
+        codex_state::StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize runtime");
+    let second =
+        codex_state::StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize second runtime");
+
+    let (first_outcome, second_outcome) = tokio::join!(
+        backfill_sessions_with_lease(
+            runtime.as_ref(),
+            codex_home.as_path(),
+            "test-provider",
+            Duration::from_millis(100),
+            "heartbeat-worker-a",
+        ),
+        backfill_sessions_with_lease(
+            second.as_ref(),
+            codex_home.as_path(),
+            "test-provider",
+            Duration::from_millis(100),
+            "heartbeat-worker-b",
+        )
+    );
+    assert!(
+        matches!(
+            (first_outcome, second_outcome),
+            (BackfillRunOutcome::Completed, BackfillRunOutcome::Busy)
+                | (BackfillRunOutcome::Busy, BackfillRunOutcome::Completed)
+        ),
+        "exactly one concurrent runner should execute the backfill"
+    );
+
+    assert_eq!(
+        runtime
+            .backfill_coordinator()
+            .state()
+            .await
+            .expect("get backfill state")
+            .status,
+        BackfillStatus::Complete
+    );
+    assert!(
+        runtime
+            .get_thread(last_thread_id.expect("last thread id"))
+            .await
+            .expect("get last thread")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn cancelled_backfill_runner_releases_lease_for_retry() {
+    let dir = tempdir().expect("tempdir");
+    let codex_home = dir.path().to_path_buf();
+    let mut last_thread_id = None;
+    for _ in 0..300 {
+        let thread_uuid = Uuid::new_v4();
+        write_rollout_in_sessions(
+            codex_home.as_path(),
+            "2026-01-27T12-34-56",
+            "2026-01-27T12:34:56Z",
+            thread_uuid,
+            /*git*/ None,
+        );
+        last_thread_id = Some(ThreadId::from_string(&thread_uuid.to_string()).expect("thread id"));
+    }
+    let first =
+        codex_state::StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize first runtime");
+    let second =
+        codex_state::StateRuntime::init_sqlite(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize second runtime");
+    let first_runtime = first.clone();
+    let first_home = codex_home.clone();
+    let runner = tokio::spawn(async move {
+        backfill_sessions_with_lease(
+            first_runtime.as_ref(),
+            first_home.as_path(),
+            "test-provider",
+            Duration::from_secs(60),
+            "cancelled-worker",
+        )
+        .await;
+    });
+    let coordinator = second.backfill_coordinator();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let state = coordinator.state().await.expect("get running state");
+            match state.status {
+                BackfillStatus::Running if state.last_watermark.is_some() => break,
+                BackfillStatus::Pending | BackfillStatus::Running => {
+                    tokio::task::yield_now().await;
+                }
+                BackfillStatus::Complete => panic!("backfill completed before cancellation"),
+            }
+        }
+    })
+    .await
+    .expect("runner should checkpoint its lease");
+
+    runner.abort();
+    assert!(
+        runner
+            .await
+            .expect_err("runner should be cancelled")
+            .is_cancelled()
+    );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if coordinator
+                .state()
+                .await
+                .expect("get released state")
+                .status
+                == BackfillStatus::Pending
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled runner should release its lease");
+
+    let retry_outcome = backfill_sessions_with_lease(
+        second.as_ref(),
+        codex_home.as_path(),
+        "test-provider",
+        Duration::from_secs(60),
+        "retry-worker",
+    )
+    .await;
+    assert_eq!(retry_outcome, BackfillRunOutcome::Completed);
+
+    assert_eq!(
+        coordinator
+            .state()
+            .await
+            .expect("get complete state")
+            .status,
+        BackfillStatus::Complete
+    );
+    assert!(
+        second
+            .get_thread(last_thread_id.expect("last thread id"))
+            .await
+            .expect("get last thread")
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -337,7 +647,13 @@ async fn backfill_sessions_preserves_existing_git_branch_and_fills_missing_git_f
         .await
         .expect("existing metadata upsert");
 
-    backfill_sessions(runtime.as_ref(), codex_home.as_path(), "test-provider").await;
+    backfill_sessions_with_owner(
+        runtime.as_ref(),
+        codex_home.as_path(),
+        "test-provider",
+        "test-owner",
+    )
+    .await;
 
     let persisted = runtime
         .get_thread(thread_id)
@@ -389,7 +705,13 @@ async fn backfill_sessions_preserves_existing_paginated_memory_mode() {
             .expect("disable memory mode")
     );
 
-    backfill_sessions(runtime.as_ref(), codex_home.as_path(), "test-provider").await;
+    backfill_sessions_with_owner(
+        runtime.as_ref(),
+        codex_home.as_path(),
+        "test-provider",
+        "test-owner",
+    )
+    .await;
 
     assert_eq!(
         runtime
@@ -424,7 +746,13 @@ async fn backfill_sessions_normalizes_cwd_before_upsert() {
     .await
     .expect("initialize runtime");
 
-    backfill_sessions(runtime.as_ref(), codex_home.as_path(), "test-provider").await;
+    backfill_sessions_with_owner(
+        runtime.as_ref(),
+        codex_home.as_path(),
+        "test-provider",
+        "test-owner",
+    )
+    .await;
 
     let thread_id = ThreadId::from_string(&thread_uuid.to_string()).expect("thread id");
     let stored = runtime

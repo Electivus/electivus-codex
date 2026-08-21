@@ -57,6 +57,28 @@ pub(crate) struct AccountedGoalProgress {
     pub(crate) goal_id: String,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct GoalProgressEvent<'a> {
+    accounting_id: &'a str,
+    public_id: &'a str,
+}
+
+impl<'a> GoalProgressEvent<'a> {
+    pub(crate) fn same(id: &'a str) -> Self {
+        Self {
+            accounting_id: id,
+            public_id: id,
+        }
+    }
+
+    fn with_accounting_id(public_id: &'a str, accounting_id: &'a str) -> Self {
+        Self {
+            accounting_id,
+            public_id,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreviousGoalSnapshot {
     pub goal_id: String,
@@ -140,9 +162,11 @@ impl GoalRuntimeHandle {
         }
 
         if let Some(turn_id) = self.inner.accounting_state.current_turn_id() {
+            let public_event_id = format!("{turn_id}:external-goal-mutation");
+            let accounting_id = format!("{public_event_id}:{}", ThreadId::new());
             self.account_active_goal_progress(
                 turn_id.as_str(),
-                &format!("{turn_id}:external-goal-mutation"),
+                GoalProgressEvent::with_accounting_id(&public_event_id, &accounting_id),
                 codex_state::GoalAccountingMode::ActiveOnly,
                 BudgetLimitedGoalDisposition::ClearActive,
             )
@@ -150,8 +174,10 @@ impl GoalRuntimeHandle {
             return Ok(());
         }
 
+        let public_event_id = format!("{}:external-goal-mutation", self.inner.thread_id);
+        let accounting_id = format!("{public_event_id}:{}", ThreadId::new());
         self.account_idle_goal_progress(
-            &format!("{}:external-goal-mutation", self.inner.thread_id),
+            GoalProgressEvent::with_accounting_id(&public_event_id, &accounting_id),
             codex_state::GoalAccountingMode::ActiveOnly,
             BudgetLimitedGoalDisposition::ClearActive,
         )
@@ -272,9 +298,10 @@ impl GoalRuntimeHandle {
                 ("usage-limit", codex_state::ThreadGoalStatus::UsageLimited)
             }
         };
+        let event_id = format!("{turn_id}:{event_name}-progress");
         self.account_active_goal_progress(
             turn_id,
-            &format!("{turn_id}:{event_name}-progress"),
+            GoalProgressEvent::same(&event_id),
             codex_state::GoalAccountingMode::ActiveOnly,
             BudgetLimitedGoalDisposition::ClearActive,
         )
@@ -456,7 +483,7 @@ impl GoalRuntimeHandle {
     pub(crate) async fn account_active_goal_progress(
         &self,
         turn_id: &str,
-        event_id: &str,
+        event: GoalProgressEvent<'_>,
         mode: codex_state::GoalAccountingMode,
         budget_limited_goal_disposition: BudgetLimitedGoalDisposition,
     ) -> Result<Option<AccountedGoalProgress>, String> {
@@ -477,10 +504,15 @@ impl GoalRuntimeHandle {
             .thread_goals()
             .account_thread_goal_usage(
                 self.thread_id(),
-                snapshot.time_delta_seconds,
-                snapshot.token_delta,
-                mode,
-                Some(snapshot.expected_goal_id.as_str()),
+                codex_state::GoalAccountingRequest {
+                    event_id: event.accounting_id,
+                    time_delta_seconds: snapshot.time_delta_seconds,
+                    token_delta: snapshot.token_delta,
+                    mode,
+                    target: codex_state::GoalAccountingTarget::GoalId(
+                        snapshot.expected_goal_id.as_str(),
+                    ),
+                },
             )
             .await
             .map_err(|err| err.to_string())?;
@@ -506,11 +538,20 @@ impl GoalRuntimeHandle {
                 );
                 let goal = protocol_goal_from_state(goal);
                 self.inner.event_emitter.thread_goal_updated(
-                    event_id.to_string(),
+                    event.public_id.to_string(),
                     Some(turn_id.to_string()),
                     goal.clone(),
                 );
                 Some(AccountedGoalProgress { goal, goal_id })
+            }
+            codex_state::GoalAccountingOutcome::AlreadyAccounted(goal) => {
+                accounting.mark_progress_accounted_for_status(
+                    turn_id,
+                    &snapshot,
+                    goal.status,
+                    budget_limited_goal_disposition,
+                );
+                None
             }
             codex_state::GoalAccountingOutcome::Unchanged(_) => None,
         })
@@ -518,7 +559,7 @@ impl GoalRuntimeHandle {
 
     async fn account_idle_goal_progress(
         &self,
-        event_id: &str,
+        event: GoalProgressEvent<'_>,
         mode: codex_state::GoalAccountingMode,
         budget_limited_goal_disposition: BudgetLimitedGoalDisposition,
     ) -> Result<Option<AccountedGoalProgress>, String> {
@@ -539,10 +580,15 @@ impl GoalRuntimeHandle {
             .thread_goals()
             .account_thread_goal_usage(
                 self.thread_id(),
-                snapshot.time_delta_seconds,
-                /*token_delta*/ 0,
-                mode,
-                Some(snapshot.expected_goal_id.as_str()),
+                codex_state::GoalAccountingRequest {
+                    event_id: event.accounting_id,
+                    time_delta_seconds: snapshot.time_delta_seconds,
+                    token_delta: 0,
+                    mode,
+                    target: codex_state::GoalAccountingTarget::GoalId(
+                        snapshot.expected_goal_id.as_str(),
+                    ),
+                },
             )
             .await
             .map_err(|err| err.to_string())?;
@@ -567,11 +613,19 @@ impl GoalRuntimeHandle {
                 );
                 let goal = protocol_goal_from_state(goal);
                 self.inner.event_emitter.thread_goal_updated(
-                    event_id.to_string(),
+                    event.public_id.to_string(),
                     /*turn_id*/ None,
                     goal.clone(),
                 );
                 Some(AccountedGoalProgress { goal, goal_id })
+            }
+            codex_state::GoalAccountingOutcome::AlreadyAccounted(goal) => {
+                accounting.mark_idle_progress_accounted_for_status(
+                    &snapshot,
+                    goal.status,
+                    budget_limited_goal_disposition,
+                );
+                None
             }
             codex_state::GoalAccountingOutcome::Unchanged(_) => {
                 accounting.reset_idle_progress_baseline_and_clear_active_goal();

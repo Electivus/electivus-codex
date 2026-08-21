@@ -111,7 +111,11 @@ impl LegacyAppPathString {
 
     /// Parses this API string as a host-native absolute path.
     pub fn to_inferred_abs_path(&self) -> Option<AbsolutePathBuf> {
-        AbsolutePathBuf::try_from(self.clone()).ok()
+        let convention = self.infer_absolute_path_convention()?;
+        if convention != PathConvention::native() {
+            return None;
+        }
+        self.to_path_uri(convention).ok()?.to_abs_path().ok()
     }
 
     /// Infers the path convention of an absolute API path from its spelling.

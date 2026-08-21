@@ -1,0 +1,6 @@
+---
+source: tui/src/session_resume.rs
+assertion_line: 677
+expression: "unusable_recorded_working_directory_warning(CwdPromptAction::Resume,\n\"<recorded cwd>\", Path::new(\"<current cwd>\"),).to_string()"
+---
+Warning: Recorded Working Directory `<recorded cwd>` cannot be used on this host. Continuing the resume in `<current cwd>`. Use `--cd <path>` to choose another directory or set `tui.resume_cwd = "current"` to keep this behavior.

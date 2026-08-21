@@ -216,6 +216,17 @@ impl FunctionToolOutput {
     pub fn into_text(self) -> String {
         function_call_output_content_items_to_text(&self.body).unwrap_or_default()
     }
+
+    pub(crate) fn prepend_text(&mut self, prefix: String) {
+        match self.body.first_mut() {
+            Some(FunctionCallOutputContentItem::InputText { text }) => {
+                *text = format!("{prefix}\n{text}");
+            }
+            _ => self
+                .body
+                .insert(0, FunctionCallOutputContentItem::InputText { text: prefix }),
+        }
+    }
 }
 
 impl ToolOutput for FunctionToolOutput {
@@ -324,6 +335,7 @@ pub struct ExecCommandToolOutput {
     pub original_token_count: Option<usize>,
     /// Bytes omitted by the output collection cap before model-facing truncation.
     pub output_omitted_bytes: Option<NonZeroUsize>,
+    pub timing_adjustment: Option<String>,
     pub hook_command: Option<String>,
 }
 
@@ -383,6 +395,8 @@ impl ToolOutput for ExecCommandToolOutput {
             session_id: Option<i32>,
             #[serde(skip_serializing_if = "Option::is_none")]
             original_token_count: Option<usize>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            timing_adjustment: Option<String>,
             output: String,
         }
 
@@ -392,6 +406,7 @@ impl ToolOutput for ExecCommandToolOutput {
             exit_code: self.exit_code,
             session_id: self.process_id,
             original_token_count: self.original_token_count,
+            timing_adjustment: self.timing_adjustment.clone(),
             output: match self.max_output_tokens {
                 Some(max_tokens) => self.truncated_output(max_tokens),
                 None => String::from_utf8_lossy(&self.raw_output).to_string(),
@@ -459,6 +474,10 @@ impl ExecCommandToolOutput {
 
         if let Some(original_token_count) = self.original_token_count {
             sections.push(format!("Original token count: {original_token_count}"));
+        }
+
+        if let Some(timing_adjustment) = &self.timing_adjustment {
+            sections.push(timing_adjustment.clone());
         }
 
         sections.push("Output:".to_string());

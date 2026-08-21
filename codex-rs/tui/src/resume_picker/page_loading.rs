@@ -97,4 +97,12 @@ impl PaginationState {
     pub(super) fn is_loading(&self) -> bool {
         matches!(self.loading, LoadingState::Pending(_))
     }
+
+    #[cfg(test)]
+    pub(super) fn pending_request_token(&self) -> Option<usize> {
+        match self.loading {
+            LoadingState::Idle => None,
+            LoadingState::Pending(pending) => Some(pending.request_token),
+        }
+    }
 }

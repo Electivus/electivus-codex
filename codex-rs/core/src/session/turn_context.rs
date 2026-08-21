@@ -175,6 +175,7 @@ pub struct TurnContext {
     pub(crate) unified_exec_shell_mode: UnifiedExecShellMode,
     pub(crate) final_output_json_schema: Option<Value>,
     pub(crate) dynamic_tools: Vec<DynamicToolSpec>,
+    pub(crate) replayed_dynamic_tools: bool,
     pub(crate) turn_metadata_state: Arc<TurnMetadataState>,
     pub(crate) extension_data: Arc<codex_extension_api::ExtensionData>,
     pub(crate) turn_timing_state: Arc<TurnTimingState>,
@@ -400,6 +401,7 @@ impl TurnContext {
             unified_exec_shell_mode: self.unified_exec_shell_mode.clone(),
             final_output_json_schema: self.final_output_json_schema.clone(),
             dynamic_tools: self.dynamic_tools.clone(),
+            replayed_dynamic_tools: self.replayed_dynamic_tools,
             turn_metadata_state: self.turn_metadata_state.clone(),
             extension_data: Arc::clone(&self.extension_data),
             turn_timing_state: Arc::clone(&self.turn_timing_state),
@@ -458,19 +460,22 @@ impl TurnContext {
     pub(crate) fn to_turn_context_item(&self) -> TurnContextItem {
         let workspace_roots = self.config.effective_workspace_roots();
         #[allow(deprecated)]
-        let cwd = self.cwd.clone();
+        let cwd = PathUri::from_abs_path(&self.cwd);
         TurnContextItem {
             turn_id: Some(self.sub_id.clone()),
             cwd,
-            workspace_roots: (!workspace_roots.is_empty()).then_some(workspace_roots),
+            workspace_roots: (!workspace_roots.is_empty())
+                .then(|| workspace_roots.iter().map(PathUri::from_abs_path).collect()),
             current_date: self.current_date.clone(),
             timezone: self.timezone.clone(),
             approval_policy: self.approval_policy(),
             approvals_reviewer: Some(self.config.approvals_reviewer),
-            sandbox_policy: self.sandbox_policy(),
-            permission_profile: Some(self.permission_profile()),
+            sandbox_policy: self.sandbox_policy().into(),
+            permission_profile: Some(self.permission_profile().into()),
             network: self.turn_context_network_item(),
-            file_system_sandbox_policy: self.non_legacy_file_system_sandbox_policy(),
+            file_system_sandbox_policy: self
+                .non_legacy_file_system_sandbox_policy()
+                .map(Into::into),
             model: self.model_info.slug.clone(),
             comp_hash: self.model_info.comp_hash.clone(),
             personality: self.personality,
@@ -681,6 +686,7 @@ impl Session {
             unified_exec_shell_mode,
             final_output_json_schema: None,
             dynamic_tools: session_configuration.dynamic_tools.clone(),
+            replayed_dynamic_tools: session_configuration.replayed_dynamic_tools,
             turn_metadata_state,
             extension_data,
             turn_timing_state: Arc::new(TurnTimingState::default()),

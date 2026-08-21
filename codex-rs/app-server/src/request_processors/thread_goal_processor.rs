@@ -1,9 +1,11 @@
 use super::*;
 use codex_goal_extension::GoalObjectiveUpdate;
+use codex_goal_extension::GoalPreviewUpdate;
 use codex_goal_extension::GoalService;
 use codex_goal_extension::GoalServiceError;
 use codex_goal_extension::GoalSetRequest;
 use codex_goal_extension::GoalTokenBudgetUpdate;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
 use codex_protocol::protocol::ThreadSettingsSnapshot;
 
@@ -138,7 +140,8 @@ impl ThreadGoalRequestProcessor {
         let outcome = self
             .goal_service
             .set_thread_goal(
-                &state_db,
+                state_db.thread_goals(),
+                GoalPreviewUpdate::FillIfEmpty(state_db.as_ref()),
                 GoalSetRequest {
                     thread_id,
                     objective: objective
@@ -225,7 +228,7 @@ impl ThreadGoalRequestProcessor {
         let state_db = self.state_db_for_materialized_thread(thread_id).await?;
         let goal = self
             .goal_service
-            .get_thread_goal(&state_db, thread_id)
+            .get_thread_goal(state_db.thread_goals(), thread_id)
             .await
             .map_err(goal_service_error)?
             .map(ThreadGoal::from);
@@ -253,7 +256,7 @@ impl ThreadGoalRequestProcessor {
         };
         let cleared = self
             .goal_service
-            .clear_thread_goal(&state_db, thread_id)
+            .clear_thread_goal(state_db.thread_goals(), thread_id)
             .await
             .map_err(goal_service_error)?;
 
@@ -272,13 +275,42 @@ impl ThreadGoalRequestProcessor {
         thread_id: ThreadId,
     ) -> Result<StateDbHandle, JSONRPCErrorError> {
         if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
+            if let Some(state_db) = thread.state_db() {
+                if thread.rollout_path().is_none() && state_db.uses_local_rollout_history() {
+                    return Err(invalid_request(format!(
+                        "ephemeral thread does not support goals: {thread_id}"
+                    )));
+                }
+                return Ok(state_db);
+            }
             if thread.rollout_path().is_none() {
                 return Err(invalid_request(format!(
                     "ephemeral thread does not support goals: {thread_id}"
                 )));
             }
-            if let Some(state_db) = thread.state_db() {
-                return Ok(state_db);
+        } else if let Some(state_db) = self
+            .state_db
+            .clone()
+            .filter(|state_db| !state_db.uses_local_rollout_history())
+        {
+            match self
+                .thread_manager
+                .read_stored_thread(StoreReadThreadParams {
+                    thread_id,
+                    include_archived: true,
+                    include_history: false,
+                })
+                .await
+            {
+                Ok(_) => return Ok(state_db),
+                Err(error) if matches!(error.details(), CodexErrorDetails::ThreadNotFound(_)) => {
+                    return Err(invalid_request(format!("thread not found: {thread_id}")));
+                }
+                Err(error) => {
+                    return Err(internal_error(format!(
+                        "failed to read thread id {thread_id}: {error}"
+                    )));
+                }
             }
         } else {
             codex_rollout::find_thread_path_by_id_str(
@@ -295,7 +327,7 @@ impl ThreadGoalRequestProcessor {
 
         self.state_db
             .clone()
-            .ok_or_else(|| internal_error("sqlite state db unavailable for thread goals"))
+            .ok_or_else(|| internal_error("Runtime State Store unavailable for thread goals"))
     }
 
     async fn reconcile_thread_goal_rollout(
@@ -303,6 +335,9 @@ impl ThreadGoalRequestProcessor {
         thread_id: ThreadId,
         state_db: &StateDbHandle,
     ) -> Result<(), JSONRPCErrorError> {
+        if !state_db.uses_local_rollout_history() {
+            return Ok(());
+        }
         let running_thread = self.thread_manager.get_thread(thread_id).await.ok();
         let rollout_path = match running_thread.as_ref() {
             Some(thread) => thread.rollout_path().ok_or_else(|| {

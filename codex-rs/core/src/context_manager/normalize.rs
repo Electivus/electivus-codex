@@ -5,6 +5,7 @@ use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
+use std::borrow::Borrow;
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -216,7 +217,10 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItemEnvelope>) {
     }
 }
 
-pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, item: &ResponseItem) {
+pub(crate) fn remove_corresponding_for<T>(items: &mut Vec<T>, item: &ResponseItem) -> Option<T>
+where
+    T: Borrow<ResponseItem>,
+{
     match item {
         ResponseItem::FunctionCall { call_id, .. } => {
             remove_first_matching(items, |i| {
@@ -226,18 +230,17 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
                         call_id: existing, ..
                     } if existing == call_id
                 )
-            });
+            })
         }
         ResponseItem::FunctionCallOutput { call_id, .. } => {
-            if let Some(pos) = items.iter().position(|envelope| {
-                matches!(&envelope.item, ResponseItem::FunctionCall { call_id: existing, .. } if existing == call_id)
-            }) {
-                items.remove(pos);
-            } else if let Some(pos) = items.iter().position(|envelope| {
-                matches!(&envelope.item, ResponseItem::LocalShellCall { call_id: Some(existing), .. } if existing == call_id)
-            }) {
-                items.remove(pos);
-            }
+            remove_first_matching(items, |i| {
+                matches!(i, ResponseItem::FunctionCall { call_id: existing, .. } if existing == call_id)
+            })
+            .or_else(|| {
+                remove_first_matching(items, |i| {
+                    matches!(i, ResponseItem::LocalShellCall { call_id: Some(existing), .. } if existing == call_id)
+                })
+            })
         }
         ResponseItem::ToolSearchCall {
             call_id: Some(call_id),
@@ -251,7 +254,7 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
                         ..
                     } if existing == call_id
                 )
-            });
+            })
         }
         ResponseItem::ToolSearchOutput {
             call_id: Some(call_id),
@@ -268,7 +271,7 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
                         } if existing == call_id
                     )
                 },
-            );
+            )
         }
         ResponseItem::CustomToolCall { call_id, .. } => {
             remove_first_matching(items, |i| {
@@ -278,13 +281,13 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
                         call_id: existing, ..
                     } if existing == call_id
                 )
-            });
+            })
         }
         ResponseItem::CustomToolCallOutput { call_id, .. } => {
             remove_first_matching(
                 items,
                 |i| matches!(i, ResponseItem::CustomToolCall { call_id: existing, .. } if existing == call_id),
-            );
+            )
         }
         ResponseItem::LocalShellCall {
             call_id: Some(call_id),
@@ -297,19 +300,21 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
                         call_id: existing, ..
                     } if existing == call_id
                 )
-            });
+            })
         }
-        _ => {}
+        _ => None,
     }
 }
 
-fn remove_first_matching<F>(items: &mut Vec<ResponseItemEnvelope>, predicate: F)
+fn remove_first_matching<T, F>(items: &mut Vec<T>, predicate: F) -> Option<T>
 where
+    T: Borrow<ResponseItem>,
     F: Fn(&ResponseItem) -> bool,
 {
-    if let Some(pos) = items.iter().position(|envelope| predicate(&envelope.item)) {
-        items.remove(pos);
-    }
+    items
+        .iter()
+        .position(|item| predicate(item.borrow()))
+        .map(|pos| items.remove(pos))
 }
 
 /// Strip image content from messages and tool outputs when the model does not support images.

@@ -791,12 +791,13 @@ fn register_code_mode_executors(
     );
     enabled_tools
         .sort_by(|left, right| compare_code_mode_tools(left, right, &namespace_descriptions));
+    let yield_time = turn_context.config.tool_execution.yield_time();
     let execute_handler = CodeModeExecuteHandler::new(
         create_code_mode_tool(
             &enabled_tools,
             &deferred_tools,
             &namespace_descriptions,
-            turn_context.config.code_mode.default_exec_yield_time_ms,
+            yield_time,
             tool_mode == ToolMode::CodeModeOnly,
             if unified_image_budget_enabled(&turn_context.config.features, &turn_context.model_info)
             {
@@ -808,7 +809,7 @@ fn register_code_mode_executors(
         code_mode_nested_tool_specs,
     );
 
-    registry.prepend_trusted(Arc::new(CodeModeWaitHandler));
+    registry.prepend_trusted(Arc::new(CodeModeWaitHandler::new(yield_time)));
     registry.prepend_trusted(Arc::new(execute_handler));
 
     code_mode_tool_names
@@ -912,8 +913,9 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
                     turn_context,
                     context.environments,
                 ),
+                tool_execution: turn_context.config.tool_execution,
             }));
-            registry.add(WriteStdinHandler);
+            registry.add(WriteStdinHandler::new(turn_context.config.tool_execution));
             if turn_context.config.features.enabled(Feature::ViewImage) {
                 registry.add(ViewImageHandler::new(ViewImageToolOptions {
                     can_request_original_image_detail: can_request_original_image_detail(
@@ -974,6 +976,7 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
         backend_config: shell_command_backend_for_features(features),
         allow_login_shell,
         exec_permission_approvals_enabled,
+        tool_execution: turn_context.config.tool_execution,
     };
 
     match shell_type_for_model_and_features(&turn_context.model_info, features) {
@@ -986,8 +989,9 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
                     turn_context,
                     context.environments,
                 ),
+                tool_execution: turn_context.config.tool_execution,
             }));
-            registry.add(WriteStdinHandler);
+            registry.add(WriteStdinHandler::new(turn_context.config.tool_execution));
 
             if supports_shell_command {
                 // Keep the legacy shell tool registered while unified exec is

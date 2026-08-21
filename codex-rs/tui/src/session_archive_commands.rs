@@ -200,6 +200,7 @@ async fn lookup_session_by_exact_name(
                 },
                 lookup_mode,
                 search_term,
+                /*project_cwd*/ None,
             );
             if let Some(candidate) = candidates
                 .next(app_server)

@@ -80,7 +80,11 @@ mod native_workdir {
 }
 
 mod path_comparison {
+    #[cfg(windows)]
+    use super::super::normalize_for_path_comparison;
     use super::super::paths_match_after_normalization;
+    #[cfg(windows)]
+    use pretty_assertions::assert_eq;
     use std::path::PathBuf;
 
     #[test]
@@ -101,6 +105,18 @@ mod path_comparison {
             PathBuf::from("missing-a"),
             PathBuf::from("missing-b"),
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalized_windows_paths_use_standard_spelling() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+
+        assert_eq!(
+            normalize_for_path_comparison(dir.path())?,
+            dunce::canonicalize(dir.path())?
+        );
+        Ok(())
     }
 
     #[cfg(windows)]

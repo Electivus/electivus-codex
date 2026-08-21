@@ -126,6 +126,7 @@ pub use crate::code_mode_host::AppServerCodeModeHostArgs;
 pub use crate::code_mode_host::CodeModeHostTransport;
 pub use crate::error_code::INPUT_TOO_LARGE_ERROR_CODE;
 pub use crate::error_code::INVALID_PARAMS_ERROR_CODE;
+pub use crate::request_processors::project_session_scope::resolve_project_repository_identity;
 pub use crate::transport::AppServerTransport;
 pub use crate::transport::RemoteControlStartupMode;
 pub use crate::transport::app_server_control_socket_path;
@@ -529,7 +530,21 @@ pub async fn run_main_with_transport_options(
     {
         Ok(config) => config,
         Err(err) => {
-            if strict_config {
+            let postgresql_was_selected = config_manager
+                .load_config_layers(/*cwd*/ None)
+                .await
+                .ok()
+                .and_then(|layers| {
+                    layers
+                        .effective_config()
+                        .get("state")
+                        .and_then(toml::Value::as_table)
+                        .and_then(|state| state.get("backend"))
+                        .and_then(toml::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .is_some_and(|backend| backend == "postgresql");
+            if strict_config || postgresql_was_selected {
                 return Err(err);
             }
 
@@ -612,13 +627,21 @@ pub async fn run_main_with_transport_options(
         }
         _ => None,
     };
-    let state_db_init = match init_sqlite_state_db_with_fresh_start_on_corruption(&config).await {
+    let state_db_init = match init_state_db_with_sqlite_recovery(&config).await {
         Ok(state_db_init) => state_db_init,
         Err(err) => {
-            return Err(std::io::Error::other(format!(
-                "failed to initialize sqlite state runtime under {}: {err}",
-                config.sqlite_config().home().display()
-            )));
+            let message = if matches!(
+                &config.runtime_state_backend,
+                codex_state::RuntimeStateBackendConfig::Postgresql { .. }
+            ) {
+                format!("failed to initialize PostgreSQL Runtime State Backend: {err:#}")
+            } else {
+                format!(
+                    "failed to initialize sqlite state runtime under {}: {err}",
+                    config.sqlite_config().home().display()
+                )
+            };
+            return Err(std::io::Error::other(message));
         }
     };
     let state_db = state_db_init.state_db;
@@ -770,7 +793,7 @@ pub async fn run_main_with_transport_options(
         && remote_control_explicitly_requested
         && state_db.is_some();
     if remote_control_explicitly_requested && state_db.is_none() {
-        error!("remote control disabled because sqlite state db is unavailable");
+        error!("remote control disabled because enrollment persistence is unavailable");
     }
     let no_local_transport = transport_accept_handles.is_empty();
     if no_local_transport
@@ -782,7 +805,7 @@ pub async fn run_main_with_transport_options(
             if remote_control_policy == RemoteControlPolicy::DisabledByRequirements {
                 "no transport configured; remote control disabled by managed requirements"
             } else if remote_control_explicitly_requested && state_db.is_none() {
-                "no transport configured; remote control disabled because sqlite state db is unavailable"
+                "no transport configured; remote control disabled because enrollment persistence is unavailable"
             } else {
                 "no transport configured; use --listen or enable remote control"
             },
@@ -905,25 +928,28 @@ pub async fn run_main_with_transport_options(
         ));
         let initialize_notification_sender = outgoing_message_sender.clone();
         let outbound_control_tx = outbound_control_tx;
-        let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
-            outgoing: outgoing_message_sender,
-            analytics_events_client,
-            arg0_paths,
-            config: Arc::new(config),
-            config_manager,
-            environment_manager,
-            feedback: feedback.clone(),
-            log_db,
-            state_db: state_db.clone(),
-            config_warnings,
-            session_source,
-            auth_manager,
-            installation_id,
-            code_mode_session_provider,
-            rpc_transport: analytics_rpc_transport(&transport),
-            remote_control_handle: Some(remote_control_handle.clone()),
-            plugin_startup_tasks: runtime_options.plugin_startup_tasks,
-        }));
+        let processor = Arc::new(
+            MessageProcessor::new(MessageProcessorArgs {
+                outgoing: outgoing_message_sender,
+                analytics_events_client,
+                arg0_paths,
+                config: Arc::new(config),
+                config_manager,
+                environment_manager,
+                feedback: feedback.clone(),
+                log_db,
+                state_db: state_db.clone(),
+                config_warnings,
+                session_source,
+                auth_manager,
+                installation_id,
+                code_mode_session_provider,
+                rpc_transport: analytics_rpc_transport(&transport),
+                remote_control_handle: Some(remote_control_handle.clone()),
+                plugin_startup_tasks: runtime_options.plugin_startup_tasks,
+            })
+            .map_err(std::io::Error::other)?,
+        );
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();
         let mut connections = HashMap::<ConnectionId, ConnectionState>::new();
@@ -1293,6 +1319,20 @@ async fn init_sqlite_state_db_with_fresh_start_on_corruption(
             });
         }
     }
+}
+
+async fn init_state_db_with_sqlite_recovery(config: &Config) -> anyhow::Result<StateDbInitResult> {
+    if matches!(
+        &config.runtime_state_backend,
+        codex_state::RuntimeStateBackendConfig::Postgresql { .. }
+    ) {
+        let state_db = rollout_state_db::try_init(config).await?;
+        return Ok(StateDbInitResult {
+            state_db: Some(state_db),
+            recovery_notice: None,
+        });
+    }
+    init_sqlite_state_db_with_fresh_start_on_corruption(config).await
 }
 
 fn sqlite_home_is_blocking_file(database_path: &Path) -> bool {

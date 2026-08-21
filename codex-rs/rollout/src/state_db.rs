@@ -11,8 +11,8 @@ use chrono::DateTime;
 use chrono::Utc;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionSource;
-use codex_protocol::protocol::ThreadHistoryMode;
 pub use codex_state::LogEntry;
+use codex_state::RuntimeStateBackendConfig;
 use codex_state::SqliteConfig;
 use codex_state::ThreadMetadataBuilder;
 use codex_utils_path::normalize_for_path_comparison;
@@ -25,7 +25,12 @@ use std::time::Instant;
 use tracing::info;
 use tracing::warn;
 
-/// Core-facing handle to the SQLite-backed state runtime.
+mod reconcile;
+
+pub use reconcile::reconcile_rollout;
+pub use reconcile::reconcile_rollout_checked;
+
+/// Core-facing handle to the selected state runtime.
 pub type StateDbHandle = Arc<codex_state::StateRuntime>;
 
 #[cfg(not(test))]
@@ -39,12 +44,19 @@ const STARTUP_BACKFILL_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Initialize the state runtime for thread state persistence.
 ///
-/// This is the process entry point for local state: it opens the SQLite-backed
-/// runtime, applies rollout metadata backfills as needed, and returns the
-/// initialized handle.
+/// This is the process entry point for runtime state. SQLite startup applies rollout
+/// metadata backfills; PostgreSQL startup validates and opens the selected ready namespace.
 pub async fn init(config: &impl RolloutConfigView) -> Option<StateDbHandle> {
+    let selected_backend = config.runtime_state_backend().cloned();
     let config = RolloutConfig::from_view(config);
-    match try_init_with_roots(config.codex_home, config.sqlite, config.model_provider_id).await {
+    match try_init_with_roots_and_backend(
+        config.codex_home,
+        config.sqlite,
+        config.model_provider_id,
+        selected_backend,
+    )
+    .await
+    {
         Ok(runtime) => Some(runtime),
         Err(err) => {
             emit_startup_warning(&format!("failed to initialize state runtime: {err:#}"));
@@ -58,20 +70,47 @@ pub async fn init(config: &impl RolloutConfigView) -> Option<StateDbHandle> {
 /// Prefer [`init`] unless the caller needs to surface the exact failure after
 /// tracing or UI setup has completed.
 pub async fn try_init(config: &impl RolloutConfigView) -> anyhow::Result<StateDbHandle> {
+    let selected_backend = config.runtime_state_backend().cloned();
     let config = RolloutConfig::from_view(config);
-    try_init_with_roots(config.codex_home, config.sqlite, config.model_provider_id).await
+    try_init_with_roots_and_backend(
+        config.codex_home,
+        config.sqlite,
+        config.model_provider_id,
+        selected_backend,
+    )
+    .await
 }
 
-async fn try_init_with_roots(
+async fn try_init_with_roots_and_backend(
     codex_home: PathBuf,
     sqlite: SqliteConfig,
     default_model_provider_id: String,
+    selected_backend: Option<RuntimeStateBackendConfig>,
 ) -> anyhow::Result<StateDbHandle> {
+    let backend = match selected_backend {
+        Some(backend @ RuntimeStateBackendConfig::Postgresql { .. }) => {
+            return codex_state::StateRuntime::init_with_backend(
+                backend,
+                default_model_provider_id,
+            )
+            .await;
+        }
+        Some(backend @ RuntimeStateBackendConfig::Sqlite(_)) => backend,
+        Some(backend) => {
+            return codex_state::StateRuntime::init_with_backend(
+                backend,
+                default_model_provider_id,
+            )
+            .await;
+        }
+        None => RuntimeStateBackendConfig::Sqlite(sqlite.clone()),
+    };
     try_init_with_roots_inner(
         codex_home,
         sqlite,
         default_model_provider_id,
-        /*backfill_lease_seconds*/ None,
+        /*backfill_lease_duration*/ None,
+        backend,
     )
     .await
 }
@@ -81,13 +120,15 @@ async fn try_init_with_roots_and_backfill_lease(
     codex_home: PathBuf,
     sqlite: SqliteConfig,
     default_model_provider_id: String,
-    backfill_lease_seconds: i64,
+    backfill_lease_duration: Duration,
 ) -> anyhow::Result<StateDbHandle> {
+    let backend = RuntimeStateBackendConfig::Sqlite(sqlite.clone());
     try_init_with_roots_inner(
         codex_home,
         sqlite,
         default_model_provider_id,
-        Some(backfill_lease_seconds),
+        Some(backfill_lease_duration),
+        backend,
     )
     .await
 }
@@ -96,10 +137,11 @@ async fn try_init_with_roots_inner(
     codex_home: PathBuf,
     sqlite: SqliteConfig,
     default_model_provider_id: String,
-    backfill_lease_seconds: Option<i64>,
+    backfill_lease_duration: Option<Duration>,
+    backend: RuntimeStateBackendConfig,
 ) -> anyhow::Result<StateDbHandle> {
     let runtime =
-        codex_state::StateRuntime::init(sqlite.clone(), default_model_provider_id.clone())
+        codex_state::StateRuntime::init_with_backend(backend, default_model_provider_id.clone())
             .await
             .with_context(|| {
                 format!(
@@ -108,11 +150,13 @@ async fn try_init_with_roots_inner(
                 )
             })?;
     let backfill_gate_started = Instant::now();
+    let backfill_owner_id = format!("startup-backfill-{}", uuid::Uuid::new_v4());
     let backfill_gate_result = wait_for_backfill_gate(
         runtime.as_ref(),
         codex_home.as_path(),
         default_model_provider_id.as_str(),
-        backfill_lease_seconds,
+        backfill_lease_duration,
+        &backfill_owner_id,
     )
     .await;
     codex_state::record_backfill_gate(
@@ -131,12 +175,14 @@ async fn wait_for_backfill_gate(
     runtime: &codex_state::StateRuntime,
     codex_home: &Path,
     default_model_provider_id: &str,
-    backfill_lease_seconds: Option<i64>,
+    backfill_lease_duration: Option<Duration>,
+    backfill_owner_id: &str,
 ) -> anyhow::Result<()> {
     let wait_started = Instant::now();
     let mut reported_wait = false;
+    let backfill_coordinator = runtime.backfill_coordinator();
     loop {
-        let backfill_state = runtime.get_backfill_state().await.map_err(|err| {
+        let backfill_state = backfill_coordinator.state().await.map_err(|err| {
             anyhow::anyhow!(
                 "failed to read backfill state at {}: {err}",
                 codex_home.display()
@@ -146,18 +192,25 @@ async fn wait_for_backfill_gate(
             return Ok(());
         }
 
-        if let Some(backfill_lease_seconds) = backfill_lease_seconds {
+        if let Some(backfill_lease_duration) = backfill_lease_duration {
             metadata::backfill_sessions_with_lease(
                 runtime,
                 codex_home,
                 default_model_provider_id,
-                backfill_lease_seconds,
+                backfill_lease_duration,
+                backfill_owner_id,
             )
             .await;
         } else {
-            metadata::backfill_sessions(runtime, codex_home, default_model_provider_id).await;
+            metadata::backfill_sessions_with_owner(
+                runtime,
+                codex_home,
+                default_model_provider_id,
+                backfill_owner_id,
+            )
+            .await;
         }
-        let backfill_state = runtime.get_backfill_state().await.map_err(|err| {
+        let backfill_state = backfill_coordinator.state().await.map_err(|err| {
             anyhow::anyhow!(
                 "failed to read backfill state at {} after startup backfill: {err}",
                 codex_home.display()
@@ -206,6 +259,22 @@ fn emit_startup_warning(message: &str) {
 /// Unlike [`init`], this helper does not run rollout backfill. It is for
 /// optional local reads from non-owning contexts such as remote app-server mode.
 pub async fn get_state_db(config: &impl RolloutConfigView) -> Option<StateDbHandle> {
+    if let Some(backend @ RuntimeStateBackendConfig::Postgresql { .. }) =
+        config.runtime_state_backend().cloned()
+    {
+        return match codex_state::StateRuntime::init_with_backend(
+            backend,
+            config.model_provider_id().to_string(),
+        )
+        .await
+        {
+            Ok(runtime) => Some(runtime),
+            Err(error) => {
+                warn!("failed to initialize PostgreSQL Runtime State Backend: {error:#}");
+                None
+            }
+        };
+    }
     let state_path = config.sqlite_config().state_db_path();
     if !tokio::fs::try_exists(&state_path).await.unwrap_or(false) {
         codex_state::record_fallback(
@@ -246,7 +315,7 @@ async fn require_backfill_complete(
     runtime: StateDbHandle,
     codex_home: &Path,
 ) -> Option<StateDbHandle> {
-    match runtime.get_backfill_state().await {
+    match runtime.backfill_coordinator().state().await {
         Ok(state) if state.status == codex_state::BackfillStatus::Complete => Some(runtime),
         Ok(state) => {
             warn!(
@@ -359,6 +428,7 @@ pub async fn list_threads_db(
     allowed_sources: &[SessionSource],
     model_providers: Option<&[String]>,
     cwd_filters: Option<&[PathBuf]>,
+    repository_identity: Option<&str>,
     relation_filter: Option<codex_state::ThreadRelationFilter>,
     archived: bool,
     section: Option<Option<&str>>,
@@ -407,6 +477,7 @@ pub async fn list_threads_db(
             allowed_sources: allowed_sources.as_slice(),
             model_providers: model_providers.as_deref(),
             cwd_filters: normalized_cwd_filters.as_deref(),
+            repository_identity,
             anchor: anchor.as_ref(),
             sort_key: state_sort_key,
             sort_direction: state_sort_direction,
@@ -434,6 +505,7 @@ pub async fn list_threads_db(
             allowed_sources: allowed_sources.as_slice(),
             model_providers: model_providers.as_deref(),
             cwd_filters: normalized_cwd_filters.as_deref(),
+            repository_identity,
             anchor: anchor.as_ref(),
             sort_key: state_sort_key,
             sort_direction: state_sort_direction,
@@ -512,93 +584,6 @@ pub async fn mark_thread_memory_mode_polluted(
     }
 }
 
-/// Reconcile rollout items into SQLite, falling back to scanning the rollout file.
-pub async fn reconcile_rollout(
-    context: Option<&codex_state::StateRuntime>,
-    rollout_path: &Path,
-    default_provider: &str,
-    builder: Option<&ThreadMetadataBuilder>,
-    items: &[RolloutItem],
-    archived_only: Option<bool>,
-    new_thread_memory_mode: Option<&str>,
-) {
-    let Some(ctx) = context else {
-        return;
-    };
-    if builder.is_some() || !items.is_empty() {
-        apply_rollout_items(
-            Some(ctx),
-            rollout_path,
-            default_provider,
-            builder,
-            items,
-            "reconcile_rollout",
-            new_thread_memory_mode,
-            /*updated_at_override*/ None,
-        )
-        .await;
-        return;
-    }
-    let outcome =
-        match metadata::extract_metadata_from_rollout(rollout_path, default_provider).await {
-            Ok(outcome) => outcome,
-            Err(err) => {
-                warn!(
-                    "state db reconcile_rollout extraction failed {}: {err}",
-                    rollout_path.display()
-                );
-                return;
-            }
-        };
-    let mut metadata = outcome.metadata;
-    let memory_mode = outcome.memory_mode.unwrap_or_else(|| "enabled".to_string());
-    metadata.cwd = normalize_cwd_for_state_db(&metadata.cwd);
-    let existing_metadata = ctx.get_thread(metadata.id).await.ok().flatten();
-    // Filesystem repair may seed a missing row, but it must not change an existing row's
-    // selected rollout path. After `thread/revert`, a scan can find multiple immutable
-    // rollouts for one thread and cannot know which one SQLite selected.
-    if existing_metadata
-        .as_ref()
-        .is_some_and(|existing| existing.rollout_path.as_path() != rollout_path)
-    {
-        return;
-    }
-    // Paginated metadata updates are SQLite-only. Use the rollout mode to seed a
-    // missing row, then keep the value from SQLite.
-    let restore_memory_mode_from_rollout =
-        existing_metadata.is_none() || matches!(metadata.history_mode, ThreadHistoryMode::Legacy);
-    if let Some(existing_metadata) = existing_metadata.as_ref() {
-        metadata.prefer_existing_git_info(existing_metadata);
-        metadata.prefer_existing_explicit_title(existing_metadata);
-    }
-    match archived_only {
-        Some(true) if metadata.archived_at.is_none() => {
-            metadata.archived_at = Some(metadata.updated_at);
-        }
-        Some(false) => {
-            metadata.archived_at = None;
-        }
-        Some(true) | None => {}
-    }
-    if let Err(err) = ctx.upsert_thread(&metadata).await {
-        warn!(
-            "state db reconcile_rollout upsert failed {}: {err}",
-            rollout_path.display()
-        );
-        return;
-    }
-    if restore_memory_mode_from_rollout
-        && let Err(err) = ctx
-            .set_thread_memory_mode(metadata.id, memory_mode.as_str())
-            .await
-    {
-        warn!(
-            "state db reconcile_rollout memory_mode update failed {}: {err}",
-            rollout_path.display()
-        );
-    }
-}
-
 /// Repair a thread's rollout path after filesystem fallback succeeds.
 pub async fn read_repair_rollout_path(
     context: Option<&codex_state::StateRuntime>,
@@ -616,9 +601,8 @@ pub async fn read_repair_rollout_path(
     if let Some(thread_id) = thread_id
         && let Ok(Some(metadata)) = ctx.get_thread(thread_id).await
     {
-        // Filesystem repair may seed a missing row, but it must not change an existing row's
-        // selected rollout path. After `thread/revert`, a scan can find multiple immutable
-        // rollouts for one thread and cannot know which one SQLite selected.
+        // A fallback scan cannot distinguish an obsolete immutable rollout from the rollout
+        // currently selected after thread/revert, so it must not replace that selected path.
         if metadata.rollout_path.as_path() != rollout_path {
             return;
         }

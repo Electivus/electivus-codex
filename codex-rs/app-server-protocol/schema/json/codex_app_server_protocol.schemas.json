@@ -18831,10 +18831,10 @@
           "cwd": {
             "allOf": [
               {
-                "$ref": "#/definitions/v2/AbsolutePathBuf"
+                "$ref": "#/definitions/v2/LegacyAppPathString"
               }
             ],
-            "description": "Working directory captured for the thread."
+            "description": "Source-native Recorded Working Directory captured for the thread."
           },
           "ephemeral": {
             "description": "Whether the thread is ephemeral and should not be materialized on disk.",
@@ -18861,6 +18861,11 @@
           "id": {
             "description": "Identifier for this thread. Codex-generated thread IDs are UUIDv7.",
             "type": "string"
+          },
+          "isPinned": {
+            "default": false,
+            "description": "Whether the thread belongs to the built-in Pinned section.",
+            "type": "boolean"
           },
           "modelProvider": {
             "description": "Model provider used for this thread (for example, 'openai').",
@@ -20367,6 +20372,13 @@
             ],
             "description": "Optional cwd filter or filters; when set, only threads whose session cwd exactly matches one of these paths are returned."
           },
+          "isPinned": {
+            "description": "Compatibility filter for membership in the built-in Pinned section. This cannot be combined with `sectionId`.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "limit": {
             "description": "Optional page size; defaults to a reasonable server-side value.",
             "format": "uint32",
@@ -20563,6 +20575,13 @@
               }
             ],
             "description": "Patch the stored Git metadata for this thread. Omit a field to leave it unchanged, set it to `null` to clear it, or provide a string to replace the stored value."
+          },
+          "isPinned": {
+            "description": "Compatibility patch for membership in the built-in Pinned section.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "threadId": {
             "type": "string"

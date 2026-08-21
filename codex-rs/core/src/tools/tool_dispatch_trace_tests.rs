@@ -277,13 +277,11 @@ async fn dispatch_lifecycle_trace_records_incompatible_payload_failures() -> any
 async fn missing_code_mode_wait_traces_only_the_wait_tool_call() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let (mut session, turn) = make_session_and_context().await;
-    session.services.code_mode_service = CodeModeService::new(
-        Arc::new(MissingCellCodeModeSessionProvider),
-        &turn.config.code_mode,
-    );
+    session.services.code_mode_service =
+        CodeModeService::new(Arc::new(MissingCellCodeModeSessionProvider));
     attach_test_trace(&mut session, &turn, temp.path())?;
 
-    let registry = ToolRegistry::with_handler_for_test(Arc::new(CodeModeWaitHandler));
+    let registry = ToolRegistry::with_handler_for_test(Arc::new(CodeModeWaitHandler::default()));
     let session = Arc::new(session);
     let turn = Arc::new(turn);
 
