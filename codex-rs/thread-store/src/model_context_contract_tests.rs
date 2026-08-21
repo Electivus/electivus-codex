@@ -493,7 +493,7 @@ fn bounded_model_context_history(thread_id: ThreadId, cwd: &Path) -> Vec<Rollout
     .concat()
 }
 
-fn model_context_turn(
+pub(super) fn model_context_turn(
     thread_id: ThreadId,
     cwd: &Path,
     turn_id: &str,
