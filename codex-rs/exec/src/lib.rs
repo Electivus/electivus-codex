@@ -19,6 +19,7 @@ use codex_app_server_client::ExecServerRuntimePaths;
 use codex_app_server_client::InProcessAppServerClient;
 use codex_app_server_client::InProcessClientStartArgs;
 use codex_app_server_client::InProcessServerEvent;
+use codex_app_server_client::TypedRequestError;
 use codex_app_server_client::resolve_project_repository_identity;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigWarningNotification;
@@ -34,6 +35,7 @@ use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::Thread as AppServerThread;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
+use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItem as AppServerThreadItem;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
@@ -71,11 +73,14 @@ use codex_core::config::find_codex_home;
 use codex_core::config::load_config_toml_with_layer_stack;
 use codex_core::config::resolve_oss_provider;
 use codex_core::config::resolve_profile_v2_config_path;
+use codex_core::find_thread_meta_by_name_str;
 use codex_core::format_exec_policy_error_with_source;
 use codex_core::path_utils;
 use codex_core::read_session_meta_line;
 use codex_feedback::CodexFeedback;
 use codex_git_utils::get_git_repo_root;
+use codex_history::RolloutItem;
+use codex_history::RolloutLine;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::default_client::set_default_originator;
 use codex_login::enforce_login_restrictions;
@@ -850,16 +855,9 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     .map_err(anyhow::Error::msg)?;
             (session_configured.thread_id, session_configured)
         } else {
-            let response: ThreadStartResponse = send_request_with_response(
-                &client,
-                ClientRequest::ThreadStart {
-                    request_id: request_ids.next(),
-                    params: thread_start_params_from_config(&config),
-                },
-                "thread/start",
-            )
-            .await
-            .map_err(anyhow::Error::msg)?;
+            let response = start_thread(&client, &mut request_ids, &config)
+                .await
+                .map_err(anyhow::Error::msg)?;
             let session_configured =
                 session_configured_from_thread_start_response(&response, &config)
                     .map_err(anyhow::Error::msg)?;
@@ -936,16 +934,9 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         .map_err(anyhow::Error::msg)?;
         (session_configured.thread_id, session_configured)
     } else {
-        let response: ThreadStartResponse = send_request_with_response(
-            &client,
-            ClientRequest::ThreadStart {
-                request_id: request_ids.next(),
-                params: thread_start_params_from_config(&config),
-            },
-            "thread/start",
-        )
-        .await
-        .map_err(anyhow::Error::msg)?;
+        let response = start_thread(&client, &mut request_ids, &config)
+            .await
+            .map_err(anyhow::Error::msg)?;
         let session_configured = session_configured_from_thread_start_response(&response, &config)
             .map_err(anyhow::Error::msg)?;
         (session_configured.thread_id, session_configured)
@@ -1169,6 +1160,34 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn start_thread(
+    client: &InProcessAppServerClient,
+    request_ids: &mut RequestIdSequencer,
+    config: &Config,
+) -> Result<ThreadStartResponse, String> {
+    let mut params = thread_start_params_from_config(config);
+    loop {
+        match client
+            .request_typed(ClientRequest::ThreadStart {
+                request_id: request_ids.next(),
+                params: params.clone(),
+            })
+            .await
+        {
+            Ok(response) => return Ok(response),
+            Err(TypedRequestError::Server { source, .. })
+                if params.history_mode.is_some()
+                    && source.code == -32600
+                    && source.message
+                        == "paginated threads require thread/turns/list and thread/items/list support" =>
+            {
+                params.history_mode = None;
+            }
+            Err(err) => return Err(format!("thread/start: {err}")),
+        }
+    }
+}
+
 fn thread_start_params_from_config(config: &Config) -> ThreadStartParams {
     let permissions = permissions_selection_from_config(config);
     let sandbox = permissions.is_none().then(|| {
@@ -1188,6 +1207,7 @@ fn thread_start_params_from_config(config: &Config) -> ThreadStartParams {
         permissions,
         config: thread_config_overrides_from_config(config),
         ephemeral: Some(config.ephemeral),
+        history_mode: (!config.ephemeral).then_some(ThreadHistoryMode::Paginated),
         thread_source: Some(ThreadSource::User),
         ..ThreadStartParams::default()
     }
@@ -1540,6 +1560,43 @@ fn all_thread_source_kinds() -> Vec<ThreadSourceKind> {
     ]
 }
 
+async fn latest_thread_cwd(thread: &AppServerThread) -> Option<PathBuf> {
+    if let Some(path) = thread.path.as_deref()
+        && let Some(cwd) = parse_latest_turn_context_cwd(path).await
+    {
+        return Some(cwd);
+    }
+    thread
+        .cwd
+        .to_inferred_abs_path()
+        .map(AbsolutePathBuf::into_path_buf)
+}
+
+async fn parse_latest_turn_context_cwd(path: &Path) -> Option<PathBuf> {
+    let text = tokio::fs::read_to_string(path).await.ok()?;
+    for line in text.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(trimmed) else {
+            continue;
+        };
+        if let RolloutItem::TurnContext(item) = rollout_line.item {
+            return item
+                .cwd
+                .to_abs_path()
+                .ok()
+                .map(AbsolutePathBuf::into_path_buf);
+        }
+    }
+    None
+}
+
+fn cwds_match(current_cwd: &Path, session_cwd: &Path) -> bool {
+    path_utils::paths_match_after_normalization(current_cwd, session_cwd)
+}
+
 async fn resolve_resume_thread_id(
     client: &InProcessAppServerClient,
     config: &Config,
@@ -1598,10 +1655,8 @@ async fn resolve_resume_thread_id(
                         continue;
                     }
                     if validate_local_rollout_project {
-                        let cwd_matches = path_utils::paths_match_after_normalization(
-                            config.cwd.as_path(),
-                            session_meta.meta.cwd.as_path(),
-                        );
+                        let cwd_matches =
+                            cwds_match(config.cwd.as_path(), session_meta.meta.cwd.as_path());
                         let repository_matches = project_repository_identity
                             .as_deref()
                             .is_some_and(|expected_identity| {
@@ -1638,6 +1693,28 @@ async fn resolve_resume_thread_id(
     if Uuid::parse_str(session_id).is_ok() {
         return Ok(Some(session_id.to_string()));
     }
+    if let Some(state_db) = state_db.filter(|state_db| state_db.uses_local_rollout_history()) {
+        let cwd = (!args.all).then_some(config.cwd.as_path());
+        let resolved = state_db
+            .find_thread_by_exact_title(
+                session_id,
+                &[],
+                /*model_providers*/ None,
+                /*archived_only*/ false,
+                cwd,
+            )
+            .await?;
+        if let Some(thread) = resolved {
+            return Ok(Some(thread.id.to_string()));
+        }
+        if let Some((_, session_meta)) =
+            find_thread_meta_by_name_str(&config.codex_home, session_id, Some(state_db.as_ref()))
+                .await?
+            && (args.all || cwds_match(config.cwd.as_path(), &session_meta.meta.cwd))
+        {
+            return Ok(Some(session_meta.meta.id.to_string()));
+        }
+    }
 
     let mut cursor = None;
     loop {
@@ -1668,7 +1745,26 @@ async fn resolve_resume_thread_id(
         .await
         .map_err(anyhow::Error::msg)?;
         for thread in response.data {
-            if thread.name.as_deref() == Some(session_id) {
+            if thread.name.as_deref() != Some(session_id) {
+                continue;
+            }
+            let cwd_matches = latest_thread_cwd(&thread)
+                .await
+                .as_deref()
+                .is_some_and(|cwd| cwds_match(config.cwd.as_path(), cwd));
+            let repository_matches =
+                project_repository_identity
+                    .as_deref()
+                    .is_some_and(|expected_identity| {
+                        thread
+                            .git_info
+                            .as_ref()
+                            .and_then(|git_info| git_info.origin_url.as_deref())
+                            .and_then(codex_git_utils::canonicalize_git_remote_url)
+                            .as_deref()
+                            == Some(expected_identity)
+                    });
+            if args.all || cwd_matches || repository_matches {
                 return Ok(Some(thread.id));
             }
         }

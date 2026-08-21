@@ -282,7 +282,6 @@ async fn schedule_startup_prewarm_inner(
             &startup_cancellation_token,
         )
         .await?;
-    let startup_router = Arc::clone(&step_context.tool_router);
     startup_turn_context.session_telemetry.record_startup_phase(
         "startup_prewarm_build_tools",
         built_tools_started_at.elapsed(),
@@ -293,8 +292,7 @@ async fn schedule_startup_prewarm_inner(
         Vec::new(),
         /*replay_prefix_items*/ 0,
         /*replayed_history*/ false,
-        startup_router.as_ref(),
-        startup_turn_context.as_ref(),
+        step_context.as_ref(),
         BaseInstructions {
             text: base_instructions,
             provenance: None,
@@ -318,11 +316,11 @@ async fn schedule_startup_prewarm_inner(
     client_session
         .prewarm_websocket(
             &startup_prompt,
-            &startup_turn_context.model_info,
-            &startup_turn_context.session_telemetry,
-            startup_turn_context.reasoning_effort.clone(),
-            startup_turn_context.reasoning_summary,
-            startup_turn_context.config.service_tier.clone(),
+            &step_context.model_info,
+            &step_context.session_telemetry,
+            step_context.reasoning_effort.clone(),
+            step_context.reasoning_summary,
+            step_context.service_tier.clone(),
             &responses_metadata,
         )
         .await?;
