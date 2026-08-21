@@ -53,6 +53,8 @@ const APP_ONLY_CWD_MARKER_FILE_ENV: &str = "MCP_TEST_APP_ONLY_CWD_MARKER_FILE";
 const DYNAMIC_SERVER_METADATA_ENV: &str = "MCP_TEST_DYNAMIC_SERVER_METADATA";
 const INITIALIZE_BARRIER_FILE_ENV: &str = "MCP_TEST_INITIALIZE_BARRIER_FILE";
 const SERVER_INSTRUCTIONS_ENV: &str = "MCP_TEST_SERVER_INSTRUCTIONS";
+const MAX_ECHO_REPEAT: usize = 100_000;
+const MAX_ECHO_OUTPUT_BYTES: usize = 1024 * 1024;
 
 fn dynamic_server_process_label() -> Option<String> {
     std::env::var_os(DYNAMIC_SERVER_METADATA_ENV)
@@ -182,7 +184,11 @@ impl TestToolServer {
             "properties": {
                 "message": { "type": "string" },
                 "env_var": { "type": "string" },
-                "repeat": { "type": "integer", "minimum": 1 }
+                "repeat": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_ECHO_REPEAT
+                }
             },
             "required": ["message"],
             "additionalProperties": false
@@ -707,9 +713,24 @@ impl ServerHandler for TestToolServer {
 
                 let env_snapshot: HashMap<String, String> = std::env::vars().collect();
                 let env_name = args.env_var.as_deref().unwrap_or("MCP_TEST_VALUE");
-                let echo = dynamic_server_process_label().unwrap_or_else(|| {
-                    format!("ECHOING: {}", args.message.repeat(args.repeat.unwrap_or(1)))
-                });
+                let repeat = args.repeat.unwrap_or(1);
+                if repeat > MAX_ECHO_REPEAT {
+                    return Err(McpError::invalid_params(
+                        format!("repeat must not exceed {MAX_ECHO_REPEAT}"),
+                        None,
+                    ));
+                }
+                let Some(output_bytes) = args.message.len().checked_mul(repeat) else {
+                    return Err(McpError::invalid_params("echo output size overflow", None));
+                };
+                if output_bytes > MAX_ECHO_OUTPUT_BYTES {
+                    return Err(McpError::invalid_params(
+                        format!("echo output must not exceed {MAX_ECHO_OUTPUT_BYTES} bytes"),
+                        None,
+                    ));
+                }
+                let echo = dynamic_server_process_label()
+                    .unwrap_or_else(|| format!("ECHOING: {}", args.message.repeat(repeat)));
                 let structured_content = json!({
                     "echo": echo,
                     "env": env_snapshot.get(env_name),
