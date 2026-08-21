@@ -145,42 +145,41 @@ async fn postgres_contract_model_context_accepts_large_presentation_rows_only()
             if message.len() == 50_000
     ));
 
-    let oversized_model_thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f039")?;
+    let large_model_thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f039")?;
     store
         .create_thread(create_thread_params(
-            oversized_model_thread_id,
+            large_model_thread_id,
             &cwd,
             ThreadHistoryMode::Legacy,
         ))
         .await?;
+    let large_model_item = RolloutItem::ResponseItem(
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "x".repeat(50_000),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+        .into(),
+    );
     store
         .append_items(AppendThreadItemsParams {
-            thread_id: oversized_model_thread_id,
-            items: vec![RolloutItem::ResponseItem(
-                ResponseItem::Message {
-                    id: None,
-                    role: "user".to_string(),
-                    content: vec![ContentItem::InputText {
-                        text: "x".repeat(50_000),
-                    }],
-                    phase: None,
-                    internal_chat_message_metadata_passthrough: None,
-                }
-                .into(),
-            )],
+            thread_id: large_model_thread_id,
+            items: vec![large_model_item.clone()],
         })
         .await?;
-    let oversized_model_error = store
+    let large_model_context = store
         .load_latest_model_context(LoadThreadHistoryParams {
-            thread_id: oversized_model_thread_id,
+            thread_id: large_model_thread_id,
             include_archived: false,
         })
-        .await
-        .expect_err("oversized model-visible message must be rejected");
-    assert!(
-        oversized_model_error
-            .to_string()
-            .contains("an individual model-visible history item exceeds 10000 estimated tokens")
+        .await?;
+    assert_eq!(
+        serde_json::to_value(&large_model_context.items[1..])?,
+        serde_json::to_value([large_model_item])?
     );
 
     let oversized_session_meta_thread_id =
