@@ -634,6 +634,21 @@ async fn postgres_contract_resume_splits_oversized_developer_bundle_without_loss
             },
         })
         .await?;
+    let presentation_items = vec![completed_item(
+        thread_id,
+        "turn-2",
+        TurnItem::Reasoning(codex_protocol::items::ReasoningItem {
+            id: "presentation-only".to_string(),
+            summary_text: Vec::new(),
+            raw_content: vec!["presentation-only".repeat(1_000_000)],
+        }),
+    )];
+    writer
+        .append_items(store::AppendThreadItemsParams {
+            thread_id,
+            items: presentation_items,
+        })
+        .await?;
     let section = |label: &str, bytes: usize| {
         let prefix = format!("resume-limit-{label}:");
         format!("{prefix}{}", "x".repeat(bytes - prefix.len()))
@@ -683,6 +698,17 @@ async fn postgres_contract_resume_splits_oversized_developer_bundle_without_loss
         })
         .await?;
     writer.shutdown_thread(thread_id).await?;
+    let verification_pool = sqlx::PgPool::connect(&fixture.database_url).await?;
+    let presentation_bytes: i32 = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT octet_length(item::text) FROM \"{}\".thread_history \
+         WHERE thread_id = $1 AND item #>> '{{payload,item,id}}' = 'presentation-only'",
+        fixture.schema
+    )))
+    .bind(thread_id.to_string())
+    .fetch_one(&verification_pool)
+    .await?;
+    assert!(presentation_bytes > 16 * 1024 * 1024);
+    verification_pool.close().await;
 
     let reader_runtime = fixture.runtime(codex_home.path()).await?;
     let thread_store: Arc<dyn store::ThreadStore> = Arc::new(
@@ -717,7 +743,7 @@ async fn postgres_contract_resume_splits_oversized_developer_bundle_without_loss
         },
     )
     .await?;
-    timeout(DEFAULT_READ_TIMEOUT, async {
+    timeout(DEFAULT_READ_TIMEOUT.saturating_mul(/*rhs*/ 3), async {
         loop {
             let Some(event) = client.next_event().await else {
                 anyhow::bail!("resumed replica stopped before turn/completed");
@@ -745,6 +771,7 @@ async fn postgres_contract_resume_splits_oversized_developer_bundle_without_loss
     let model_input = model_request["input"]
         .as_array()
         .context("post-resume model request must contain input")?;
+    assert!(!serde_json::to_string(model_input)?.contains("presentation-only"));
     let mut replayed_sections = Vec::new();
     for item in model_input {
         assert!(
@@ -771,9 +798,15 @@ async fn postgres_contract_resume_splits_oversized_developer_bundle_without_loss
         replayed_sections,
         sections.iter().map(String::as_str).collect::<Vec<_>>()
     );
-    let replayed_agent_text = model_input
+    let replayed_agent_items = model_input
         .iter()
-        .filter(|item| item.get("type").and_then(Value::as_str) == Some("agent_message"))
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("agent_message"));
+    assert!(
+        replayed_agent_items
+            .clone()
+            .all(|item| { item["author"] == "parent" && item["recipient"] == "child" })
+    );
+    let replayed_agent_text = replayed_agent_items
         .filter_map(|item| item.get("content").and_then(Value::as_array))
         .flatten()
         .filter_map(|content| content.get("text").and_then(Value::as_str))
