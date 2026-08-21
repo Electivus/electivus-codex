@@ -5341,7 +5341,7 @@ text(JSON.stringify(tool));
                 "Echo back the provided message and include environment data.\n\n",
                 "exec tool declaration:\n",
                 "```ts\n",
-                "declare const tools: { mcp__rmcp__echo(args: { env_var?: string; message: string; }): ",
+                "declare const tools: { mcp__rmcp__echo(args: { env_var?: string; message: string; repeat?: number; }): ",
                 "Promise<CallToolResult<{ echo: string; env: string | null; }>>; };\n",
                 "```",
             ),
