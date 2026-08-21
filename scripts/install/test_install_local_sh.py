@@ -26,7 +26,7 @@ class InstallLocalShTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(
                 (root / "build.log").read_text(encoding="utf-8").splitlines(),
-                ["cargo_profile=dev", "debug_assertions=false"],
+                ["cargo_profile=dev-small", "debug_assertions=false"],
             )
 
     def test_successful_install_keeps_new_release_and_two_previous(self) -> None:

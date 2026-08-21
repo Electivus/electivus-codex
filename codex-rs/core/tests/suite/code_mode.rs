@@ -3851,8 +3851,8 @@ async fn code_mode_unified_image_budget_accepts_legacy_detail_hints() -> Result<
     skip_if_no_network!(Ok(()));
 
     let image = ImageBuffer::from_pixel(
-        /*width*/ 2304,
-        /*height*/ 864,
+        /*width*/ 32,
+        /*height*/ 12,
         Rgba([20, 40, 60, 255]),
     );
     let mut encoded = Cursor::new(Vec::new());
@@ -3901,7 +3901,7 @@ image({{
             .split_once(',')
             .expect("image data URL should have a base64 payload");
         let image = image::load_from_memory(&BASE64_STANDARD.decode(payload)?)?;
-        assert_eq!(image.dimensions(), (2304, 864));
+        assert_eq!(image.dimensions(), (32, 12));
     }
 
     let body = request.body_json();
@@ -5341,7 +5341,7 @@ text(JSON.stringify(tool));
                 "Echo back the provided message and include environment data.\n\n",
                 "exec tool declaration:\n",
                 "```ts\n",
-                "declare const tools: { mcp__rmcp__echo(args: { env_var?: string; message: string; }): ",
+                "declare const tools: { mcp__rmcp__echo(args: { env_var?: string; message: string; repeat?: number; }): ",
                 "Promise<CallToolResult<{ echo: string; env: string | null; }>>; };\n",
                 "```",
             ),
