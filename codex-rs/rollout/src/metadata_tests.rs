@@ -547,15 +547,18 @@ async fn cancelled_backfill_runner_releases_lease_for_retry() {
     let coordinator = second.backfill_coordinator();
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            match coordinator.state().await.expect("get running state").status {
-                BackfillStatus::Running => break,
-                BackfillStatus::Pending => tokio::task::yield_now().await,
+            let state = coordinator.state().await.expect("get running state");
+            match state.status {
+                BackfillStatus::Running if state.last_watermark.is_some() => break,
+                BackfillStatus::Pending | BackfillStatus::Running => {
+                    tokio::task::yield_now().await;
+                }
                 BackfillStatus::Complete => panic!("backfill completed before cancellation"),
             }
         }
     })
     .await
-    .expect("runner should claim lease");
+    .expect("runner should checkpoint its lease");
 
     runner.abort();
     assert!(
