@@ -17,6 +17,9 @@ from typing import Protocol
 
 SYNC_BRANCH_PREFIX = "automation/upstream-sync/"
 MAX_CONFLICTS_SHOWN = 20
+GITHUB_PAGE_SIZE = 100
+DEFAULT_GITHUB_RECORD_LIMIT = 1_000
+UPSTREAM_RELEASE_RECORD_LIMIT = 10_000
 RELEASE_TAG_PATTERN = re.compile(
     r"^rust-v(?P<major>0|[1-9]\d*)\."
     r"(?P<minor>0|[1-9]\d*)\."
@@ -102,6 +105,8 @@ class SyncResult:
 class ReleaseClient(Protocol):
     def list_releases(self) -> list[Release]: ...
 
+    def release_for_tag(self, tag: str) -> Release: ...
+
 
 class PullRequestService(Protocol):
     def open_synchronization(self) -> PullRequest | None: ...
@@ -121,18 +126,30 @@ class GitHubClient:
         self.repository = repository
 
     def list_releases(self) -> list[Release]:
-        releases = []
-        for item in self._get_pages("/repos/openai/codex/releases"):
-            releases.append(
-                Release(
-                    tag=item["tag_name"],
-                    published_at=item.get("published_at"),
-                    draft=item["draft"],
-                    url=item["html_url"],
-                    prerelease=item["prerelease"],
-                )
+        return [
+            self._release(item)
+            for item in self._get_pages(
+                "/repos/openai/codex/releases",
+                record_limit=UPSTREAM_RELEASE_RECORD_LIMIT,
             )
-        return releases
+        ]
+
+    def release_for_tag(self, tag: str) -> Release:
+        encoded_tag = urllib.parse.quote(tag, safe="")
+        result = self._request(f"/repos/openai/codex/releases/tags/{encoded_tag}")
+        if not isinstance(result, dict):
+            raise SyncError(f"GitHub returned a non-object response for release {tag}")
+        return self._release(result)
+
+    @staticmethod
+    def _release(item: dict) -> Release:
+        return Release(
+            tag=item["tag_name"],
+            published_at=item.get("published_at"),
+            draft=item["draft"],
+            url=item["html_url"],
+            prerelease=item["prerelease"],
+        )
 
     def open_synchronization(self) -> PullRequest | None:
         matches = [
@@ -193,17 +210,28 @@ class GitHubClient:
             raise SyncError(f"found multiple PRs for {description}")
         return matches[0] if matches else None
 
-    def _get_pages(self, path: str, query: dict[str, str] | None = None) -> list[dict]:
+    def _get_pages(
+        self,
+        path: str,
+        query: dict[str, str] | None = None,
+        *,
+        record_limit: int = DEFAULT_GITHUB_RECORD_LIMIT,
+    ) -> list[dict]:
         items = []
-        for page in range(1, 11):
-            page_query = {**(query or {}), "per_page": "100", "page": str(page)}
+        page_limit = record_limit // GITHUB_PAGE_SIZE
+        for page in range(1, page_limit + 1):
+            page_query = {
+                **(query or {}),
+                "per_page": str(GITHUB_PAGE_SIZE),
+                "page": str(page),
+            }
             result = self._request(f"{path}?{urllib.parse.urlencode(page_query)}")
             if not isinstance(result, list):
                 raise SyncError(f"GitHub returned a non-list response for {path}")
             items.extend(result)
-            if len(result) < 100:
+            if len(result) < GITHUB_PAGE_SIZE:
                 return items
-        raise SyncError(f"GitHub pagination exceeded 1000 records for {path}")
+        raise SyncError(f"GitHub pagination exceeded {record_limit} records for {path}")
 
     def _request(
         self,
@@ -246,9 +274,12 @@ def synchronize(
             pr_url=frozen.url,
         )
 
-    release, selection_mode = _select_release(
-        releases.list_releases(), config.manual_tag
+    candidates = (
+        [releases.release_for_tag(config.manual_tag)]
+        if config.manual_tag
+        else releases.list_releases()
     )
+    release, selection_mode = _select_release(candidates, config.manual_tag)
     release_commit = _fetch_release(config, release.tag)
     branch = f"{SYNC_BRANCH_PREFIX}{release_commit}"
     fork_head = _default_head(config)
