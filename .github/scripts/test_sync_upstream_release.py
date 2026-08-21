@@ -36,6 +36,44 @@ class FixtureReleases:
     def list_releases(self) -> list[Release]:
         return self.releases
 
+    def release_for_tag(self, tag: str) -> Release:
+        selected = next((release for release in self.releases if release.tag == tag), None)
+        if selected is None:
+            raise SyncError(f"{tag!r} is not a published, non-draft Codex CLI release")
+        return selected
+
+
+class ExactReleaseOnly(FixtureReleases):
+    def list_releases(self) -> list[Release]:
+        raise AssertionError("manual release selection must not list every release")
+
+
+def github_release_payload(tag: str) -> dict:
+    return {
+        "tag_name": tag,
+        "published_at": "2026-08-21T18:12:34Z",
+        "draft": False,
+        "html_url": f"https://example.test/releases/{tag}",
+        "prerelease": False,
+    }
+
+
+class PagedReleaseGitHubClient(GitHubClient):
+    def __init__(self, pages: list[list[dict]]) -> None:
+        super().__init__("token", "Electivus/electivus-codex")
+        self.pages = pages
+
+    def _request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        body: dict | None = None,
+    ):
+        if not self.pages:
+            raise AssertionError(f"unexpected GitHub request: {method} {path} {body}")
+        return self.pages.pop(0)
+
 
 class RecordingPullRequests:
     def __init__(self, pull_requests: list[PullRequest] | None = None) -> None:
@@ -68,6 +106,37 @@ class RecordingPullRequests:
 
 
 class SyncUpstreamReleaseTest(unittest.TestCase):
+    def test_github_release_listing_accepts_more_than_1000_records(self) -> None:
+        pages = [
+            [
+                github_release_payload(f"rust-v{page}.{item}.0")
+                for item in range(100)
+            ]
+            for page in range(10)
+        ]
+        pages.append([github_release_payload("rust-v10.0.0")])
+
+        releases = PagedReleaseGitHubClient(pages).list_releases()
+
+        self.assertEqual(
+            (len(releases), releases[0], releases[-1]),
+            (
+                1001,
+                Release(
+                    tag="rust-v0.0.0",
+                    published_at="2026-08-21T18:12:34Z",
+                    draft=False,
+                    url="https://example.test/releases/rust-v0.0.0",
+                ),
+                Release(
+                    tag="rust-v10.0.0",
+                    published_at="2026-08-21T18:12:34Z",
+                    draft=False,
+                    url="https://example.test/releases/rust-v10.0.0",
+                ),
+            ),
+        )
+
     def test_clean_sync_selects_greatest_semantic_version_and_preserves_topology(
         self,
     ) -> None:
@@ -279,6 +348,32 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     tag=valid.tag,
                     release_commit=valid.commit,
                     branch=f"automation/upstream-sync/{valid.commit}",
+                    preparation_mode="clean",
+                    pr_number=1,
+                    pr_url="https://example.test/pull/1",
+                ),
+            )
+            self.assertIn("Selection: manual", pull_requests.created[0].body)
+
+    def test_manual_override_does_not_require_release_listing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            selected = fixture.release("rust-v1.0.0", "1.0.0", "selected")
+            pull_requests = RecordingPullRequests()
+
+            result = synchronize(
+                fixture.config(manual_tag=selected.tag),
+                ExactReleaseOnly.published(selected),
+                pull_requests,
+            )
+
+            self.assertEqual(
+                result,
+                SyncResult(
+                    outcome="pr-created-clean",
+                    tag=selected.tag,
+                    release_commit=selected.commit,
+                    branch=f"automation/upstream-sync/{selected.commit}",
                     preparation_mode="clean",
                     pr_number=1,
                     pr_url="https://example.test/pull/1",
