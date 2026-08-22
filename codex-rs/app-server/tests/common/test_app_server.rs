@@ -227,6 +227,11 @@ impl TestAppServer {
         self.json_logs.wait_for_event(event_name).await
     }
 
+    /// Waits for the child process to emit a stderr line containing `needle`.
+    pub async fn wait_for_stderr_containing(&self, needle: &str) -> anyhow::Result<String> {
+        self.json_logs.wait_for_text(needle).await
+    }
+
     async fn new_with_program_env_and_args(
         codex_home: &Path,
         program: &Path,

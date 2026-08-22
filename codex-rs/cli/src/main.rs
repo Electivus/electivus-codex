@@ -59,6 +59,7 @@ mod queue_cmd;
 mod remote_control_cmd;
 #[cfg(target_os = "windows")]
 mod sandbox_setup;
+mod state_cmd;
 mod state_db_recovery;
 #[cfg(not(windows))]
 mod wsl_paths;
@@ -68,6 +69,7 @@ use crate::plugin_cmd::PluginCli;
 use crate::plugin_cmd::PluginSubcommand;
 use crate::queue_cmd::QueueCommand;
 use crate::remote_control_cmd::RemoteControlCommand;
+use crate::state_cmd::StateCommand;
 use doctor::DoctorCommand;
 use state_db_recovery as local_state_db;
 
@@ -91,6 +93,7 @@ use codex_login::CodexAuth;
 use codex_login::is_workload_identity_selected;
 use codex_login::read_codex_access_token_from_env;
 use codex_memories_write::clear_memory_roots_contents;
+use codex_memories_write::reset_memories;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::protocol::AskForApproval;
@@ -174,6 +177,9 @@ enum Subcommand {
 
     /// Diagnose local Codex installation, config, auth, and runtime health.
     Doctor(DoctorCommand),
+
+    /// Manage the Runtime State Store.
+    State(StateCommand),
 
     /// Run commands within a Codex-provided sandbox.
     Sandbox(HostSandboxArgs),
@@ -351,7 +357,7 @@ struct ResumeCommand {
     #[arg(long = "last", default_value_t = false)]
     last: bool,
 
-    /// Show all sessions (disables cwd filtering and shows CWD column).
+    /// Show all sessions (bypasses Project Session Scope and shows CWD column).
     #[arg(long = "all", default_value_t = false)]
     all: bool,
 
@@ -404,7 +410,7 @@ struct DeleteCommand {
 
 #[derive(Debug, Parser)]
 struct ForkCommand {
-    /// Conversation/session id (UUID). When provided, forks this session.
+    /// Session id (UUID) or session name. UUIDs take precedence if it parses.
     /// If omitted, use --last to pick the most recent recorded session.
     #[arg(value_name = "SESSION_ID")]
     session_id: Option<String>,
@@ -413,7 +419,7 @@ struct ForkCommand {
     #[arg(long = "last", default_value_t = false)]
     last: bool,
 
-    /// Show all sessions (disables cwd filtering and shows CWD column).
+    /// Show all sessions (bypasses Project Session Scope and shows CWD column).
     #[arg(long = "all", default_value_t = false)]
     all: bool,
 
@@ -1600,6 +1606,14 @@ async fn cli_main(
             )
             .await?;
         }
+        Some(Subcommand::State(state_command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "state",
+            )?;
+            state_cmd::run(state_command).await?;
+        }
         Some(Subcommand::Cloud(mut cloud_cli)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -2332,6 +2346,19 @@ async fn run_debug_clear_memories_command(
         .build()
         .await?;
 
+    if config.runtime_state_backend.is_postgresql() {
+        let runtime = StateRuntime::init_with_backend(
+            config.runtime_state_backend.clone(),
+            config.model_provider_id.clone(),
+        )
+        .await?;
+        let reset_result = reset_memories(runtime.memories(), &config.codex_home).await;
+        runtime.close().await;
+        reset_result?;
+        println!("Cleared PostgreSQL memory state and local disposable memory workspaces.");
+        return Ok(());
+    }
+
     let memories_path = config.sqlite_config().memories_db_path();
     let cleared_memories_db =
         StateRuntime::clear_memory_data_in_sqlite_home(config.sqlite_config()).await?;
@@ -2439,6 +2466,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Logout(_)) => Some("logout"),
         Some(Subcommand::Completion(_)) => Some("completion"),
         Some(Subcommand::Update) => Some("update"),
+        Some(Subcommand::State(_)) => Some("state"),
         Some(Subcommand::Cloud(_)) => Some("cloud"),
         Some(Subcommand::Sandbox(_)) => Some("sandbox"),
         Some(Subcommand::Debug(_)) => Some("debug"),
@@ -2860,6 +2888,89 @@ mod tests {
         let size = std::mem::size_of_val(&future);
 
         assert!(size < 64 * 1024, "interactive TUI future is {size} bytes");
+    }
+
+    #[test]
+    fn state_migrate_parses_the_explicit_offline_interface() {
+        assert!(
+            MultitoolCli::try_parse_from([
+                "codex",
+                "state",
+                "migrate",
+                "--sqlite-home",
+                "/tmp/codex-sqlite",
+                "--url-env",
+                "CODEX_TEST_POSTGRES_URL",
+                "--schema",
+                "migration_target",
+            ])
+            .is_ok()
+        );
+        assert!(
+            MultitoolCli::try_parse_from([
+                "codex",
+                "state",
+                "migrate",
+                "--url-env",
+                "CODEX_TEST_POSTGRES_URL",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn state_initialize_parses_the_explicit_empty_interface() {
+        assert!(
+            MultitoolCli::try_parse_from([
+                "codex",
+                "state",
+                "initialize",
+                "--url-env",
+                "CODEX_TEST_POSTGRES_URL",
+                "--schema",
+                "empty_target",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn state_initialize_success_output_is_explicit_about_empty_start() {
+        insta::assert_snapshot!(
+            crate::state_cmd::format_initialization_success(
+                "empty_target",
+                /*fencing_token*/ 1,
+                &serde_json::Value::String("readiness-proof".to_string()),
+            )
+            .expect("initialization success output"),
+            @r###"
+        PostgreSQL Runtime State Namespace `empty_target` was initialized empty and is READY at readiness fence 1.
+        Validated the current schema layout, empty authoritative stores, referential integrity, and an active empty Memory Generation.
+        Readiness evidence: "readiness-proof"
+        No SQLite Runtime State Namespace was read or migrated.
+        config.toml was not changed; select the PostgreSQL backend separately after review.
+        "###
+        );
+    }
+
+    #[test]
+    fn state_migrate_success_output_is_explicit_about_manual_cutover() {
+        insta::assert_snapshot!(
+            crate::state_cmd::format_migration_success(
+                "migration_target",
+                /*fencing_token*/ 4,
+                &serde_json::Value::String("integrity-proof".to_string()),
+            )
+            .expect("migration success output"),
+            @r###"
+        PostgreSQL Runtime State Namespace `migration_target` is READY at migration fence 4.
+        Validated counts, identifiers, ordering, content hashes, referential integrity, and every Runtime State Store responsibility.
+        Integrity evidence: "integrity-proof"
+        The SQLite source, rollouts, Memory Artifacts, and config.toml were preserved.
+        config.toml was not changed; select the PostgreSQL backend separately after review.
+        WARNING: This migration is forward-only. After PostgreSQL accepts new writes, the preserved SQLite source becomes stale and cannot provide a lossless rollback.
+        "###
+        );
     }
 
     #[tokio::test]

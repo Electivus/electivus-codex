@@ -19138,10 +19138,10 @@
           "cwd": {
             "allOf": [
               {
-                "$ref": "#/definitions/v2/AbsolutePathBuf"
+                "$ref": "#/definitions/v2/LegacyAppPathString"
               }
             ],
-            "description": "Working directory captured for the thread."
+            "description": "Source-native Recorded Working Directory captured for the thread."
           },
           "ephemeral": {
             "description": "Whether the thread is ephemeral and should not be materialized on disk.",

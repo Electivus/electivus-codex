@@ -359,6 +359,9 @@ unified_exec_zsh_fork = false
 
 [plugins."{METRICS_PLUGIN_ID}"]
 enabled = true
+
+[tool_execution.yield]
+min_ms = 1
 "#,
         ),
     )?;

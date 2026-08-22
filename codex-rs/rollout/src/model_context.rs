@@ -15,6 +15,40 @@ pub enum ModelContextScanProgress {
     Complete,
 }
 
+/// Minimal persisted event metadata needed while selecting a bounded model-context suffix.
+///
+/// Storage backends may use these signals instead of loading presentation-only event payloads.
+/// Signals affect cutoff selection but are not added to the reconstructed rollout items.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelContextScanSignal {
+    Compacted {
+        has_replacement_history: bool,
+        has_window_number: bool,
+    },
+    ThreadRolledBack,
+    ItemCompleted {
+        turn_id: String,
+        is_user_message: bool,
+    },
+    TurnComplete {
+        turn_id: String,
+    },
+    TurnAborted {
+        turn_id: Option<String>,
+    },
+    TurnStarted {
+        turn_id: String,
+    },
+    TurnContext {
+        turn_id: Option<String>,
+    },
+    ResponseItem {
+        counts_as_user_turn: bool,
+    },
+    InterAgentCommunication,
+    UserMessage,
+}
+
 /// Accumulates newest-to-oldest rollout items until they are sufficient to reconstruct the latest
 /// model context.
 ///
@@ -62,6 +96,70 @@ impl ModelContextScan {
         progress
     }
 
+    /// Observes scan metadata without retaining its presentation-only payload for replay.
+    pub fn push_signal(&mut self, signal: ModelContextScanSignal) -> ModelContextScanProgress {
+        if self.must_scan_to_start {
+            return ModelContextScanProgress::Continue;
+        }
+
+        match signal {
+            ModelContextScanSignal::Compacted {
+                has_replacement_history: true,
+                has_window_number: true,
+            } => self.saw_compaction = true,
+            ModelContextScanSignal::Compacted { .. } | ModelContextScanSignal::ThreadRolledBack => {
+                self.must_scan_to_start = true
+            }
+            ModelContextScanSignal::ItemCompleted {
+                turn_id,
+                is_user_message,
+            } => {
+                if self.active_segment.turn_id.is_none() {
+                    self.active_segment.turn_id = Some(turn_id.clone());
+                }
+                if turn_ids_are_compatible(
+                    self.active_segment.turn_id.as_deref(),
+                    Some(turn_id.as_str()),
+                ) {
+                    self.active_segment.has_user_turn |= is_user_message;
+                }
+            }
+            ModelContextScanSignal::TurnComplete { turn_id }
+            | ModelContextScanSignal::TurnAborted {
+                turn_id: Some(turn_id),
+            } => {
+                self.active_segment.turn_id.get_or_insert(turn_id);
+            }
+            ModelContextScanSignal::TurnAborted { turn_id: None } => {}
+            ModelContextScanSignal::TurnStarted { turn_id } => {
+                if turn_ids_are_compatible(
+                    self.active_segment.turn_id.as_deref(),
+                    Some(turn_id.as_str()),
+                ) {
+                    self.finalize_active_segment();
+                }
+            }
+            ModelContextScanSignal::TurnContext { turn_id } => {
+                if self.active_segment.turn_id.is_none() {
+                    self.active_segment.turn_id = turn_id.clone();
+                }
+                if turn_ids_are_compatible(
+                    self.active_segment.turn_id.as_deref(),
+                    turn_id.as_deref(),
+                ) {
+                    self.active_segment.has_turn_context = true;
+                }
+            }
+            ModelContextScanSignal::ResponseItem {
+                counts_as_user_turn,
+            } => self.active_segment.has_user_turn |= counts_as_user_turn,
+            ModelContextScanSignal::InterAgentCommunication
+            | ModelContextScanSignal::UserMessage => self.active_segment.has_user_turn = true,
+        }
+
+        self.progress()
+    }
+
     /// Returns the collected items in chronological order with canonical head metadata.
     ///
     /// Call this after the reader reaches the beginning of its source or after [`Self::push`]
@@ -84,71 +182,51 @@ impl ModelContextScan {
         }
 
         match item {
-            RolloutItem::Compacted(compacted)
-                if compacted.replacement_history.is_none() || compacted.window_number.is_none() =>
-            {
-                self.must_scan_to_start = true;
-            }
-            RolloutItem::Compacted(_) => {
-                self.saw_compaction = true;
+            RolloutItem::Compacted(compacted) => {
+                return self.push_signal(ModelContextScanSignal::Compacted {
+                    has_replacement_history: compacted.replacement_history.is_some(),
+                    has_window_number: compacted.window_number.is_some(),
+                });
             }
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_)) => {
-                // Paginated threads reject rollback. Keep old rollouts correct rather than
-                // duplicating rollback survival semantics in this bounded selector.
-                self.must_scan_to_start = true;
+                return self.push_signal(ModelContextScanSignal::ThreadRolledBack);
             }
             RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => {
-                if self.active_segment.turn_id.is_none() {
-                    self.active_segment.turn_id = Some(event.turn_id.clone());
-                }
-                if turn_ids_are_compatible(
-                    self.active_segment.turn_id.as_deref(),
-                    Some(event.turn_id.as_str()),
-                ) {
-                    self.active_segment.has_user_turn |=
-                        matches!(&event.item, TurnItem::UserMessage(_));
-                }
+                return self.push_signal(ModelContextScanSignal::ItemCompleted {
+                    turn_id: event.turn_id.clone(),
+                    is_user_message: matches!(&event.item, TurnItem::UserMessage(_)),
+                });
             }
             RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => {
-                self.active_segment
-                    .turn_id
-                    .get_or_insert_with(|| event.turn_id.clone());
+                return self.push_signal(ModelContextScanSignal::TurnComplete {
+                    turn_id: event.turn_id.clone(),
+                });
             }
             RolloutItem::EventMsg(EventMsg::TurnAborted(event)) => {
-                if let Some(turn_id) = &event.turn_id {
-                    self.active_segment
-                        .turn_id
-                        .get_or_insert_with(|| turn_id.clone());
-                }
+                return self.push_signal(ModelContextScanSignal::TurnAborted {
+                    turn_id: event.turn_id.clone(),
+                });
             }
             RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
-                if turn_ids_are_compatible(
-                    self.active_segment.turn_id.as_deref(),
-                    Some(event.turn_id.as_str()),
-                ) {
-                    self.finalize_active_segment();
-                }
+                return self.push_signal(ModelContextScanSignal::TurnStarted {
+                    turn_id: event.turn_id.clone(),
+                });
             }
             RolloutItem::TurnContext(context) => {
-                if self.active_segment.turn_id.is_none() {
-                    self.active_segment.turn_id = context.turn_id.clone();
-                }
-                if turn_ids_are_compatible(
-                    self.active_segment.turn_id.as_deref(),
-                    context.turn_id.as_deref(),
-                ) {
-                    self.active_segment.has_turn_context = true;
-                }
+                return self.push_signal(ModelContextScanSignal::TurnContext {
+                    turn_id: context.turn_id.clone(),
+                });
             }
             RolloutItem::ResponseItem(response_item) => {
-                self.active_segment.has_user_turn |=
-                    response_item_counts_as_user_turn(response_item);
+                return self.push_signal(ModelContextScanSignal::ResponseItem {
+                    counts_as_user_turn: response_item_counts_as_user_turn(response_item),
+                });
             }
             RolloutItem::InterAgentCommunication(_) => {
-                self.active_segment.has_user_turn = true;
+                return self.push_signal(ModelContextScanSignal::InterAgentCommunication);
             }
             RolloutItem::EventMsg(EventMsg::UserMessage(_)) => {
-                self.active_segment.has_user_turn = true;
+                return self.push_signal(ModelContextScanSignal::UserMessage);
             }
             RolloutItem::EventMsg(_)
             | RolloutItem::SessionMeta(_)
@@ -157,6 +235,10 @@ impl ModelContextScan {
             | RolloutItem::WorldState(_) => {}
         }
 
+        self.progress()
+    }
+
+    fn progress(&self) -> ModelContextScanProgress {
         if self.has_bounded_cutoff() {
             ModelContextScanProgress::Complete
         } else {

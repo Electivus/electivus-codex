@@ -33,6 +33,7 @@ pub use codex_app_server::in_process::InProcessServerEvent;
 use codex_app_server::in_process::InProcessStartArgs;
 use codex_app_server::in_process::LogDbLayer;
 pub use codex_app_server::in_process::StateDbHandle;
+pub use codex_app_server::resolve_project_repository_identity;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientNotification;
 use codex_app_server_protocol::ClientRequest;

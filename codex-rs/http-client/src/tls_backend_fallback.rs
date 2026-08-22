@@ -15,6 +15,8 @@ use crate::OutboundProxyRoute;
 const MAX_CACHED_RUSTLS_DESTINATIONS: usize = 16;
 // Schannel maps TLS alert 70 (protocol_version) to SEC_E_UNSUPPORTED_FUNCTION.
 const SCHANNEL_PROTOCOL_VERSION_ERROR: i32 = 0x8009_0302_u32 as i32;
+// Current Windows builds can instead surface the same peer alert as SEC_E_ILLEGAL_MESSAGE.
+const SCHANNEL_ILLEGAL_MESSAGE_ERROR: i32 = 0x8009_0326_u32 as i32;
 
 #[derive(Clone, Default)]
 pub(crate) struct RustlsClientCache {
@@ -136,9 +138,13 @@ fn has_retryable_tls_error(error: &(dyn Error + 'static)) -> bool {
         let is_schannel_protocol_version_error = error
             .downcast_ref::<std::io::Error>()
             .and_then(std::io::Error::raw_os_error)
-            == Some(SCHANNEL_PROTOCOL_VERSION_ERROR)
+            .is_some_and(|error| {
+                error == SCHANNEL_PROTOCOL_VERSION_ERROR || error == SCHANNEL_ILLEGAL_MESSAGE_ERROR
+            })
             || message.contains("(os error -2146893054)")
-            || message.contains("0x80090302");
+            || message.contains("0x80090302")
+            || message.contains("(os error -2146893018)")
+            || message.contains("0x80090326");
         if is_macos_protocol_version_error
             || is_linux_protocol_version_error
             || is_schannel_protocol_version_error

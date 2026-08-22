@@ -1,0 +1,43 @@
+name: upstream-release-sync
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Optional exact published rust-v... release tag
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-release-sync
+  cancel-in-progress: false
+
+jobs:
+  synchronize:
+    if: ${{ github.event_name != 'schedule' || github.repository == 'Electivus/electivus-codex' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout fork history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.UPSTREAM_SYNC_PUSH_TOKEN }}
+
+      - name: Prepare Synchronization PR
+        id: synchronize
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || '' }}
+        run: |
+          python3 .github/scripts/sync_upstream_release.py \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --release-tag "$RELEASE_TAG" \
+            --output "$GITHUB_OUTPUT" \
+            --summary "$GITHUB_STEP_SUMMARY"

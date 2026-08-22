@@ -497,6 +497,18 @@ fn converts_native_api_path_to_inferred_absolute_path() {
 }
 
 #[test]
+fn foreign_absolute_api_path_has_no_host_native_absolute_path() {
+    #[cfg(not(windows))]
+    let raw_path = r"C:\workspace\file.rs";
+    #[cfg(windows)]
+    let raw_path = "/workspace/file.rs";
+    let path = LegacyAppPathString::from_string(raw_path);
+
+    assert!(path.to_inferred_path_uri().is_some());
+    assert_eq!(path.to_inferred_abs_path(), None);
+}
+
+#[test]
 fn foreign_absolute_syntax_deserializes_without_host_interpretation() {
     for (raw_path, convention) in [
         (r"C:\workspace\file.rs", PathConvention::Windows),

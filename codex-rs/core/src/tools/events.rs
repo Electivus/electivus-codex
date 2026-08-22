@@ -398,6 +398,18 @@ impl ToolEmitter {
                 (event, result)
             }
             Err(ToolError::Codex(err)) => match err.details() {
+                CodexErrorDetails::TurnAborted => {
+                    let message = match self {
+                        Self::UnifiedExec { .. } => "exec command rejected by user".to_string(),
+                        Self::ApplyPatch { .. } => "patch rejected by user".to_string(),
+                    };
+                    let event = ToolEventStage::Failure(ToolEventFailure::Rejected {
+                        message: message.clone(),
+                        applied_patch_delta,
+                    });
+                    let result = Err(FunctionCallError::RespondToModel(message));
+                    (event, result)
+                }
                 CodexErrorDetails::Sandbox(SandboxErr::Timeout { output }) => {
                     let output = output.as_ref().clone();
                     let response = self.format_exec_output_for_model(&output, ctx);
@@ -753,6 +765,44 @@ mod tests {
             PatchApplyStatus::Declined,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn aborted_unified_exec_is_reported_as_declined() {
+        let (session, turn, rx_event) =
+            make_session_and_context_with_dynamic_tools_and_rx(Vec::new()).await;
+        let dir = tempdir().expect("tempdir");
+        let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute cwd");
+        let command = vec!["echo".to_string(), "hello".to_string()];
+
+        ToolEmitter::unified_exec(
+            &command,
+            cwd,
+            ExecCommandSource::Agent,
+            /*process_id*/ None,
+            /*plugin_attribution*/ None,
+        )
+        .finish(
+            ToolEventCtx::new(session.as_ref(), turn.as_ref(), "call-id", None),
+            Err(ToolError::Codex(CodexErr::TurnAborted)),
+            /*applied_patch_delta*/ None,
+        )
+        .await
+        .expect_err("aborted command");
+
+        let completed = rx_event.recv().await.expect("item completed event");
+        assert!(matches!(
+            completed.msg,
+            EventMsg::ItemCompleted(event)
+                if matches!(
+                    &event.item,
+                    TurnItem::CommandExecution(CommandExecutionItem {
+                        status: CommandExecutionStatus::Declined,
+                        aggregated_output: Some(output),
+                        ..
+                    }) if output == "exec command rejected by user"
+                )
+        ));
     }
 
     #[tokio::test]

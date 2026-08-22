@@ -1581,7 +1581,7 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
     let found = |id: ThreadId| removed.iter().any(|p| p["threadId"] == id.to_string());
     assert!([original, child].into_iter().all(found));
     let retained = server.thread_read(original, /*include_turns*/ false);
-    assert_eq!(retained.await?.cwd, current.abs().canonicalize()?);
+    assert_eq!(retained.await?.cwd, current.abs().canonicalize()?.into());
     assert_eq!(app.chat_widget.config_ref().cwd, trusted.clone().abs());
     assert!(render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("SessionStart"));
     app.chat_widget
@@ -1623,6 +1623,8 @@ fn fresh_session_applies_requested_name() -> Result<()> {
                 let codex_home = tempdir()?;
                 app.config.codex_home = codex_home.path().to_path_buf().abs();
                 app.config.sqlite = SqliteConfig::new_for_testing(codex_home.path().abs());
+                app.config.runtime_state_backend =
+                    codex_state::RuntimeStateBackendConfig::Sqlite(app.config.sqlite.clone());
                 let (mut app_server, requests, proxy) = start_recording_app_server(
                     &app.config,
                     /*blocked_thread_list*/ None,
@@ -1684,6 +1686,8 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                 app.config.codex_home = codex_home.path().to_path_buf().abs();
                 app.config.sqlite =
                     codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
+                app.config.runtime_state_backend =
+                    codex_state::RuntimeStateBackendConfig::Sqlite(app.config.sqlite.clone());
                 let root_timestamp = "2026-01-01T00-00-00";
                 let root_thread_id = ThreadId::from_string(
                     &create_fake_rollout(

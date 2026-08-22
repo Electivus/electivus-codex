@@ -18,10 +18,12 @@ codex-app-server-protocol = { workspace = true }
 codex-extension-items = { workspace = true }
 codex-git-utils = { workspace = true }
 codex-install-context = { workspace = true }
+codex-model-context = { workspace = true }
 codex-otel = { workspace = true }
 codex-protocol = { workspace = true }
 codex-rollout = { workspace = true }
 codex-state = { workspace = true }
+codex-tools = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-path = { workspace = true }
 codex-utils-path-uri = { workspace = true }
@@ -34,8 +36,10 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 zstd = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
+base64 = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }

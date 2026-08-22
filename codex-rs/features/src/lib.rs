@@ -153,6 +153,8 @@ pub enum Feature {
     CwdRelativeTurnDiffs,
     /// Enable runtime metrics snapshots via a manual reader.
     RuntimeMetrics,
+    /// Allow selecting PostgreSQL as the Runtime State Backend.
+    PostgresqlState,
     /// Enable startup memory extraction and file-backed memory consolidation.
     MemoryTool,
     /// Enable importing project-scoped memory from external agents.
@@ -979,6 +981,16 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::RuntimeMetrics,
         key: "runtime_metrics",
         stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::PostgresqlState,
+        key: "postgresql_state",
+        stage: Stage::Experimental {
+            name: "PostgreSQL runtime state",
+            menu_description: "Allow PostgreSQL 18 or later to store Codex runtime state.",
+            announcement: "",
+        },
         default_enabled: false,
     },
     FeatureSpec {

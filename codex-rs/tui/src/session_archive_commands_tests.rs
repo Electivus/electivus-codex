@@ -431,6 +431,7 @@ async fn queues_non_interactive_and_custom_sessions_without_scanning_rollouts()
     .await?;
     let queued = runtime
         .thread_queue()
+        .expect("test runtime should use SQLite queues")
         .list_page(thread_id, /*offset*/ 0, /*limit*/ 10)
         .await
         .map_err(|error| color_eyre::eyre::eyre!("{error}"))?;

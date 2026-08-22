@@ -1,12 +1,10 @@
 name: v8-canary
 
-# Do not use trigger-level path filters here. This workflow is also called by
-# postmerge-ci, and GitHub cannot share a path filter between pull_request and
-# workflow_call. v8_canary_changes.py is the single source of truth instead;
-# unrelated events run only the cheap metadata job below.
+# The Merge gate calls this Change-triggered validation. Postmerge does not;
+# manual dispatches force the complete Linux matrix. v8_canary_changes.py is
+# the single source of truth for relevant paths.
 on:
   workflow_call:
-  pull_request: {}
   workflow_dispatch:
 
 concurrency:
@@ -15,14 +13,16 @@ concurrency:
 
 jobs:
   metadata:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
+      canary_reason: ${{ steps.changes.outputs.canary_reason }}
       # Older revisions can contain a detector that does not emit this output.
       # Missing must mean "run" so they cannot silently skip the expensive V8
       # coverage while reporting success.
       canary_required: ${{ steps.changes.outputs.canary_required || 'true' }}
       v8_version: ${{ steps.v8_version.outputs.version }}
-      windows_source_required: ${{ steps.changes.outputs.windows_source_required }}
+      windows_source_required: ${{ steps.changes.outputs.windows_source_required || 'true' }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -40,7 +40,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="$(python3 .github/scripts/rusty_v8_bazel.py resolved-v8-crate-version)"
+          version="unknown-${GITHUB_SHA:0:12}"
+          resolved=""
+          if resolved="$(python3 .github/scripts/rusty_v8_bazel.py resolved-v8-crate-version)" \
+            && [[ "$resolved" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
+            version="$resolved"
+          fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Detect V8 canary changes
@@ -53,21 +58,70 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Manual runs have no meaningful before/after range. Force every V8
-          # variant so workflow_dispatch remains a reliable retry path.
+          canary_required=true
+          canary_reason="detector did not run; V8 canary remains required"
+          windows_source_required=true
+          detector_status=0
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
-            output="$(python3 .github/scripts/v8_canary_changes.py --force)"
+            output="$(python3 .github/scripts/v8_canary_changes.py --force 2>&1)" || detector_status=$?
           else
             output="$(python3 .github/scripts/v8_canary_changes.py \
               --base "${BASE_SHA}" \
-              --head "${HEAD_SHA}")"
+              --head "${HEAD_SHA}" 2>&1)" || detector_status=$?
           fi
-          echo "${output}"
-          echo "${output}" >> "${GITHUB_OUTPUT}"
+
+          if [[ $detector_status -ne 0 ]]; then
+            canary_reason="detector exited with status ${detector_status}; V8 canary remains required"
+          else
+            mapfile -t detector_lines <<< "$output"
+            if [[ ${#detector_lines[@]} -eq 3 \
+              && ${detector_lines[0]} =~ ^canary_required=(true|false)$ \
+              && ${detector_lines[1]} =~ ^canary_reason=([[:print:]]{1,240})$ \
+              && ${detector_lines[2]} =~ ^windows_source_required=(true|false)$ ]]; then
+              canary_required="${detector_lines[0]#canary_required=}"
+              canary_reason="${detector_lines[1]#canary_reason=}"
+              windows_source_required="${detector_lines[2]#windows_source_required=}"
+            else
+              canary_reason="classifier returned malformed output; V8 canary remains required"
+            fi
+          fi
+
+          echo "canary_required=${canary_required}" >> "$GITHUB_OUTPUT"
+          echo "canary_reason=${canary_reason}" >> "$GITHUB_OUTPUT"
+          echo "windows_source_required=${windows_source_required}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## V8 canary metadata"
+            echo
+            echo "- Required: \`${canary_required}\`"
+            echo "- Reason: ${canary_reason}"
+            echo "- Windows source build required: \`${windows_source_required}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
+
+  result:
+    name: V8 canary result
+    needs: [metadata, build]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Validate V8 canary result
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          CANARY_REASON: ${{ needs.metadata.outputs.canary_reason }}
+          CANARY_REQUIRED: ${{ needs.metadata.outputs.canary_required }}
+          METADATA_RESULT: ${{ needs.metadata.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/v8_canary_result.py | tee -a "$GITHUB_STEP_SUMMARY"
 
   build:
     name: Build ${{ matrix.variant }} ${{ matrix.target }}
@@ -75,6 +129,7 @@ jobs:
     # Metadata always runs; only relevant changes pay for the large matrix.
     if: ${{ needs.metadata.outputs.canary_required == 'true' }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     permissions:
       contents: read
       actions: read
@@ -111,34 +166,6 @@ jobs:
             platform: linux_arm64
             sandbox: true
             target: aarch64-unknown-linux-gnu
-            v8_cpu: arm64
-            variant: ptrcomp-sandbox
-          - runner: macos-15-xlarge
-            bazel_config: ci-macos
-            platform: macos_amd64
-            sandbox: false
-            target: x86_64-apple-darwin
-            v8_cpu: x64
-            variant: release
-          - runner: macos-15-xlarge
-            bazel_config: ci-macos
-            platform: macos_amd64
-            sandbox: true
-            target: x86_64-apple-darwin
-            v8_cpu: x64
-            variant: ptrcomp-sandbox
-          - runner: macos-15-xlarge
-            bazel_config: ci-macos
-            platform: macos_arm64
-            sandbox: false
-            target: aarch64-apple-darwin
-            v8_cpu: arm64
-            variant: release
-          - runner: macos-15-xlarge
-            bazel_config: ci-macos
-            platform: macos_arm64
-            sandbox: true
-            target: aarch64-apple-darwin
             v8_cpu: arm64
             variant: ptrcomp-sandbox
           - runner: ubuntu-24.04
@@ -261,7 +288,7 @@ jobs:
 
           host_arch="$(uname -m)"
           case "${TARGET}:${host_arch}" in
-            x86_64-apple-darwin:x86_64|aarch64-apple-darwin:arm64|x86_64-unknown-linux-gnu:x86_64|aarch64-unknown-linux-gnu:aarch64)
+            x86_64-unknown-linux-gnu:x86_64|aarch64-unknown-linux-gnu:aarch64)
               ;;
             *)
               echo "Skipping non-native Cargo smoke for ${TARGET} on ${host_arch}."

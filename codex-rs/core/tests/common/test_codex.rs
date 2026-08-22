@@ -338,6 +338,7 @@ pub struct TestCodexBuilder {
     code_mode_host_program: Option<PathBuf>,
     history_mode: Option<ThreadHistoryMode>,
     models_manager: Option<SharedModelsManager>,
+    thread_store: Option<Arc<dyn ThreadStore>>,
 }
 
 impl TestCodexBuilder {
@@ -368,6 +369,14 @@ impl TestCodexBuilder {
 
     pub fn with_history_mode(mut self, history_mode: ThreadHistoryMode) -> Self {
         self.history_mode = Some(history_mode);
+        self
+    }
+
+    pub fn with_thread_store<T>(mut self, thread_store: Arc<T>) -> Self
+    where
+        T: ThreadStore + 'static,
+    {
+        self.thread_store = Some(thread_store);
         self
     }
 
@@ -669,7 +678,10 @@ impl TestCodexBuilder {
     ) -> anyhow::Result<TestCodex> {
         let auth = self.auth.clone();
         let state_db = codex_core::init_state_db(&config).await;
-        let thread_store = thread_store_from_config(&config, state_db.clone());
+        let thread_store = match self.thread_store.take() {
+            Some(thread_store) => thread_store,
+            None => thread_store_from_config(&config, state_db.clone())?,
+        };
         let installation_id = resolve_installation_id(&config.codex_home).await?;
         let user_instructions_provider =
             self.user_instructions_provider.clone().unwrap_or_else(|| {
@@ -1339,6 +1351,24 @@ pub fn test_codex() -> TestCodexBuilder {
                 .features
                 .disable(Feature::ShellSnapshot)
                 .expect("test config should allow ShellSnapshot override");
+            // Most integration tests use short explicit waits to stay fast and are not exercising
+            // the product timing bounds. Timing-policy tests override these ranges explicitly.
+            let timeout = config.tool_execution.timeout();
+            let yield_time = config.tool_execution.yield_time();
+            config.tool_execution = codex_config::ToolExecutionPolicy::new(
+                codex_config::ToolExecutionTimingRange::new(
+                    /*min_ms*/ 1,
+                    timeout.default_ms(),
+                    timeout.max_ms(),
+                )
+                .expect("test timeout range should be valid"),
+                codex_config::ToolExecutionTimingRange::new(
+                    /*min_ms*/ 1,
+                    yield_time.default_ms(),
+                    yield_time.max_ms(),
+                )
+                .expect("test yield range should be valid"),
+            );
         })],
         auth: CodexAuth::from_api_key("dummy"),
         pre_build_hooks: vec![],
@@ -1354,6 +1384,7 @@ pub fn test_codex() -> TestCodexBuilder {
         code_mode_host_program: None,
         history_mode: None,
         models_manager: None,
+        thread_store: None,
     }
 }
 

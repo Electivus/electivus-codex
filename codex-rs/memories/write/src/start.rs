@@ -6,6 +6,7 @@ use crate::metrics::MEMORY_STARTUP;
 use crate::phase1;
 use crate::phase2;
 use crate::runtime::MemoryStartupContext;
+use crate::workspace_materialization::prepare_memory_workspace_from_store;
 use codex_core::CodexThread;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
@@ -46,13 +47,17 @@ pub fn start_memories_startup_task(
         source.clone(),
     ));
 
-    if context.state_db().is_none() {
+    let Some(state_db) = context.state_db() else {
         warn!("state db unavailable for memories startup pipeline; skipping");
         return;
-    }
+    };
 
     tokio::spawn(async move {
         let root = memory_root(&config.codex_home);
+        if let Err(err) = prepare_memory_workspace_from_store(state_db.memories(), &root).await {
+            warn!("failed preparing memories workspace from state backend: {err}");
+            return;
+        }
         if let Err(err) = ensure_layout(&root).await {
             warn!("failed preparing memories root: {err}");
             return;

@@ -1,3 +1,4 @@
+use codex_config::ToolExecutionPolicy;
 use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiTool;
 use codex_tools::ToolSpec;
@@ -9,6 +10,7 @@ use std::collections::BTreeMap;
 pub struct CommandToolOptions {
     pub allow_login_shell: bool,
     pub exec_permission_approvals_enabled: bool,
+    pub tool_execution: ToolExecutionPolicy,
 }
 
 #[cfg(test)]
@@ -23,11 +25,13 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
     include_environment_id: bool,
     include_shell_parameter: bool,
 ) -> ToolSpec {
-    let yield_time_ms_description = if cfg!(windows) {
-        "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 10000-30000 ms."
-    } else {
-        "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."
-    };
+    let yield_time = options.tool_execution.yield_time();
+    let yield_time_ms_description = format!(
+        "Wait before yielding output. Non-interactive commands use the configured default {} ms and range {}-{} ms. TTY commands use the fixed default 10000 ms and range 250-30000 ms. Commands that finish sooner return immediately.",
+        yield_time.default_ms(),
+        yield_time.min_ms(),
+        yield_time.max_ms()
+    );
     let mut properties = BTreeMap::from([
         (
             "cmd".to_string(),
@@ -49,7 +53,7 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
         ),
         (
             "yield_time_ms".to_string(),
-            JsonSchema::number(Some(yield_time_ms_description.to_string())),
+            JsonSchema::number(Some(yield_time_ms_description)),
         ),
         (
             "max_output_tokens".to_string(),
@@ -110,7 +114,8 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
     })
 }
 
-pub fn create_write_stdin_tool() -> ToolSpec {
+pub fn create_write_stdin_tool(tool_execution: ToolExecutionPolicy) -> ToolSpec {
+    let yield_time = tool_execution.yield_time();
     let properties = BTreeMap::from([
         (
             "session_id".to_string(),
@@ -126,9 +131,12 @@ pub fn create_write_stdin_tool() -> ToolSpec {
         ),
         (
             "yield_time_ms".to_string(),
-            JsonSchema::number(Some(
-                "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default.".to_string(),
-            )),
+            JsonSchema::number(Some(format!(
+                "Wait before yielding output. Empty polls use the configured default {} ms and range {}-{} ms. Non-empty writes use the fixed default 250 ms and range 250-30000 ms.",
+                yield_time.default_ms(),
+                yield_time.min_ms(),
+                yield_time.max_ms()
+            ))),
         ),
         (
             "max_output_tokens".to_string(),

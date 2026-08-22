@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::config_toml::ToolsToml;
+use crate::tool_execution::ToolExecutionToml;
 use crate::types::AnalyticsConfigToml;
 use crate::types::ApprovalsReviewer;
 use crate::types::Personality;
@@ -56,6 +57,7 @@ pub struct ConfigProfile {
     pub include_environment_context: Option<bool>,
     pub experimental_use_unified_exec_tool: Option<bool>,
     pub tools: Option<ToolsToml>,
+    pub tool_execution: Option<ToolExecutionToml>,
     pub web_search: Option<WebSearchMode>,
     pub analytics: Option<AnalyticsConfigToml>,
     /// TUI settings scoped to this profile.

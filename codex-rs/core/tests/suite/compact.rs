@@ -282,8 +282,7 @@ with Path(r"{manual_post_log_path}").open("a", encoding="utf-8") as handle:
 }
 
 fn non_openai_model_provider(server: &MockServer) -> ModelProviderInfo {
-    let mut provider =
-        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
+    let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
     provider.name = "OpenAI (test)".into();
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
@@ -291,8 +290,7 @@ fn non_openai_model_provider(server: &MockServer) -> ModelProviderInfo {
 }
 
 fn openai_model_provider(server: &MockServer) -> ModelProviderInfo {
-    let mut provider =
-        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
+    let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
     provider

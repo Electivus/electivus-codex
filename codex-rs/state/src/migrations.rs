@@ -53,17 +53,10 @@ pub(crate) fn runtime_thread_history_migrator() -> Migrator {
     runtime_migrator(&THREAD_HISTORY_MIGRATOR)
 }
 
-pub(crate) async fn repair_legacy_recency_migration_version(
+pub(crate) async fn repair_legacy_state_migration_versions(
     pool: &SqlitePool,
     migrator: &Migrator,
 ) -> anyhow::Result<()> {
-    let Some(recency_migration) = migrator
-        .migrations
-        .iter()
-        .find(|migration| migration.version == 39)
-    else {
-        return Ok(());
-    };
     let migrations_table_exists = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
     )
@@ -74,8 +67,13 @@ pub(crate) async fn repair_legacy_recency_migration_version(
         return Ok(());
     }
 
-    let legacy_recency_needs_repair = sqlx::query_scalar::<_, i64>(
-        r#"
+    if let Some(recency_migration) = migrator
+        .migrations
+        .iter()
+        .find(|migration| migration.version == 39)
+    {
+        let legacy_recency_needs_repair = sqlx::query_scalar::<_, i64>(
+            r#"
 SELECT 1
 FROM _sqlx_migrations
 WHERE version = ?
@@ -83,20 +81,17 @@ WHERE version = ?
   AND NOT EXISTS (
       SELECT 1 FROM _sqlx_migrations WHERE version = ?
   )
-        "#,
-    )
-    .bind(38_i64)
-    .bind(recency_migration.checksum.as_ref())
-    .bind(recency_migration.version)
-    .fetch_optional(pool)
-    .await?
-    .is_some();
-    if !legacy_recency_needs_repair {
-        return Ok(());
-    }
-
-    sqlx::query(
-        r#"
+            "#,
+        )
+        .bind(38_i64)
+        .bind(recency_migration.checksum.as_ref())
+        .bind(recency_migration.version)
+        .fetch_optional(pool)
+        .await?
+        .is_some();
+        if legacy_recency_needs_repair {
+            sqlx::query(
+                r#"
 UPDATE _sqlx_migrations
 SET version = ?, description = ?
 WHERE version = ?
@@ -104,18 +99,91 @@ WHERE version = ?
   AND NOT EXISTS (
       SELECT 1 FROM _sqlx_migrations WHERE version = ?
   )
-        "#,
+                "#,
+            )
+            .bind(recency_migration.version)
+            .bind(recency_migration.description.as_ref())
+            .bind(38_i64)
+            .bind(recency_migration.checksum.as_ref())
+            .bind(recency_migration.version)
+            .execute(pool)
+            .await?;
+        }
+    }
+
+    // Upstream used versions 43-50 for pin, provider, section, section-order, rollout-state,
+    // section-appearance, projects, and empty-preview indexes. The combined sequence inserts fork
+    // migrations into that range. Match applied migrations by checksum and move the entire known
+    // suffix through temporary versions before assigning the combined versions so crossing remaps
+    // cannot collide.
+    let applied = sqlx::query_as::<_, (i64, Vec<u8>)>(
+        "SELECT version, checksum FROM _sqlx_migrations WHERE version >= 43 ORDER BY version",
     )
-    .bind(recency_migration.version)
-    .bind(recency_migration.description.as_ref())
-    .bind(38_i64)
-    .bind(recency_migration.checksum.as_ref())
-    .bind(recency_migration.version)
-    .execute(pool)
+    .fetch_all(pool)
     .await?;
+    let mut remaps = Vec::new();
+    for (applied_version, checksum) in &applied {
+        let Some(migration) = migrator
+            .migrations
+            .iter()
+            .find(|migration| migration.checksum.as_ref() == checksum.as_slice())
+        else {
+            continue;
+        };
+        if migration.version != *applied_version {
+            remaps.push((*applied_version, migration));
+        }
+    }
+    if remaps.is_empty() {
+        return Ok(());
+    }
+
+    let remap_sources = remaps
+        .iter()
+        .map(|(version, _)| *version)
+        .collect::<std::collections::HashSet<_>>();
+    for (_, migration) in &remaps {
+        if let Some((_, checksum)) = applied
+            .iter()
+            .find(|(version, _)| *version == migration.version)
+            && checksum.as_slice() != migration.checksum.as_ref()
+            && !remap_sources.contains(&migration.version)
+        {
+            return Ok(());
+        }
+    }
+
+    let mut transaction = pool.begin().await?;
+    let temporary_remaps = remaps
+        .iter()
+        .enumerate()
+        .map(|(index, (legacy_version, migration))| {
+            (i64::MIN + index as i64, *legacy_version, *migration)
+        })
+        .collect::<Vec<_>>();
+    for (temporary_version, legacy_version, migration) in &temporary_remaps {
+        sqlx::query("UPDATE _sqlx_migrations SET version = ? WHERE version = ? AND checksum = ?")
+            .bind(temporary_version)
+            .bind(legacy_version)
+            .bind(migration.checksum.as_ref())
+            .execute(&mut *transaction)
+            .await?;
+    }
+    for (temporary_version, _, migration) in temporary_remaps {
+        sqlx::query(
+            "UPDATE _sqlx_migrations SET version = ?, description = ? WHERE version = ? AND checksum = ?",
+        )
+        .bind(migration.version)
+        .bind(migration.description.as_ref())
+        .bind(temporary_version)
+        .bind(migration.checksum.as_ref())
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
     Ok(())
 }
 
 #[cfg(test)]
 #[path = "migrations_tests.rs"]
-mod tests;
+pub(crate) mod tests;

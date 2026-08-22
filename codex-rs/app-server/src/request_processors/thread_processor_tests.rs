@@ -486,8 +486,9 @@ mod thread_processor_behavior_tests {
             agent_role: None,
             agent_path: None,
             git_info: None,
+            repository_identity: None,
             approval_mode: AskForApproval::OnRequest,
-            permission_profile: PermissionProfile::read_only(),
+            permission_profile: PermissionProfile::read_only().into(),
             token_usage: None,
             first_user_message: Some("first user message".to_string()),
             history: None,
@@ -1014,8 +1015,7 @@ mod thread_processor_behavior_tests {
         fs::write(&path, format!("{}\n", serde_json::to_string(&line)?))?;
 
         let summary = read_summary_from_rollout(path.as_path(), "fallback").await?;
-        let fallback_cwd = AbsolutePathBuf::from_absolute_path("/")?;
-        let thread = summary_to_thread(summary, &fallback_cwd);
+        let thread = summary_to_thread(summary);
 
         assert_eq!(thread.agent_nickname, Some("atlas".to_string()));
         assert_eq!(thread.agent_role, Some("explorer".to_string()));
@@ -1159,8 +1159,7 @@ mod thread_processor_behavior_tests {
             /*git_origin_url*/ None,
         );
 
-        let fallback_cwd = AbsolutePathBuf::from_absolute_path("/")?;
-        let thread = summary_to_thread(summary, &fallback_cwd);
+        let thread = summary_to_thread(summary);
 
         assert_eq!(thread.agent_nickname, Some("atlas".to_string()));
         assert_eq!(thread.agent_role, Some("explorer".to_string()));

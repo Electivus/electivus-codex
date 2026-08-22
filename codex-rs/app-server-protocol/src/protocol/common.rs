@@ -3105,7 +3105,7 @@ mod tests {
                     recency_at: Some(3),
                     status: v2::ThreadStatus::Idle,
                     path: None,
-                    cwd: cwd.clone(),
+                    cwd: cwd.clone().into(),
                     cli_version: "0.0.0".to_string(),
                     source: v2::SessionSource::Exec,
                     can_accept_direct_input: None,

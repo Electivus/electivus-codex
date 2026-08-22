@@ -230,6 +230,7 @@ pub(super) async fn lookup_session_by_exact_name(
                     lookup_mode,
                     search_term,
                     source_kinds.clone(),
+                    /*project_cwd*/ None,
                 );
                 while let Some(candidate) = candidates
                     .next(app_server)

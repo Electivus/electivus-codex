@@ -2076,15 +2076,22 @@ async fn code_mode_only_exposes_code_executor_and_hides_nested_tools() {
 }
 
 #[tokio::test]
-async fn code_mode_config_updates_exec_description() {
-    for (configured_yield_time_ms, expected_yield_time_ms) in
-        [(None, 30_000), (Some(10_000), 10_000)]
-    {
+async fn tool_execution_yield_updates_code_mode_exec_description() {
+    for expected_yield_time_ms in [30_000, 10_000] {
         let plan = probe(|turn| {
             set_features(turn, &[Feature::CodeMode]);
-            if let Some(yield_time_ms) = configured_yield_time_ms {
+            if expected_yield_time_ms != 30_000 {
                 update_config(turn, |config| {
-                    config.code_mode.default_exec_yield_time_ms = yield_time_ms;
+                    let policy = config.tool_execution;
+                    config.tool_execution = codex_config::ToolExecutionPolicy::new(
+                        policy.timeout(),
+                        codex_config::ToolExecutionTimingRange::new(
+                            /*min_ms*/ expected_yield_time_ms,
+                            /*default_ms*/ expected_yield_time_ms,
+                            /*max_ms*/ expected_yield_time_ms,
+                        )
+                        .expect("test yield range should be valid"),
+                    );
                 });
             }
         })
@@ -2093,11 +2100,32 @@ async fn code_mode_config_updates_exec_description() {
         let ToolSpec::Freeform(exec) = plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME) else {
             panic!("expected code mode exec tool");
         };
-        assert!(
-            exec.description
-                .contains(&format!("Defaults to {expected_yield_time_ms} ms."))
-        );
+        assert!(exec.description.contains(&format!(
+            "Configured yield default is {expected_yield_time_ms} ms"
+        )));
     }
+}
+
+#[tokio::test]
+async fn code_mode_buffered_exec_is_a_no_op() {
+    let plain = probe(|turn| {
+        set_features(turn, &[Feature::CodeMode]);
+    })
+    .await;
+    let flagged = probe(|turn| {
+        set_features(turn, &[Feature::CodeMode, Feature::CodeModeBufferedExec]);
+    })
+    .await;
+
+    let ToolSpec::Freeform(plain_exec) = plain.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME)
+    else {
+        panic!("expected code mode exec tool");
+    };
+    let ToolSpec::Freeform(flagged_exec) = flagged.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME)
+    else {
+        panic!("expected code mode exec tool");
+    };
+    assert_eq!(flagged_exec.description, plain_exec.description);
 }
 
 #[tokio::test]

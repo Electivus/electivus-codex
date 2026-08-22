@@ -272,7 +272,9 @@ max_rollouts_per_startup = 9
 min_rollout_idle_hours = 24
 min_rate_limit_remaining_percent = 12
 extract_model = "gpt-5-mini"
+extract_model_reasoning_effort = "high"
 consolidation_model = "gpt-5.2"
+consolidation_model_reasoning_effort = "xhigh"
 "#;
     let memories_cfg =
         toml::from_str::<ConfigToml>(memories).expect("TOML deserialization should succeed");
@@ -289,7 +291,9 @@ consolidation_model = "gpt-5.2"
             min_rollout_idle_hours: Some(24),
             min_rate_limit_remaining_percent: Some(12),
             extract_model: Some("gpt-5-mini".to_string()),
+            extract_model_reasoning_effort: Some(ReasoningEffort::High),
             consolidation_model: Some("gpt-5.2".to_string()),
+            consolidation_model_reasoning_effort: Some(ReasoningEffort::XHigh),
         }),
         memories_cfg.memories
     );
@@ -315,7 +319,9 @@ consolidation_model = "gpt-5.2"
             min_rollout_idle_hours: 24,
             min_rate_limit_remaining_percent: 12,
             extract_model: Some("gpt-5-mini".to_string()),
+            extract_model_reasoning_effort: Some(ReasoningEffort::High),
             consolidation_model: Some("gpt-5.2".to_string()),
+            consolidation_model_reasoning_effort: Some(ReasoningEffort::XHigh),
         }
     );
 
@@ -352,6 +358,107 @@ async fn goal_max_token_budget_requires_positive_integer() {
             "invalid goal token budget should be rejected: {invalid}"
         );
     }
+}
+
+#[tokio::test]
+async fn load_config_rejects_extract_effort_without_extract_model() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config_toml = toml::from_str("[memories]\nextract_model_reasoning_effort = \"high\"\n")
+        .expect("TOML should deserialize");
+
+    let error = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("orphaned extraction effort should be rejected");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        error.to_string(),
+        "`memories.extract_model_reasoning_effort` requires `memories.extract_model`"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_rejects_consolidation_effort_without_consolidation_model()
+-> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config_toml =
+        toml::from_str("[memories]\nconsolidation_model_reasoning_effort = \"high\"\n")
+            .expect("TOML should deserialize");
+
+    let error = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("orphaned consolidation effort should be rejected");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        error.to_string(),
+        "`memories.consolidation_model_reasoning_effort` requires `memories.consolidation_model`"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_pairs_memory_model_and_effort_across_layers() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let system_file = codex_home.path().join("system.toml").abs();
+    let user_file = codex_home.path().join(CONFIG_TOML_FILE).abs();
+    let config_layer_stack = ConfigLayerStack::new(
+        vec![
+            ConfigLayerEntry::new(
+                ConfigLayerSource::System { file: system_file },
+                toml::toml! {
+                    [memories]
+                    extract_model = "future-memory-model"
+                }
+                .into(),
+            ),
+            ConfigLayerEntry::new(
+                ConfigLayerSource::User {
+                    file: user_file,
+                    profile: None,
+                },
+                toml::toml! {
+                    [memories]
+                    extract_model_reasoning_effort = "future"
+                }
+                .into(),
+            ),
+        ],
+        Default::default(),
+        Default::default(),
+    )?;
+    let config_toml = config_layer_stack
+        .effective_config()
+        .try_into()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+
+    let config = Config::load_config_with_layer_stack(
+        LOCAL_FS.as_ref(),
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+        config_layer_stack,
+    )
+    .await?;
+
+    assert_eq!(
+        config.memories,
+        MemoriesConfig {
+            extract_model: Some("future-memory-model".to_string()),
+            extract_model_reasoning_effort: Some(ReasoningEffort::Custom("future".to_string())),
+            ..MemoriesConfig::default()
+        }
+    );
+    Ok(())
 }
 
 #[test]
@@ -5858,6 +5965,105 @@ async fn sqlite_home_defaults_to_codex_home_for_workspace_write() -> std::io::Re
     .await?;
 
     assert_eq!(config.sqlite.home(), codex_home.path());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_state_backend_defaults_to_sqlite() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.runtime_state_backend,
+        RuntimeStateBackendConfig::Sqlite(SqliteConfig::from_sqlite_home(codex_home.abs()))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn postgresql_runtime_state_backend_requires_experimental_feature() {
+    let codex_home = TempDir::new().expect("create CODEX_HOME");
+    let config_toml = toml::from_str(
+        r#"
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+url_env = "CODEX_POSTGRES_URL"
+"#,
+    )
+    .expect("parse config");
+
+    let error = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("PostgreSQL selection should fail while the feature is disabled");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        error
+            .to_string()
+            .contains("requires `features.postgresql_state = true`")
+    );
+}
+
+#[tokio::test]
+async fn postgresql_runtime_state_backend_uses_stable_config_and_warns_for_sqlite_home()
+-> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let sqlite_sentinel = codex_home.path().join("must-not-be-accessed");
+    let config_toml = toml::from_str(&format!(
+        r#"
+sqlite_home = "{}"
+
+[features]
+postgresql_state = true
+
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+url_env = "CODEX_POSTGRES_URL"
+schema = "codex_test"
+"#,
+        sqlite_sentinel.display()
+    ))
+    .expect("parse config");
+
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.runtime_state_backend,
+        RuntimeStateBackendConfig::Postgresql {
+            codex_home: codex_home.abs(),
+            namespace: PostgresNamespaceConfig::new(
+                "CODEX_POSTGRES_URL".to_string(),
+                "codex_test".to_string(),
+                PostgresPoolConfig::default(),
+            )
+            .expect("valid namespace config"),
+        }
+    );
+    assert!(config.startup_warnings.iter().any(|warning| {
+        warning.contains("`sqlite_home` is configured but inactive")
+            && warning.contains("PostgreSQL")
+    }));
+    assert!(!sqlite_sentinel.exists());
 
     Ok(())
 }
@@ -12595,6 +12801,121 @@ speaker = "Desk Speakers"
     assert_eq!(
         config.realtime_audio.speaker.as_deref(),
         Some("Desk Speakers")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn tool_execution_partial_overrides_resolve_in_effective_config() -> std::io::Result<()> {
+    let config_toml = toml::from_str(
+        r#"
+[tool_execution.timeout]
+min_ms = 20000
+max_ms = 900000
+
+[tool_execution.yield]
+default_ms = 45000
+"#,
+    )
+    .expect("tool execution config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.tool_execution,
+        codex_config::ToolExecutionPolicy::new(
+            codex_config::ToolExecutionTimingRange::new(
+                /*min_ms*/ 20_000, /*default_ms*/ 600_000, /*max_ms*/ 900_000,
+            )
+            .expect("expected timeout range should be valid"),
+            codex_config::ToolExecutionTimingRange::new(
+                /*min_ms*/ 10_000, /*default_ms*/ 45_000, /*max_ms*/ 300_000,
+            )
+            .expect("expected yield range should be valid"),
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn tool_execution_fields_merge_from_root_into_named_profile() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"
+[tool_execution.timeout]
+min_ms = 20000
+default_ms = 600000
+max_ms = 900000
+"#,
+    )?;
+    let selected_config = codex_home.path().join("patient.config.toml");
+    std::fs::write(
+        &selected_config,
+        r#"
+[tool_execution.timeout]
+default_ms = 700000
+"#,
+    )?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .loader_overrides(LoaderOverrides {
+            user_config_path: Some(selected_config.abs()),
+            user_config_profile: Some("patient".parse().expect("profile-v2 name")),
+            ..LoaderOverrides::without_managed_config_for_tests()
+        })
+        .build()
+        .await?;
+
+    assert_eq!(
+        config.tool_execution.timeout(),
+        codex_config::ToolExecutionTimingRange::new(
+            /*min_ms*/ 20_000, /*default_ms*/ 700_000, /*max_ms*/ 900_000,
+        )
+        .expect("expected timeout range should be valid")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_yield_alias_conflicts_with_profile_maximum() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        "background_terminal_max_timeout = 90000\n",
+    )?;
+    let selected_config = codex_home.path().join("patient.config.toml");
+    std::fs::write(
+        &selected_config,
+        r#"
+[tool_execution.yield]
+max_ms = 120000
+"#,
+    )?;
+
+    let err = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .loader_overrides(LoaderOverrides {
+            user_config_path: Some(selected_config.abs()),
+            user_config_profile: Some("patient".parse().expect("profile-v2 name")),
+            ..LoaderOverrides::without_managed_config_for_tests()
+        })
+        .build()
+        .await
+        .expect_err("legacy and profile timing maxima should conflict");
+
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        err.to_string(),
+        "`background_terminal_max_timeout` conflicts with `tool_execution.yield.max_ms`; remove the deprecated key"
     );
     Ok(())
 }

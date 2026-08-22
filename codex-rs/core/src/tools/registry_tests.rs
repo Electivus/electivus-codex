@@ -550,7 +550,7 @@ async fn code_mode_wait_does_not_expose_default_hook_payloads() {
     let (session, turn) = crate::session::tests::make_session_and_context().await;
     let output = crate::tools::context::FunctionToolOutput::from_text("ok".to_string(), Some(true));
 
-    let wait = crate::tools::handlers::CodeModeWaitHandler;
+    let wait = crate::tools::handlers::CodeModeWaitHandler::default();
     let wait_invocation = test_invocation(
         Arc::new(session),
         Arc::new(turn),
@@ -565,7 +565,7 @@ async fn code_mode_wait_does_not_expose_default_hook_payloads() {
 async fn write_stdin_does_not_expose_default_pre_tool_use_payload() {
     let (session, turn) = crate::session::tests::make_session_and_context().await;
 
-    let write_stdin = crate::tools::handlers::WriteStdinHandler;
+    let write_stdin = crate::tools::handlers::WriteStdinHandler::default();
     let invocation = test_invocation(
         Arc::new(session),
         Arc::new(turn),

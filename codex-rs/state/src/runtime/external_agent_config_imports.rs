@@ -1,10 +1,122 @@
 use super::StateRuntime;
-use crate::model::datetime_to_epoch_millis;
+use super::memory_store::MemoryArtifact;
+use super::memory_store::MemoryArtifactSet;
+use super::memory_store::MemoryStore;
 use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
-use sqlx::Row;
+use sqlx::PgPool;
+use sqlx::SqlitePool;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+#[path = "external_agent_config_imports/postgres.rs"]
+mod postgres;
+#[path = "external_agent_config_imports/sqlite.rs"]
+mod sqlite;
+
+use postgres::PostgresExternalAgentConfigImportStore;
+use sqlite::SqliteExternalAgentConfigImportStore;
+
+pub(crate) const IMPORTED_MEMORY_EXTENSION_PREFIX: &str = "extensions/external_agent_import/";
+pub(crate) const IMPORTED_MEMORY_INSTRUCTIONS_PATH: &str =
+    "extensions/external_agent_import/instructions.md";
+pub(crate) const IMPORTED_MEMORY_RESOURCES_PREFIX: &str =
+    "extensions/external_agent_import/resources/";
+
+/// A validated replacement of selected external-agent project resources.
+///
+/// Project keys and artifact paths are portable persisted identifiers, not host filesystem paths.
+/// A selected project without artifacts represents removal of its previously imported resources.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalAgentMemoryImport {
+    project_keys: Vec<String>,
+    artifacts: MemoryArtifactSet,
+}
+
+impl ExternalAgentMemoryImport {
+    pub fn new(
+        mut project_keys: Vec<String>,
+        artifacts: MemoryArtifactSet,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !project_keys.is_empty(),
+            "external-agent Memory Artifact publication requires a selected project"
+        );
+        project_keys.sort();
+        project_keys.dedup();
+        anyhow::ensure!(
+            project_keys
+                .iter()
+                .all(|project_key| !project_key.contains('/')),
+            "external-agent memory project keys must be one portable path component"
+        );
+        MemoryArtifactSet::new(
+            project_keys
+                .iter()
+                .map(|project_key| {
+                    MemoryArtifact::new(
+                        format!("{IMPORTED_MEMORY_RESOURCES_PREFIX}{project_key}/scope.json"),
+                        Vec::new(),
+                    )
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?,
+        )?;
+        for artifact in artifacts.artifacts() {
+            anyhow::ensure!(
+                artifact.path() == IMPORTED_MEMORY_INSTRUCTIONS_PATH
+                    || project_keys.iter().any(|project_key| {
+                        artifact.path().starts_with(&format!(
+                            "{IMPORTED_MEMORY_RESOURCES_PREFIX}{project_key}/"
+                        ))
+                    }),
+                "external-agent Memory Artifact is outside the selected project replacements"
+            );
+        }
+        Ok(Self {
+            project_keys,
+            artifacts,
+        })
+    }
+
+    pub fn project_keys(&self) -> &[String] {
+        &self.project_keys
+    }
+
+    pub fn artifacts(&self) -> &MemoryArtifactSet {
+        &self.artifacts
+    }
+
+    /// Overlays a later replacement while retaining unrelated project resources.
+    pub fn overlay(self, newer: Self) -> anyhow::Result<Self> {
+        let Self {
+            mut project_keys,
+            artifacts,
+        } = self;
+        let Self {
+            project_keys: newer_project_keys,
+            artifacts: newer_artifacts,
+        } = newer;
+        let mut merged_artifacts = artifacts
+            .artifacts()
+            .iter()
+            .filter(|artifact| {
+                !newer_project_keys.iter().any(|project_key| {
+                    artifact
+                        .path()
+                        .starts_with(&format!("{IMPORTED_MEMORY_RESOURCES_PREFIX}{project_key}/"))
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for artifact in newer_artifacts.artifacts() {
+            merged_artifacts.retain(|existing| existing.path() != artifact.path());
+            merged_artifacts.push(artifact.clone());
+        }
+        project_keys.extend(newer_project_keys);
+        Self::new(project_keys, MemoryArtifactSet::new(merged_artifacts)?)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalAgentConfigImportSuccessRecord {
@@ -43,6 +155,150 @@ pub struct ExternalAgentConfigImportHistoryRecord {
     pub failures: Vec<ExternalAgentConfigImportFailureRecord>,
 }
 
+/// Storage-neutral facade for completed external-agent import outcomes and history.
+///
+/// Implementations preserve the order of success and failure payloads exactly as supplied. A
+/// repeated import identifier replaces the prior completion as one record rather than adding a
+/// duplicate history entry.
+#[derive(Clone)]
+pub struct ExternalAgentConfigImportStore {
+    backend: ExternalAgentConfigImportStoreBackend,
+}
+
+#[derive(Clone)]
+enum ExternalAgentConfigImportStoreBackend {
+    Postgres(Box<PostgresExternalAgentConfigImportStore>),
+    Sqlite {
+        imports: SqliteExternalAgentConfigImportStore,
+        memories: MemoryStore,
+    },
+}
+
+impl ExternalAgentConfigImportStore {
+    pub(crate) fn from_sqlite(pool: Arc<SqlitePool>, memories: MemoryStore) -> Self {
+        Self {
+            backend: ExternalAgentConfigImportStoreBackend::Sqlite {
+                imports: SqliteExternalAgentConfigImportStore::new(pool),
+                memories,
+            },
+        }
+    }
+
+    pub(crate) fn from_postgres(pool: PgPool, schema: String) -> Self {
+        Self {
+            backend: ExternalAgentConfigImportStoreBackend::Postgres(Box::new(
+                PostgresExternalAgentConfigImportStore::new(pool, schema),
+            )),
+        }
+    }
+
+    pub async fn record_completed(
+        &self,
+        import_id: &str,
+        successes: &[ExternalAgentConfigImportSuccessRecord],
+        failures: &[ExternalAgentConfigImportFailureRecord],
+    ) -> anyhow::Result<()> {
+        self.record_completed_with_provider(
+            import_id, /*provider_id*/ None, successes, failures,
+        )
+        .await
+    }
+
+    pub async fn record_completed_with_provider(
+        &self,
+        import_id: &str,
+        provider_id: Option<&str>,
+        successes: &[ExternalAgentConfigImportSuccessRecord],
+        failures: &[ExternalAgentConfigImportFailureRecord],
+    ) -> anyhow::Result<()> {
+        match &self.backend {
+            ExternalAgentConfigImportStoreBackend::Postgres(store) => {
+                store
+                    .record_completed(import_id, provider_id, successes, failures)
+                    .await
+            }
+            ExternalAgentConfigImportStoreBackend::Sqlite { imports, .. } => {
+                imports
+                    .record_completed(import_id, provider_id, successes, failures)
+                    .await
+            }
+        }
+    }
+
+    /// Records one completion and schedules or atomically publishes its imported resources,
+    /// according to the configured backend's authority model.
+    pub async fn record_completed_with_memory_import(
+        &self,
+        import_id: &str,
+        successes: &[ExternalAgentConfigImportSuccessRecord],
+        failures: &[ExternalAgentConfigImportFailureRecord],
+        memory_import: &ExternalAgentMemoryImport,
+    ) -> anyhow::Result<()> {
+        self.record_completed_with_memory_import_and_provider(
+            import_id,
+            /*provider_id*/ None,
+            successes,
+            failures,
+            memory_import,
+        )
+        .await
+    }
+
+    pub async fn record_completed_with_memory_import_and_provider(
+        &self,
+        import_id: &str,
+        provider_id: Option<&str>,
+        successes: &[ExternalAgentConfigImportSuccessRecord],
+        failures: &[ExternalAgentConfigImportFailureRecord],
+        memory_import: &ExternalAgentMemoryImport,
+    ) -> anyhow::Result<()> {
+        match &self.backend {
+            ExternalAgentConfigImportStoreBackend::Postgres(store) => {
+                store
+                    .record_completed_with_memory_import(
+                        import_id,
+                        provider_id,
+                        successes,
+                        failures,
+                        memory_import,
+                    )
+                    .await
+            }
+            ExternalAgentConfigImportStoreBackend::Sqlite { imports, memories } => {
+                imports
+                    .record_completed(import_id, provider_id, successes, failures)
+                    .await?;
+                memories
+                    .enqueue_global_consolidation(Utc::now().timestamp())
+                    .await
+            }
+        }
+    }
+
+    pub async fn details(
+        &self,
+        import_id: &str,
+    ) -> anyhow::Result<Option<ExternalAgentConfigImportDetailsRecord>> {
+        match &self.backend {
+            ExternalAgentConfigImportStoreBackend::Postgres(store) => {
+                store.details(import_id).await
+            }
+            ExternalAgentConfigImportStoreBackend::Sqlite { imports, .. } => {
+                imports.details(import_id).await
+            }
+        }
+    }
+
+    pub async fn history(&self) -> anyhow::Result<Vec<ExternalAgentConfigImportHistoryRecord>> {
+        match &self.backend {
+            ExternalAgentConfigImportStoreBackend::Postgres(store) => store.history().await,
+            ExternalAgentConfigImportStoreBackend::Sqlite { imports, .. } => {
+                imports.history().await
+            }
+        }
+    }
+}
+
 impl StateRuntime {
     pub async fn record_external_agent_config_import_completed(
         &self,
@@ -51,95 +307,41 @@ impl StateRuntime {
         successes: &[ExternalAgentConfigImportSuccessRecord],
         failures: &[ExternalAgentConfigImportFailureRecord],
     ) -> anyhow::Result<()> {
-        sqlx::query(
-            r#"
-INSERT INTO external_agent_config_imports (
-    import_id,
-    provider_id,
-    completed_at_ms,
-    successes,
-    failures
-) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT(import_id) DO UPDATE SET
-    provider_id = excluded.provider_id,
-    completed_at_ms = excluded.completed_at_ms,
-    successes = excluded.successes,
-    failures = excluded.failures
-"#,
-        )
-        .bind(import_id)
-        .bind(provider_id)
-        .bind(datetime_to_epoch_millis(Utc::now()))
-        .bind(serde_json::to_string(successes)?)
-        .bind(serde_json::to_string(failures)?)
-        .execute(self.pool.as_ref())
-        .await?;
+        self.external_agent_config_imports
+            .record_completed_with_provider(import_id, provider_id, successes, failures)
+            .await
+    }
 
-        Ok(())
+    pub async fn record_external_agent_config_import_completed_with_memory_import(
+        &self,
+        import_id: &str,
+        provider_id: Option<&str>,
+        successes: &[ExternalAgentConfigImportSuccessRecord],
+        failures: &[ExternalAgentConfigImportFailureRecord],
+        memory_import: &ExternalAgentMemoryImport,
+    ) -> anyhow::Result<()> {
+        self.external_agent_config_imports
+            .record_completed_with_memory_import_and_provider(
+                import_id,
+                provider_id,
+                successes,
+                failures,
+                memory_import,
+            )
+            .await
     }
 
     pub async fn external_agent_config_import_details_record(
         &self,
         import_id: &str,
     ) -> anyhow::Result<Option<ExternalAgentConfigImportDetailsRecord>> {
-        let row = sqlx::query(
-            r#"
-SELECT
-    successes,
-    failures
-FROM external_agent_config_imports
-WHERE import_id = ?
-"#,
-        )
-        .bind(import_id)
-        .fetch_optional(self.pool.as_ref())
-        .await?;
-
-        row.map(|row| {
-            let successes: String = row.try_get("successes")?;
-            let failures: String = row.try_get("failures")?;
-            Ok(ExternalAgentConfigImportDetailsRecord {
-                successes: serde_json::from_str(&successes)?,
-                failures: serde_json::from_str(&failures)?,
-            })
-        })
-        .transpose()
+        self.external_agent_config_imports.details(import_id).await
     }
 
     pub async fn external_agent_config_import_history_records(
         &self,
     ) -> anyhow::Result<Vec<ExternalAgentConfigImportHistoryRecord>> {
-        let rows = sqlx::query(
-            r#"
-SELECT
-    import_id,
-    provider_id,
-    completed_at_ms,
-    successes,
-    failures
-FROM external_agent_config_imports
-ORDER BY completed_at_ms DESC, import_id ASC
-"#,
-        )
-        .fetch_all(self.pool.as_ref())
-        .await?;
-
-        rows.into_iter()
-            .map(|row| {
-                let import_id: String = row.try_get("import_id")?;
-                let provider_id: Option<String> = row.try_get("provider_id")?;
-                let completed_at_ms: i64 = row.try_get("completed_at_ms")?;
-                let successes: String = row.try_get("successes")?;
-                let failures: String = row.try_get("failures")?;
-                Ok(ExternalAgentConfigImportHistoryRecord {
-                    import_id,
-                    provider_id,
-                    completed_at_ms,
-                    successes: serde_json::from_str(&successes)?,
-                    failures: serde_json::from_str(&failures)?,
-                })
-            })
-            .collect()
+        self.external_agent_config_imports.history().await
     }
 }
 

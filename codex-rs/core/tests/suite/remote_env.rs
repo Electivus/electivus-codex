@@ -644,7 +644,7 @@ async fn environment_permissions_follow_configuration_ownership() -> Result<()> 
         turn_context
             .workspace_roots
             .as_ref()
-            .is_some_and(|roots| roots.contains(&owner_profile_workspace_root))
+            .is_some_and(|roots| roots.contains(&owner_profile_workspace_root.clone().into()))
     );
     assert_eq!(
         (
@@ -652,7 +652,7 @@ async fn environment_permissions_follow_configuration_ownership() -> Result<()> 
             turn_context.active_permission_profile
         ),
         (
-            Some(PermissionProfile::read_only()),
+            Some(PermissionProfile::read_only().into()),
             Some(owner_active_profile)
         )
     );
@@ -2212,7 +2212,7 @@ async fn deferred_executor_spawn_agent_inherits_ready_step_environments(
     let child_settings = child_thread.thread_settings_snapshot().await;
     assert_ne!(
         child_settings.permission_profile,
-        child_snapshot.permission_profile
+        child_snapshot.permission_profile.clone().into()
     );
     assert_eq!(
         (

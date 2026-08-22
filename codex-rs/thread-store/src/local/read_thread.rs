@@ -5,6 +5,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::TokenUsage;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::find_thread_name_by_id;
 use codex_rollout::read_session_meta_line;
@@ -14,6 +15,7 @@ use codex_state::ThreadMetadata;
 use super::LocalThreadStore;
 use super::helpers::distinct_thread_metadata_title;
 use super::helpers::git_info_from_parts;
+use super::helpers::overlay_rollout_fields;
 use super::helpers::permission_profile_from_metadata_value;
 use super::helpers::rollout_path_is_archived;
 use super::helpers::set_thread_name;
@@ -44,34 +46,27 @@ pub(super) async fn read_thread(
                 .await)
     {
         let metadata_sandbox_policy = metadata.sandbox_policy.clone();
+        let metadata_cwd = metadata.cwd.clone();
         let mut thread = stored_thread_from_sqlite_metadata(store, metadata).await?;
         // Paginated history may contain only a suffix, so its display metadata lives in SQLite.
         // Legacy display metadata remains rollout-derived.
         if thread.history_mode == ThreadHistoryMode::Legacy
             && !params.include_history
             && let Some(rollout_path) = thread.rollout_path.clone()
-            && let Ok(mut rollout_thread) = read_thread_from_rollout_path(store, rollout_path).await
+            && let Ok(rollout_thread) = read_thread_from_rollout_path(store, rollout_path).await
             && rollout_thread.thread_id == thread_id
             && (params.include_archived || rollout_thread.archived_at.is_none())
             && !rollout_thread.preview.is_empty()
         {
-            rollout_thread.recency_at = thread.recency_at;
-            rollout_thread.section = thread.section;
-            rollout_thread.section_position = thread.section_position;
-            rollout_thread.section_entered_at = thread.section_entered_at;
-            if !thread.cwd.as_os_str().is_empty() {
-                rollout_thread.cwd = thread.cwd;
+            overlay_rollout_fields(&mut thread, rollout_thread);
+            if !metadata_cwd.as_os_str().is_empty() {
+                thread.cwd = metadata_cwd;
             }
-            if thread.name.is_some() {
-                rollout_thread.name = thread.name;
-            }
-            rollout_thread.project_id = thread.project_id;
-            rollout_thread.git_info = thread.git_info;
-            rollout_thread.permission_profile = permission_profile_from_metadata_value(
+            thread.permission_profile = permission_profile_from_metadata_value(
                 &metadata_sandbox_policy,
-                rollout_thread.cwd.as_path(),
-            );
-            thread = rollout_thread;
+                thread.cwd.as_path(),
+            )
+            .into();
         }
         reject_paginated_history(&thread, params.include_history)?;
         attach_history_if_requested(&mut thread, params.include_history).await?;
@@ -137,20 +132,22 @@ pub(super) async fn read_thread_by_rollout_path(
             thread = stored_thread_from_sqlite_metadata(store, metadata).await?;
         } else {
             thread.recency_at = metadata.recency_at;
-            thread.section = metadata.section;
+            thread.section = metadata.section.clone();
             thread.section_position = metadata.section_position;
             thread.section_entered_at = metadata.section_entered_at;
-            thread.project_id = metadata.project_id;
+            thread.project_id = metadata.project_id.clone();
+            let fallback_repository_identity = thread.repository_identity.take();
             if !metadata.cwd.as_os_str().is_empty()
                 && resolve_requested_rollout_path(store, metadata.rollout_path.clone())
                     .await
                     .is_ok_and(|metadata_rollout_path| metadata_rollout_path == path)
             {
-                thread.cwd = metadata.cwd;
+                thread.cwd = metadata.cwd.clone();
                 thread.permission_profile = permission_profile_from_metadata_value(
                     &metadata.sandbox_policy,
                     thread.cwd.as_path(),
-                );
+                )
+                .into();
             }
             let (fallback_sha, fallback_branch, fallback_origin_url) = match thread.git_info.take()
             {
@@ -161,11 +158,20 @@ pub(super) async fn read_thread_by_rollout_path(
                 ),
                 None => (None, None, None),
             };
+            let (origin_url, repository_identity) = match (
+                metadata.git_origin_url_is_explicit(),
+                metadata.git_origin_url,
+            ) {
+                (true, origin_url) => (origin_url, metadata.repository_identity),
+                (false, Some(origin_url)) => (Some(origin_url), metadata.repository_identity),
+                (false, None) => (fallback_origin_url, fallback_repository_identity),
+            };
             thread.git_info = git_info_from_parts(
                 metadata.git_sha.or(fallback_sha),
                 metadata.git_branch.or(fallback_branch),
-                metadata.git_origin_url.or(fallback_origin_url),
+                origin_url,
             );
+            thread.repository_identity = repository_identity;
         }
     }
     reject_paginated_history(&thread, include_history)?;
@@ -391,14 +397,18 @@ pub(super) fn stored_thread_from_state_metadata(
         agent_nickname: metadata.agent_nickname,
         agent_role: metadata.agent_role,
         agent_path: metadata.agent_path,
+        repository_identity: metadata.repository_identity,
         git_info: git_info_from_parts(
             metadata.git_sha,
             metadata.git_branch,
             metadata.git_origin_url,
         ),
         approval_mode: parse_or_default(&metadata.approval_mode, AskForApproval::OnRequest),
-        permission_profile,
-        token_usage: None,
+        permission_profile: permission_profile.into(),
+        token_usage: (metadata.tokens_used != 0).then(|| TokenUsage {
+            total_tokens: metadata.tokens_used,
+            ..Default::default()
+        }),
         first_user_message: metadata.first_user_message,
         history: None,
     }
@@ -431,9 +441,15 @@ async fn stored_thread_from_session_meta(
 ) -> ThreadStoreResult<StoredThread> {
     let meta_line = read_required_session_meta_line(path.as_path()).await?;
     let archived = rollout_path_is_archived(store.config.codex_home.as_path(), path.as_path());
-    Ok(stored_thread_from_meta_line(
-        store, meta_line, path, archived,
-    ))
+    let mut thread = stored_thread_from_meta_line(store, meta_line, path, archived);
+    if thread.history_mode == ThreadHistoryMode::Legacy
+        && let Ok(Some(name)) =
+            find_thread_name_by_id(store.config.codex_home.as_path(), &thread.thread_id).await
+        && !name.trim().is_empty()
+    {
+        set_thread_name(&mut thread, name);
+    }
+    Ok(thread)
 }
 
 async fn read_required_session_meta_line(
@@ -490,9 +506,14 @@ fn stored_thread_from_meta_line(
         agent_nickname: meta_line.meta.agent_nickname,
         agent_role: meta_line.meta.agent_role,
         agent_path: meta_line.meta.agent_path,
+        repository_identity: meta_line
+            .git
+            .as_ref()
+            .and_then(|git| git.repository_url.as_deref())
+            .and_then(codex_git_utils::canonicalize_git_remote_url),
         git_info: meta_line.git,
         approval_mode: AskForApproval::OnRequest,
-        permission_profile: PermissionProfile::read_only(),
+        permission_profile: PermissionProfile::read_only().into(),
         token_usage: None,
         first_user_message: None,
         history: None,
@@ -631,6 +652,7 @@ mod tests {
         );
         builder.model_provider = Some(config.default_model_provider_id.clone());
         builder.git_branch = Some("sqlite-branch".to_string());
+        builder.git_origin_url = Some("ssh://git@ghe.example.test:2222/Org/Repo.git".to_string());
         let recency_at = chrono::DateTime::parse_from_rfc3339("2026-01-03T12:00:00Z")
             .expect("timestamp should parse")
             .with_timezone(&Utc);
@@ -654,7 +676,7 @@ mod tests {
 
         let thread = store
             .read_thread_by_rollout_path(
-                active_path,
+                active_path.clone(),
                 /*include_archived*/ false,
                 /*include_history*/ false,
             )
@@ -677,7 +699,38 @@ mod tests {
         );
         assert_eq!(
             git_info.repository_url.as_deref(),
-            Some("https://example.com/repo.git")
+            Some("ssh://git@ghe.example.test:2222/Org/Repo.git")
+        );
+        assert_eq!(
+            thread.repository_identity.as_deref(),
+            Some("ghe.example.test:2222/Org/Repo")
+        );
+
+        runtime
+            .update_thread_git_info(
+                thread_id,
+                /*git_sha*/ None,
+                /*git_branch*/ None,
+                Some(None),
+            )
+            .await
+            .expect("explicit origin clear should succeed");
+        let cleared = store
+            .read_thread_by_rollout_path(
+                active_path,
+                /*include_archived*/ false,
+                /*include_history*/ false,
+            )
+            .await
+            .expect("read thread after explicit origin clear");
+        assert_eq!(
+            (
+                cleared
+                    .git_info
+                    .and_then(|git_info| git_info.repository_url),
+                cleared.repository_identity,
+            ),
+            (None, None)
         );
     }
 
@@ -953,7 +1006,7 @@ mod tests {
             .expect("read thread");
 
         assert_eq!(thread.preview, "Hello from user");
-        assert_eq!(thread.permission_profile, PermissionProfile::Disabled);
+        assert_eq!(thread.permission_profile(), PermissionProfile::Disabled);
     }
 
     #[tokio::test]
@@ -991,7 +1044,7 @@ mod tests {
             .await
             .expect("read thread");
 
-        assert_eq!(thread.permission_profile, PermissionProfile::Disabled);
+        assert_eq!(thread.permission_profile(), PermissionProfile::Disabled);
     }
 
     #[tokio::test]
@@ -1078,7 +1131,7 @@ mod tests {
             exclude_slash_tmp: false,
         };
         assert_eq!(
-            thread.permission_profile,
+            thread.permission_profile(),
             PermissionProfile::from_legacy_sandbox_policy_for_cwd(
                 &legacy_policy,
                 sqlite_cwd.as_path()

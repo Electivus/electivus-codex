@@ -57,6 +57,27 @@ pub struct GoalSetRequest<'a> {
     pub max_goal_token_budget: Option<i64>,
 }
 
+/// Selects whether setting a goal should fill an empty thread preview.
+#[derive(Clone, Copy)]
+#[non_exhaustive]
+pub enum GoalPreviewUpdate<'a> {
+    /// Fill an empty preview through the runtime metadata facade.
+    FillIfEmpty(&'a codex_state::StateRuntime),
+    /// Leave preview metadata unchanged when no metadata facade is available.
+    Skip,
+}
+
+impl GoalPreviewUpdate<'_> {
+    async fn apply(self, thread_id: ThreadId, goal: &codex_state::ThreadGoal) {
+        match self {
+            Self::FillIfEmpty(state_db) => {
+                fill_empty_thread_preview_if_possible(state_db, thread_id, goal).await;
+            }
+            Self::Skip => {}
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct GoalSetOutcome {
     pub goal: ThreadGoal,
@@ -130,11 +151,10 @@ impl GoalService {
 
     pub async fn get_thread_goal(
         &self,
-        state_db: &codex_state::StateRuntime,
+        goal_store: &codex_state::GoalStore,
         thread_id: ThreadId,
     ) -> Result<Option<ThreadGoal>, GoalServiceError> {
-        state_db
-            .thread_goals()
+        goal_store
             .get_thread_goal(thread_id)
             .await
             .map(|goal| goal.map(protocol_goal_from_state))
@@ -143,7 +163,8 @@ impl GoalService {
 
     pub async fn set_thread_goal(
         &self,
-        state_db: &codex_state::StateRuntime,
+        goal_store: &codex_state::GoalStore,
+        preview_update: GoalPreviewUpdate<'_>,
         request: GoalSetRequest<'_>,
     ) -> Result<GoalSetOutcome, GoalServiceError> {
         let GoalSetRequest {
@@ -192,17 +213,12 @@ impl GoalService {
         }
 
         let (goal, previous_goal) = if let Some(objective) = objective {
-            let existing_goal = state_db
-                .thread_goals()
-                .get_thread_goal(thread_id)
-                .await
-                .map_err(|err| {
-                    GoalServiceError::Internal(format!("failed to read thread goal: {err}"))
-                })?;
+            let existing_goal = goal_store.get_thread_goal(thread_id).await.map_err(|err| {
+                GoalServiceError::Internal(format!("failed to read thread goal: {err}"))
+            })?;
             if let Some(existing_goal) = existing_goal.as_ref() {
                 let previous_goal = PreviousGoalSnapshot::from(existing_goal);
-                state_db
-                    .thread_goals()
+                goal_store
                     .update_thread_goal(
                         thread_id,
                         codex_state::GoalUpdate {
@@ -223,8 +239,7 @@ impl GoalService {
                     })
                     .map(|goal| (goal, Some(previous_goal)))?
             } else {
-                state_db
-                    .thread_goals()
+                goal_store
                     .replace_thread_goal(
                         thread_id,
                         objective,
@@ -238,8 +253,7 @@ impl GoalService {
                     .map(|goal| (goal, None))?
             }
         } else {
-            let existing_goal = state_db
-                .thread_goals()
+            let existing_goal = goal_store
                 .get_thread_goal(thread_id)
                 .await
                 .map_err(|err| {
@@ -252,8 +266,7 @@ impl GoalService {
                 })?;
             let previous_goal = PreviousGoalSnapshot::from(&existing_goal);
             let expected_goal_id = existing_goal.goal_id.clone();
-            state_db
-                .thread_goals()
+            goal_store
                 .update_thread_goal(
                     thread_id,
                     codex_state::GoalUpdate {
@@ -276,7 +289,7 @@ impl GoalService {
         };
 
         if objective.is_some() {
-            fill_empty_thread_preview_if_possible(state_db, thread_id, &goal).await;
+            preview_update.apply(thread_id, &goal).await;
         }
         Ok(GoalSetOutcome {
             goal: protocol_goal_from_state(goal.clone()),
@@ -287,7 +300,7 @@ impl GoalService {
 
     pub async fn clear_thread_goal(
         &self,
-        state_db: &codex_state::StateRuntime,
+        goal_store: &codex_state::GoalStore,
         thread_id: ThreadId,
     ) -> Result<bool, GoalServiceError> {
         let runtime = self.runtime_for_thread(thread_id);
@@ -308,8 +321,7 @@ impl GoalService {
             tracing::warn!("failed to prepare external goal mutation: {err}");
         }
 
-        let cleared_goal = state_db
-            .thread_goals()
+        let cleared_goal = goal_store
             .delete_thread_goal(thread_id)
             .await
             .map_err(|err| {

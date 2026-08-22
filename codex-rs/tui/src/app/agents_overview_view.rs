@@ -173,18 +173,25 @@ impl AgentsOverviewView {
                     "{} {} {}",
                     row.thread.name.as_deref().unwrap_or_default(),
                     row.thread.preview,
-                    row.thread.cwd.display(),
+                    row.thread.cwd.render_for_ui(),
                 )
                 .to_lowercase();
                 (search.is_empty() || searchable.contains(&search)).then_some(index)
             })
             .collect::<Vec<_>>();
         if !state.status_grouping {
-            visible.sort_by_key(|index| {
-                (
-                    &self.rows[*index].thread.cwd,
-                    std::cmp::Reverse(self.rows[*index].thread.updated_at),
-                )
+            visible.sort_by(|left, right| {
+                self.rows[*left]
+                    .thread
+                    .cwd
+                    .as_str()
+                    .cmp(self.rows[*right].thread.cwd.as_str())
+                    .then_with(|| {
+                        self.rows[*right]
+                            .thread
+                            .updated_at
+                            .cmp(&self.rows[*left].thread.updated_at)
+                    })
             });
         }
         visible
@@ -230,7 +237,10 @@ impl AgentsOverviewView {
                     .send(AppEvent::DispatchAgentsOverviewTask {
                         prompt: input,
                         cwd: (!state.status_grouping)
-                            .then(|| self.selected_row().map(|row| row.thread.cwd.clone()))
+                            .then(|| {
+                                self.selected_row()
+                                    .and_then(|row| row.thread.cwd.to_inferred_abs_path())
+                            })
                             .flatten(),
                     });
             }
@@ -312,7 +322,7 @@ impl AgentsOverviewView {
             }
             let row = &self.rows[index];
             let group = if project_grouping {
-                row.thread.cwd.display().to_string()
+                row.thread.cwd.render_for_ui()
             } else {
                 row.group.label().to_string()
             };
@@ -381,7 +391,7 @@ impl AgentsOverviewView {
             Line::from(vec![dot, " ".into(), status.into()]),
             Line::default(),
             Line::from("Project".dim()),
-            Line::from(row.thread.cwd.display().to_string()),
+            Line::from(row.thread.cwd.render_for_ui()),
         ];
         if let Some(branch) = row
             .thread

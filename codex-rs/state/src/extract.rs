@@ -89,7 +89,7 @@ fn apply_session_meta_from_item(metadata: &mut ThreadMetadata, meta_line: &Sessi
 
 fn apply_turn_context(metadata: &mut ThreadMetadata, turn_ctx: &TurnContextItem) {
     if metadata.cwd.as_os_str().is_empty() {
-        metadata.cwd = turn_ctx.cwd.clone().into_path_buf();
+        metadata.cwd = turn_ctx.cwd.to_path_buf();
     }
     metadata.model = Some(turn_ctx.model.clone());
     metadata.reasoning_effort = turn_ctx.effort.clone();
@@ -124,7 +124,7 @@ fn apply_event_msg(metadata: &mut ThreadMetadata, event: &EventMsg) {
             metadata.model = Some(settings.model.clone());
             metadata.model_provider = settings.model_provider_id.clone();
             metadata.reasoning_effort = settings.reasoning_effort.clone();
-            metadata.cwd = settings.cwd.clone().into_path_buf();
+            metadata.cwd = settings.cwd.to_path_buf();
             metadata.sandbox_policy =
                 serde_json::to_string(&settings.permission_profile).unwrap_or_default();
             metadata.approval_mode = enum_to_string(&settings.approval_policy);
@@ -200,6 +200,7 @@ mod tests {
     use codex_protocol::protocol::USER_MESSAGE_BEGIN;
     use codex_protocol::protocol::UserMessageEvent;
     use codex_protocol::user_input::UserInput;
+    use codex_utils_absolute_path::test_support::PathExt;
 
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
@@ -421,18 +422,17 @@ mod tests {
             &mut metadata,
             &RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
-                cwd: serde_json::from_value(serde_json::json!(
-                    std::env::current_dir()
-                        .expect("current directory")
-                        .join("parent/workspace")
-                ))
-                .expect("absolute parent cwd"),
+                cwd: std::env::current_dir()
+                    .expect("current directory")
+                    .join("parent/workspace")
+                    .abs()
+                    .into(),
                 workspace_roots: None,
                 current_date: None,
                 timezone: None,
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: None,
-                sandbox_policy: SandboxPolicy::DangerFullAccess,
+                sandbox_policy: SandboxPolicy::DangerFullAccess.into(),
                 permission_profile: None,
                 active_permission_profile: None,
                 network: None,
@@ -468,19 +468,18 @@ mod tests {
             &mut metadata,
             &RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
-                cwd: serde_json::from_value(serde_json::json!(
-                    std::env::current_dir()
-                        .expect("current directory")
-                        .join("workspace")
-                ))
-                .expect("absolute workspace cwd"),
+                cwd: std::env::current_dir()
+                    .expect("current directory")
+                    .join("workspace")
+                    .abs()
+                    .into(),
                 workspace_roots: None,
                 current_date: None,
                 timezone: None,
                 approval_policy: AskForApproval::OnRequest,
                 approvals_reviewer: None,
-                sandbox_policy: SandboxPolicy::DangerFullAccess,
-                permission_profile: Some(permission_profile.clone()),
+                sandbox_policy: SandboxPolicy::DangerFullAccess.into(),
+                permission_profile: Some(permission_profile.clone().into()),
                 active_permission_profile: None,
                 network: None,
                 file_system_sandbox_policy: None,
@@ -515,14 +514,13 @@ mod tests {
             &mut metadata,
             &RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
-                cwd: serde_json::from_value(serde_json::json!(&fallback_cwd))
-                    .expect("absolute fallback cwd"),
+                cwd: fallback_cwd.abs().into(),
                 workspace_roots: None,
                 current_date: None,
                 timezone: None,
                 approval_policy: AskForApproval::OnRequest,
                 approvals_reviewer: None,
-                sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                sandbox_policy: SandboxPolicy::new_read_only_policy().into(),
                 permission_profile: None,
                 active_permission_profile: None,
                 network: None,
@@ -551,18 +549,17 @@ mod tests {
             &mut metadata,
             &RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
-                cwd: serde_json::from_value(serde_json::json!(
-                    std::env::current_dir()
-                        .expect("current directory")
-                        .join("fallback/workspace")
-                ))
-                .expect("absolute fallback cwd"),
+                cwd: std::env::current_dir()
+                    .expect("current directory")
+                    .join("fallback/workspace")
+                    .abs()
+                    .into(),
                 workspace_roots: None,
                 current_date: None,
                 timezone: None,
                 approval_policy: AskForApproval::OnRequest,
                 approvals_reviewer: None,
-                sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                sandbox_policy: SandboxPolicy::new_read_only_policy().into(),
                 permission_profile: None,
                 active_permission_profile: None,
                 network: None,
@@ -599,9 +596,9 @@ mod tests {
                     service_tier: None,
                     approval_policy: AskForApproval::Never,
                     approvals_reviewer: ApprovalsReviewer::User,
-                    permission_profile: permission_profile.clone(),
+                    permission_profile: permission_profile.clone().into(),
                     active_permission_profile: None,
-                    cwd: cwd.clone().try_into().expect("absolute settings cwd"),
+                    cwd: cwd.abs().into(),
                     reasoning_effort: Some(ReasoningEffort::Ultra),
                     reasoning_summary: Some(ReasoningSummary::Auto),
                     personality: None,
@@ -711,6 +708,8 @@ mod tests {
             git_sha: None,
             git_branch: None,
             git_origin_url: None,
+            repository_identity: None,
+            git_origin_url_is_explicit: false,
         }
     }
 

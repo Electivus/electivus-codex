@@ -702,13 +702,15 @@ mod tests {
                 item: RolloutItem::TurnContext(TurnContextItem {
                     turn_id: Some((*turn_id).to_string()),
                     cwd: AbsolutePathBuf::from_absolute_path(tempdir.path())
-                        .expect("absolute feedback rollout directory"),
+                        .expect("absolute feedback rollout directory")
+                        .into(),
                     workspace_roots: None,
                     current_date: None,
                     timezone: None,
                     approval_policy: codex_protocol::protocol::AskForApproval::Never,
                     approvals_reviewer: None,
-                    sandbox_policy: codex_protocol::protocol::SandboxPolicy::new_read_only_policy(),
+                    sandbox_policy: codex_protocol::protocol::SandboxPolicy::new_read_only_policy()
+                        .into(),
                     permission_profile: None,
                     active_permission_profile: None,
                     network: None,

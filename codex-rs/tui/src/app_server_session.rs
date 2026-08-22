@@ -3444,7 +3444,7 @@ mod tests {
                 recency_at: Some(2),
                 status: ThreadStatus::Idle,
                 path: None,
-                cwd: test_path_buf("/tmp/project").abs(),
+                cwd: test_path_buf("/tmp/project").abs().into(),
                 cli_version: "0.0.0".to_string(),
                 source: codex_app_server_protocol::SessionSource::Cli,
                 can_accept_direct_input: None,

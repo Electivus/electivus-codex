@@ -63,3 +63,17 @@ tail -F ./.codex-log/codex-tui.log
 The non-interactive mode (`codex exec`) defaults to `RUST_LOG=error`, but messages are printed inline, so there is no need to monitor a separate file.
 
 See the Rust documentation on [`RUST_LOG`](https://docs.rs/env_logger/latest/env_logger/#enabling-logging) for more information on the configuration options.
+
+### RustRover
+
+Open the repository root in RustRover and attach `codex-rs/Cargo.toml` when prompted. This is
+the root of the Rust workspace; the repository root itself is a JavaScript monorepo root and
+does not contain a `Cargo.toml`.
+
+The workspace pins Rust `1.95.0` and the required `rustfmt`, `clippy`, and `rust-src` components
+in `codex-rs/rust-toolchain.toml`. Configure RustRover to use the rustup toolchain (the default
+toolchain home is `%USERPROFILE%\.cargo\bin` on Windows), and keep the Cargo working directory
+set to `codex-rs`.
+
+Shared run/debug configurations are available in `.run` for the Codex CLI, `codex exec`, and a
+workspace-wide Cargo check.

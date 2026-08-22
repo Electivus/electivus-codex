@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt;
 
+use codex_protocol::openai_models::ReasoningEffort;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -315,8 +316,12 @@ pub struct MemoriesToml {
     pub min_rate_limit_remaining_percent: Option<i64>,
     /// Model used for thread summarisation.
     pub extract_model: Option<String>,
+    /// Reasoning effort used for thread summarisation.
+    pub extract_model_reasoning_effort: Option<ReasoningEffort>,
     /// Model used for memory consolidation.
     pub consolidation_model: Option<String>,
+    /// Reasoning effort used for memory consolidation.
+    pub consolidation_model_reasoning_effort: Option<ReasoningEffort>,
 }
 
 /// Effective memories settings after defaults are applied.
@@ -333,7 +338,9 @@ pub struct MemoriesConfig {
     pub min_rollout_idle_hours: i64,
     pub min_rate_limit_remaining_percent: i64,
     pub extract_model: Option<String>,
+    pub extract_model_reasoning_effort: Option<ReasoningEffort>,
     pub consolidation_model: Option<String>,
+    pub consolidation_model_reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl Default for MemoriesConfig {
@@ -350,7 +357,9 @@ impl Default for MemoriesConfig {
             min_rollout_idle_hours: DEFAULT_MEMORIES_MIN_ROLLOUT_IDLE_HOURS,
             min_rate_limit_remaining_percent: DEFAULT_MEMORIES_MIN_RATE_LIMIT_REMAINING_PERCENT,
             extract_model: None,
+            extract_model_reasoning_effort: None,
             consolidation_model: None,
+            consolidation_model_reasoning_effort: None,
         }
     }
 }
@@ -396,7 +405,9 @@ impl From<MemoriesToml> for MemoriesConfig {
                 .unwrap_or(defaults.min_rate_limit_remaining_percent)
                 .clamp(0, 100),
             extract_model: toml.extract_model,
+            extract_model_reasoning_effort: toml.extract_model_reasoning_effort,
             consolidation_model: toml.consolidation_model,
+            consolidation_model_reasoning_effort: toml.consolidation_model_reasoning_effort,
         }
     }
 }

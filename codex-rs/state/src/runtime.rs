@@ -1,6 +1,4 @@
-use crate::LogEntry;
-use crate::LogQuery;
-use crate::LogRow;
+use crate::PostgresRuntimeStatePool;
 use crate::SortKey;
 use crate::SqliteConfig;
 use crate::ThreadMetadata;
@@ -25,13 +23,12 @@ use chrono::DateTime;
 use chrono::Utc;
 use codex_history::RolloutItem;
 use codex_protocol::ThreadId;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value;
 use sqlx::QueryBuilder;
 use sqlx::Row;
 use sqlx::Sqlite;
-use sqlx::SqliteConnection;
 use sqlx::SqlitePool;
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,15 +36,53 @@ use std::sync::atomic::AtomicI64;
 use std::time::Instant;
 use tracing::warn;
 
+mod backend;
+#[cfg(test)]
+#[path = "runtime/backend_contract_tests.rs"]
+mod backend_contract_tests;
 mod backfill;
+#[cfg(test)]
+#[path = "runtime/backfill_contract_tests.rs"]
+pub(crate) mod backfill_contract_tests;
 mod external_agent_config_imports;
+#[cfg(test)]
+#[path = "runtime/external_agent_config_imports_contract_tests.rs"]
+pub(crate) mod external_agent_config_imports_contract_tests;
 mod goals;
-mod logs;
+#[cfg(test)]
+#[path = "runtime/goals_contract_tests.rs"]
+pub(crate) mod goals_contract_tests;
+mod log_store;
+#[cfg(test)]
+#[path = "runtime/logs_contract_tests.rs"]
+pub(crate) mod logs_contract_tests;
 mod memories;
+mod memory_store;
+#[cfg(test)]
+#[path = "runtime/memory_store_contract_tests.rs"]
+pub(crate) mod memory_store_contract_tests;
+#[cfg(test)]
+#[path = "runtime/memory_store_output_contract_tests.rs"]
+pub(crate) mod memory_store_output_contract_tests;
+#[cfg(test)]
+#[path = "runtime/memory_store_phase2_contract_tests.rs"]
+pub(crate) mod memory_store_phase2_contract_tests;
+#[cfg(test)]
+#[path = "runtime/memory_store_phase2_success_contract_tests.rs"]
+pub(crate) mod memory_store_phase2_success_contract_tests;
+#[cfg(test)]
+#[path = "runtime/memory_store_reset_contract_tests.rs"]
+pub(crate) mod memory_store_reset_contract_tests;
+#[cfg(test)]
+#[path = "runtime/memory_store_startup_contract_tests.rs"]
+pub(crate) mod memory_store_startup_contract_tests;
 mod projects;
 mod queued_items;
 mod recovery;
 mod remote_control;
+#[cfg(test)]
+#[path = "runtime/remote_control_contract_tests.rs"]
+pub(crate) mod remote_control_contract_tests;
 mod rollout_migration;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -55,15 +90,34 @@ mod thread_section_order;
 mod thread_sections;
 mod threads;
 
+pub use backend::RuntimeStateBackendConfig;
+pub use backfill::BackfillClaimOutcome;
+pub use backfill::BackfillCoordinator;
+pub use backfill::BackfillLease;
+pub use backfill::BackfillLeaseUpdate;
 pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportHistoryRecord;
+pub use external_agent_config_imports::ExternalAgentConfigImportStore;
 pub use external_agent_config_imports::ExternalAgentConfigImportSuccessRecord;
+pub use external_agent_config_imports::ExternalAgentMemoryImport;
 pub use goals::GoalAccountingMode;
 pub use goals::GoalAccountingOutcome;
+pub use goals::GoalAccountingRequest;
+pub use goals::GoalAccountingTarget;
 pub use goals::GoalStore;
+pub use goals::GoalStoreError;
+pub use goals::GoalStoreErrorKind;
+pub use goals::GoalStoreOperation;
+pub use goals::GoalStoreResult;
 pub use goals::GoalUpdate;
-pub use memories::MemoryStore;
+pub(crate) use log_store::LogStore;
+pub use memory_store::MemoryArtifact;
+pub use memory_store::MemoryArtifactSet;
+pub use memory_store::MemoryGeneration;
+pub use memory_store::MemoryStore;
+pub use memory_store::MemoryWorkspaceMaterialization;
+pub(crate) use memory_store::import_migrated_memory_generation;
 pub use queued_items::SqliteQueueStore;
 pub use recovery::RuntimeDbBackup;
 pub(super) use recovery::RuntimeDbInitError;
@@ -73,7 +127,9 @@ pub use recovery::runtime_db_path_for_corruption_error;
 pub use recovery::sqlite_error_detail_is_corruption;
 pub use recovery::sqlite_error_detail_is_lock;
 pub use remote_control::RemoteControlEnrollmentRecord;
+pub use remote_control::RemoteControlEnrollmentStore;
 pub use threads::ThreadFilterOptions;
+pub use threads::ThreadResumeMetadata;
 
 // "Partition" is the retained-log-content bucket we cap at 10 MiB:
 // - one bucket per non-null thread_id
@@ -88,13 +144,22 @@ const LOG_PARTITION_ROW_LIMIT: i64 = 1_000;
 pub struct StateRuntime {
     sqlite: SqliteConfig,
     default_provider: String,
-    pool: Arc<sqlx::SqlitePool>,
-    logs_pool: Arc<sqlx::SqlitePool>,
+    external_agent_config_imports: ExternalAgentConfigImportStore,
+    backend: StateRuntimeBackend,
+    backfill: BackfillCoordinator,
+    logs: LogStore,
+    remote_control_enrollments: RemoteControlEnrollmentStore,
     thread_goals: GoalStore,
     memories: MemoryStore,
-    thread_queue: SqliteQueueStore,
+    thread_queue: Option<SqliteQueueStore>,
     thread_updated_at_millis: Arc<AtomicI64>,
     thread_recency_at_millis: Arc<AtomicI64>,
+}
+
+#[derive(Clone)]
+enum StateRuntimeBackend {
+    Postgresql(PostgresRuntimeStatePool),
+    Sqlite(Arc<sqlx::SqlitePool>),
 }
 
 impl StateRuntime {
@@ -105,7 +170,28 @@ impl StateRuntime {
     /// Logs and paginated thread history live in dedicated files to reduce
     /// lock contention with the rest of the state store.
     pub async fn init(sqlite: SqliteConfig, default_provider: String) -> anyhow::Result<Arc<Self>> {
-        Self::init_inner(sqlite, default_provider, /*telemetry_override*/ None).await
+        Self::init_with_backend(RuntimeStateBackendConfig::Sqlite(sqlite), default_provider).await
+    }
+
+    /// Initialize an explicitly selected SQLite state runtime.
+    ///
+    /// This opens (and migrates) the SQLite databases under `sqlite_home`.
+    /// Logs and paginated thread history live in dedicated files to reduce
+    /// lock contention with the rest of the state store.
+    pub async fn init_sqlite(
+        sqlite_home: PathBuf,
+        default_provider: String,
+    ) -> anyhow::Result<Arc<Self>> {
+        let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(sqlite_home)?);
+        Self::init_with_backend(RuntimeStateBackendConfig::Sqlite(sqlite), default_provider).await
+    }
+
+    /// Initialize the state runtime with the selected Runtime State Backend.
+    pub async fn init_with_backend(
+        backend: RuntimeStateBackendConfig,
+        default_provider: String,
+    ) -> anyhow::Result<Arc<Self>> {
+        Self::init_inner(backend, default_provider, /*telemetry_override*/ None).await
     }
 
     #[cfg(test)]
@@ -114,15 +200,73 @@ impl StateRuntime {
         default_provider: String,
         telemetry_override: &dyn DbTelemetry,
     ) -> anyhow::Result<Arc<Self>> {
-        Self::init_inner(sqlite, default_provider, Some(telemetry_override)).await
+        Self::init_inner(
+            RuntimeStateBackendConfig::Sqlite(sqlite),
+            default_provider,
+            Some(telemetry_override),
+        )
+        .await
     }
 
     async fn init_inner(
+        backend: RuntimeStateBackendConfig,
+        default_provider: String,
+        telemetry_override: Option<&dyn DbTelemetry>,
+    ) -> anyhow::Result<Arc<Self>> {
+        match backend {
+            RuntimeStateBackendConfig::Sqlite(sqlite) => {
+                Self::init_sqlite_backend(sqlite, default_provider, telemetry_override).await
+            }
+            RuntimeStateBackendConfig::Postgresql {
+                codex_home,
+                namespace,
+            } => {
+                anyhow::ensure!(
+                    telemetry_override.is_none(),
+                    "SQLite telemetry overrides cannot initialize PostgreSQL Runtime State"
+                );
+                Self::init_postgresql(codex_home, namespace, default_provider).await
+            }
+        }
+    }
+
+    async fn init_postgresql(
+        codex_home: AbsolutePathBuf,
+        namespace: crate::PostgresNamespaceConfig,
+        default_provider: String,
+    ) -> anyhow::Result<Arc<Self>> {
+        let pool = PostgresRuntimeStatePool::connect(namespace).await?;
+        let (raw_pool, schema) = pool.thread_store_connection();
+        let memories = pool.memory_store();
+        let sqlite = SqliteConfig::from_sqlite_home(codex_home);
+        let runtime = Arc::new(Self {
+            sqlite,
+            default_provider,
+            external_agent_config_imports: pool.external_agent_config_import_store(),
+            backfill: pool.backfill_coordinator(),
+            logs: LogStore::from_postgres(raw_pool, schema),
+            remote_control_enrollments: pool.remote_control_enrollment_store(),
+            thread_goals: pool.goal_store(),
+            memories,
+            backend: StateRuntimeBackend::Postgresql(pool),
+            thread_queue: None,
+            thread_updated_at_millis: Arc::new(AtomicI64::new(0)),
+            thread_recency_at_millis: Arc::new(AtomicI64::new(0)),
+        });
+        if let Err(error) = runtime.run_logs_startup_maintenance().await {
+            runtime.close().await;
+            return Err(error);
+        }
+        Ok(runtime)
+    }
+
+    async fn init_sqlite_backend(
         sqlite: SqliteConfig,
         default_provider: String,
         telemetry_override: Option<&dyn DbTelemetry>,
     ) -> anyhow::Result<Arc<Self>> {
-        tokio::fs::create_dir_all(sqlite.home()).await?;
+        let codex_home = sqlite.home().to_path_buf();
+        tokio::fs::create_dir_all(&codex_home).await?;
         let state_migrator = runtime_state_migrator();
         let logs_migrator = runtime_logs_migrator();
         let goals_migrator = runtime_goals_migrator();
@@ -248,13 +392,22 @@ impl StateRuntime {
             };
         let thread_updated_at_millis = thread_updated_at_millis.unwrap_or(0);
         let thread_recency_at_millis = thread_recency_at_millis.unwrap_or(0);
+        let memories = MemoryStore::new(Arc::clone(&memories_pool), Arc::clone(&pool));
         let runtime = Arc::new(Self {
+            external_agent_config_imports: ExternalAgentConfigImportStore::from_sqlite(
+                Arc::clone(&pool),
+                memories.clone(),
+            ),
             thread_goals: GoalStore::new(Arc::clone(&goals_pool)),
-            memories: MemoryStore::new(Arc::clone(&memories_pool), Arc::clone(&pool)),
-            thread_queue: SqliteQueueStore::new(queue_pool),
-            pool,
-            logs_pool,
+            thread_queue: Some(SqliteQueueStore::new(queue_pool)),
             sqlite,
+            memories,
+            remote_control_enrollments: RemoteControlEnrollmentStore::from_sqlite(Arc::clone(
+                &pool,
+            )),
+            backfill: BackfillCoordinator::from_sqlite(Arc::clone(&pool)),
+            backend: StateRuntimeBackend::Sqlite(pool),
+            logs: LogStore::from_sqlite(logs_pool),
             default_provider,
             thread_updated_at_millis: Arc::new(AtomicI64::new(thread_updated_at_millis)),
             thread_recency_at_millis: Arc::new(AtomicI64::new(thread_recency_at_millis)),
@@ -282,17 +435,65 @@ impl StateRuntime {
     }
 
     /// Return the durable, SQLite-backed user-message queue.
-    pub fn thread_queue(&self) -> &SqliteQueueStore {
-        &self.thread_queue
+    pub fn thread_queue(&self) -> Option<&SqliteQueueStore> {
+        self.thread_queue.as_ref()
     }
 
-    /// Close all SQLite pools and wait for outstanding pool workers to exit.
+    /// Whether local rollout JSONL is canonical thread history for this runtime.
+    ///
+    /// Consumers may use this to preserve SQLite compatibility lookups without
+    /// identifying or branching on the selected storage backend.
+    pub fn uses_local_rollout_history(&self) -> bool {
+        matches!(self.backend, StateRuntimeBackend::Sqlite(_))
+    }
+
+    /// Returns the ready PostgreSQL pool owner when this runtime selected PostgreSQL.
+    #[doc(hidden)]
+    pub fn postgres_runtime_pool(&self) -> Option<&PostgresRuntimeStatePool> {
+        match &self.backend {
+            StateRuntimeBackend::Postgresql(pool) => Some(pool),
+            StateRuntimeBackend::Sqlite(_) => None,
+        }
+    }
+
+    fn postgres_connection(&self) -> Option<(sqlx::PgPool, String)> {
+        self.postgres_runtime_pool()
+            .map(PostgresRuntimeStatePool::thread_store_connection)
+    }
+
+    fn sqlite_pool(&self) -> anyhow::Result<&SqlitePool> {
+        match &self.backend {
+            StateRuntimeBackend::Postgresql(_) => anyhow::bail!(
+                "SQLite-only Runtime State operation is unavailable with the PostgreSQL backend"
+            ),
+            StateRuntimeBackend::Sqlite(pool) => Ok(pool.as_ref()),
+        }
+    }
+
+    #[cfg(test)]
+    fn sqlite_pool_arc(&self) -> anyhow::Result<&Arc<SqlitePool>> {
+        match &self.backend {
+            StateRuntimeBackend::Postgresql(_) => anyhow::bail!(
+                "SQLite-only Runtime State operation is unavailable with the PostgreSQL backend"
+            ),
+            StateRuntimeBackend::Sqlite(pool) => Ok(pool),
+        }
+    }
+
+    /// Close every pool owned by this runtime and wait for outstanding workers to exit.
     pub async fn close(&self) {
-        self.thread_queue.close().await;
-        self.memories.close().await;
-        self.thread_goals.close().await;
-        self.logs_pool.close().await;
-        self.pool.close().await;
+        match &self.backend {
+            StateRuntimeBackend::Postgresql(pool) => pool.close().await,
+            StateRuntimeBackend::Sqlite(pool) => {
+                if let Some(thread_queue) = &self.thread_queue {
+                    thread_queue.close().await;
+                }
+                self.memories.close().await;
+                self.thread_goals.close().await;
+                self.logs.close().await;
+                pool.close().await;
+            }
+        }
     }
 
     pub async fn clear_memory_data_in_sqlite_home(sqlite: &SqliteConfig) -> anyhow::Result<bool> {
@@ -586,7 +787,7 @@ mod tests {
                 .bind(updated_at_ms)
                 .bind(recency_at_ms)
                 .bind(thread_id.to_string())
-                .execute(runtime.pool.as_ref())
+                .execute(runtime.sqlite_pool().expect("SQLite runtime"))
                 .await
                 .expect("thread timestamps should be updated");
         }

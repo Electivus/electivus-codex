@@ -47,7 +47,6 @@ use super::list::ThreadSortKey;
 use super::list::ThreadsPage;
 use super::list::get_threads;
 use super::list::get_threads_in_root;
-use super::list::parse_cursor;
 use super::list::parse_timestamp_uuid_from_filename;
 use super::metadata;
 use super::ordinal::RolloutOrdinalState;
@@ -57,6 +56,7 @@ use super::session_index::find_thread_names_by_ids;
 use crate::InitialHistory;
 use crate::ResumedHistory;
 use crate::RolloutItem;
+use crate::RolloutLine;
 use crate::config::RolloutConfigView;
 use crate::state_db;
 use crate::state_db::StateDbHandle;
@@ -493,6 +493,7 @@ impl RolloutRecorder {
                 allowed_sources,
                 model_providers,
                 cwd_filters,
+                /*repository_identity*/ None,
                 /*relation_filter*/ None,
                 archived,
                 /*section*/ None,
@@ -604,6 +605,7 @@ impl RolloutRecorder {
             allowed_sources,
             model_providers,
             cwd_filters,
+            /*repository_identity*/ None,
             /*relation_filter*/ None,
             archived,
             /*section*/ None,
@@ -635,6 +637,7 @@ impl RolloutRecorder {
                     allowed_sources,
                     model_providers,
                     cwd_filters,
+                    /*repository_identity*/ None,
                     /*relation_filter*/ None,
                     archived,
                     /*section*/ None,
@@ -677,6 +680,7 @@ impl RolloutRecorder {
                         allowed_sources,
                         model_providers,
                         cwd_filters,
+                        /*repository_identity*/ None,
                         /*relation_filter*/ None,
                         archived,
                         /*section*/ None,
@@ -758,6 +762,7 @@ impl RolloutRecorder {
                     allowed_sources,
                     model_providers,
                     cwd_filter.as_ref().map(std::slice::from_ref),
+                    /*repository_identity*/ None,
                     /*relation_filter*/ None,
                     /*archived*/ false,
                     /*section*/ None,
@@ -1009,13 +1014,41 @@ impl RolloutRecorder {
     pub async fn load_rollout_items(
         path: &Path,
     ) -> std::io::Result<(Vec<RolloutItem>, Option<ThreadId>, usize)> {
+        let (lines, thread_id, parse_errors) = Self::load_rollout_lines(path).await?;
+        Ok((
+            lines.into_iter().map(|line| line.item).collect(),
+            thread_id,
+            parse_errors,
+        ))
+    }
+
+    /// Loads complete canonical rollout records through the same compatibility parser used by
+    /// resume, preserving each record's timestamp and optional persisted ordinal.
+    pub async fn load_rollout_lines(
+        path: &Path,
+    ) -> std::io::Result<(Vec<RolloutLine>, Option<ThreadId>, usize)> {
+        let (lines, thread_id, parse_errors, _) =
+            Self::load_rollout_lines_bounded(path, u64::MAX).await?;
+        Ok((lines, thread_id, parse_errors))
+    }
+
+    /// Loads complete rollout records while bounding uncompressed source retained by migration.
+    pub async fn load_rollout_lines_bounded(
+        path: &Path,
+        maximum_source_bytes: u64,
+    ) -> std::io::Result<(Vec<RolloutLine>, Option<ThreadId>, usize, u64)> {
         trace!("Resuming rollout from {path:?}");
-        let mut items: Vec<RolloutItem> = Vec::new();
+        let mut lines = Vec::new();
         let mut thread_id: Option<ThreadId> = None;
         let mut parse_errors = 0usize;
+        let mut source_bytes = 0_u64;
         let mut reader = compression::open_rollout_line_reader(path).await?;
         let mut saw_non_empty_line = false;
-        while let Some(line) = reader.next_line().await? {
+        while let Some((line, line_bytes)) = reader
+            .next_line_bounded(maximum_source_bytes.saturating_sub(source_bytes))
+            .await?
+        {
+            source_bytes = source_bytes.saturating_add(line_bytes);
             if line.trim().is_empty() {
                 continue;
             }
@@ -1048,15 +1081,14 @@ impl RolloutRecorder {
                 }
             };
 
-            let item = rollout_line.item;
             // Use the FIRST SessionMeta encountered in the file as the canonical
             // thread id and main session information. Keep all items intact.
             if thread_id.is_none()
-                && let RolloutItem::SessionMeta(session_meta_line) = &item
+                && let RolloutItem::SessionMeta(session_meta_line) = &rollout_line.item
             {
                 thread_id = Some(session_meta_line.meta.id);
             }
-            items.push(item);
+            lines.push(rollout_line);
         }
         if !saw_non_empty_line {
             return Err(IoError::other("empty session file"));
@@ -1064,11 +1096,11 @@ impl RolloutRecorder {
 
         tracing::debug!(
             "Resumed rollout with {} items, thread ID: {:?}, parse errors: {}",
-            items.len(),
+            lines.len(),
             thread_id,
             parse_errors,
         );
-        Ok((items, thread_id, parse_errors))
+        Ok((lines, thread_id, parse_errors, source_bytes))
     }
 
     pub async fn get_rollout_history(path: &Path) -> std::io::Result<InitialHistory> {
@@ -1203,20 +1235,10 @@ fn truncate_fs_page(
         return page;
     }
     page.items.truncate(page_size);
-    page.next_cursor = page.items.last().and_then(|item| {
-        let file_name = item.path.file_name()?.to_str()?;
-        let (created_at, _id) = parse_timestamp_uuid_from_filename(file_name)?;
-        let cursor_token = match sort_key {
-            ThreadSortKey::CreatedAt => created_at.format(&Rfc3339).ok()?,
-            ThreadSortKey::UpdatedAt => item.updated_at.as_deref()?.to_string(),
-            ThreadSortKey::RecencyAt => item
-                .recency_at
-                .as_deref()
-                .or(item.updated_at.as_deref())?
-                .to_string(),
-        };
-        parse_cursor(cursor_token.as_str())
-    });
+    page.next_cursor = page
+        .items
+        .last()
+        .and_then(|item| cursor_from_thread_item(item, sort_key));
     page
 }
 
@@ -1518,9 +1540,7 @@ async fn list_threads_from_files_asc(
         );
         all_items.retain(|item| {
             thread_item_sort_key(item, sort_key).is_some_and(|key| match anchor.1 {
-                Some(anchor_id) if sort_key == ThreadSortKey::RecencyAt => {
-                    key > (anchor.0, anchor_id)
-                }
+                Some(anchor_id) => key > (anchor.0, anchor_id),
                 _ => key.0 > anchor.0,
             })
         });
@@ -1595,13 +1615,10 @@ fn thread_item_sort_key(
 
 fn cursor_from_thread_item(item: &ThreadItem, sort_key: ThreadSortKey) -> Option<Cursor> {
     let (timestamp, id) = thread_item_sort_key(item, sort_key)?;
-    match sort_key {
-        ThreadSortKey::RecencyAt => Some(Cursor::with_thread_id(
-            timestamp,
-            ThreadId::from_string(&id.to_string()).ok()?,
-        )),
-        ThreadSortKey::CreatedAt | ThreadSortKey::UpdatedAt => Some(Cursor::new(timestamp)),
-    }
+    Some(Cursor::with_thread_id(
+        timestamp,
+        ThreadId::from_string(&id.to_string()).ok()?,
+    ))
 }
 
 fn precompute_new_rollout_path(
@@ -2024,7 +2041,7 @@ fn thread_item_from_state_metadata(
         agent_role: item.agent_role,
         model_provider: Some(item.model_provider),
         cli_version: Some(item.cli_version),
-        created_at: Some(item.created_at.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        created_at: Some(item.created_at.to_rfc3339_opts(SecondsFormat::Millis, true)),
         updated_at: Some(item.updated_at.to_rfc3339_opts(SecondsFormat::Millis, true)),
         recency_at: Some(item.recency_at.to_rfc3339_opts(SecondsFormat::Millis, true)),
     }
@@ -2078,7 +2095,9 @@ async fn resume_candidate_matches_cwd(
             | RolloutItem::EventMsg(_) => None,
         })
     {
-        return cwd_matches(latest_turn_context_cwd.as_path(), cwd);
+        return latest_turn_context_cwd
+            .to_abs_path()
+            .is_ok_and(|turn_context_cwd| cwd_matches(turn_context_cwd.as_path(), cwd));
     }
 
     metadata::extract_metadata_from_rollout(rollout_path, default_provider)
