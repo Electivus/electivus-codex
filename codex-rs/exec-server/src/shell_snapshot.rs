@@ -17,7 +17,6 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::sync::OnceCell;
 
-use crate::FileSystemSandboxContext;
 use crate::local_process::shell_environment_policy;
 use crate::process_sandbox::PreparedExecRequest;
 use crate::protocol::ExecEnvPolicy;
@@ -41,7 +40,6 @@ struct CachedShellSnapshot {
     request: ShellSnapshotRequest,
     cwd: PathUri,
     env_policy: Option<ExecEnvPolicy>,
-    sandbox: Option<FileSystemSandboxContext>,
     snapshot: Arc<OnceCell<Option<ShellSnapshot>>>,
 }
 
@@ -90,7 +88,6 @@ impl ShellSnapshotCache {
                 &entry.request == request
                     && entry.cwd == params.cwd
                     && entry.env_policy == params.env_policy
-                    && entry.sandbox == params.sandbox
             });
             let cached = position.and_then(|position| {
                 let entry = entries.remove(position)?;
@@ -106,7 +103,6 @@ impl ShellSnapshotCache {
                     request: request.clone(),
                     cwd: params.cwd.clone(),
                     env_policy: params.env_policy.clone(),
-                    sandbox: params.sandbox.clone(),
                     snapshot: Arc::clone(&snapshot),
                 };
                 entries.push_back(entry);
@@ -152,7 +148,14 @@ impl ShellSnapshotCache {
         prepared
             .env
             .retain(|name, _| !shell_environment::is_non_inheritable_env_var(name));
-
+        let restore_bash_env = if shell_type == ShellType::Bash {
+            prepared.env.remove("BASH_ENV").map(|value| {
+                let value = value.replace('\'', "'\"'\"'");
+                format!("export BASH_ENV='{value}'\n")
+            })
+        } else {
+            None
+        };
         let mut state = snapshot.state.as_str();
         let mut state_variables = Vec::new();
         while !state.is_empty() {
@@ -180,11 +183,26 @@ impl ShellSnapshotCache {
             ShellType::Sh => ("-c", ""),
             ShellType::PowerShell | ShellType::Cmd => unreachable!(),
         };
-        prepared.command[shell_start + 1] = shell_flag.to_string();
-        prepared.command[shell_start + 2] = format!(
-            "{startup}if ! eval \"unset {state_variables}\n{state_expansion}\" >/dev/null; then printf 'failed to restore shell snapshot\\n' >&2; fi\n{}",
+        let command = format!(
+            "{startup}if ! eval \"unset {state_variables}\n{state_expansion}\" >/dev/null; then printf 'failed to restore shell snapshot\\n' >&2; fi\n{}{}",
+            restore_bash_env.as_deref().unwrap_or_default(),
             params.argv[2]
         );
+        if shell_type == ShellType::Bash {
+            prepared.command.splice(
+                shell_start..,
+                [
+                    params.argv[0].clone(),
+                    "--noprofile".to_string(),
+                    "--norc".to_string(),
+                    shell_flag.to_string(),
+                    command,
+                ],
+            );
+        } else {
+            prepared.command[shell_start + 1] = shell_flag.to_string();
+            prepared.command[shell_start + 2] = command;
+        }
 
         Ok(())
     }
@@ -197,9 +215,23 @@ async fn capture_snapshot(
 ) -> Result<ShellSnapshot, JSONRPCErrorError> {
     let script = snapshot_state_and_environment_script(shell_type)
         .ok_or_else(|| invalid_params("unsupported shell snapshot script".to_string()))?;
-    let shell_start = prepared.command.len() - params.argv.len();
-    let mut argv = prepared.command.clone();
-    argv[shell_start + 2] = script;
+    // Capture startup state outside the target sandbox. The final command still
+    // uses `prepared.command`, while the capture needs to let startup files
+    // initialize state that a read-only sandbox may block.
+    let mut argv = params.argv.clone();
+    if shell_type == ShellType::Bash {
+        argv.splice(
+            1..,
+            [
+                "--noprofile".to_string(),
+                "--norc".to_string(),
+                "-c".to_string(),
+                script,
+            ],
+        );
+    } else {
+        argv[2] = script;
+    }
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| internal_error("missing shell snapshot command".to_string()))?;

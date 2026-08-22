@@ -783,7 +783,12 @@ mod tests {
             /*plugin_attribution*/ None,
         )
         .finish(
-            ToolEventCtx::new(session.as_ref(), turn.as_ref(), "call-id", None),
+            ToolEventCtx::new(
+                session.as_ref(),
+                turn.as_ref(),
+                "call-id",
+                /*turn_diff_tracker*/ None,
+            ),
             Err(ToolError::Codex(CodexErr::TurnAborted)),
             /*applied_patch_delta*/ None,
         )

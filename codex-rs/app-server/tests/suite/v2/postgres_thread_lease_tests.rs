@@ -55,7 +55,7 @@ async fn postgres_contract_active_session_recovers_expired_lease_before_interrup
 model = "mock-model"
 model_provider = "mock_provider"
 approval_policy = "never"
-sandbox_mode = "workspace-write"
+sandbox_mode = "danger-full-access"
 
 [model_providers.mock_provider]
 name = "Mock provider"

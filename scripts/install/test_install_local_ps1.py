@@ -65,7 +65,7 @@ class InstallLocalPowerShellTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(
                 build_log.read_text(encoding="utf-8"),
-                "0.148.0-alpha.12\nrelease",
+                "0.148.0-alpha.12\ndev\nfalse",
             )
             self.assertEqual(cargo_toml.read_bytes(), original_cargo_toml)
             self.assertEqual(cargo_lock.read_bytes(), original_cargo_lock)
@@ -89,7 +89,7 @@ class InstallLocalPowerShellTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(
                 build_log.read_text(encoding="utf-8"),
-                "0.148.0-alpha.12\nrelease",
+                "0.148.0-alpha.12\ndev\nfalse",
             )
             self.assertEqual(cargo_toml.read_bytes(), original_cargo_toml)
             self.assertEqual(
@@ -112,7 +112,7 @@ class InstallLocalPowerShellTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(
                 build_log.read_text(encoding="utf-8"),
-                "1.2.3-beta.4\nrelease",
+                "1.2.3-beta.4\ndev\nfalse",
             )
             self.assertEqual(cargo_toml.read_bytes(), original_cargo_toml)
             self.assertEqual(
@@ -143,7 +143,8 @@ def create_repo(root: Path) -> Path:
             arguments = os.sys.argv[1:]
             profile_index = arguments.index("--cargo-profile") + 1
             Path(os.environ["CODEX_TEST_BUILD_LOG"]).write_text(
-                f"{match.group(1)}\\n{arguments[profile_index]}",
+                f"{match.group(1)}\\n{arguments[profile_index]}\\n"
+                f"{os.environ.get('CARGO_PROFILE_DEV_DEBUG_ASSERTIONS', 'unset')}",
                 encoding="utf-8",
             )
             raise SystemExit(23)

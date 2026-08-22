@@ -189,10 +189,14 @@ async fn shell_snapshot_v2_filters_profile_exports_and_stays_in_memory(
             profile_path.to_string_lossy().into_owned(),
         );
     }
-    if shell_name == "bash" && automatic_startup {
+    if shell_name == "bash" {
         configured_environment.insert(
             "BASH_ENV".to_string(),
-            profile_path.to_string_lossy().into_owned(),
+            if automatic_startup {
+                profile_path.to_string_lossy().into_owned()
+            } else {
+                Default::default()
+            },
         );
     }
     let policy = ExecEnvPolicy {

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::error::Error;
 use std::fmt;
 use std::future::Future;
 use std::io;
@@ -33,6 +34,7 @@ use crate::route_aware_redirect::redirect_request;
 use crate::route_aware_redirect::redirect_url;
 use crate::route_aware_redirect::remove_sensitive_headers;
 use crate::tls_backend_fallback::RustlsClientCache;
+use crate::tls_backend_fallback::has_certificate_error;
 use crate::tls_backend_fallback::should_retry_with_rustls;
 
 const MAX_CACHED_ROUTES: usize = 16;
@@ -113,6 +115,11 @@ impl RouteAwareRequestError {
         if let Self::Route(RouteAwareClientPoolError::Resolve(error)) = self
             && let Some(source) = error.get_ref()
             && source.is::<rustls::Error>()
+        {
+            return Some(RouteFailureClass::TlsError);
+        }
+        if let Self::Request(error) = self
+            && error.source().is_some_and(has_certificate_error)
         {
             return Some(RouteFailureClass::TlsError);
         }
