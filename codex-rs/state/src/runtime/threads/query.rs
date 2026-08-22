@@ -44,6 +44,7 @@ SELECT
     ) AS section_appearance,
     threads.section_position,
     threads.section_entered_at_ms,
+    threads.project_id,
     threads.git_sha,
     threads.git_branch,
     threads.git_origin_url,
@@ -61,6 +62,7 @@ pub struct ThreadFilterOptions<'a> {
     pub cwd_filters: Option<&'a [PathBuf]>,
     pub repository_identity: Option<&'a str>,
     pub section: Option<Option<&'a str>>,
+    pub project_id: Option<Option<&'a str>>,
     pub anchor: Option<&'a crate::Anchor>,
     pub sort_key: SortKey,
     pub sort_direction: SortDirection,
@@ -93,6 +95,7 @@ pub(super) fn push_thread_filters_with_preview<'a>(
         cwd_filters,
         repository_identity,
         section,
+        project_id,
         anchor,
         sort_key,
         sort_direction,
@@ -114,6 +117,16 @@ pub(super) fn push_thread_filters_with_preview<'a>(
         }
         Some(None) => {
             builder.push(" AND threads.thread_section_id IS NULL");
+        }
+        None => {}
+    }
+    match project_id {
+        Some(Some(project_id)) => {
+            builder.push(" AND threads.project_id = ");
+            builder.push_bind(project_id);
+        }
+        Some(None) => {
+            builder.push(" AND threads.project_id IS NULL");
         }
         None => {}
     }

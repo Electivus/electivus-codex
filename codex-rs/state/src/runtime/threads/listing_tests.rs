@@ -45,6 +45,9 @@ async fn list_threads_filters_sections_before_recency_pagination_and_uses_index(
     ] {
         let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
         metadata.recency_at = DateTime::<Utc>::from_timestamp(recency_at, 0).unwrap();
+        if thread_id == oldest_pinned {
+            metadata.preview = Some(String::new());
+        }
         metadata.section = section.map(|id| ThreadSection {
             id: id.to_string(),
             name: crate::PINNED_THREAD_SECTION_NAME.to_string(),
@@ -60,6 +63,7 @@ async fn list_threads_filters_sections_before_recency_pagination_and_uses_index(
         cwd_filters: None,
         repository_identity: None,
         section,
+        project_id: None,
         anchor,
         sort_key: SortKey::RecencyAt,
         sort_direction: SortDirection::Desc,
@@ -133,12 +137,7 @@ async fn list_threads_filters_sections_before_recency_pagination_and_uses_index(
             .iter()
             .map(|thread| thread.id)
             .collect::<Vec<_>>(),
-        vec![
-            newest_unpinned,
-            newest_pinned,
-            oldest_pinned,
-            oldest_unpinned,
-        ]
+        vec![newest_unpinned, newest_pinned, oldest_unpinned,]
     );
 
     let mut builder = QueryBuilder::<Sqlite>::new("EXPLAIN QUERY PLAN ");
@@ -208,6 +207,7 @@ async fn section_position_listing_uses_stable_indexed_keyset_pagination() {
         cwd_filters: None,
         repository_identity: None,
         section: Some(Some(CUSTOM_THREAD_SECTION_ID)),
+        project_id: None,
         anchor,
         sort_key: SortKey::SectionPosition,
         sort_direction: SortDirection::Asc,

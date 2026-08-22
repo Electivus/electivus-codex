@@ -327,6 +327,7 @@ fn visible_agent(message: &str) -> RolloutItem {
         message: message.to_string(),
         phase: None,
         memory_citation: None,
+        delivery: None,
     }))
 }
 

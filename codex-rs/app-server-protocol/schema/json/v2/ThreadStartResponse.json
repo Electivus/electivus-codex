@@ -25,6 +25,12 @@
       ],
       "type": "object"
     },
+    "AgentMessageDelivery": {
+      "enum": [
+        "async"
+      ],
+      "type": "string"
+    },
     "AgentPath": {
       "type": "string"
     },
@@ -1142,11 +1148,6 @@
           "description": "Identifier for this thread. Codex-generated thread IDs are UUIDv7.",
           "type": "string"
         },
-        "isPinned": {
-          "default": false,
-          "description": "Whether the thread belongs to the built-in Pinned section.",
-          "type": "boolean"
-        },
         "modelProvider": {
           "description": "Model provider used for this thread (for example, 'openai').",
           "type": "string"
@@ -1175,6 +1176,13 @@
         "preview": {
           "description": "Usually the first user message in the thread, if available.",
           "type": "string"
+        },
+        "projectId": {
+          "description": "Canonical project assignment owned by app-server, if any.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "recencyAt": {
           "description": "Unix timestamp (in seconds) used for thread recency ordering.",
@@ -1257,6 +1265,7 @@
         "id",
         "modelProvider",
         "preview",
+        "projectId",
         "sessionId",
         "source",
         "status",
@@ -1350,6 +1359,17 @@
         },
         {
           "properties": {
+            "delivery": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/AgentMessageDelivery"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
             "id": {
               "type": "string"
             },

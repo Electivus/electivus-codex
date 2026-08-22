@@ -111,6 +111,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mark_thread_paginated_preserves_legacy_display_name() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
+        let thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000125").expect("valid thread id");
+        let metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
+
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("upsert should succeed");
+        assert!(
+            runtime
+                .mark_thread_paginated(thread_id, Some("legacy display name"))
+                .await
+                .expect("mark paginated history")
+        );
+
+        let metadata = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("thread should load")
+            .expect("thread should exist");
+        assert_eq!(
+            (metadata.history_mode, metadata.name),
+            (
+                ThreadHistoryMode::Paginated,
+                Some("legacy display name".to_string())
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn delete_thread_cleans_associated_state() -> Result<()> {
         let codex_home = unique_temp_dir();
         let runtime = StateRuntime::init(
@@ -336,6 +374,7 @@ mod tests {
                     cwd_filters: None,
                     repository_identity: None,
                     section: None,
+                    project_id: None,
                     anchor: Some(&anchor),
                     sort_key: SortKey::UpdatedAt,
                     sort_direction: SortDirection::Asc,
@@ -366,6 +405,7 @@ mod tests {
                     cwd_filters: None,
                     repository_identity: None,
                     section: None,
+                    project_id: None,
                     anchor: page.next_anchor.as_ref(),
                     sort_key: SortKey::UpdatedAt,
                     sort_direction: SortDirection::Asc,
@@ -424,6 +464,7 @@ mod tests {
                     cwd_filters: Some(cwd_filters.as_slice()),
                     repository_identity: None,
                     section: None,
+                    project_id: None,
                     anchor: None,
                     sort_key: SortKey::UpdatedAt,
                     sort_direction: SortDirection::Desc,
@@ -458,6 +499,7 @@ mod tests {
                     cwd_filters: Some(cwd_filters.as_slice()),
                     repository_identity: None,
                     section: None,
+                    project_id: None,
                     anchor: first_page.next_anchor.as_ref(),
                     sort_key: SortKey::UpdatedAt,
                     sort_direction: SortDirection::Desc,
@@ -485,6 +527,7 @@ mod tests {
                     cwd_filters: Some(&[]),
                     repository_identity: None,
                     section: None,
+                    project_id: None,
                     anchor: None,
                     sort_key: SortKey::UpdatedAt,
                     sort_direction: SortDirection::Desc,
@@ -554,6 +597,7 @@ mod tests {
                         cwd_filters,
                         repository_identity: None,
                         section: None,
+                        project_id: None,
                         anchor,
                         sort_key,
                         sort_direction: SortDirection::Desc,
@@ -656,6 +700,7 @@ mod tests {
                 cwd_filters: None,
                 repository_identity: None,
                 section: None,
+                project_id: None,
                 anchor: None,
                 sort_key: SortKey::CreatedAt,
                 sort_direction: SortDirection::Desc,
@@ -686,6 +731,7 @@ mod tests {
             cwd_filters: None,
             repository_identity: None,
             section: None,
+            project_id: None,
             anchor,
             sort_key: SortKey::CreatedAt,
             sort_direction: SortDirection::Desc,
@@ -1460,6 +1506,7 @@ mod tests {
                     cwd_filters: None,
                     repository_identity: None,
                     section: None,
+                    project_id: None,
                     anchor: None,
                     sort_key: SortKey::RecencyAt,
                     sort_direction: SortDirection::Desc,
@@ -1494,6 +1541,7 @@ mod tests {
                     cwd_filters: None,
                     repository_identity: None,
                     section: None,
+                    project_id: None,
                     anchor: first_page.next_anchor.as_ref(),
                     sort_key: SortKey::RecencyAt,
                     sort_direction: SortDirection::Desc,
@@ -1528,6 +1576,7 @@ mod tests {
                     cwd_filters: None,
                     repository_identity: None,
                     section: None,
+                    project_id: None,
                     anchor: second_page.next_anchor.as_ref(),
                     sort_key: SortKey::RecencyAt,
                     sort_direction: SortDirection::Desc,

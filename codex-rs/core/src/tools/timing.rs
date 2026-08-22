@@ -5,7 +5,6 @@ use codex_config::ToolExecutionTimingRange;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum TimingParameter {
-    Timeout,
     Yield,
 }
 
@@ -46,7 +45,6 @@ pub(crate) fn adjustment_message(
 ) -> Option<String> {
     let adjustment = timing.adjustment?;
     let parameter = match parameter {
-        TimingParameter::Timeout => "timeout_ms",
         TimingParameter::Yield => "yield_time_ms",
     };
     let bound = match adjustment.bound {

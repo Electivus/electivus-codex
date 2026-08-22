@@ -83,6 +83,7 @@ impl Harness {
                 repository_identity: PROJECT_IDENTITY.to_string(),
             },
             section: None,
+            project_id: None,
             archived: false,
             search_term: None,
             relation_filter: None,

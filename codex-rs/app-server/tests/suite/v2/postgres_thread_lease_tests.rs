@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use app_test_support::create_command_execution_sse_response;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
-use app_test_support::create_shell_command_sse_response;
 use codex_app_server::in_process::InProcessServerEvent;
 use codex_app_server_protocol as api;
 use codex_protocol::ThreadId;
@@ -39,14 +39,15 @@ async fn postgres_contract_active_session_recovers_expired_lease_before_interrup
     ];
     #[cfg(not(target_os = "windows"))]
     let command = vec!["sleep".to_string(), "10".to_string()];
-    let model_server =
-        create_mock_responses_server_sequence_unchecked(vec![create_shell_command_sse_response(
+    let model_server = create_mock_responses_server_sequence_unchecked(vec![
+        create_command_execution_sse_response(
             command,
             Some(working_directory.path()),
             Some(10_000),
             "call_sleep",
-        )?])
-        .await;
+        )?,
+    ])
+    .await;
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(
@@ -54,7 +55,7 @@ async fn postgres_contract_active_session_recovers_expired_lease_before_interrup
 model = "mock-model"
 model_provider = "mock_provider"
 approval_policy = "never"
-sandbox_mode = "workspace-write"
+sandbox_mode = "danger-full-access"
 
 [model_providers.mock_provider]
 name = "Mock provider"

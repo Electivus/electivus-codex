@@ -60,6 +60,7 @@ impl StateRuntime {
                 cwd_filters: None,
                 repository_identity: None,
                 section: None,
+                project_id: None,
                 anchor: None,
                 sort_key: crate::SortKey::UpdatedAt,
                 sort_direction: SortDirection::Desc,
@@ -188,6 +189,7 @@ impl StateRuntime {
                 cwd_filters: None,
                 repository_identity: None,
                 section: None,
+                project_id: None,
                 anchor,
                 sort_key,
                 sort_direction: SortDirection::Desc,
@@ -260,11 +262,13 @@ WITH RECURSIVE subtree(child_thread_id, parent_thread_id) AS (
     };
     let include_thread_id_tiebreaker =
         should_include_thread_id_tiebreaker(filters, relation_filter);
+    let include_empty_preview =
+        relation_filter.is_some() || matches!(filters.section, Some(Some(_)));
     push_thread_filters_with_preview(
         builder,
         filters,
         include_thread_id_tiebreaker,
-        /*include_empty_preview*/ relation_filter.is_some(),
+        include_empty_preview,
     );
     match relation_filter {
         Some(crate::ThreadRelationFilter::DirectChildrenOf(parent_thread_id)) => {

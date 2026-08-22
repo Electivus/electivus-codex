@@ -555,7 +555,7 @@ impl ContextManager {
 
     /// This function enforces a couple of invariants on the in-memory history:
     /// 1. every call (function/custom) has a corresponding output entry
-    /// 2. every output has a corresponding call entry
+    /// 2. every output has a corresponding call entry or names an external tool event
     /// 3. unsupported image and audio content is stripped from messages and tool outputs
     fn normalize_history(&mut self, input_modalities: &[InputModality]) {
         let items = Arc::make_mut(&mut self.items);
@@ -563,7 +563,7 @@ impl ContextManager {
         // all function/tool calls must have a corresponding output
         normalize::ensure_call_outputs_present(items);
 
-        // all outputs must have a corresponding function/tool call
+        // Paired outputs must have a corresponding call; named external outputs stand alone.
         normalize::remove_orphan_outputs(items);
 
         // strip images when model does not support them

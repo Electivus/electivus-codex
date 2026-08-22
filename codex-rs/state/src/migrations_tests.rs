@@ -855,7 +855,7 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
 
 #[tokio::test]
 async fn repairs_complete_official_thread_migration_history_before_fork_migrations() {
-    for official_last_version in 43..=48 {
+    for official_last_version in 43..=50 {
         let sqlite_home = crate::runtime::test_support::unique_temp_dir();
         tokio::fs::create_dir_all(&sqlite_home)
             .await
@@ -876,10 +876,18 @@ async fn repairs_complete_official_thread_migration_history_before_fork_migratio
             .filter(|migration| migration.version <= 42)
             .cloned()
             .collect::<Vec<_>>();
-        for (official_version, combined_version) in
-            [(43, 44), (44, 45), (45, 47), (46, 48), (47, 50), (48, 51)]
-                .into_iter()
-                .take_while(|(official_version, _)| *official_version <= official_last_version)
+        for (official_version, combined_version) in [
+            (43, 44),
+            (44, 45),
+            (45, 47),
+            (46, 48),
+            (47, 50),
+            (48, 51),
+            (49, 52),
+            (50, 53),
+        ]
+        .into_iter()
+        .take_while(|(official_version, _)| *official_version <= official_last_version)
         {
             let migration = STATE_MIGRATOR
                 .migrations

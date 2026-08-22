@@ -100,6 +100,7 @@ pub(super) async fn search_threads(
         model_providers: None,
         location_filter: crate::ThreadLocationFilter::Unrestricted,
         section: None,
+        project_id: None,
         archived: params.archived,
         search_term: None,
         relation_filter: None,

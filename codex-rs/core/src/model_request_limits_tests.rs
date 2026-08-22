@@ -330,7 +330,9 @@ fn truncates_tool_outputs_to_the_hard_item_cap_preserving_envelopes() {
     let sources = vec![
         ResponseItem::FunctionCallOutput {
             id: Some(function_id.clone()),
-            call_id: "function-call".to_string(),
+            call_id: Some("function-call".to_string()),
+            name: Some("function-tool".to_string()),
+            namespace: Some("functions".to_string()),
             output: oversized_payload.clone(),
             internal_chat_message_metadata_passthrough: Some(metadata.clone()),
         },
@@ -359,12 +361,15 @@ fn truncates_tool_outputs_to_the_hard_item_cap_preserving_envelopes() {
             ResponseItem::FunctionCallOutput {
                 id,
                 call_id,
+                name,
+                namespace,
                 output,
                 internal_chat_message_metadata_passthrough: metadata,
             } => (
                 id.clone(),
                 call_id.clone(),
-                None,
+                name.clone(),
+                namespace.clone(),
                 output.success,
                 metadata.clone(),
                 output.text_content().map(str::to_string),
@@ -377,8 +382,9 @@ fn truncates_tool_outputs_to_the_hard_item_cap_preserving_envelopes() {
                 internal_chat_message_metadata_passthrough: metadata,
             } => (
                 id.clone(),
-                call_id.clone(),
+                Some(call_id.clone()),
                 name.clone(),
+                None,
                 output.success,
                 metadata.clone(),
                 output.text_content().map(str::to_string),
@@ -389,15 +395,17 @@ fn truncates_tool_outputs_to_the_hard_item_cap_preserving_envelopes() {
     let expected_envelopes = vec![
         (
             Some(function_id),
-            "function-call".to_string(),
-            None,
+            Some("function-call".to_string()),
+            Some("function-tool".to_string()),
+            Some("functions".to_string()),
             Some(true),
             Some(metadata.clone()),
         ),
         (
             Some(custom_id),
-            "custom-call".to_string(),
+            Some("custom-call".to_string()),
             Some("custom-tool".to_string()),
+            None,
             Some(true),
             Some(metadata),
         ),
@@ -405,17 +413,18 @@ fn truncates_tool_outputs_to_the_hard_item_cap_preserving_envelopes() {
     assert_eq!(
         output_provenance
             .iter()
-            .map(|(id, call_id, name, success, metadata, _)| (
+            .map(|(id, call_id, name, namespace, success, metadata, _)| (
                 id.clone(),
                 call_id.clone(),
                 name.clone(),
+                namespace.clone(),
                 *success,
                 metadata.clone(),
             ))
             .collect::<Vec<_>>(),
         expected_envelopes
     );
-    assert!(output_provenance.iter().all(|(_, _, _, _, _, output)| {
+    assert!(output_provenance.iter().all(|(_, _, _, _, _, _, output)| {
         output
             .as_deref()
             .is_some_and(|output| output.contains("tokens truncated"))
@@ -428,7 +437,9 @@ fn rejects_tool_outputs_with_unsplittable_fixed_overhead() {
     let mut request = request(
         vec![ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: oversized_call_id,
+            call_id: Some(oversized_call_id),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_text("small output".to_string()),
             internal_chat_message_metadata_passthrough: None,
         }],
@@ -478,7 +489,9 @@ fn projects_tool_outputs_with_oversized_structured_content() {
     let sources = vec![
         ResponseItem::FunctionCallOutput {
             id: Some(ResponseItemId::with_suffix("fco", "encrypted")),
-            call_id: "encrypted-call".to_string(),
+            call_id: Some("encrypted-call".to_string()),
+            name: Some("encrypted-function".to_string()),
+            namespace: Some("functions".to_string()),
             output: FunctionCallOutputPayload::from_content_items(vec![
                 FunctionCallOutputContentItem::EncryptedContent {
                     encrypted_content: "A".repeat(100_000),
@@ -534,21 +547,27 @@ fn projects_tool_outputs_with_oversized_structured_content() {
                 ResponseItem::FunctionCallOutput {
                     id: source_id,
                     call_id: source_call_id,
+                    name: source_name,
+                    namespace: source_namespace,
                     output: source_output,
                     internal_chat_message_metadata_passthrough: source_metadata,
                 },
                 ResponseItem::FunctionCallOutput {
                     id,
                     call_id,
+                    name,
+                    namespace,
                     output,
                     internal_chat_message_metadata_passthrough: metadata,
                 },
             ) => {
                 assert_eq!(
-                    (id, call_id, output.success, metadata),
+                    (id, call_id, name, namespace, output.success, metadata),
                     (
                         source_id,
                         source_call_id,
+                        source_name,
+                        source_namespace,
                         source_output.success,
                         source_metadata
                     )
@@ -651,7 +670,9 @@ fn preserves_bounded_structured_tool_outputs_exactly() {
     let sources = vec![
         ResponseItem::FunctionCallOutput {
             id: Some(ResponseItemId::with_suffix("fco", "encrypted-bounded")),
-            call_id: "encrypted-bounded-call".to_string(),
+            call_id: Some("encrypted-bounded-call".to_string()),
+            name: Some("encrypted-function".to_string()),
+            namespace: Some("functions".to_string()),
             output: FunctionCallOutputPayload::from_content_items(vec![
                 FunctionCallOutputContentItem::EncryptedContent {
                     encrypted_content: "A".repeat(60_000),

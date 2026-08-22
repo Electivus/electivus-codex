@@ -61,17 +61,26 @@ fn empty_layers_compose_to_none() {
 fn cloud_auth_requirements_do_not_override_local_or_discard_other_policy() {
     let local = RequirementsLayerEntry::from_toml(
         RequirementSource::Unknown,
-        "allowed_login_methods = [\"api\"]",
+        r#"allowed_login_methods = ["api"]
+cli_auth_credentials_store = "keyring"
+chatgpt_base_url = "https://managed.example/backend-api/""#,
     );
     let cloud = layer(
         "req_cloud",
         "Cloud policy",
-        "allowed_login_methods = [\"saml\"]\nallowed_chatgpt_workspaces = \"invalid\"\nallow_login_shell = false",
+        r#"allowed_login_methods = ["saml"]
+allowed_chatgpt_workspaces = "invalid"
+cli_auth_credentials_store = "invalid"
+chatgpt_base_url = false
+allow_login_shell = false"#,
     );
     assert_eq!(
         compose(vec![local, cloud]).expect("cloud auth cannot invalidate enterprise policy"),
         Some(expected_requirements(
-            "allowed_login_methods = [\"api\"]\nallow_login_shell = false"
+            r#"allowed_login_methods = ["api"]
+cli_auth_credentials_store = "keyring"
+chatgpt_base_url = "https://managed.example/backend-api/"
+allow_login_shell = false"#
         ))
     );
 }
@@ -87,6 +96,7 @@ allowed_approval_policies = ["on-request"]
 allowed_sandbox_modes = ["workspace-write"]
 default_permissions = ":workspace"
 allow_remote_control = true
+additional_developer_instructions = "Lower-priority instructions."
 
 [allowed_permission_profiles]
 ":read-only" = true
@@ -101,6 +111,7 @@ allowed_approval_policies = ["never"]
 allowed_sandbox_modes = ["read-only"]
 default_permissions = ":read-only"
 allow_remote_control = false
+additional_developer_instructions = ""
 
 [allowed_permission_profiles]
 ":danger-full-access" = false
@@ -119,6 +130,7 @@ allowed_approval_policies = ["never"]
 allowed_sandbox_modes = ["read-only"]
 default_permissions = ":read-only"
 allow_remote_control = false
+additional_developer_instructions = ""
 
 [allowed_permission_profiles]
 ":danger-full-access" = false

@@ -353,6 +353,7 @@ pub(super) fn agent_item(item_id: &str, text: &str, phase: Option<MessagePhase>)
         }],
         phase,
         memory_citation: None,
+        delivery: None,
     })
 }
 

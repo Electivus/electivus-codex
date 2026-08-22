@@ -114,6 +114,10 @@ pub(super) async fn list_threads(
         }
     }
 
+    if let Some(project_id) = params.project_id.as_ref() {
+        items.retain(|thread| &thread.project_id == project_id);
+    }
+
     Ok(ThreadPage { items, next_cursor })
 }
 
@@ -199,6 +203,10 @@ async fn list_section_threads(
         cwd_filters: normalized_cwd_filters.as_deref(),
         repository_identity,
         section: Some(Some(section)),
+        project_id: params
+            .project_id
+            .as_ref()
+            .map(|project_id| project_id.as_deref()),
         anchor: anchor.as_ref(),
         sort_key: codex_state::SortKey::SectionPosition,
         sort_direction: match params.sort_direction {
@@ -285,7 +293,10 @@ pub(super) async fn list_rollout_threads(
             unreachable!("project scope dispatched before local listing")
         }
     };
-    if params.relation_filter.is_some() || params.section.is_some() || repository_identity.is_some()
+    if params.relation_filter.is_some()
+        || params.section.is_some()
+        || params.project_id.is_some()
+        || repository_identity.is_some()
     {
         let relation_filter = params
             .relation_filter
@@ -311,6 +322,7 @@ pub(super) async fn list_rollout_threads(
             relation_filter,
             params.archived,
             params.section.as_ref().map(Option::as_deref),
+            params.project_id.as_ref().map(Option::as_deref),
             params.search_term.as_deref(),
         )
         .await
@@ -433,6 +445,7 @@ mod tests {
                 model_providers: None,
                 location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: None,
+                project_id: None,
                 archived: false,
                 search_term: None,
                 relation_filter: None,
@@ -494,6 +507,7 @@ mod tests {
                 model_providers: None,
                 location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: None,
+                project_id: None,
                 archived: false,
                 search_term: Some("needle".to_string()),
                 relation_filter: None,
@@ -567,6 +581,7 @@ mod tests {
                 model_providers: None,
                 location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: None,
+                project_id: None,
                 archived: false,
                 search_term: Some("canonical".to_string()),
                 relation_filter: None,
@@ -604,6 +619,7 @@ mod tests {
                 model_providers: None,
                 location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: None,
+                project_id: None,
                 archived: false,
                 search_term: None,
                 relation_filter: None,
@@ -621,6 +637,7 @@ mod tests {
                 model_providers: None,
                 location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: None,
+                project_id: None,
                 archived: true,
                 search_term: None,
                 relation_filter: None,
@@ -674,6 +691,7 @@ mod tests {
                 model_providers: Some(vec!["test-provider".to_string()]),
                 location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: None,
+                project_id: None,
                 archived: false,
                 search_term: None,
                 relation_filter: None,
@@ -752,6 +770,7 @@ mod tests {
             model_providers: None,
             location_filter: crate::ThreadLocationFilter::Unrestricted,
             section: Some(Some(PINNED_THREAD_SECTION_ID.to_owned())),
+            project_id: None,
             archived: false,
             search_term: None,
             relation_filter: None,
@@ -805,6 +824,7 @@ mod tests {
                 model_providers: None,
                 location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: None,
+                project_id: None,
                 archived: false,
                 search_term: None,
                 relation_filter: None,

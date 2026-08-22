@@ -28,15 +28,15 @@ preview: string, /**
  * Whether the thread is ephemeral and should not be materialized on disk.
  */
 ephemeral: boolean, /**
- * Whether the thread belongs to the built-in Pinned section.
- */
-isPinned: boolean, /**
  * The independently persisted section selected for this thread, if any.
  */
 section: ThreadSection | null, /**
  * Unix timestamp in seconds when the thread entered its current section.
  */
 sectionEnteredAt: number | null, /**
+ * Canonical project assignment owned by app-server, if any.
+ */
+projectId: string | null, /**
  * Model provider used for this thread (for example, 'openai').
  */
 modelProvider: string, /**

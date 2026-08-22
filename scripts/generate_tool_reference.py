@@ -23,7 +23,6 @@ clock.sleep :: `features.current_time_reminder` + its `sleep_tool` setting.
 create_goal get_goal update_goal :: `features.goals` + persistent state.
 exec wait :: `features.code_mode`/`code_mode_only`, or model tool mode.
 exec_command write_stdin :: `features.shell_tool` + `features.unified_exec` + environment.
-shell_command :: `features.shell_tool` + one local environment.
 followup_task interrupt_agent list_agents send_message spawn_agent wait_agent :: `features.multi_agent_v2` or model-selected v2.
 get_context_remaining new_context :: `features.token_budget`.
 image_gen.imagegen :: `features.image_generation` + provider, model, and auth capabilities.
@@ -33,6 +32,7 @@ memories.add_ad_hoc_note memories.list memories.read memories.search :: `feature
 multi_agent_v1.close_agent multi_agent_v1.resume_agent multi_agent_v1.send_input multi_agent_v1.spawn_agent multi_agent_v1.wait_agent :: `features.multi_agent` or model-selected v1 + `agents.enabled`.
 request_permissions :: `features.request_permissions_tool` + execution environment.
 request_user_input :: `tools.experimental_request_user_input.enabled`; Default mode also uses `features.default_mode_request_user_input`.
+send_user_message_async :: Root agent + model-advertised experimental tool support.
 skills.list skills.read :: No dedicated feature; enabled skill provider/orchestrator setting.
 test_sync_tool :: No user feature; model test-tool capability.
 tool_search :: No active feature; model search + namespaces + deferred tools.

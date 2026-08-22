@@ -135,6 +135,7 @@ pub(super) async fn read_thread_by_rollout_path(
             thread.section = metadata.section.clone();
             thread.section_position = metadata.section_position;
             thread.section_entered_at = metadata.section_entered_at;
+            thread.project_id = metadata.project_id.clone();
             let fallback_repository_identity = thread.repository_identity.take();
             if !metadata.cwd.as_os_str().is_empty()
                 && resolve_requested_rollout_path(store, metadata.rollout_path.clone())
@@ -387,6 +388,7 @@ pub(super) fn stored_thread_from_state_metadata(
         section: metadata.section,
         section_position: metadata.section_position,
         section_entered_at: metadata.section_entered_at,
+        project_id: metadata.project_id,
         cwd: metadata.cwd,
         cli_version: metadata.cli_version,
         source: parse_session_source(&metadata.source),
@@ -495,6 +497,7 @@ fn stored_thread_from_meta_line(
         section: None,
         section_position: None,
         section_entered_at: None,
+        project_id: None,
         cwd: meta_line.meta.cwd,
         cli_version: meta_line.meta.cli_version,
         source: meta_line.meta.source,

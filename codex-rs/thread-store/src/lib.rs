@@ -37,6 +37,7 @@ mod postgres_lease_recovery_contract_tests;
 #[cfg(test)]
 #[path = "postgres_turn_projection_contract_tests.rs"]
 mod postgres_turn_projection_contract_tests;
+mod projects;
 mod queue_store;
 #[cfg(test)]
 #[path = "runtime_state_migration_contract_tests.rs"]
@@ -65,6 +66,7 @@ pub use live_thread::LiveThread;
 pub use live_thread::LiveThreadInitGuard;
 pub use local::LocalThreadStore;
 pub use local::LocalThreadStoreConfig;
+pub use local::RolloutMigrationFailureReason;
 pub use local::RolloutMigrationMode;
 pub use local::RolloutMigrationOptions;
 pub use local::RolloutMigrationOutcome;
@@ -73,6 +75,17 @@ pub use local::RolloutMigrationReport;
 pub use local::RolloutMigrationStatus;
 pub use postgres::PostgresThreadProjectionMaterializer;
 pub use postgres::PostgresThreadStore;
+pub use projects::CreateProjectParams;
+pub use projects::CreatedProject;
+pub use projects::DeletedProject;
+pub use projects::ListProjectsParams;
+pub use projects::MoveProjectParams;
+pub use projects::ProjectMoveOutcome;
+pub use projects::StoredProject;
+pub use projects::StoredProjectRoot;
+pub use projects::StoredProjectsPage;
+pub use projects::UpdateProjectParams;
+pub use projects::UpdatedProject;
 pub use queue_store::LocalQueueStore;
 pub use queue_store::QueueStore;
 pub use store::ChildRegistrationGuard;

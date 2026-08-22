@@ -1064,6 +1064,7 @@ fn list_params(
         model_providers: Some(Vec::new()),
         location_filter: crate::ThreadLocationFilter::Unrestricted,
         section: None,
+        project_id: None,
         archived: false,
         search_term: None,
         relation_filter: None,

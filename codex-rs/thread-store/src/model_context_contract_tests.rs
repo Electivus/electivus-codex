@@ -507,6 +507,7 @@ pub(super) fn model_context_turn(
         RolloutItem::Compacted(CompactedItem {
             message: format!("{turn_id} checkpoint"),
             replacement_history: Some(Vec::new()),
+            mcp_resource_origins: None,
             window_number: Some(window_number),
             first_window_id: None,
             previous_window_id: None,
@@ -577,6 +578,7 @@ fn turn_context(cwd: &Path, turn_id: &str) -> RolloutItem {
         approvals_reviewer: None,
         sandbox_policy: SandboxPolicy::new_read_only_policy().into(),
         permission_profile: None,
+        active_permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,
         model: "contract-model".to_string(),

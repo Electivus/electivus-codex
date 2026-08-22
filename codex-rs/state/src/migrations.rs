@@ -111,10 +111,11 @@ WHERE version = ?
         }
     }
 
-    // Upstream used versions 43-48 for pin, provider, section, section-order, rollout-state,
-    // and section-appearance migrations. The combined sequence inserts fork migrations into
-    // that range. Match applied migrations by checksum and move the entire known suffix through
-    // temporary versions before assigning the combined versions so crossing remaps cannot collide.
+    // Upstream used versions 43-50 for pin, provider, section, section-order, rollout-state,
+    // section-appearance, projects, and empty-preview indexes. The combined sequence inserts fork
+    // migrations into that range. Match applied migrations by checksum and move the entire known
+    // suffix through temporary versions before assigning the combined versions so crossing remaps
+    // cannot collide.
     let applied = sqlx::query_as::<_, (i64, Vec<u8>)>(
         "SELECT version, checksum FROM _sqlx_migrations WHERE version >= 43 ORDER BY version",
     )

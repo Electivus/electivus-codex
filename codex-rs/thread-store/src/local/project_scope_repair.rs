@@ -295,6 +295,7 @@ async fn query_project_threads(
         relation_filter,
         params.archived,
         params.section.as_ref().map(Option::as_deref),
+        params.project_id.as_ref().map(Option::as_deref),
         params.search_term.as_deref(),
     )
     .await

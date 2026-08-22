@@ -88,7 +88,9 @@ fn image_data_url_payload_does_not_dominate_function_call_output_estimate() {
     let image_url = format!("data:image/png;base64,{payload}");
     let item = ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: "call-abc".to_string(),
+        call_id: Some("call-abc".to_string()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload::from_content_items(vec![
             FunctionCallOutputContentItem::InputText {
                 text: "Screenshot captured".to_string(),
@@ -161,7 +163,9 @@ fn audio_data_url_payload_does_not_dominate_function_call_output_estimate() {
     let (audio_url, payload_len) = pcm_wav_data_url(/*sample_count*/ 800);
     let item = ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: "call-audio".to_string(),
+        call_id: Some("call-audio".to_string()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload::from_content_items(vec![
             FunctionCallOutputContentItem::InputAudio { audio_url },
         ]),
@@ -231,7 +235,9 @@ fn non_base64_image_urls_are_unchanged() {
     };
     let function_output_item = ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: "call-1".to_string(),
+        call_id: Some("call-1".to_string()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload::from_content_items(vec![
             FunctionCallOutputContentItem::InputImage {
                 image_url: "file:///tmp/foo.png".to_string(),
@@ -262,7 +268,9 @@ fn encrypted_function_output_uses_plaintext_byte_estimate() {
     let items = [
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "call-encrypted".to_string(),
+            call_id: Some("call-encrypted".to_string()),
+            name: None,
+            namespace: None,
             output: output.clone(),
             internal_chat_message_metadata_passthrough: None,
         },
@@ -327,7 +335,9 @@ fn non_image_base64_data_url_is_unchanged() {
     let image_url = format!("data:application/octet-stream;base64,{payload}");
     let item = ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: "call-octet".to_string(),
+        call_id: Some("call-octet".to_string()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload::from_content_items(vec![
             FunctionCallOutputContentItem::InputImage {
                 image_url,
@@ -416,7 +426,9 @@ fn original_detail_images_scale_with_dimensions() {
     let image_url = format!("data:image/png;base64,{payload}");
     let item = ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: "call-original".to_string(),
+        call_id: Some("call-original".to_string()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload::from_content_items(vec![
             FunctionCallOutputContentItem::InputImage {
                 image_url,
@@ -448,7 +460,9 @@ fn original_detail_images_are_capped_at_max_patch_count() {
     let image_url = format!("data:image/png;base64,{payload}");
     let item = ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: "call-original-capped".to_string(),
+        call_id: Some("call-original-capped".to_string()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload::from_content_items(vec![
             FunctionCallOutputContentItem::InputImage {
                 image_url,
@@ -483,7 +497,9 @@ fn original_detail_webp_images_scale_with_dimensions() {
     let image_url = format!("data:image/webp;base64,{payload}");
     let item = ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: "call-original-webp".to_string(),
+        call_id: Some("call-original-webp".to_string()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload::from_content_items(vec![
             FunctionCallOutputContentItem::InputImage {
                 image_url,

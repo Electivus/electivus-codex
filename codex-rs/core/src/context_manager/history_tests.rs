@@ -325,6 +325,7 @@ fn reference_context_item() -> TurnContextItem {
         approvals_reviewer: None,
         sandbox_policy: SandboxPolicy::new_read_only_policy().into(),
         permission_profile: None,
+        active_permission_profile: None,
         network: None,
         file_system_sandbox_policy: None,
         model: "gpt-test".to_string(),
@@ -564,7 +565,9 @@ fn record_annotated_items_preserves_metadata_while_processing_item() {
     let envelope = ResponseItemEnvelope {
         item: ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "call-1".to_string(),
+            call_id: Some("call-1".to_string()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload {
                 body: FunctionCallOutputBody::Text("word ".repeat(100)),
                 success: Some(true),
@@ -701,7 +704,9 @@ fn for_prompt_strips_media_when_model_does_not_support_it() {
         },
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "call-1".to_string(),
+            call_id: Some("call-1".to_string()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_content_items(vec![
                 FunctionCallOutputContentItem::InputText {
                     text: "image result".to_string(),
@@ -783,7 +788,9 @@ fn for_prompt_strips_media_when_model_does_not_support_it() {
         },
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "call-1".to_string(),
+            call_id: Some("call-1".to_string()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_content_items(vec![
                 FunctionCallOutputContentItem::InputText {
                     text: "image result".to_string(),
@@ -1006,7 +1013,9 @@ fn remove_first_item_removes_matching_output_for_function_call() {
         },
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "call-1".to_string(),
+            call_id: Some("call-1".to_string()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_text("ok".to_string()),
             internal_chat_message_metadata_passthrough: None,
         },
@@ -1021,7 +1030,9 @@ fn remove_first_item_removes_matching_call_for_output() {
     let items = vec![
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "call-2".to_string(),
+            call_id: Some("call-2".to_string()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_text("ok".to_string()),
             internal_chat_message_metadata_passthrough: None,
         },
@@ -1058,7 +1069,9 @@ fn remove_first_item_handles_local_shell_pair() {
         },
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "call-3".to_string(),
+            call_id: Some("call-3".to_string()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_text("ok".to_string()),
             internal_chat_message_metadata_passthrough: None,
         },
@@ -1210,6 +1223,9 @@ fn drop_last_n_user_turns_trims_context_updates_above_rolled_back_turn() {
         assistant_msg("session prefix item"),
         user_input_text_msg("turn 1 user"),
         assistant_msg("turn 1 assistant"),
+        developer_msg(
+            "<managed_developer_instructions>\nROLLED_BACK_MANAGED_INSTRUCTIONS\n</managed_developer_instructions>",
+        ),
         developer_msg(&format!(
             "{APPS_INSTRUCTIONS_OPEN_TAG}\nROLLED_BACK_APPS_INSTRUCTIONS"
         )),
@@ -1352,7 +1368,9 @@ fn normalization_retains_local_shell_outputs() {
         },
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "shell-1".to_string(),
+            call_id: Some("shell-1".to_string()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_text("Total output lines: 1\n\nok".to_string()),
             internal_chat_message_metadata_passthrough: None,
         },
@@ -1374,7 +1392,9 @@ fn record_items_truncates_function_call_output_content() {
     let long_output = long_line.repeat(2_500);
     let item = ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: "call-100".to_string(),
+        call_id: Some("call-100".to_string()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload {
             body: FunctionCallOutputBody::Text(long_output.clone()),
             success: Some(true),
@@ -1439,7 +1459,9 @@ fn record_items_respects_custom_token_limit() {
     let long_output = "tokenized content repeated many times ".repeat(200);
     let item = ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: "call-custom-limit".to_string(),
+        call_id: Some("call-custom-limit".to_string()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload {
             body: FunctionCallOutputBody::Text(long_output),
             success: Some(true),
@@ -1467,7 +1489,9 @@ fn record_replayed_items_caps_large_outputs_using_the_complete_item_estimate() {
             TruncationPolicy::Bytes(400_000),
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "large-function-output".to_string(),
+                call_id: Some("large-function-output".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("a".repeat(400_000)),
                 internal_chat_message_metadata_passthrough: None,
             },
@@ -1517,7 +1541,9 @@ fn record_replayed_items_caps_large_outputs_using_the_complete_item_estimate() {
 fn live_and_replayed_large_outputs_share_the_same_hard_cap_projection() {
     let item = ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: "large-byte-output".to_string(),
+        call_id: Some("large-byte-output".to_string()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload::from_text("output".repeat(100_000)),
         internal_chat_message_metadata_passthrough: None,
     };
@@ -1543,7 +1569,9 @@ fn live_and_replayed_large_outputs_share_the_same_hard_cap_projection() {
 fn record_replayed_items_drops_output_when_its_envelope_cannot_fit() {
     let item = ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: "oversized-call-id".repeat(10_000),
+        call_id: Some("oversized-call-id".repeat(10_000)),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload::from_text("output".repeat(50_000)),
         internal_chat_message_metadata_passthrough: None,
     };
@@ -1961,7 +1989,9 @@ fn normalize_adds_missing_output_for_function_call() {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "call-x".to_string(),
+                call_id: Some("call-x".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("aborted".to_string()),
                 internal_chat_message_metadata_passthrough: None,
             },
@@ -2046,7 +2076,9 @@ fn normalize_adds_missing_output_for_local_shell_call_with_id() {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "shell-1".to_string(),
+                call_id: Some("shell-1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("aborted".to_string()),
                 internal_chat_message_metadata_passthrough: None,
             },
@@ -2059,7 +2091,9 @@ fn normalize_adds_missing_output_for_local_shell_call_with_id() {
 fn normalize_removes_orphan_function_call_output() {
     let items = vec![ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: "orphan-1".to_string(),
+        call_id: Some("orphan-1".to_string()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload::from_text("ok".to_string()),
         internal_chat_message_metadata_passthrough: None,
     }];
@@ -2104,7 +2138,9 @@ fn normalize_mixed_inserts_and_removals() {
         // Orphan output that should be removed
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "c2".to_string(),
+            call_id: Some("c2".to_string()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_text("ok".to_string()),
             internal_chat_message_metadata_passthrough: None,
         },
@@ -2151,7 +2187,9 @@ fn normalize_mixed_inserts_and_removals() {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "c1".to_string(),
+                call_id: Some("c1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("aborted".to_string()),
                 internal_chat_message_metadata_passthrough: None,
             },
@@ -2186,7 +2224,9 @@ fn normalize_mixed_inserts_and_removals() {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "s1".to_string(),
+                call_id: Some("s1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("aborted".to_string()),
                 internal_chat_message_metadata_passthrough: None,
             },
@@ -2221,12 +2261,29 @@ fn normalize_adds_missing_output_for_function_call_inserts_output() {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "call-x".to_string(),
+                call_id: Some("call-x".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("aborted".to_string()),
                 internal_chat_message_metadata_passthrough: None,
             },
         ]
     );
+}
+
+#[test]
+fn normalize_preserves_named_function_call_output_without_call_id() {
+    let item = ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: None,
+        name: Some("send_message_to_thread".to_string()),
+        namespace: Some("codex_app".to_string()),
+        output: FunctionCallOutputPayload::from_text("cross-thread message".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let history = create_history_with_items(vec![item.clone()]);
+
+    assert_eq!(history.for_prompt(&default_input_modalities()), vec![item]);
 }
 
 #[test]
@@ -2354,7 +2411,9 @@ fn normalize_adds_missing_output_for_local_shell_call_with_id_panics_in_debug() 
 fn normalize_removes_orphan_function_call_output_panics_in_debug() {
     let items = vec![ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: "orphan-1".to_string(),
+        call_id: Some("orphan-1".to_string()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload::from_text("ok".to_string()),
         internal_chat_message_metadata_passthrough: None,
     }];
@@ -2454,7 +2513,9 @@ fn normalize_mixed_inserts_and_removals_panics_in_debug() {
         },
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "c2".to_string(),
+            call_id: Some("c2".to_string()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_text("ok".to_string()),
             internal_chat_message_metadata_passthrough: None,
         },
@@ -2490,7 +2551,9 @@ fn record_items_omits_audio_that_exceeds_the_output_budget() {
     let (audio_url, _) = pcm_wav_data_url(/*sample_count*/ 80_000);
     let item = ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: "call-audio".to_string(),
+        call_id: Some("call-audio".to_string()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload {
             body: FunctionCallOutputBody::ContentItems(vec![
                 FunctionCallOutputContentItem::InputAudio { audio_url },
@@ -2507,7 +2570,9 @@ fn record_items_omits_audio_that_exceeds_the_output_budget() {
         raw_items(&history),
         &[ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "call-audio".to_string(),
+            call_id: Some("call-audio".to_string()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload {
                 body: FunctionCallOutputBody::ContentItems(vec![
                     FunctionCallOutputContentItem::InputText {

@@ -383,6 +383,9 @@ pub struct ConfigReadResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ConfigRequirements {
+    pub cli_auth_credentials_store: Option<CliAuthCredentialsStoreMode>,
+    pub chatgpt_base_url: Option<String>,
+    pub additional_developer_instructions: Option<String>,
     #[experimental(nested)]
     pub allowed_approval_policies: Option<Vec<AskForApproval>>,
     #[experimental("configRequirements/read.allowedApprovalsReviewers")]
@@ -397,6 +400,7 @@ pub struct ConfigRequirements {
     pub allow_remote_control: Option<bool>,
     pub computer_use: Option<ComputerUseRequirements>,
     pub browser_use: Option<BrowserUseRequirements>,
+    pub in_app_browser: Option<InAppBrowserRequirements>,
     pub feature_requirements: Option<BTreeMap<String, bool>>,
     #[experimental("configRequirements/read.hooks")]
     pub hooks: Option<ManagedHooksRequirements>,
@@ -415,6 +419,16 @@ pub struct ConfigRequirements {
     pub allow_login_shell: Option<bool>,
     pub feedback: Option<FeedbackRequirements>,
     pub windows_sandbox_private_desktop: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/", rename_all = "camelCase")]
+pub enum CliAuthCredentialsStoreMode {
+    File,
+    Keyring,
+    Auto,
+    Ephemeral,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -460,6 +474,13 @@ pub struct ComputerUseRequirements {
 #[ts(export_to = "v2/")]
 pub struct BrowserUseRequirements {
     pub disable_auto_review: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct InAppBrowserRequirements {
+    pub allow_external_browser_settings_import: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

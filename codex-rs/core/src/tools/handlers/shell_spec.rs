@@ -162,84 +162,6 @@ pub fn create_write_stdin_tool(tool_execution: ToolExecutionPolicy) -> ToolSpec 
     })
 }
 
-pub fn create_shell_command_tool(options: CommandToolOptions) -> ToolSpec {
-    let timeout = options.tool_execution.timeout();
-    let mut properties = BTreeMap::from([
-        (
-            "command".to_string(),
-            JsonSchema::string(Some(
-                "Shell script to run in the user's default shell.".to_string(),
-            )),
-        ),
-        (
-            "workdir".to_string(),
-            JsonSchema::string(Some(
-                "Working directory for the command. Defaults to the turn cwd.".to_string(),
-            )),
-        ),
-        (
-            "timeout_ms".to_string(),
-            JsonSchema::number_with_bounds(
-                Some(format!(
-                    "Maximum command runtime. Configured default is {} ms; effective range is {}-{} ms.",
-                    timeout.default_ms(),
-                    timeout.min_ms(),
-                    timeout.max_ms()
-                )),
-                timeout.min_ms(),
-                timeout.max_ms(),
-            ),
-        ),
-    ]);
-    if options.allow_login_shell {
-        properties.insert(
-            "login".to_string(),
-            JsonSchema::boolean(Some(
-                "True runs with login shell semantics; false disables them. Defaults to true."
-                    .to_string(),
-            )),
-        );
-    }
-    properties.extend(create_approval_parameters(
-        options.exec_permission_approvals_enabled,
-    ));
-
-    let description = if cfg!(windows) {
-        format!(
-            r#"Runs a Powershell command (Windows) and returns its output.
-
-Examples of valid command strings:
-
-- ls -a (show hidden): "Get-ChildItem -Force"
-- recursive find by name: "Get-ChildItem -Recurse -Filter *.py"
-- recursive grep: "Get-ChildItem -Path C:\\myrepo -Recurse | Select-String -Pattern 'TODO' -CaseSensitive"
-- ps aux | grep python: "Get-Process | Where-Object {{ $_.ProcessName -like '*python*' }}"
-- setting an env var: "$env:FOO='bar'; echo $env:FOO"
-- running an inline Python script: "@'\\nprint('Hello, world!')\\n'@ | python -"
-
-{}"#,
-            windows_shell_guidance()
-        )
-    } else {
-        r#"Runs a shell command and returns its output.
-- Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary."#
-            .to_string()
-    };
-
-    ToolSpec::Function(ResponsesApiTool {
-        name: "shell_command".to_string(),
-        description,
-        strict: false,
-        defer_loading: None,
-        parameters: JsonSchema::object(
-            properties,
-            Some(vec!["command".to_string()]),
-            Some(false.into()),
-        ),
-        output_schema: None,
-    })
-}
-
 pub fn create_request_permissions_tool(description: String) -> ToolSpec {
     let properties = BTreeMap::from([
         (
@@ -304,10 +226,6 @@ fn unified_exec_output_schema() -> Value {
             "output": {
                 "type": "string",
                 "description": "Command output text, possibly truncated."
-            },
-            "timing_adjustment": {
-                "type": "string",
-                "description": "Policy adjustment applied to an explicit timing request."
             }
         },
         "required": ["wall_time_seconds", "output"],

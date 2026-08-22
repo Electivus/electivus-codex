@@ -395,6 +395,7 @@ async fn postgres_contract_ambiguous_append_retry_requires_current_writer_fence(
             vec![RolloutItem::Compacted(CompactedItem {
                 message: "different retry content".to_string(),
                 replacement_history: None,
+                mcp_resource_origins: None,
                 window_number: None,
                 first_window_id: None,
                 previous_window_id: None,
@@ -667,6 +668,7 @@ async fn postgres_contract_append_batch_retries_are_idempotent()
             vec![RolloutItem::Compacted(CompactedItem {
                 message: "different content".to_string(),
                 replacement_history: None,
+                mcp_resource_origins: None,
                 window_number: None,
                 first_window_id: None,
                 previous_window_id: None,
@@ -843,7 +845,9 @@ fn append_items() -> Vec<RolloutItem> {
         RolloutItem::ResponseItem(
             ResponseItem::FunctionCallOutput {
                 id: Some(ResponseItemId::from_server("response-output-id".into())),
-                call_id: "function-call-id".to_string(),
+                call_id: Some("function-call-id".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(
                     "structured function output".to_string(),
                 ),
@@ -854,6 +858,7 @@ fn append_items() -> Vec<RolloutItem> {
         RolloutItem::Compacted(CompactedItem {
             message: "compacted history marker".to_string(),
             replacement_history: None,
+            mcp_resource_origins: None,
             window_number: Some(2),
             first_window_id: Some("window-first".to_string()),
             previous_window_id: Some("window-previous".to_string()),

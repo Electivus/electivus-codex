@@ -212,6 +212,7 @@ impl PostgresThreadStore {
             section: None,
             section_position: None,
             section_entered_at: None,
+            project_id: None,
             cwd: params.metadata.cwd.clone().unwrap_or_default(),
             cli_version: env!("CARGO_PKG_VERSION").to_string(),
             source: params.source.clone(),

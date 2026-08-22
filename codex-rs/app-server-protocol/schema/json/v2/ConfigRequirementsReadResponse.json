@@ -93,6 +93,15 @@
       },
       "type": "object"
     },
+    "CliAuthCredentialsStoreMode": {
+      "enum": [
+        "file",
+        "keyring",
+        "auto",
+        "ephemeral"
+      ],
+      "type": "string"
+    },
     "ComputerUseRequirements": {
       "properties": {
         "allowLockedComputerUse": {
@@ -106,6 +115,12 @@
     },
     "ConfigRequirements": {
       "properties": {
+        "additionalDeveloperInstructions": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "allowAppshots": {
           "type": [
             "boolean",
@@ -195,10 +210,26 @@
             }
           ]
         },
+        "chatgptBaseUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "checkForUpdateOnStartup": {
           "type": [
             "boolean",
             "null"
+          ]
+        },
+        "cliAuthCredentialsStore": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CliAuthCredentialsStoreMode"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "computerUse": {
@@ -240,6 +271,16 @@
           "anyOf": [
             {
               "$ref": "#/definitions/FeedbackRequirements"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inAppBrowser": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InAppBrowserRequirements"
             },
             {
               "type": "null"
@@ -438,6 +479,17 @@
     "FeedbackRequirements": {
       "properties": {
         "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "InAppBrowserRequirements": {
+      "properties": {
+        "allowExternalBrowserSettingsImport": {
           "type": [
             "boolean",
             "null"

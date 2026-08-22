@@ -96,7 +96,9 @@ fn model_context_validation_distinguishes_replay_safe_and_rejected_items() {
     let truncatable_output = RolloutItem::ResponseItem(
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "call-1".to_string(),
+            call_id: Some("call-1".to_string()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_text("output".repeat(50_000)),
             internal_chat_message_metadata_passthrough: None,
         }
@@ -105,7 +107,9 @@ fn model_context_validation_distinguishes_replay_safe_and_rejected_items() {
     let impossible_output = RolloutItem::ResponseItem(
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "call".repeat(50_000),
+            call_id: Some("call".repeat(50_000)),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_text("output".repeat(50_000)),
             internal_chat_message_metadata_passthrough: None,
         }
@@ -330,7 +334,9 @@ fn model_context_validation_accepts_request_projectable_items_and_rejects_unspli
     };
     let multi_image_output = ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: "call-images".to_string(),
+        call_id: Some("call-images".to_string()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload::from_content_items(
             (0..6)
                 .map(|index| FunctionCallOutputContentItem::InputImage {
@@ -343,7 +349,9 @@ fn model_context_validation_accepts_request_projectable_items_and_rejects_unspli
     };
     let encrypted_output = ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: "call-encrypted".to_string(),
+        call_id: Some("call-encrypted".to_string()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload::from_content_items(vec![
             FunctionCallOutputContentItem::EncryptedContent {
                 encrypted_content: "encrypted".repeat(10_000),
@@ -426,6 +434,7 @@ fn compacted_replacement_history_is_bounded_after_expansion() {
     let compacted = RolloutItem::Compacted(CompactedItem {
         message: "summary".to_string(),
         replacement_history: Some(vec![replacement.into(); MAX_MODEL_CONTEXT_ITEMS + 1]),
+        mcp_resource_origins: None,
         window_number: None,
         first_window_id: None,
         previous_window_id: None,

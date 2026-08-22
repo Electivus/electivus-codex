@@ -13,21 +13,6 @@ fn has_parameter(tool: &ToolSpec, parameter_name: &str) -> bool {
         .is_some()
 }
 
-fn parameter_description<'a>(tool: &'a ToolSpec, parameter_name: &str) -> &'a str {
-    let ToolSpec::Function(tool) = tool else {
-        panic!("expected function tool");
-    };
-    let properties = tool
-        .parameters
-        .properties
-        .as_ref()
-        .expect("expected object parameters");
-    properties[parameter_name]
-        .description
-        .as_deref()
-        .expect("parameter should have a description")
-}
-
 #[test]
 fn exec_command_tool_matches_expected_spec() {
     let tool = create_exec_command_tool(CommandToolOptions {
@@ -177,38 +162,6 @@ fn write_stdin_tool_matches_expected_spec() {
 }
 
 #[test]
-fn execution_tool_descriptions_use_resolved_timing_policy() {
-    let tool_execution = codex_config::ToolExecutionPolicy::new(
-        codex_config::ToolExecutionTimingRange::new(
-            /*min_ms*/ 111, /*default_ms*/ 222, /*max_ms*/ 333,
-        )
-        .expect("test timeout range should be valid"),
-        codex_config::ToolExecutionTimingRange::new(
-            /*min_ms*/ 444, /*default_ms*/ 555, /*max_ms*/ 666,
-        )
-        .expect("test yield range should be valid"),
-    );
-    let options = CommandToolOptions {
-        allow_login_shell: false,
-        exec_permission_approvals_enabled: false,
-        tool_execution,
-    };
-
-    assert_eq!(
-        [
-            parameter_description(&create_shell_command_tool(options), "timeout_ms"),
-            parameter_description(&create_exec_command_tool(options), "yield_time_ms"),
-            parameter_description(&create_write_stdin_tool(tool_execution), "yield_time_ms"),
-        ],
-        [
-            "Maximum command runtime. Configured default is 222 ms; effective range is 111-333 ms.",
-            "Wait before yielding output. Non-interactive commands use the configured default 555 ms and range 444-666 ms. TTY commands use the fixed default 10000 ms and range 250-30000 ms. Commands that finish sooner return immediately.",
-            "Wait before yielding output. Empty polls use the configured default 555 ms and range 444-666 ms. Non-empty writes use the fixed default 250 ms and range 250-30000 ms.",
-        ]
-    );
-}
-
-#[test]
 fn request_permissions_tool_includes_full_permission_schema() {
     let tool =
         create_request_permissions_tool("Request extra permissions for this turn.".to_string());
@@ -240,85 +193,6 @@ fn request_permissions_tool_includes_full_permission_schema() {
             parameters: JsonSchema::object(
                 properties,
                 Some(vec!["permissions".to_string()]),
-                Some(false.into())
-            ),
-            output_schema: None,
-        })
-    );
-}
-
-#[test]
-fn shell_command_tool_matches_expected_spec() {
-    let tool = create_shell_command_tool(CommandToolOptions {
-        allow_login_shell: true,
-        exec_permission_approvals_enabled: false,
-        tool_execution: codex_config::ToolExecutionPolicy::default(),
-    });
-
-    let description = if cfg!(windows) {
-        r#"Runs a Powershell command (Windows) and returns its output.
-
-Examples of valid command strings:
-
-- ls -a (show hidden): "Get-ChildItem -Force"
-- recursive find by name: "Get-ChildItem -Recurse -Filter *.py"
-- recursive grep: "Get-ChildItem -Path C:\\myrepo -Recurse | Select-String -Pattern 'TODO' -CaseSensitive"
-- ps aux | grep python: "Get-Process | Where-Object { $_.ProcessName -like '*python*' }"
-- setting an env var: "$env:FOO='bar'; echo $env:FOO"
-- running an inline Python script: "@'\\nprint('Hello, world!')\\n'@ | python -""#
-            .to_string()
-            + &windows_shell_guidance_description()
-    } else {
-        r#"Runs a shell command and returns its output.
-- Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary."#
-            .to_string()
-    };
-
-    let mut properties = BTreeMap::from([
-        (
-            "command".to_string(),
-            JsonSchema::string(Some(
-                "Shell script to run in the user's default shell.".to_string(),
-            )),
-        ),
-        (
-            "workdir".to_string(),
-            JsonSchema::string(Some(
-                "Working directory for the command. Defaults to the turn cwd.".to_string(),
-            )),
-        ),
-        (
-            "timeout_ms".to_string(),
-            JsonSchema::number_with_bounds(
-                Some(
-                    "Maximum command runtime. Configured default is 600000 ms; effective range is 10000-3600000 ms.".to_string(),
-                ),
-                /*minimum*/ 10_000,
-                /*maximum*/ 3_600_000,
-            ),
-        ),
-        (
-            "login".to_string(),
-            JsonSchema::boolean(Some(
-                "True runs with login shell semantics; false disables them. Defaults to true."
-                    .to_string(),
-            )),
-        ),
-    ]);
-    properties.extend(create_approval_parameters(
-        /*exec_permission_approvals_enabled*/ false,
-    ));
-
-    assert_eq!(
-        tool,
-        ToolSpec::Function(ResponsesApiTool {
-            name: "shell_command".to_string(),
-            description,
-            strict: false,
-            defer_loading: None,
-            parameters: JsonSchema::object(
-                properties,
-                Some(vec!["command".to_string()]),
                 Some(false.into())
             ),
             output_schema: None,

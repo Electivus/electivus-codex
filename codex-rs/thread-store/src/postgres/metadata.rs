@@ -268,6 +268,7 @@ fn rebuild_projection(
         section,
         section_position,
         section_entered_at,
+        project_id: None,
         cwd: session_meta.meta.cwd.clone(),
         cli_version: session_meta.meta.cli_version.clone(),
         source: session_meta.meta.source.clone(),

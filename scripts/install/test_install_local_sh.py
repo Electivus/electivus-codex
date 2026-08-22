@@ -17,6 +17,16 @@ RELEASE_PREFIX = f"local-debug-{TARGET}"
 
 
 class InstallLocalShTest(unittest.TestCase):
+    def test_upstream_version_build_sets_repository_root_for_package_helpers(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            result = run_installer(root, use_upstream_version=True)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_dev_build_disables_debug_assertions_without_using_release(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -26,7 +36,7 @@ class InstallLocalShTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(
                 (root / "build.log").read_text(encoding="utf-8").splitlines(),
-                ["cargo_profile=dev-small", "debug_assertions=false"],
+                ["cargo_profile=dev", "debug_assertions=false"],
             )
 
     def test_successful_install_keeps_new_release_and_two_previous(self) -> None:
@@ -80,7 +90,7 @@ class InstallLocalShTest(unittest.TestCase):
 
 
 def run_installer(
-    root: Path, *, codex_exit: int = 0
+    root: Path, *, codex_exit: int = 0, use_upstream_version: bool = False
 ) -> subprocess.CompletedProcess[str]:
     fake_bin = root / "fake-bin"
     fake_bin.mkdir()
@@ -115,6 +125,23 @@ def run_installer(
         fake_bin / "python3",
         f"""\
         #!/bin/sh
+        if [ "$1" = "-c" ]; then
+          case "$2" in
+            *read_workspace_version*)
+              printf '0.0.0\n'
+              exit 0
+              ;;
+            *resolve_upstream_build_version*)
+              if [ "${{CODEX_REPO_ROOT-}}" != "$CODEX_TEST_EXPECTED_REPO_ROOT" ]; then
+                printf 'unexpected CODEX_REPO_ROOT: %s\n' "${{CODEX_REPO_ROOT-}}" >&2
+                exit 1
+              fi
+              printf '0.0.0\n'
+              exit 0
+              ;;
+          esac
+        fi
+
         if [ "$1" != "{BUILD_SCRIPT}" ]; then
           exec "{sys.executable}" "$@"
         fi
@@ -166,10 +193,15 @@ def run_installer(
         "CODEX_INSTALL_DIR": str(install_bin),
         "CODEX_TEST_BUILD_LOG": str(root / "build.log"),
         "CODEX_TEST_CODEX_EXIT": str(codex_exit),
+        "CODEX_TEST_EXPECTED_REPO_ROOT": str(REPO_ROOT),
         "TMPDIR": str(root),
     }
+    env.pop("CODEX_REPO_ROOT", None)
+    arguments = ["sh", str(INSTALL_SCRIPT)]
+    if use_upstream_version:
+        arguments.append("--use-upstream-version")
     return subprocess.run(
-        ["sh", str(INSTALL_SCRIPT)],
+        arguments,
         cwd=REPO_ROOT,
         env=env,
         text=True,

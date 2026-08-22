@@ -123,6 +123,7 @@ impl SessionTarget {
 #[derive(Debug, Clone)]
 pub enum SessionSelection {
     StartFresh,
+    AgentsOverview,
     Resume(SessionTarget),
     Fork(SessionTarget),
     Exit,
@@ -5691,6 +5692,7 @@ session_picker_view = "dense"
             render_list(&mut frame, area, &state);
         }
         terminal.flush().expect("flush");
+        terminal.swap_buffers();
         assert!(terminal.backend().to_string().contains("↓ more"));
 
         state.density = SessionListDensity::Dense;
@@ -6452,9 +6454,9 @@ session_picker_view = "dense"
             parent_thread_id: None,
             preview: String::from("remote thread"),
             ephemeral: false,
-            is_pinned: false,
             section: None,
             section_entered_at: None,
+            project_id: None,
             history_mode: Default::default(),
             model_provider: String::from("openai"),
             created_at: 1,
@@ -6503,9 +6505,9 @@ session_picker_view = "dense"
             parent_thread_id: None,
             preview: String::from("preview"),
             ephemeral: false,
-            is_pinned: false,
             section: None,
             section_entered_at: None,
+            project_id: None,
             history_mode: Default::default(),
             model_provider: String::from("openai"),
             created_at: 1,
@@ -6539,6 +6541,7 @@ session_picker_view = "dense"
                         text: format!("hello from assistant [file]({linked_file})"),
                         phase: None,
                         memory_citation: None,
+                        delivery: None,
                     },
                     ThreadItem::Plan {
                         id: String::from("plan-1"),
@@ -6584,9 +6587,9 @@ session_picker_view = "dense"
             parent_thread_id: None,
             preview: String::from("preview"),
             ephemeral: false,
-            is_pinned: false,
             section: None,
             section_entered_at: None,
+            project_id: None,
             history_mode: Default::default(),
             model_provider: String::from("openai"),
             created_at: 1,
@@ -6657,9 +6660,9 @@ session_picker_view = "dense"
             parent_thread_id: None,
             preview: String::from("preview"),
             ephemeral: false,
-            is_pinned: false,
             section: None,
             section_entered_at: None,
+            project_id: None,
             history_mode: Default::default(),
             model_provider: String::from("openai"),
             created_at: 1,

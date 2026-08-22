@@ -72,6 +72,12 @@ class CanaryDecision:
     reason: str
 
 
+@dataclass(frozen=True)
+class CanaryMetadata:
+    canary: CanaryDecision
+    windows_source_required: bool
+
+
 def matching_canary_paths(changed_files: set[str]) -> set[str]:
     """Return changed paths that require the general V8 build matrix."""
     return {
@@ -203,20 +209,44 @@ def decision_for_revisions(
     force: bool = False,
     root: Path = ROOT,
 ) -> CanaryDecision:
+    return metadata_for_revisions(base, head, force=force, root=root).canary
+
+
+def metadata_for_revisions(
+    base: str | None,
+    head: str | None,
+    *,
+    force: bool = False,
+    root: Path = ROOT,
+) -> CanaryMetadata:
     if force:
-        return CanaryDecision(True, "manual workflow dispatch")
+        return CanaryMetadata(
+            CanaryDecision(True, "manual workflow dispatch"),
+            windows_source_required=True,
+        )
     if not base or not head:
-        return CanaryDecision(True, "comparison is missing base or head")
+        return CanaryMetadata(
+            CanaryDecision(True, "comparison is missing base or head"),
+            windows_source_required=True,
+        )
     try:
         files = changed_files(base, head, root=root)
         common = merge_base(base, head, root=root)
-        return classify_changed_files(
-            files,
-            v8_version_at_revision(common, root=root),
-            v8_version_at_revision(head, root=root),
+        base_version = v8_version_at_revision(common, root=root)
+        head_version = v8_version_at_revision(head, root=root)
+        return CanaryMetadata(
+            classify_changed_files(files, base_version, head_version),
+            windows_source_required(
+                files,
+                base_version,
+                head_version,
+            ),
         )
     except Exception as error:
-        return CanaryDecision(True, f"comparison failed ({type(error).__name__})")
+        return CanaryMetadata(
+            CanaryDecision(True, f"comparison failed ({type(error).__name__})"),
+            windows_source_required=True,
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -229,9 +259,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    decision = decision_for_revisions(args.base, args.head, force=args.force)
-    print(f"canary_required={str(decision.required).lower()}")
-    print(f"canary_reason={decision.reason}")
+    metadata = metadata_for_revisions(args.base, args.head, force=args.force)
+    print(f"canary_required={str(metadata.canary.required).lower()}")
+    print(f"canary_reason={metadata.canary.reason}")
+    print(
+        "windows_source_required="
+        f"{str(metadata.windows_source_required).lower()}"
+    )
 
 
 if __name__ == "__main__":

@@ -30,10 +30,6 @@ sourceKinds?: Array<ThreadSourceKind> | null, /**
  * If false or null, only non-archived threads are returned.
  */
 archived?: boolean | null, /**
- * Compatibility filter for membership in the built-in Pinned section.
- * This cannot be combined with `sectionId`.
- */
-isPinned?: boolean | null, /**
  * Omit to include every section, set to `null` for unsectioned threads,
  * or provide a section ID to return only threads in that section.
  */

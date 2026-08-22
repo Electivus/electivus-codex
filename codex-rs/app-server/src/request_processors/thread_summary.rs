@@ -196,51 +196,6 @@ pub(crate) fn thread_settings_from_config_snapshot(
     }
 }
 
-pub(crate) fn thread_settings_from_core_snapshot(
-    snapshot: codex_protocol::protocol::ThreadSettingsSnapshot,
-) -> std::io::Result<ThreadSettings> {
-    let codex_protocol::protocol::ThreadSettingsSnapshot {
-        model,
-        model_provider_id,
-        service_tier,
-        approval_policy,
-        approvals_reviewer,
-        permission_profile,
-        active_permission_profile,
-        cwd,
-        reasoning_effort,
-        reasoning_summary,
-        personality,
-        collaboration_mode,
-    } = snapshot;
-    let cwd = cwd.to_abs_path()?;
-    let permission_profile = permission_profile
-        .to_native()
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    let sandbox_policy = codex_sandboxing::compatibility_sandbox_policy_for_permission_profile(
-        &permission_profile,
-        cwd.as_path(),
-    )
-    .into();
-    Ok(ThreadSettings {
-        sandbox_policy,
-        cwd,
-        approval_policy: approval_policy.into(),
-        approvals_reviewer: approvals_reviewer.into(),
-        active_permission_profile: thread_response_active_permission_profile(
-            active_permission_profile,
-        ),
-        model,
-        model_provider: model_provider_id,
-        service_tier,
-        effort: reasoning_effort,
-        summary: reasoning_summary,
-        collaboration_mode,
-        multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
-        personality,
-    })
-}
-
 #[cfg(test)]
 fn parse_datetime(timestamp: Option<&str>) -> Option<DateTime<Utc>> {
     timestamp.and_then(|ts| {
@@ -301,9 +256,9 @@ pub(crate) fn summary_to_thread(summary: ConversationSummary) -> Thread {
         parent_thread_id: None,
         preview,
         ephemeral: false,
-        is_pinned: false,
         section: None,
         section_entered_at: None,
+        project_id: None,
         history_mode: ThreadHistoryMode::Legacy,
         model_provider,
         created_at: created_at.map(|dt| dt.timestamp()).unwrap_or(0),

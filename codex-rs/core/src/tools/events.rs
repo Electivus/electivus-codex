@@ -26,7 +26,6 @@ use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::PatchApplyStatus;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_shell_command::parse_command::parse_command;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use codex_utils_string::truncate_middle_with_token_budget;
 use std::collections::HashMap;
@@ -180,13 +179,6 @@ async fn emit_exec_command_begin(ctx: ToolEventCtx<'_>, exec_input: &ExecCommand
 }
 // Concrete, allocation-free emitter: avoid trait objects and boxed futures.
 pub(crate) enum ToolEmitter {
-    Shell {
-        command: Vec<String>,
-        cwd: PathUri,
-        source: ExecCommandSource,
-        parsed_cmd: Vec<ParsedCommand>,
-        plugin_attribution: Option<PluginCommandAttribution>,
-    },
     ApplyPatch {
         changes: HashMap<PathBuf, FileChange>,
         auto_approved: bool,
@@ -203,22 +195,6 @@ pub(crate) enum ToolEmitter {
 }
 
 impl ToolEmitter {
-    pub fn shell(
-        command: Vec<String>,
-        cwd: AbsolutePathBuf,
-        source: ExecCommandSource,
-        plugin_attribution: Option<PluginCommandAttribution>,
-    ) -> Self {
-        let parsed_cmd = parse_command(&command);
-        Self::Shell {
-            command,
-            cwd: PathUri::from_abs_path(&cwd),
-            source,
-            parsed_cmd,
-            plugin_attribution,
-        }
-    }
-
     pub fn apply_patch_for_environment(
         changes: HashMap<PathBuf, FileChange>,
         auto_approved: bool,
@@ -251,33 +227,6 @@ impl ToolEmitter {
 
     pub async fn emit(&self, ctx: ToolEventCtx<'_>, stage: ToolEventStage<'_>) {
         match (self, stage) {
-            (
-                Self::Shell {
-                    command,
-                    cwd,
-                    source,
-                    parsed_cmd,
-                    plugin_attribution,
-                    ..
-                },
-                stage,
-            ) => {
-                emit_exec_stage(
-                    ctx,
-                    ExecCommandInput::new(
-                        command,
-                        cwd,
-                        parsed_cmd,
-                        *source,
-                        /*interaction_input*/ None,
-                        /*process_id*/ None,
-                        plugin_attribution.as_ref(),
-                    ),
-                    stage,
-                )
-                .await;
-            }
-
             (
                 Self::ApplyPatch {
                     changes,
@@ -449,6 +398,18 @@ impl ToolEmitter {
                 (event, result)
             }
             Err(ToolError::Codex(err)) => match err.details() {
+                CodexErrorDetails::TurnAborted => {
+                    let message = match self {
+                        Self::UnifiedExec { .. } => "exec command rejected by user".to_string(),
+                        Self::ApplyPatch { .. } => "patch rejected by user".to_string(),
+                    };
+                    let event = ToolEventStage::Failure(ToolEventFailure::Rejected {
+                        message: message.clone(),
+                        applied_patch_delta,
+                    });
+                    let result = Err(FunctionCallError::RespondToModel(message));
+                    (event, result)
+                }
                 CodexErrorDetails::Sandbox(SandboxErr::Timeout { output }) => {
                     let output = output.as_ref().clone();
                     let response = self.format_exec_output_for_model(&output, ctx);
@@ -491,9 +452,7 @@ impl ToolEmitter {
                 // TODO: We should add a new ToolError variant for user-declined approvals.
                 let normalized = if msg == "rejected by user" {
                     match self {
-                        Self::Shell { .. } | Self::UnifiedExec { .. } => {
-                            "exec command rejected by user".to_string()
-                        }
+                        Self::UnifiedExec { .. } => "exec command rejected by user".to_string(),
                         Self::ApplyPatch { .. } => "patch rejected by user".to_string(),
                     }
                 } else {
@@ -806,6 +765,49 @@ mod tests {
             PatchApplyStatus::Declined,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn aborted_unified_exec_is_reported_as_declined() {
+        let (session, turn, rx_event) =
+            make_session_and_context_with_dynamic_tools_and_rx(Vec::new()).await;
+        let dir = tempdir().expect("tempdir");
+        let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute cwd");
+        let command = vec!["echo".to_string(), "hello".to_string()];
+
+        ToolEmitter::unified_exec(
+            &command,
+            cwd,
+            ExecCommandSource::Agent,
+            /*process_id*/ None,
+            /*plugin_attribution*/ None,
+        )
+        .finish(
+            ToolEventCtx::new(
+                session.as_ref(),
+                turn.as_ref(),
+                "call-id",
+                /*turn_diff_tracker*/ None,
+            ),
+            Err(ToolError::Codex(CodexErr::TurnAborted)),
+            /*applied_patch_delta*/ None,
+        )
+        .await
+        .expect_err("aborted command");
+
+        let completed = rx_event.recv().await.expect("item completed event");
+        assert!(matches!(
+            completed.msg,
+            EventMsg::ItemCompleted(event)
+                if matches!(
+                    &event.item,
+                    TurnItem::CommandExecution(CommandExecutionItem {
+                        status: CommandExecutionStatus::Declined,
+                        aggregated_output: Some(output),
+                        ..
+                    }) if output == "exec command rejected by user"
+                )
+        ));
     }
 
     #[tokio::test]

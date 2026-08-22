@@ -48,11 +48,15 @@ pub(super) fn truncate_output_item(item: &ResponseItem, policy: TruncationPolicy
         ResponseItem::FunctionCallOutput {
             id,
             call_id,
+            name,
+            namespace,
             output,
             internal_chat_message_metadata_passthrough: metadata,
         } => ResponseItem::FunctionCallOutput {
             id: id.clone(),
             call_id: call_id.clone(),
+            name: name.clone(),
+            namespace: namespace.clone(),
             output: truncate_function_output_payload(output, policy),
             internal_chat_message_metadata_passthrough: metadata.clone(),
         },

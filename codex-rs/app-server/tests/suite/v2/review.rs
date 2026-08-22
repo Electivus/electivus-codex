@@ -1,11 +1,13 @@
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
-use app_test_support::create_exec_command_sse_response;
+use app_test_support::create_escalated_command_execution_sse_response;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::CommandExecutionApprovalDecision;
+use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCError;
@@ -194,7 +196,16 @@ async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()
 #[tokio::test]
 async fn review_start_exec_approval_item_id_matches_command_execution_item() -> Result<()> {
     let responses = vec![
-        create_exec_command_sse_response("review-call-1")?,
+        create_escalated_command_execution_sse_response(
+            vec![
+                "git".to_string(),
+                "rev-parse".to_string(),
+                "HEAD".to_string(),
+            ],
+            /*workdir*/ None,
+            Some(5000),
+            "review-call-1",
+        )?,
         create_final_assistant_message_sse_response("done")?,
     ];
     let server = create_mock_responses_server_sequence(responses).await;
@@ -202,7 +213,7 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri())
         .with_provider_name("Mock provider")
-        .with_approval_policy("untrusted")
+        .with_approval_policy("on-request")
         .disable_feature(Feature::ShellSnapshot)
         .enable_feature(Feature::UnifiedExec)
         .write(codex_home.path())?;
@@ -253,7 +264,9 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
 
     mcp.send_response(
         request_id,
-        serde_json::json!({ "decision": codex_protocol::protocol::ReviewDecision::Approved }),
+        serde_json::to_value(CommandExecutionRequestApprovalResponse {
+            decision: CommandExecutionApprovalDecision::Accept,
+        })?,
     )
     .await?;
     timeout(

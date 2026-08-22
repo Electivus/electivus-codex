@@ -99,7 +99,7 @@ impl ExternalAgentConfigRequestProcessor {
         } = args;
         let migration_service = ExternalAgentConfigService::new(
             codex_home.clone(),
-            thread_manager.plugins_manager().auth_mode(),
+            thread_manager.auth_manager(),
             analytics_events_client.clone(),
             state_db.clone(),
         );
@@ -129,7 +129,6 @@ impl ExternalAgentConfigRequestProcessor {
     ) -> Result<ExternalAgentConfigDetectResponse, JSONRPCErrorError> {
         let migration_service = self
             .migration_service
-            .with_auth_mode(self.thread_manager.plugins_manager().auth_mode())
             .with_migration_source(params.migration_source.as_deref());
         let default_session_import_limits = ExternalAgentSessionImportLimits::default();
         let migration_service =
@@ -201,7 +200,6 @@ impl ExternalAgentConfigRequestProcessor {
         let provider_id = params.provider_id.clone();
         let migration_service = self
             .migration_service
-            .with_auth_mode(self.thread_manager.plugins_manager().auth_mode())
             .with_migration_source(params.migration_source.as_deref());
         let needs_runtime_refresh = migration_items_need_runtime_refresh(&params.migration_items);
         let has_migration_items = !params.migration_items.is_empty();

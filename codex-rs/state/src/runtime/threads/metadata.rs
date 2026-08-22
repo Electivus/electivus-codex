@@ -15,16 +15,35 @@ pub struct ThreadResumeMetadata {
 }
 
 impl StateRuntime {
-    /// Permanently promote a thread to paginated history without changing metadata or recency.
-    pub async fn mark_thread_paginated(&self, thread_id: ThreadId) -> anyhow::Result<bool> {
+    /// Permanently promote a thread, preserving its canonical name or a legacy-visible fallback.
+    pub async fn mark_thread_paginated(
+        &self,
+        thread_id: ThreadId,
+        legacy_name: Option<&str>,
+    ) -> anyhow::Result<bool> {
         if let Some((pool, schema)) = self.postgres_connection() {
-            return postgres::mark_thread_paginated(&pool, &schema, thread_id).await;
+            return postgres::mark_thread_paginated(&pool, &schema, thread_id, legacy_name).await;
         }
 
-        let result = sqlx::query("UPDATE threads SET history_mode = 'paginated' WHERE id = ?")
-            .bind(thread_id.to_string())
-            .execute(self.sqlite_pool()?)
-            .await?;
+        // Legacy threads display `title`, then fall back to the name index. Paginated threads
+        // display `name`; `title` remains derived metadata used for search. Preserve an existing
+        // `name`, otherwise carry over the legacy display name.
+        let result = sqlx::query(
+            r#"
+UPDATE threads
+SET
+    history_mode = 'paginated',
+    name = CASE
+        WHEN name IS NULL OR trim(name) = '' THEN ?
+        ELSE name
+    END
+WHERE id = ?
+            "#,
+        )
+        .bind(legacy_name)
+        .bind(thread_id.to_string())
+        .execute(self.sqlite_pool()?)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -87,6 +106,7 @@ SELECT
     ) AS section_appearance,
     threads.section_position,
     threads.section_entered_at_ms,
+    threads.project_id,
     threads.git_sha,
     threads.git_branch,
     threads.git_origin_url,
@@ -220,8 +240,9 @@ INSERT INTO threads (
     git_branch,
     git_origin_url,
     repository_identity,
-    memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    memory_mode,
+    project_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO NOTHING
             "#,
         )
@@ -276,6 +297,7 @@ ON CONFLICT(id) DO NOTHING
                 .and_then(codex_git_utils::canonicalize_git_remote_url),
         )
         .bind("enabled")
+        .bind(metadata.project_id.as_deref())
         .execute(self.sqlite_pool()?)
         .await?;
         self.insert_thread_spawn_edge_from_source_if_absent(metadata.id, metadata.source.as_str())

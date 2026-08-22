@@ -41,6 +41,7 @@ async fn postgres_contract_active_writer_recovers_expired_lease_without_takeover
             vec![RolloutItem::Compacted(CompactedItem {
                 message: "history after idle lease expiry".to_string(),
                 replacement_history: None,
+                mcp_resource_origins: None,
                 window_number: None,
                 first_window_id: None,
                 previous_window_id: None,

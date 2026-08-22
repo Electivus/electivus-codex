@@ -9,6 +9,7 @@ use crate::outgoing_message::OutgoingMessageSender;
 use codex_analytics::AnalyticsEventsClient;
 use codex_app_server_protocol::AutoReviewRequirements;
 use codex_app_server_protocol::BrowserUseRequirements;
+use codex_app_server_protocol::CliAuthCredentialsStoreMode;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::ComputerUseRequirements;
 use codex_app_server_protocol::ConfigBatchWriteParams;
@@ -24,6 +25,7 @@ use codex_app_server_protocol::ConfiguredHookMatcherGroup;
 use codex_app_server_protocol::ExperimentalFeatureEnablementSetParams;
 use codex_app_server_protocol::ExperimentalFeatureEnablementSetResponse;
 use codex_app_server_protocol::FeedbackRequirements;
+use codex_app_server_protocol::InAppBrowserRequirements;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::ManagedHooksRequirements;
 use codex_app_server_protocol::ModelProviderCapabilitiesReadResponse;
@@ -352,6 +354,24 @@ fn map_requirements_toml_to_api(requirements: ConfigRequirementsToml) -> ConfigR
         .and_then(|windows| windows.sandbox_private_desktop);
 
     ConfigRequirements {
+        cli_auth_credentials_store: requirements.cli_auth_credentials_store.map(
+            |mode| match mode {
+                codex_config::types::AuthCredentialsStoreMode::File => {
+                    CliAuthCredentialsStoreMode::File
+                }
+                codex_config::types::AuthCredentialsStoreMode::Keyring => {
+                    CliAuthCredentialsStoreMode::Keyring
+                }
+                codex_config::types::AuthCredentialsStoreMode::Auto => {
+                    CliAuthCredentialsStoreMode::Auto
+                }
+                codex_config::types::AuthCredentialsStoreMode::Ephemeral => {
+                    CliAuthCredentialsStoreMode::Ephemeral
+                }
+            },
+        ),
+        chatgpt_base_url: requirements.chatgpt_base_url,
+        additional_developer_instructions: requirements.additional_developer_instructions,
         allowed_approval_policies: requirements.allowed_approval_policies.map(|policies| {
             policies
                 .into_iter()
@@ -408,6 +428,12 @@ fn map_requirements_toml_to_api(requirements: ConfigRequirementsToml) -> ConfigR
         browser_use: requirements
             .browser_use
             .map(map_browser_use_requirements_to_api),
+        in_app_browser: requirements.in_app_browser.map(|in_app_browser| {
+            InAppBrowserRequirements {
+                allow_external_browser_settings_import: in_app_browser
+                    .allow_external_browser_settings_import,
+            }
+        }),
         feature_requirements: requirements
             .feature_requirements
             .map(|requirements| requirements.entries),

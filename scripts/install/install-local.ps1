@@ -70,7 +70,7 @@ function Resolve-CommandPath {
         }
     }
 
-    throw "$Description is required to install a local Codex release build."
+    throw "$Description is required to install a local Codex dev build."
 }
 
 function ConvertTo-AbsolutePath {
@@ -445,7 +445,7 @@ function Invoke-LocalPackageBuild {
         [string[]]$PythonPrefixArguments
     )
 
-    Write-Step "Building local Codex release package"
+    Write-Step "Building local Codex dev package"
     if (Test-Path -LiteralPath $PackageDir) {
         Remove-Item -LiteralPath $PackageDir -Recurse -Force
     }
@@ -459,11 +459,12 @@ function Invoke-LocalPackageBuild {
         "--variant",
         "codex",
         "--cargo-profile",
-        "release",
+        "dev",
         "--package-dir",
         $PackageDir,
         "--force"
     )
+    $env:CARGO_PROFILE_DEV_DEBUG_ASSERTIONS = "false"
     if (-not [string]::IsNullOrWhiteSpace($env:CODEX_LOCAL_RG)) {
         $localRgPath = ConvertTo-AbsolutePath $env:CODEX_LOCAL_RG
         if (-not (Test-Path -LiteralPath $localRgPath -PathType Leaf)) {
@@ -716,6 +717,7 @@ switch ($architecture) {
 
 $scriptDir = ConvertTo-AbsolutePath $PSScriptRoot
 $repoRoot = ConvertTo-AbsolutePath (Join-Path $scriptDir "..\..")
+$env:CODEX_REPO_ROOT = $repoRoot
 $buildScript = Join-Path $repoRoot "scripts\build_codex_package.py"
 $cargoManifestPath = Join-Path $repoRoot "codex-rs\Cargo.toml"
 $cargoLockPath = Join-Path $repoRoot "codex-rs\Cargo.lock"
@@ -758,7 +760,7 @@ $visibleBinDir = if ([string]::IsNullOrWhiteSpace($env:CODEX_INSTALL_DIR)) {
 }
 $visibleBinDir = ConvertTo-AbsolutePath $visibleBinDir
 
-$releasePrefix = "local-release-$target"
+$releasePrefix = "local-debug-$target"
 $releaseName = "$releasePrefix-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))-$PID"
 $releaseDir = Join-Path $releasesDir $releaseName
 $stagingDir = Join-Path $releasesDir ".staging.$releaseName.$PID"
@@ -770,7 +772,7 @@ try {
         New-Item -ItemType Directory -Force -Path $standaloneRoot | Out-Null
         New-Item -ItemType Directory -Force -Path $releasesDir | Out-Null
         Remove-StaleInstallArtifacts -StandaloneRoot $standaloneRoot -ReleasesDir $releasesDir
-        Write-Step "Installing local release build to $releaseDir"
+        Write-Step "Installing local dev build to $releaseDir"
 
         if ($useUpstreamVersionRequested) {
             $currentWorkspaceVersion = Read-WorkspaceVersion -CargoManifestPath $cargoManifestPath

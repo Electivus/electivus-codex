@@ -57,6 +57,7 @@ async fn read_origin(
             ],
             cwd,
             env_policy: None,
+            shell_snapshot: None,
             env: HashMap::new(),
             tty: false,
             pipe_stdin: false,

@@ -81,12 +81,12 @@ fn thread_list_params_encode_each_scope_as_a_complete_request() {
                 model_providers: Some(vec![String::from("openai")]),
                 source_kinds: Some(vec![ThreadSourceKind::Cli, ThreadSourceKind::VsCode]),
                 archived: Some(true),
-                is_pinned: None,
                 section_id: None,
                 cwd,
                 project_cwd,
                 use_state_db_only: true,
                 search_term: None,
+                project_id: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
             }

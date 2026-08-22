@@ -89,8 +89,9 @@ INSERT INTO threads (
     git_branch,
     git_origin_url,
     repository_identity,
-    memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    memory_mode,
+    project_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     rollout_path = excluded.rollout_path,
     created_at = excluded.created_at,
@@ -189,6 +190,7 @@ ON CONFLICT(id) DO UPDATE SET
                 .and_then(codex_git_utils::canonicalize_git_remote_url),
         )
         .bind(creation_memory_mode.unwrap_or("enabled"))
+        .bind(metadata.project_id.as_deref())
         .execute(self.sqlite_pool()?)
         .await?;
         self.insert_thread_spawn_edge_from_source_if_absent(metadata.id, metadata.source.as_str())

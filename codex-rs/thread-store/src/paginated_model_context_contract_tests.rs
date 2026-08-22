@@ -225,6 +225,7 @@ fn completed_agent_message(thread_id: ThreadId, turn_id: &str, text: String) -> 
             content: vec![AgentMessageContent::Text { text }],
             phase: None,
             memory_citation: None,
+            delivery: None,
         }),
         started_at_ms: Some(0),
         completed_at_ms: 0,

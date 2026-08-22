@@ -107,26 +107,24 @@ pub(crate) fn should_retry_with_rustls(error: &reqwest::Error) -> bool {
     error.is_connect() && !error.is_timeout() && error.source().is_some_and(has_retryable_tls_error)
 }
 
+pub(crate) fn has_certificate_error(error: &(dyn Error + 'static)) -> bool {
+    let mut source = Some(error);
+    while let Some(error) = source {
+        if is_certificate_error_message(&error.to_string().to_ascii_lowercase()) {
+            return true;
+        }
+        source = error.source();
+    }
+    false
+}
+
 fn has_retryable_tls_error(error: &(dyn Error + 'static)) -> bool {
     let mut source = Some(error);
     let mut recognized_negotiation_failure = false;
 
     while let Some(error) = source {
         let message = error.to_string().to_ascii_lowercase();
-        if [
-            "certificate",
-            "unknown issuer",
-            "unknown ca",
-            "untrusted",
-            "self signed",
-            "self-signed",
-            "hostname",
-            "expired",
-            "revoked",
-        ]
-        .iter()
-        .any(|marker| message.contains(marker))
-        {
+        if is_certificate_error_message(&message) {
             return false;
         }
 
@@ -155,6 +153,22 @@ fn has_retryable_tls_error(error: &(dyn Error + 'static)) -> bool {
     }
 
     recognized_negotiation_failure
+}
+
+fn is_certificate_error_message(message: &str) -> bool {
+    [
+        "certificate",
+        "unknown issuer",
+        "unknown ca",
+        "untrusted",
+        "self signed",
+        "self-signed",
+        "hostname",
+        "expired",
+        "revoked",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
 }
 
 #[cfg(test)]

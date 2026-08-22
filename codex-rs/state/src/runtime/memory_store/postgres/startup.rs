@@ -341,6 +341,7 @@ fn thread_metadata_from_projection(
         section: projection.section,
         section_position: projection.section_position,
         section_entered_at: projection.section_entered_at,
+        project_id: None,
         git_sha,
         git_branch,
         git_origin_url,

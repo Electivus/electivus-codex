@@ -3,7 +3,6 @@ use anyhow::Result;
 use codex_config::ToolExecutionPolicy;
 use codex_config::ToolExecutionTimingRange;
 use codex_features::Feature;
-use codex_protocol::openai_models::ConfigShellToolType;
 use core_test_support::TestTargetOs;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
@@ -33,18 +32,6 @@ fn function_output(request: &ResponsesRequest, call_id: &str) -> Result<String> 
     output.with_context(|| format!("tool result for {call_id} should contain text"))
 }
 
-fn reported_timeout_ms(output: &str) -> Result<u64> {
-    output
-        .lines()
-        .find_map(|line| {
-            line.trim()
-                .strip_prefix("command timed out after ")
-                .and_then(|value| value.strip_suffix(" milliseconds"))
-                .and_then(|value| value.parse().ok())
-        })
-        .with_context(|| format!("timeout duration should be present in output: {output}"))
-}
-
 fn tool_property_description(
     request: &ResponsesRequest,
     tool_name: &str,
@@ -66,68 +53,6 @@ fn tool_property_description(
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
         .with_context(|| format!("{tool_name}.{property_name} description should be present"))
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shell_timeout_below_minimum_is_clamped_and_disclosed() -> Result<()> {
-    const CALL_ID: &str = "tool-execution-timeout-min";
-
-    skip_if_no_network!(Ok(()));
-
-    let command = match test_target_os() {
-        TestTargetOs::Windows => {
-            "Start-Sleep -Milliseconds 50; Write-Output tool-execution-complete"
-        }
-        TestTargetOs::Linux | TestTargetOs::MacOs => "sleep 0.05; printf tool-execution-complete",
-    };
-    let arguments = serde_json::to_string(&json!({
-        "command": command,
-        "timeout_ms": 1,
-    }))?;
-    let server = start_mock_server().await;
-    let response_mock = mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![
-                ev_response_created("resp-1"),
-                ev_function_call(CALL_ID, "shell_command", &arguments),
-                ev_completed("resp-1"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-2"),
-                ev_assistant_message("msg-1", "done"),
-                ev_completed("resp-2"),
-            ]),
-        ],
-    )
-    .await;
-    let mut builder = test_codex().with_model("gpt-5.4").with_config(|config| {
-        config.tool_execution = ToolExecutionPolicy::new(
-            timing_range(
-                /*min_ms*/ 200, /*default_ms*/ 300, /*max_ms*/ 500,
-            ),
-            config.tool_execution.yield_time(),
-        );
-    });
-    let test = builder.build_with_auto_env(&server).await?;
-
-    test.submit_turn("run the command").await?;
-
-    let request = response_mock
-        .last_request()
-        .context("model should receive the shell result")?;
-    let (output, success) = request
-        .function_call_output_content_and_success(CALL_ID)
-        .context("shell result should be present")?;
-    let output = output.context("shell result should contain text")?;
-    assert_ne!(success, Some(false));
-    assert!(output.contains("tool-execution-complete"), "{output}");
-    assert!(
-        output.contains("Timing policy adjusted timeout_ms from 1 ms to 200 ms (minimum 200 ms)."),
-        "{output}"
-    );
-
-    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -320,80 +245,6 @@ text("tool-execution-complete");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shell_uses_configured_default_and_clamps_to_maximum() -> Result<()> {
-    const DEFAULT_CALL_ID: &str = "tool-execution-timeout-default";
-    const MAX_CALL_ID: &str = "tool-execution-timeout-max";
-
-    skip_if_no_network!(Ok(()));
-
-    let command = match test_target_os() {
-        TestTargetOs::Windows => "Start-Sleep -Milliseconds 800",
-        TestTargetOs::Linux | TestTargetOs::MacOs => "sleep 0.8",
-    };
-    let default_arguments = serde_json::to_string(&json!({ "command": command }))?;
-    let max_arguments = serde_json::to_string(&json!({
-        "command": command,
-        "timeout_ms": 1_000,
-    }))?;
-    let server = start_mock_server().await;
-    let response_mock = mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![
-                ev_response_created("resp-1"),
-                ev_function_call(DEFAULT_CALL_ID, "shell_command", &default_arguments),
-                ev_function_call(MAX_CALL_ID, "shell_command", &max_arguments),
-                ev_completed("resp-1"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-2"),
-                ev_assistant_message("msg-1", "done"),
-                ev_completed("resp-2"),
-            ]),
-        ],
-    )
-    .await;
-    let mut builder = test_codex().with_model("gpt-5.4").with_config(|config| {
-        config.tool_execution = ToolExecutionPolicy::new(
-            timing_range(
-                /*min_ms*/ 100, /*default_ms*/ 200, /*max_ms*/ 500,
-            ),
-            config.tool_execution.yield_time(),
-        );
-    });
-    let test = builder.build_with_auto_env(&server).await?;
-
-    test.submit_turn("run both commands").await?;
-
-    let request = response_mock
-        .last_request()
-        .context("model should receive both shell results")?;
-    let default_output = function_output(&request, DEFAULT_CALL_ID)?;
-    let default_elapsed_ms = reported_timeout_ms(&default_output)?;
-    assert!(
-        (200..=60_000).contains(&default_elapsed_ms),
-        "configured 200 ms timeout was reported as {default_elapsed_ms} ms: {default_output}"
-    );
-    assert!(
-        !default_output.contains("Timing policy adjusted"),
-        "{default_output}"
-    );
-    let max_output = function_output(&request, MAX_CALL_ID)?;
-    let max_elapsed_ms = reported_timeout_ms(&max_output)?;
-    assert!(
-        (500..=60_000).contains(&max_elapsed_ms),
-        "configured 500 ms timeout was reported as {max_elapsed_ms} ms: {max_output}"
-    );
-    assert!(
-        max_output
-            .contains("Timing policy adjusted timeout_ms from 1000 ms to 500 ms (maximum 500 ms)."),
-        "{max_output}"
-    );
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_write_stdin_discloses_yield_adjustment() -> Result<()> {
     const CALL_ID: &str = "tool-execution-failed-write-stdin";
 
@@ -448,77 +299,6 @@ async fn failed_write_stdin_discloses_yield_adjustment() -> Result<()> {
     );
     assert!(
         output.contains("write_stdin failed: Unknown process id 999999"),
-        "{output}"
-    );
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn nested_code_mode_shell_call_uses_timeout_policy() -> Result<()> {
-    const CALL_ID: &str = "tool-execution-nested-shell";
-
-    skip_if_no_network!(Ok(()));
-
-    let command = match test_target_os() {
-        TestTargetOs::Windows => "Start-Sleep -Milliseconds 50; Write-Output nested-shell-complete",
-        TestTargetOs::Linux | TestTargetOs::MacOs => "sleep 0.05; printf nested-shell-complete",
-    };
-    let command = serde_json::to_string(command)?;
-    let code = format!(
-        r#"const result = await tools.shell_command({{ command: {command}, timeout_ms: 1 }});
-text(result);
-"#
-    );
-    let server = start_mock_server().await;
-    let response_mock = mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![
-                ev_response_created("resp-1"),
-                ev_custom_tool_call(CALL_ID, "exec", &code),
-                ev_completed("resp-1"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-2"),
-                ev_assistant_message("msg-1", "done"),
-                ev_completed("resp-2"),
-            ]),
-        ],
-    )
-    .await;
-    let mut builder = test_codex()
-        .with_model_info_override("gpt-5.4", |model_info| {
-            model_info.shell_type = ConfigShellToolType::ShellCommand;
-        })
-        .with_config(|config| {
-            config.tool_execution = ToolExecutionPolicy::new(
-                timing_range(
-                    /*min_ms*/ 200, /*default_ms*/ 300, /*max_ms*/ 500,
-                ),
-                config.tool_execution.yield_time(),
-            );
-            config
-                .features
-                .disable(Feature::UnifiedExec)
-                .expect("unified exec should be disableable");
-            config
-                .features
-                .enable(Feature::CodeMode)
-                .expect("code mode should be enableable");
-        });
-    let test = builder.build_with_auto_env(&server).await?;
-
-    test.submit_turn("run the nested shell call").await?;
-
-    let request = response_mock
-        .last_request()
-        .context("model should receive the nested shell result")?;
-    let output = request.custom_tool_call_output(CALL_ID).to_string();
-    assert!(output.contains("nested-shell-complete"), "{output}");
-    assert!(!output.contains("Script running with cell ID"), "{output}");
-    assert!(
-        output.contains("Timing policy adjusted timeout_ms from 1 ms to 200 ms (minimum 200 ms)."),
         "{output}"
     );
 
@@ -695,7 +475,7 @@ async fn polls_snapshot_reloaded_policy_and_input_uses_interactive_range() -> Re
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refreshed_policy_updates_future_contracts_and_calls() -> Result<()> {
-    const CALL_ID: &str = "tool-execution-refreshed-shell";
+    const CALL_ID: &str = "tool-execution-refreshed-exec";
 
     skip_if_no_network!(Ok(()));
 
@@ -704,8 +484,9 @@ async fn refreshed_policy_updates_future_contracts_and_calls() -> Result<()> {
         TestTargetOs::Linux | TestTargetOs::MacOs => "printf refreshed-policy",
     };
     let arguments = serde_json::to_string(&json!({
-        "command": command,
-        "timeout_ms": 1,
+        "cmd": command,
+        "tty": false,
+        "yield_time_ms": 1,
     }))?;
     let server = start_mock_server().await;
     let response_mock = mount_sse_sequence(
@@ -718,7 +499,7 @@ async fn refreshed_policy_updates_future_contracts_and_calls() -> Result<()> {
             ]),
             sse(vec![
                 ev_response_created("resp-2"),
-                ev_function_call(CALL_ID, "shell_command", &arguments),
+                ev_function_call(CALL_ID, "exec_command", &arguments),
                 ev_completed("resp-2"),
             ]),
             sse(vec![
@@ -729,32 +510,28 @@ async fn refreshed_policy_updates_future_contracts_and_calls() -> Result<()> {
         ],
     )
     .await;
-    let mut builder = test_codex()
-        .with_model_info_override("gpt-5.4", |model_info| {
-            model_info.shell_type = ConfigShellToolType::ShellCommand;
-        })
-        .with_config(|config| {
-            config.tool_execution = ToolExecutionPolicy::new(
-                timing_range(
-                    /*min_ms*/ 200, /*default_ms*/ 300, /*max_ms*/ 400,
-                ),
-                config.tool_execution.yield_time(),
-            );
-            config
-                .features
-                .disable(Feature::UnifiedExec)
-                .expect("unified exec should be disableable");
-        });
+    let mut builder = test_codex().with_model("gpt-5.4").with_config(|config| {
+        config.tool_execution = ToolExecutionPolicy::new(
+            config.tool_execution.timeout(),
+            timing_range(
+                /*min_ms*/ 200, /*default_ms*/ 300, /*max_ms*/ 400,
+            ),
+        );
+        config
+            .features
+            .enable(Feature::UnifiedExec)
+            .expect("unified exec should be enableable");
+    });
     let test = builder.build_with_auto_env(&server).await?;
 
     test.submit_turn("show the current tools").await?;
 
     let mut refreshed_config = test.config.clone();
     refreshed_config.tool_execution = ToolExecutionPolicy::new(
+        refreshed_config.tool_execution.timeout(),
         timing_range(
             /*min_ms*/ 500, /*default_ms*/ 600, /*max_ms*/ 700,
         ),
-        refreshed_config.tool_execution.yield_time(),
     );
     test.codex.refresh_runtime_config(refreshed_config).await;
     test.submit_turn("run the command with refreshed config")
@@ -762,21 +539,22 @@ async fn refreshed_policy_updates_future_contracts_and_calls() -> Result<()> {
 
     let requests = response_mock.requests();
     let initial_description =
-        tool_property_description(&requests[0], "shell_command", "timeout_ms")?;
+        tool_property_description(&requests[0], "exec_command", "yield_time_ms")?;
     assert!(
-        initial_description.contains("default is 300 ms; effective range is 200-400 ms"),
+        initial_description.contains("configured default 300 ms and range 200-400 ms"),
         "{initial_description}"
     );
     let refreshed_description =
-        tool_property_description(&requests[1], "shell_command", "timeout_ms")?;
+        tool_property_description(&requests[1], "exec_command", "yield_time_ms")?;
     assert!(
-        refreshed_description.contains("default is 600 ms; effective range is 500-700 ms"),
+        refreshed_description.contains("configured default 600 ms and range 500-700 ms"),
         "{refreshed_description}"
     );
     let output = function_output(&requests[2], CALL_ID)?;
     assert!(output.contains("refreshed-policy"), "{output}");
     assert!(
-        output.contains("Timing policy adjusted timeout_ms from 1 ms to 500 ms (minimum 500 ms)."),
+        output.contains("Timing policy adjusted")
+            && output.contains("from 1 ms to 500 ms (minimum 500 ms)."),
         "{output}"
     );
 

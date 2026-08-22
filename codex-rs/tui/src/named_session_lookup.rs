@@ -7,6 +7,7 @@ use codex_app_server_protocol::Thread as AppServerThread;
 use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadSortKey;
+use codex_app_server_protocol::ThreadSourceKind;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionSource;
@@ -42,6 +43,7 @@ pub(super) struct NamedSessionCandidates<'a> {
     collection: SessionCollection,
     mode: SessionNameLookupMode,
     search_term: Option<&'a str>,
+    source_kinds: Vec<ThreadSourceKind>,
     project_cwd: Option<&'a Path>,
     cursor: Option<String>,
     pending: std::vec::IntoIter<AppServerThread>,
@@ -150,7 +152,7 @@ async fn lookup_legacy_index_target(
 }
 
 /// Allows a missing SQLite name only for legacy threads, whose name may exist only in the index.
-fn current_name_is_compatible(thread: &AppServerThread, name: &str) -> bool {
+pub(super) fn current_name_is_compatible(thread: &AppServerThread, name: &str) -> bool {
     match thread.history_mode {
         ThreadHistoryMode::Legacy => thread.name.as_deref().is_none_or(|current| current == name),
         ThreadHistoryMode::Paginated => thread.name.as_deref() == Some(name),
@@ -173,6 +175,7 @@ async fn lookup_from_app_server(
         SessionCollection::Active,
         mode,
         Some(name),
+        super::resume_source_kinds(/*include_non_interactive*/ false),
         project_cwd,
     );
     while let Some(candidate) = candidates.next(app_server).await? {
@@ -210,6 +213,7 @@ impl<'a> NamedSessionCandidates<'a> {
         collection: SessionCollection,
         mode: SessionNameLookupMode,
         search_term: Option<&'a str>,
+        source_kinds: Vec<ThreadSourceKind>,
         project_cwd: Option<&'a Path>,
     ) -> Self {
         Self {
@@ -218,6 +222,7 @@ impl<'a> NamedSessionCandidates<'a> {
             collection,
             mode,
             search_term,
+            source_kinds,
             project_cwd,
             cursor: None,
             pending: Vec::new().into_iter(),
@@ -290,12 +295,10 @@ impl<'a> NamedSessionCandidates<'a> {
                     sort_key: Some(sort_key),
                     sort_direction: None,
                     model_providers: None,
-                    source_kinds: Some(super::resume_source_kinds(
-                        /*include_non_interactive*/ false,
-                    )),
+                    source_kinds: Some(self.source_kinds.clone()),
                     archived: Some(self.collection == SessionCollection::Archived),
-                    is_pinned: None,
                     section_id: None,
+                    project_id: None,
                     parent_thread_id: None,
                     ancestor_thread_id: None,
                     cwd: None,

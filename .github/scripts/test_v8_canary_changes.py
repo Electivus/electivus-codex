@@ -4,11 +4,13 @@ import unittest
 from pathlib import Path
 
 from v8_canary_changes import CanaryDecision
+from v8_canary_changes import CanaryMetadata
 from v8_canary_changes import changed_files
 from v8_canary_changes import canary_required
 from v8_canary_changes import classify_changed_files
 from v8_canary_changes import decision_for_revisions
 from v8_canary_changes import merge_base
+from v8_canary_changes import metadata_for_revisions
 from v8_canary_changes import resolved_v8_version
 from v8_canary_changes import windows_source_required
 
@@ -65,6 +67,32 @@ class V8CanaryChangesTest(unittest.TestCase):
             self.assertEqual(
                 CanaryDecision(True, "comparison failed (CalledProcessError)"),
                 decision_for_revisions(
+                    "missing-base", "missing-head", root=Path(temp_dir)
+                ),
+            )
+
+    def test_windows_source_metadata_fails_closed(self) -> None:
+        self.assertEqual(
+            CanaryMetadata(
+                CanaryDecision(True, "manual workflow dispatch"),
+                windows_source_required=True,
+            ),
+            metadata_for_revisions(None, None, force=True),
+        )
+        self.assertEqual(
+            CanaryMetadata(
+                CanaryDecision(True, "comparison is missing base or head"),
+                windows_source_required=True,
+            ),
+            metadata_for_revisions(None, "head"),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self.assertEqual(
+                CanaryMetadata(
+                    CanaryDecision(True, "comparison failed (CalledProcessError)"),
+                    windows_source_required=True,
+                ),
+                metadata_for_revisions(
                     "missing-base", "missing-head", root=Path(temp_dir)
                 ),
             )

@@ -1,5 +1,6 @@
 //! Root of the `codex-core` library.
 
+#![recursion_limit = "256"]
 // Prevent accidental direct writes to stdout/stderr in library code. All
 // user-visible output must go through the appropriate abstraction (e.g.,
 // the TUI or the tracing stack).
@@ -31,10 +32,18 @@ mod compact_remote;
 mod compact_remote_history;
 mod compact_remote_v2;
 mod compact_token_budget;
+pub use codex_network_proxy::EnvironmentNetworkPolicy;
+pub use codex_network_proxy::NetworkDomainPermission;
+pub use codex_network_proxy::NetworkDomainPermissionEntry;
+pub use codex_network_proxy::NetworkDomainPermissions;
+pub use codex_network_proxy::NetworkUnixSocketPermission;
+pub use codex_network_proxy::NetworkUnixSocketPermissions;
+pub use codex_protocol::mcp_policy::EnvironmentMcpPolicy;
 pub use codex_protocol::protocol::EnvironmentConfig;
 pub use codex_thread::BackgroundTerminalInfo;
 pub use codex_thread::CodexThread;
 pub use codex_thread::CodexThreadSettingsOverrides;
+pub use codex_thread::GuardianRootMessage;
 pub use codex_thread::ThreadConfigSnapshot;
 pub use session::turn_context::TurnContext;
 mod agent;
@@ -55,6 +64,7 @@ mod exec_policy;
 #[cfg(test)]
 mod git_info_tests;
 mod guardian;
+mod hook_mcp_executor;
 mod hook_runtime;
 mod image_preparation;
 mod installation_id;

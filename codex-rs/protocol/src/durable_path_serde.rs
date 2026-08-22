@@ -9,7 +9,6 @@ use serde::de::Error as _;
 use serde_json::Value;
 
 use crate::models::PermissionProfile;
-use crate::permissions::FileSystemSandboxPolicy;
 use crate::protocol::SandboxPolicy;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,7 +28,9 @@ where
     pub fn to_native(&self) -> Result<T, serde_json::Error> {
         match &self.0 {
             DurablePathValueInner::Native(value) => Ok(value.clone()),
-            DurablePathValueInner::Foreign(value) => serde_json::from_value(value.clone()),
+            DurablePathValueInner::Foreign(_) => {
+                Err(serde_json::Error::custom("value contains foreign paths"))
+            }
         }
     }
 }
@@ -64,13 +65,13 @@ where
         D: Deserializer<'de>,
     {
         let value = Value::deserialize(deserializer)?;
-        match serde_json::from_value::<T>(value.clone()) {
-            Ok(value) => Ok(Self(DurablePathValueInner::Native(value))),
-            Err(_) if contains_foreign_native_path(&value) => {
-                Ok(Self(DurablePathValueInner::Foreign(value)))
-            }
-            Err(err) => Err(D::Error::custom(err)),
+        if contains_foreign_native_path(&value) {
+            return Ok(Self(DurablePathValueInner::Foreign(value)));
         }
+        serde_json::from_value(value)
+            .map(DurablePathValueInner::Native)
+            .map(Self)
+            .map_err(D::Error::custom)
     }
 }
 
@@ -79,9 +80,6 @@ pub type DurablePermissionProfile = DurablePathValue<PermissionProfile>;
 
 /// A legacy sandbox policy whose serialized paths retain their originating host convention.
 pub type DurableSandboxPolicy = DurablePathValue<SandboxPolicy>;
-
-/// A filesystem policy whose serialized paths retain their originating host convention.
-pub type DurableFileSystemSandboxPolicy = DurablePathValue<FileSystemSandboxPolicy>;
 
 fn contains_foreign_native_path(value: &Value) -> bool {
     match value {

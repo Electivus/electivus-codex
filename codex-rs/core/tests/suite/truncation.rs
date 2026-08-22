@@ -17,6 +17,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::TruncationPolicy;
 use codex_protocol::user_input::UserInput;
 use core_test_support::TempDirExt;
 use core_test_support::assert_regex_match;
@@ -48,7 +49,7 @@ fn assert_wall_time_header(output: &str) {
     assert_eq!(marker, "Output:");
 }
 
-// Verifies that a standard tool call (shell_command) exceeding the model formatting
+// Verifies that a standard tool call (exec_command) exceeding the model formatting
 // limits is truncated before being sent back to the model.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tool_call_output_configured_limit_chars_type() -> Result<()> {
@@ -56,7 +57,7 @@ async fn tool_call_output_configured_limit_chars_type() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    // Use a model that exposes the shell_command tool.
+    // Use a model that exposes the exec_command tool.
     let mut builder = test_codex().with_model("gpt-5.2").with_config(|config| {
         config.tool_output_token_limit = Some(100_000);
     });
@@ -70,8 +71,9 @@ async fn tool_call_output_configured_limit_chars_type() -> Result<()> {
         "seq 1 100000"
     };
     let args = serde_json::json!({
-        "command": command,
-        "timeout_ms": 5_000,
+        "cmd": command,
+        "yield_time_ms": 5_000,
+        "max_output_tokens": 100_000,
     });
 
     // First response: model tells us to run the tool; second: complete the turn.
@@ -79,7 +81,7 @@ async fn tool_call_output_configured_limit_chars_type() -> Result<()> {
         &server,
         sse(vec![
             responses::ev_response_created("resp-1"),
-            responses::ev_function_call(call_id, "shell_command", &serde_json::to_string(&args)?),
+            responses::ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
             responses::ev_completed("resp-1"),
         ]),
     )
@@ -162,7 +164,7 @@ async fn tool_call_output_configured_limit_chars_type() -> Result<()> {
             matches!(
                 item,
                 ResponseItem::FunctionCallOutput { call_id: item_call_id, .. }
-                    if item_call_id == call_id
+                    if item_call_id.as_deref() == Some(call_id)
             )
         })
         .collect::<Vec<_>>();
@@ -227,7 +229,7 @@ async fn tool_call_output_configured_limit_chars_type() -> Result<()> {
     Ok(())
 }
 
-// Verifies that a standard tool call (shell_command) exceeding the model formatting
+// Verifies that a standard tool call (exec_command) exceeding the model formatting
 // limits is truncated before being sent back to the model.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tool_call_output_exceeds_limit_truncated_chars_limit() -> Result<()> {
@@ -235,7 +237,7 @@ async fn tool_call_output_exceeds_limit_truncated_chars_limit() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    // Use a model that exposes the shell_command tool.
+    // Use a model that exposes the exec_command tool.
     let mut builder = test_codex().with_model("gpt-5.2");
 
     let fixture = builder.build(&server).await?;
@@ -247,8 +249,8 @@ async fn tool_call_output_exceeds_limit_truncated_chars_limit() -> Result<()> {
         "seq 1 100000"
     };
     let args = serde_json::json!({
-        "command": command,
-        "timeout_ms": 5_000,
+        "cmd": command,
+        "yield_time_ms": 5_000,
     });
 
     // First response: model tells us to run the tool; second: complete the turn.
@@ -256,7 +258,7 @@ async fn tool_call_output_exceeds_limit_truncated_chars_limit() -> Result<()> {
         &server,
         sse(vec![
             responses::ev_response_created("resp-1"),
-            responses::ev_function_call(call_id, "shell_command", &serde_json::to_string(&args)?),
+            responses::ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
             responses::ev_completed("resp-1"),
         ]),
     )
@@ -291,20 +293,20 @@ async fn tool_call_output_exceeds_limit_truncated_chars_limit() -> Result<()> {
         "expected truncated shell output to be plain text"
     );
 
-    let truncated_pattern = r#"(?s)^Exit code: 0\nWall time: [0-9]+(?:\.[0-9]+)? seconds\nTotal output lines: 100000\nOutput:\n.*?…\d+ chars truncated….*$"#;
+    let truncated_pattern = r#"(?s)^Chunk ID: [^\n]+\nWall time: [0-9]+(?:\.[0-9]+)? seconds\nProcess exited with code 0\nOriginal token count: \d+\nOutput:\nWarning: truncated output \(original token count: \d+\)\nTotal output lines: 100000\n\n.*?…\d+ chars truncated….*$"#;
 
     assert_regex_match(truncated_pattern, &output);
 
     let len = output.len();
     assert!(
-        (9_900..=10_100).contains(&len),
+        (9_900..=10_500).contains(&len),
         "expected ~10k chars after truncation, got {len}"
     );
 
     Ok(())
 }
 
-// Verifies that a standard tool call (shell_command) exceeding the model formatting
+// Verifies that a standard tool call (exec_command) exceeding the model formatting
 // limits is truncated before being sent back to the model.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> {
@@ -312,7 +314,7 @@ async fn tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> {
 
     let server = start_mock_server().await;
 
-    // Use a model that exposes the shell_command tool.
+    // Use a model that exposes the exec_command tool.
     let mut builder = test_codex().with_model("gpt-5.4");
     let fixture = builder.build(&server).await?;
 
@@ -323,8 +325,8 @@ async fn tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> {
         "seq 1 100000"
     };
     let args = serde_json::json!({
-        "command": command,
-        "timeout_ms": 5_000,
+        "cmd": command,
+        "yield_time_ms": 5_000,
     });
 
     // First response: model tells us to run the tool; second: complete the turn.
@@ -332,7 +334,7 @@ async fn tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> {
         &server,
         sse(vec![
             responses::ev_response_created("resp-1"),
-            responses::ev_function_call(call_id, "shell_command", &serde_json::to_string(&args)?),
+            responses::ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
             responses::ev_completed("resp-1"),
         ]),
     )
@@ -366,17 +368,21 @@ async fn tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> {
         serde_json::from_str::<Value>(&output).is_err(),
         "expected truncated shell output to be plain text"
     );
-    let truncated_pattern = r#"(?s)^Exit code: 0
+    let truncated_pattern = r#"(?s)^Chunk ID: [^\n]+
 Wall time: [0-9]+(?:\.[0-9]+)? seconds
-Total output lines: 100000
+Process exited with code 0
+Original token count: \d+
 Output:
+Warning: truncated output \(original token count: \d+\)
+Total output lines: 100000
+
 1
 2
 3
 4
 5
 6
-.*…[0-9]+ tokens truncated.*
+.*…\d+ tokens truncated.*
 99999
 100000
 $"#;
@@ -385,7 +391,7 @@ $"#;
     Ok(())
 }
 
-// Ensures shell_command outputs that exceed the line limit are truncated only once.
+// Ensures exec_command outputs that exceed the line limit are truncated only once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tool_call_output_truncated_only_once() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -401,15 +407,15 @@ async fn tool_call_output_truncated_only_once() -> Result<()> {
         "seq 1 10000"
     };
     let args = serde_json::json!({
-        "command": command,
-        "timeout_ms": 5_000,
+        "cmd": command,
+        "yield_time_ms": 5_000,
     });
 
     mount_sse_once(
         &server,
         sse(vec![
             responses::ev_response_created("resp-1"),
-            responses::ev_function_call(call_id, "shell_command", &serde_json::to_string(&args)?),
+            responses::ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
             responses::ev_completed("resp-1"),
         ]),
     )
@@ -692,15 +698,15 @@ async fn token_policy_marker_reports_tokens() -> Result<()> {
 
     let call_id = "shell-token-marker";
     let args = json!({
-        "command": "seq 1 150",
-        "timeout_ms": 5_000,
+        "cmd": "seq 1 150",
+        "yield_time_ms": 5_000,
     });
 
     mount_sse_once(
         &server,
         sse(vec![
             ev_response_created("resp-1"),
-            ev_function_call(call_id, "shell_command", &serde_json::to_string(&args)?),
+            ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
             ev_completed("resp-1"),
         ]),
     )
@@ -723,14 +729,16 @@ async fn token_policy_marker_reports_tokens() -> Result<()> {
         .function_call_output_text(call_id)
         .context("shell output present")?;
 
-    let pattern = r"(?s)^Exit code: 0\nWall time: [0-9]+(?:\.[0-9]+)? seconds\nTotal output lines: 150\nOutput:\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19.*tokens truncated.*129\n130\n131\n132\n133\n134\n135\n136\n137\n138\n139\n140\n141\n142\n143\n144\n145\n146\n147\n148\n149\n150\n$";
+    let pattern = r"(?s)^Chunk ID: [^\n]+\nWall time: [0-9]+(?:\.[0-9]+)? seconds\nProcess exited with code 0\nOriginal token count: \d+\nOutput:\nWarning: truncated output \(original token count: \d+\)\nTotal output lines: 150\n\n1\n2\n3\n.*…\d+ tokens truncated….*149\n150\n$";
 
     assert_regex_match(pattern, &output);
+    assert_eq!(output.matches("tokens truncated").count(), 1);
+    assert!(output.len() <= (TruncationPolicy::Tokens(50) * 1.2).byte_budget());
 
     Ok(())
 }
 
-// Byte-based policy should report bytes removed.
+// Byte-based policy should report characters removed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn byte_policy_marker_reports_bytes() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -743,15 +751,15 @@ async fn byte_policy_marker_reports_bytes() -> Result<()> {
 
     let call_id = "shell-byte-marker";
     let args = json!({
-        "command": "seq 1 150",
-        "timeout_ms": 5_000,
+        "cmd": "seq 1 150",
+        "yield_time_ms": 5_000,
     });
 
     mount_sse_once(
         &server,
         sse(vec![
             ev_response_created("resp-1"),
-            ev_function_call(call_id, "shell_command", &serde_json::to_string(&args)?),
+            ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
             ev_completed("resp-1"),
         ]),
     )
@@ -774,16 +782,18 @@ async fn byte_policy_marker_reports_bytes() -> Result<()> {
         .function_call_output_text(call_id)
         .context("shell output present")?;
 
-    let pattern = r"(?s)^Exit code: 0\nWall time: [0-9]+(?:\.[0-9]+)? seconds\nTotal output lines: 150\nOutput:\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19.*chars truncated.*129\n130\n131\n132\n133\n134\n135\n136\n137\n138\n139\n140\n141\n142\n143\n144\n145\n146\n147\n148\n149\n150\n$";
+    let pattern = r"(?s)^Chunk ID: [^\n]+\nWall time: [0-9]+(?:\.[0-9]+)? seconds\nProcess exited with code 0\nOriginal token count: \d+\nOutput:\nWarning: truncated output \(original token count: \d+\)\nTotal output lines: 150\n\n1\n2\n3\n.*…\d+ chars truncated….*149\n150\n$";
 
     assert_regex_match(pattern, &output);
+    assert_eq!(output.matches("chars truncated").count(), 1);
+    assert!(output.len() <= (TruncationPolicy::Bytes(200) * 1.2).byte_budget());
 
     Ok(())
 }
 
-// shell_command output should remain intact when the config opts into a large token budget.
+// exec_command output should remain intact when the config opts into a large token budget.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shell_command_output_not_truncated_with_custom_limit() -> Result<()> {
+async fn exec_command_output_not_truncated_with_custom_limit() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -794,8 +804,8 @@ async fn shell_command_output_not_truncated_with_custom_limit() -> Result<()> {
 
     let call_id = "shell-no-trunc";
     let args = json!({
-        "command": "seq 1 1000",
-        "timeout_ms": 5_000,
+        "cmd": "seq 1 1000",
+        "yield_time_ms": 5_000,
     });
     let expected_body: String = (1..=1000).map(|i| format!("{i}\n")).collect();
 
@@ -803,7 +813,7 @@ async fn shell_command_output_not_truncated_with_custom_limit() -> Result<()> {
         &server,
         sse(vec![
             ev_response_created("resp-1"),
-            ev_function_call(call_id, "shell_command", &serde_json::to_string(&args)?),
+            ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
             ev_completed("resp-1"),
         ]),
     )

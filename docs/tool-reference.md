@@ -33,11 +33,11 @@ This catalog lists every statically defined model tool in Codex's core registry 
 | `multi_agent_v1.wait_agent` | `features.multi_agent` or model-selected v1 + `agents.enabled`. | `function` | Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status. | `codex-rs/core/src/tools/handlers/multi_agents_spec.rs` |
 | `new_context` | `features.token_budget`. | `function` | Start a new context window. Does not clear, reset, or otherwise affect environment state. | `codex-rs/core/src/tools/handlers/new_context_window_spec.rs` |
 | `read_mcp_resource` | No dedicated feature; at least one configured MCP server. | `function` | Read a specific resource from an MCP server given the server name and resource URI. | `codex-rs/core/src/tools/handlers/mcp_resource_spec.rs` |
-| `request_permissions` | `features.request_permissions_tool` + execution environment. | `function` | Runs a Powershell command (Windows) and returns its output.<br><br>Examples of valid command strings:<br><br>- ls -a (show hidden): "Get-ChildItem -Force"<br>- recursive find by name: "Get-ChildItem -Recurse -Filter *.py"<br>- recursive grep: "Get-ChildItem -Path C:\\myrepo -Recurse \| Select-String -Pattern 'TODO' -CaseSensitive"<br>- ps aux \| grep python: "Get-Process \| Where-Object {{ $_.ProcessName -like '*python*' }}"<br>- setting an env var: "$env:FOO='bar'; echo $env:FOO"<br>- running an inline Python script: "@'\\nprint('Hello, world!')\\n'@ \| python -"<br><br>{runtime value} | `codex-rs/core/src/tools/handlers/shell_spec.rs` |
+| `request_permissions` | `features.request_permissions_tool` + execution environment. | `function` | _Description is generated at runtime or is not available._ | `codex-rs/core/src/tools/handlers/shell_spec.rs` |
 | `request_plugin_install` | `features.tool_suggest`, `features.apps`, and `features.plugins`. | `function` | _Description is generated at runtime or is not available._ | `codex-rs/core/src/tools/handlers/request_plugin_install_spec.rs` |
 | `request_user_input` | `tools.experimental_request_user_input.enabled`; Default mode also uses `features.default_mode_request_user_input`. | `function` | _Description is generated at runtime or is not available._ | `codex-rs/core/src/tools/handlers/request_user_input_spec.rs` |
 | `send_message` | `features.multi_agent_v2` or model-selected v2. | `function` | Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn. | `codex-rs/core/src/tools/handlers/multi_agents_spec.rs` |
-| `shell_command` | `features.shell_tool` + one local environment. | `function` | Runs a Powershell command (Windows) and returns its output.<br><br>Examples of valid command strings:<br><br>- ls -a (show hidden): "Get-ChildItem -Force"<br>- recursive find by name: "Get-ChildItem -Recurse -Filter *.py"<br>- recursive grep: "Get-ChildItem -Path C:\\myrepo -Recurse \| Select-String -Pattern 'TODO' -CaseSensitive"<br>- ps aux \| grep python: "Get-Process \| Where-Object {{ $_.ProcessName -like '*python*' }}"<br>- setting an env var: "$env:FOO='bar'; echo $env:FOO"<br>- running an inline Python script: "@'\\nprint('Hello, world!')\\n'@ \| python -"<br><br>{runtime value} | `codex-rs/core/src/tools/handlers/shell_spec.rs` |
+| `send_user_message_async` | Root agent + model-advertised experimental tool support. | `function` | Send a concise, user-visible acknowledgment, important update, or blocking question. Returns immediately; any reply arrives asynchronously as a new user message. | `codex-rs/core/src/tools/handlers/send_user_message_async.rs` |
 | `skills.list` | No dedicated feature; enabled skill provider/orchestrator setting. | `function` | List skills owned by the requested authority. Returns each skill's authority, package, and main_resource. Pass the package to skills.read, and pass next_cursor back as cursor to continue. | `codex-rs/ext/skills/src/tools/list.rs` |
 | `skills.read` | No dedicated feature; enabled skill provider/orchestrator setting. | `function` | Read one page from a skill. Pass its provided package directly; root aliases are resolved automatically. Omit resource to read SKILL.md; to read another file, use the same package and pass the file's complete skill:// identifier as resource. For executor-backed skills, skill_root is the skill's absolute directory in the executor filesystem and can be used to locate bundled scripts. If the package is not provided, use skills.list to find it. Pass next_cursor back as cursor to continue. | `codex-rs/ext/skills/src/tools/read.rs` |
 | `spawn_agent` | `features.multi_agent_v2` or model-selected v2. | `function` | _Description is generated at runtime or is not available._ | `codex-rs/core/src/tools/handlers/multi_agents_spec.rs` |
@@ -290,10 +290,6 @@ fn unified_exec_output_schema() -> Value {
             "output": {
                 "type": "string",
                 "description": "Command output text, possibly truncated."
-            },
-            "timing_adjustment": {
-                "type": "string",
-                "description": "Policy adjustment applied to an explicit timing request."
             }
         },
         "required": ["wall_time_seconds", "output"],
@@ -1051,56 +1047,23 @@ JsonSchema::object(
 None
 ```
 
-### `shell_command`
+### `send_user_message_async`
 
 **Input**
 
 ```rust
-let mut properties = BTreeMap::from([
-        (
-            "command".to_string(),
+let properties = BTreeMap::from([(
+            "message".to_string(),
             JsonSchema::string(Some(
-                "Shell script to run in the user's default shell.".to_string(),
+                "The concise question or update to send to the user.".to_string(),
             )),
-        ),
-        (
-            "workdir".to_string(),
-            JsonSchema::string(Some(
-                "Working directory for the command. Defaults to the turn cwd.".to_string(),
-            )),
-        ),
-        (
-            "timeout_ms".to_string(),
-            JsonSchema::number_with_bounds(
-                Some(format!(
-                    "Maximum command runtime. Configured default is {} ms; effective range is {}-{} ms.",
-                    timeout.default_ms(),
-                    timeout.min_ms(),
-                    timeout.max_ms()
-                )),
-                timeout.min_ms(),
-                timeout.max_ms(),
-            ),
-        ),
-    ]);
-
-properties.insert(
-            "login".to_string(),
-            JsonSchema::boolean(Some(
-                "True runs with login shell semantics; false disables them. Defaults to true."
-                    .to_string(),
-            )),
-        );
-
-properties.extend(create_approval_parameters(
-        options.exec_permission_approvals_enabled,
-    ));
+        )]);
 
 JsonSchema::object(
-            properties,
-            Some(vec!["command".to_string()]),
-            Some(false.into()),
-        )
+                properties,
+                Some(vec!["message".to_string()]),
+                /*additional_properties*/ Some(false.into()),
+            )
 ```
 
 **Output**
@@ -1617,10 +1580,6 @@ fn unified_exec_output_schema() -> Value {
             "output": {
                 "type": "string",
                 "description": "Command output text, possibly truncated."
-            },
-            "timing_adjustment": {
-                "type": "string",
-                "description": "Policy adjustment applied to an explicit timing request."
             }
         },
         "required": ["wall_time_seconds", "output"],

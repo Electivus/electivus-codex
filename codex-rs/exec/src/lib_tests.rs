@@ -335,9 +335,9 @@ fn turn_items_for_thread_returns_matching_turn_items() {
         parent_thread_id: None,
         preview: String::new(),
         ephemeral: false,
-        is_pinned: false,
         section: None,
         section_entered_at: None,
+        project_id: None,
         history_mode: Default::default(),
         model_provider: "openai".to_string(),
         created_at: 0,
@@ -363,6 +363,7 @@ fn turn_items_for_thread_returns_matching_turn_items() {
                     text: "hello".to_string(),
                     phase: None,
                     memory_citation: None,
+                    delivery: None,
                 }],
                 status: codex_app_server_protocol::TurnStatus::Completed,
                 error: None,
@@ -393,6 +394,7 @@ fn turn_items_for_thread_returns_matching_turn_items() {
             text: "hello".to_string(),
             phase: None,
             memory_citation: None,
+            delivery: None,
         }])
     );
     assert_eq!(turn_items_for_thread(&thread, "missing-turn"), None);
@@ -815,9 +817,9 @@ fn sample_thread_start_response() -> ThreadStartResponse {
             parent_thread_id: None,
             preview: String::new(),
             ephemeral: false,
-            is_pinned: false,
             section: None,
             section_entered_at: None,
+            project_id: None,
             history_mode: Default::default(),
             model_provider: "openai".to_string(),
             created_at: 0,

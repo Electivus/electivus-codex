@@ -188,13 +188,17 @@ Windows output together with Linux assets in one release.
 - `v8-canary.yml` retains V8 version resolution, source builds, checksums,
   staging, and artifact-pair validation for Linux x64 and ARM64 GNU/musl
   targets. Native Cargo smoke runs for the GNU targets; musl coverage ends at
-  the staged artifact pair. It remains Change-triggered in the Merge gate and
-  complete on manual dispatch, but is not called by postmerge.
+  the staged artifact pair. Relevant source changes also retain the narrower
+  upstream Windows x64 and ARM64 sandbox source-build smoke jobs. It remains
+  Change-triggered in the Merge gate and complete on manual dispatch, but is
+  not called by postmerge.
 
 ### Validation Inventory
 
 `.github/ci-validation-inventory.json` is the machine-checked source that
-accounts for every active Full Rust family and all eight V8 legs exactly once.
+accounts for every active Full Rust family and all eight Linux V8 legs exactly
+once. The two narrower upstream Windows V8 source-build jobs are checked by the
+V8 topology validator instead of expanding the fork's Full Rust platform scope.
 
 | Family or lanes                                                            |   Cardinality | Disposition                         | Active scope                        |
 | -------------------------------------------------------------------------- | ------------: | ----------------------------------- | ----------------------------------- |
@@ -206,7 +210,8 @@ accounts for every active Full Rust family and all eight V8 legs exactly once.
 | x64 nextest four shards + PostgreSQL consumer                              |             5 | Promoted by #86                     | `merge-gate`, `full`                |
 | ARM64 nextest shards                                                       |             4 | Retained                            | `extended`, `full`                  |
 | x64/ARM64 x GNU/musl x release/ptrcomp-sandbox V8                          |             8 | Promoted by #88                     | Change-triggered Merge gate, manual |
-| macOS and Windows                                                          | 0 active legs | Out of boundary                     | None                                |
+| Windows V8 sandbox source-build smoke                                      |             2 | Retained upstream                   | Change-triggered, manual            |
+| macOS and Windows Full Rust validation                                     | 0 active legs | Out of boundary                     | None                                |
 
 ## Test Signal Integrity
 

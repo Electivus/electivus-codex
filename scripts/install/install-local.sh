@@ -14,6 +14,8 @@ LOCK_STALE_AFTER_SECS=600
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 CODEX_RS_DIR="$REPO_ROOT/codex-rs"
+CODEX_REPO_ROOT="$REPO_ROOT"
+export CODEX_REPO_ROOT
 
 path_action="already"
 path_profile=""
@@ -485,7 +487,7 @@ build_local_package() {
     "$python_bin" "$REPO_ROOT/scripts/build_codex_package.py" \
       --target "$target" \
       --variant codex \
-      --cargo-profile dev-small \
+      --cargo-profile dev \
       --package-dir "$package_dir" \
       --rg-bin "$CODEX_LOCAL_RG" \
       --force
@@ -493,7 +495,7 @@ build_local_package() {
     "$python_bin" "$REPO_ROOT/scripts/build_codex_package.py" \
       --target "$target" \
       --variant codex \
-      --cargo-profile dev-small \
+      --cargo-profile dev \
       --package-dir "$package_dir" \
       --force
   fi

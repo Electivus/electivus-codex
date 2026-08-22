@@ -282,7 +282,7 @@ async fn snapshot(
          WHERE thread_sections.id = threads.thread_section_id) AS section_name, \
          (SELECT appearance FROM thread_sections \
          WHERE thread_sections.id = threads.thread_section_id) AS section_appearance, \
-         section_position, section_entered_at_ms, git_sha, git_branch, git_origin_url, repository_identity, \
+         section_position, section_entered_at_ms, project_id, git_sha, git_branch, git_origin_url, repository_identity, \
          git_origin_url_is_explicit, memory_mode \
          FROM threads ORDER BY id",
     )
