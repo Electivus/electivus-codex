@@ -1,5 +1,6 @@
 use anyhow::Result;
 use codex_core::StartThreadOptions;
+use codex_features::Feature;
 use codex_history::InitialHistory;
 use codex_model_context::estimate_response_item_model_visible_bytes;
 use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
@@ -9,6 +10,7 @@ use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::Op;
 use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::user_input::UserInput;
 use codex_rollout::RolloutItem;
@@ -17,6 +19,7 @@ use core_test_support::responses;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
+use serde_json::Value;
 
 fn user_message(text: String) -> RolloutItem {
     RolloutItem::ResponseItem(
@@ -262,6 +265,118 @@ async fn resumed_request_splits_messages_and_trims_only_replay_with_responses_li
     );
     let replayed_text = user_texts.concat();
     assert!(replayed_text.contains(&oversized_text));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_lite_splits_aggregated_tools_for_turns_and_remote_compaction() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let response_mock = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_response_created("resp-1"),
+            responses::ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let compact_mock =
+        responses::mount_compact_json_once(&server, serde_json::json!({ "output": [] })).await;
+    let mut builder = test_codex()
+        .with_model_info_override("gpt-5.4", |model| {
+            model.use_responses_lite = true;
+            model.context_window = Some(1_000_000);
+            model.auto_compact_token_limit = Some(900_000);
+        })
+        .with_config(|config| {
+            let _ = config.features.disable(Feature::RemoteCompactionV2);
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+    let dynamic_tools = (0..2)
+        .map(|index| {
+            DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                name: format!("large_dynamic_tool_{index}"),
+                description: "x".repeat(17_000),
+                input_schema: serde_json::json!({"type": "object"}),
+                defer_loading: false,
+            })
+        })
+        .collect();
+    let thread = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            initial_history: InitialHistory::Forked(vec![user_message(
+                "replayed-message".to_string(),
+            )]),
+            dynamic_tools,
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await?
+        .thread;
+
+    thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "continue with the available tools".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let turn_event = wait_for_event(&thread, |event| {
+        matches!(event, EventMsg::TurnComplete(_) | EventMsg::Error(_))
+    })
+    .await;
+    if let EventMsg::Error(error) = turn_event {
+        panic!("Responses Lite turn failed before sampling: {error:?}");
+    }
+    thread.submit(Op::Compact).await?;
+    let compact_event = wait_for_event(&thread, |event| {
+        matches!(event, EventMsg::TurnComplete(_) | EventMsg::Error(_))
+    })
+    .await;
+    if let EventMsg::Error(error) = compact_event {
+        panic!("Responses Lite compaction failed before sampling: {error:?}");
+    }
+
+    for request in [
+        response_mock.single_request(),
+        compact_mock.single_request(),
+    ] {
+        let input = request.input();
+        let additional_tools = input
+            .iter()
+            .filter(|item| item["type"].as_str() == Some("additional_tools"))
+            .collect::<Vec<_>>();
+        assert!(additional_tools.len() > 1);
+        assert!(
+            input
+                .iter()
+                .all(|item| serde_json::to_vec(item).is_ok_and(|item| item.len() <= 40_000))
+        );
+        let tool_names = additional_tools
+            .iter()
+            .flat_map(|item| {
+                item["tools"]
+                    .as_array()
+                    .into_iter()
+                    .flat_map(|tools| tools.iter())
+            })
+            .flat_map(|tool| {
+                tool["tools"]
+                    .as_array()
+                    .map(|tools| tools.iter().collect::<Vec<_>>())
+                    .unwrap_or_else(|| vec![tool])
+            })
+            .filter_map(|tool| tool["name"].as_str())
+            .filter(|name| name.starts_with("large_dynamic_tool_"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tool_names,
+            vec!["large_dynamic_tool_0", "large_dynamic_tool_1"]
+        );
+        assert!(request.body_json().get("tools").is_none());
+        assert_eq!(
+            request.body_json()["parallel_tool_calls"],
+            Value::Bool(false)
+        );
+    }
     Ok(())
 }
 

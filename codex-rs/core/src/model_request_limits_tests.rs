@@ -10,6 +10,7 @@ use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::MessagePhase;
 use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiTool;
+use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 
 fn request(
@@ -55,6 +56,179 @@ fn function(description: String) -> ToolSpec {
         parameters: JsonSchema::default(),
         output_schema: None,
     })
+}
+
+#[test]
+fn splits_aggregated_additional_tools_without_losing_tools() {
+    let tools = (0..3)
+        .map(|index| {
+            serde_json::json!({
+                "type": "function",
+                "name": format!("lookup_{index}"),
+                "description": "x".repeat(max_model_request_item_bytes() / 2),
+                "parameters": { "type": "object" },
+            })
+        })
+        .collect::<Vec<_>>();
+    let id = ResponseItemId::with_suffix("tools", "aggregated");
+    let item = |tools| ResponseItem::AdditionalTools {
+        id: Some(id.clone()),
+        role: "developer".to_string(),
+        tools,
+    };
+    assert!(tools.iter().all(|tool| {
+        estimate_item_token_count(&item(vec![tool.clone()])) <= MAX_MODEL_REQUEST_ITEM_TOKENS as i64
+    }));
+    assert!(estimate_item_token_count(&item(tools.clone())) > MAX_MODEL_REQUEST_ITEM_TOKENS as i64);
+    let mut request = request(vec![item(tools.clone())], "", /*text*/ None);
+
+    split_model_request_messages(&mut request, &[])
+        .expect("aggregated Responses Lite tools should split at tool boundaries");
+
+    assert!(request.input.len() > 1);
+    assert!(
+        request.input.iter().all(|item| {
+            estimate_item_token_count(item) <= MAX_MODEL_REQUEST_ITEM_TOKENS as i64
+        })
+    );
+    let fragments = request
+        .input
+        .iter()
+        .map(|item| match item {
+            ResponseItem::AdditionalTools { id, role, tools } => {
+                (id.clone(), role.clone(), tools.clone())
+            }
+            other => panic!("expected additional tools fragment, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fragments
+            .iter()
+            .flat_map(|(_, _, tools)| tools.iter().cloned())
+            .collect::<Vec<_>>(),
+        tools
+    );
+    assert_eq!(fragments[0].0, Some(id));
+    assert!(fragments.iter().skip(1).all(|(id, _, _)| id.is_none()));
+    assert!(fragments.iter().all(|(_, role, _)| role == "developer"));
+}
+
+#[test]
+fn splits_oversized_additional_tools_namespace_without_losing_children() {
+    let namespace_tools = (0..3)
+        .map(|index| {
+            serde_json::json!({
+                "type": "function",
+                "name": format!("namespace_lookup_{index}"),
+                "description": "x".repeat(max_model_request_item_bytes() / 2),
+                "parameters": { "type": "object" },
+            })
+        })
+        .collect::<Vec<_>>();
+    let namespace = |tools| {
+        serde_json::json!({
+            "type": "namespace",
+            "name": "codex_app",
+            "description": "Codex app tools",
+            "tools": tools,
+        })
+    };
+    let item = |tools| ResponseItem::AdditionalTools {
+        id: None,
+        role: "developer".to_string(),
+        tools: vec![namespace(tools)],
+    };
+    assert!(namespace_tools.iter().all(|tool| {
+        estimate_item_token_count(&item(vec![tool.clone()])) <= MAX_MODEL_REQUEST_ITEM_TOKENS as i64
+    }));
+    assert!(
+        estimate_item_token_count(&item(namespace_tools.clone()))
+            > MAX_MODEL_REQUEST_ITEM_TOKENS as i64
+    );
+    let mut request = request(vec![item(namespace_tools.clone())], "", /*text*/ None);
+
+    split_model_request_messages(&mut request, &[])
+        .expect("namespace children should split across additional tools items");
+
+    assert!(request.input.len() > 1);
+    assert!(
+        request.input.iter().all(|item| {
+            estimate_item_token_count(item) <= MAX_MODEL_REQUEST_ITEM_TOKENS as i64
+        })
+    );
+    let actual_namespace_tools = request
+        .input
+        .iter()
+        .flat_map(|item| match item {
+            ResponseItem::AdditionalTools { tools, .. } => {
+                let [namespace] = tools.as_slice() else {
+                    panic!("expected one namespace per fragment");
+                };
+                assert_eq!(namespace["type"], "namespace");
+                assert_eq!(namespace["name"], "codex_app");
+                assert_eq!(namespace["description"], "Codex app tools");
+                namespace["tools"]
+                    .as_array()
+                    .expect("namespace tools array")
+            }
+            other => panic!("expected additional tools fragment, got {other:?}"),
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(actual_namespace_tools, namespace_tools);
+}
+
+#[test]
+fn rejects_additional_tools_namespace_with_one_oversized_child() {
+    let namespace = serde_json::json!({
+        "type": "namespace",
+        "name": "codex_app",
+        "description": "Codex app tools",
+        "tools": [{
+            "type": "function",
+            "name": "oversized_child",
+            "description": "x".repeat(max_model_request_item_bytes()),
+            "parameters": { "type": "object" },
+        }],
+    });
+    let mut request = request(
+        vec![ResponseItem::AdditionalTools {
+            id: None,
+            role: "developer".to_string(),
+            tools: vec![namespace],
+        }],
+        "",
+        /*text*/ None,
+    );
+
+    let error = split_model_request_messages(&mut request, &[])
+        .expect_err("one intrinsically oversized namespace child must remain invalid");
+
+    assert!(error.to_string().contains("individual input item"));
+}
+
+#[test]
+fn rejects_additional_tools_with_an_unsplittable_single_tool() {
+    let oversized_tool = serde_json::json!({
+        "type": "function",
+        "name": "oversized_tool",
+        "description": "x".repeat(max_model_request_item_bytes()),
+        "parameters": { "type": "object" },
+    });
+    let mut request = request(
+        vec![ResponseItem::AdditionalTools {
+            id: None,
+            role: "developer".to_string(),
+            tools: vec![oversized_tool],
+        }],
+        "",
+        /*text*/ None,
+    );
+
+    let error = split_model_request_messages(&mut request, &[])
+        .expect_err("one oversized tool must remain subject to the hard item cap");
+
+    assert!(error.to_string().contains("individual input item"));
 }
 
 #[test]

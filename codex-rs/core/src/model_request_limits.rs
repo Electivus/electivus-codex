@@ -92,7 +92,121 @@ fn split_input_items(items: Vec<ResponseItem>) -> Result<Vec<ResponseItem>> {
 }
 
 fn split_and_validate_input_item(item: ResponseItem) -> Result<Vec<ResponseItem>> {
-    let items = split_model_context_item_to_limit(item);
+    let items = match item {
+        ResponseItem::AdditionalTools { id, role, tools } => {
+            let mut expanded_tools = Vec::new();
+            let mut expanded_tools_bytes = 0usize;
+            let mut push_expanded_tool = |tool: serde_json::Value| -> Result<()> {
+                let tool_bytes = serde_json::to_vec(&tool)?.len();
+                if expanded_tools.len() >= MAX_MODEL_REQUEST_ITEMS
+                    || expanded_tools_bytes.saturating_add(tool_bytes) > MAX_MODEL_REQUEST_BYTES
+                {
+                    return Err(limit_error("request exceeds the bounded context budget"));
+                }
+                expanded_tools_bytes = expanded_tools_bytes.saturating_add(tool_bytes);
+                expanded_tools.push(tool);
+                Ok(())
+            };
+            for mut tool in tools {
+                let single_tool_bytes = serde_json::to_vec(&ResponseItem::AdditionalTools {
+                    id: id.clone(),
+                    role: role.clone(),
+                    tools: vec![tool.clone()],
+                })?
+                .len();
+                if single_tool_bytes <= max_model_request_item_bytes()
+                    || tool.get("type").and_then(serde_json::Value::as_str) != Some("namespace")
+                {
+                    push_expanded_tool(tool)?;
+                    continue;
+                }
+                let Some(namespace_tools) = tool
+                    .get_mut("tools")
+                    .and_then(serde_json::Value::as_array_mut)
+                    .map(std::mem::take)
+                else {
+                    push_expanded_tool(tool)?;
+                    continue;
+                };
+                if namespace_tools.is_empty() {
+                    push_expanded_tool(tool)?;
+                    continue;
+                }
+                let namespace_template = tool;
+                let empty_namespace_bytes = serde_json::to_vec(&ResponseItem::AdditionalTools {
+                    id: id.clone(),
+                    role: role.clone(),
+                    tools: vec![namespace_template.clone()],
+                })?
+                .len();
+                let mut fragment_tools = Vec::new();
+                let mut fragment_bytes = empty_namespace_bytes;
+                for namespace_tool in namespace_tools {
+                    let namespace_tool_bytes = serde_json::to_vec(&namespace_tool)?.len();
+                    let candidate_bytes = fragment_bytes
+                        .saturating_add(namespace_tool_bytes)
+                        .saturating_add(usize::from(!fragment_tools.is_empty()));
+                    if candidate_bytes > max_model_request_item_bytes()
+                        && !fragment_tools.is_empty()
+                    {
+                        let mut fragment = namespace_template.clone();
+                        fragment["tools"] =
+                            serde_json::Value::Array(std::mem::take(&mut fragment_tools));
+                        push_expanded_tool(fragment)?;
+                        fragment_bytes = empty_namespace_bytes;
+                    }
+                    fragment_bytes = fragment_bytes
+                        .saturating_add(namespace_tool_bytes)
+                        .saturating_add(usize::from(!fragment_tools.is_empty()));
+                    fragment_tools.push(namespace_tool);
+                }
+                let mut fragment = namespace_template;
+                fragment["tools"] = serde_json::Value::Array(fragment_tools);
+                push_expanded_tool(fragment)?;
+            }
+            let mut fragments = Vec::new();
+            let mut fragment_id = id;
+            let mut fragment_tools = Vec::new();
+            let mut fragment_bytes = serde_json::to_vec(&ResponseItem::AdditionalTools {
+                id: fragment_id.clone(),
+                role: role.clone(),
+                tools: Vec::new(),
+            })?
+            .len();
+            for tool in expanded_tools {
+                let tool_bytes = serde_json::to_vec(&tool)?.len();
+                let candidate_bytes = fragment_bytes
+                    .saturating_add(tool_bytes)
+                    .saturating_add(usize::from(!fragment_tools.is_empty()));
+                if candidate_bytes > max_model_request_item_bytes() && !fragment_tools.is_empty() {
+                    fragments.push(ResponseItem::AdditionalTools {
+                        id: fragment_id.take(),
+                        role: role.clone(),
+                        tools: std::mem::take(&mut fragment_tools),
+                    });
+                    fragment_bytes = serde_json::to_vec(&ResponseItem::AdditionalTools {
+                        id: None,
+                        role: role.clone(),
+                        tools: Vec::new(),
+                    })?
+                    .len();
+                }
+                fragment_bytes = fragment_bytes
+                    .saturating_add(tool_bytes)
+                    .saturating_add(usize::from(!fragment_tools.is_empty()));
+                fragment_tools.push(tool);
+            }
+            if !fragment_tools.is_empty() || fragments.is_empty() {
+                fragments.push(ResponseItem::AdditionalTools {
+                    id: fragment_id,
+                    role,
+                    tools: fragment_tools,
+                });
+            }
+            fragments
+        }
+        item => split_model_context_item_to_limit(item),
+    };
     let mut bounded_items = Vec::with_capacity(items.len());
     for item in items {
         if estimate_item_token_count(&item) > MAX_MODEL_REQUEST_ITEM_TOKENS as i64
