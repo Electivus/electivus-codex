@@ -22,7 +22,7 @@ pub(super) async fn validate_runtime_readiness(
     let mut connection = pool
         .acquire()
         .await
-        .map_err(|_| connection_failed(config.url_env()))?;
+        .map_err(|_| connection_failed(config))?;
     let mut transaction = connection
         .begin()
         .await

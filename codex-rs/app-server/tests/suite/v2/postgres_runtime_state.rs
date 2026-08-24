@@ -12,6 +12,9 @@ use anyhow::Result;
 use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::to_response;
+use codex_app_server_protocol::ConfigReadParams;
+use codex_app_server_protocol::ConfigReadResponse;
+use codex_app_server_protocol::ConfigRequirementsReadResponse;
 use codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification;
 use codex_app_server_protocol::ExternalAgentConfigImportProgressNotification;
 use codex_app_server_protocol::ExternalAgentConfigImportResponse;
@@ -47,8 +50,62 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 const DATABASE_URL_ENV: &str = "CODEX_TEST_POSTGRES_URL";
+const RUNTIME_DATABASE_URL_ENV: &str = "CODEX_POSTGRES_URL";
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(15);
 const BLOCKER_CONTENTS: &[u8] = b"configured SQLite parent must remain untouched\n";
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_app_server_initializes_from_direct_url_without_environment() -> Result<()>
+{
+    let database_url = std::env::var(DATABASE_URL_ENV)?;
+    let schema = format!("codex_app_direct_url_{}", Uuid::new_v4().simple());
+    prepare_namespace(&schema, RuntimeReadiness::Ready).await?;
+    let model_server = create_mock_responses_server_repeating_assistant("unused").await;
+    let home = RuntimeHome::new(&schema, &model_server.uri())?;
+    let config_path = home.path().join("config.toml");
+    let config = std::fs::read_to_string(&config_path)?;
+    let direct_url = serde_json::to_string(&database_url)?;
+    let direct_config = config.replace(
+        &format!("url_env = \"{DATABASE_URL_ENV}\""),
+        &format!("url = {direct_url}"),
+    );
+    anyhow::ensure!(
+        direct_config != config,
+        "URL source fixture was not replaced"
+    );
+    std::fs::write(&config_path, direct_config)?;
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .without_managed_config()
+        .with_args(&["--strict-config"])
+        .with_env_overrides(&[(DATABASE_URL_ENV, None), (RUNTIME_DATABASE_URL_ENV, None)])
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, app_server.initialize()).await??;
+
+    let requirements_id = app_server.send_config_requirements_read_request().await?;
+    let _: ConfigRequirementsReadResponse = read_response(&mut app_server, requirements_id).await?;
+    let config_id = app_server
+        .send_config_read_request(ConfigReadParams {
+            include_layers: false,
+            cwd: None,
+        })
+        .await?;
+    let config: ConfigReadResponse = read_response(&mut app_server, config_id).await?;
+    let postgresql = config
+        .config
+        .additional
+        .get("state")
+        .and_then(|state| state.get("postgresql"))
+        .context("config/read must return state.postgresql")?;
+    assert_eq!(postgresql.get("url"), Some(&json!(database_url)));
+    assert_eq!(postgresql.get("url_env"), None);
+
+    assert!(app_server.shutdown_gracefully().await?.success());
+    home.assert_sqlite_untouched()?;
+    cleanup_schema(&database_url, &schema).await
+}
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]

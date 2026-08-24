@@ -2415,20 +2415,38 @@ fn runtime_state_backend_config(
                     "`state.backend = \"postgresql\"` requires `features.postgresql_state = true`",
                 ));
             }
+            enum UrlSource {
+                Direct(String),
+                Environment(String),
+            }
+
+            let (source, schema, pool) = match postgresql {
+                codex_config::config_toml::PostgresqlStateToml::Direct { url, schema, pool } => {
+                    (UrlSource::Direct(url), schema, pool)
+                }
+                codex_config::config_toml::PostgresqlStateToml::Environment {
+                    url_env,
+                    schema,
+                    pool,
+                } => (UrlSource::Environment(url_env), schema, pool),
+            };
             let pool = PostgresPoolConfig::new(
-                postgresql.pool.max_connections,
-                Duration::from_millis(postgresql.pool.acquire_timeout_ms.get()),
-                Duration::from_millis(postgresql.pool.statement_timeout_ms.get()),
+                pool.max_connections,
+                Duration::from_millis(pool.acquire_timeout_ms.get()),
+                Duration::from_millis(pool.statement_timeout_ms.get()),
             )
             .map_err(|error| {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
             })?;
-            let namespace =
-                PostgresNamespaceConfig::new(postgresql.url_env, postgresql.schema, pool).map_err(
-                    |error| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
-                    },
-                )?;
+            let namespace = match source {
+                UrlSource::Direct(url) => PostgresNamespaceConfig::new_with_url(url, schema, pool),
+                UrlSource::Environment(url_env) => {
+                    PostgresNamespaceConfig::new(url_env, schema, pool)
+                }
+            }
+            .map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+            })?;
             Ok(RuntimeStateBackendConfig::Postgresql {
                 codex_home: codex_home.clone(),
                 namespace,

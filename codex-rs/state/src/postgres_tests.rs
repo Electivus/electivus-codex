@@ -91,6 +91,57 @@ fn resolved_environment_url_builds_passwordless_mtls_connection_descriptor() {
 }
 
 #[test]
+fn direct_url_builds_passwordless_mtls_connection_descriptor_without_environment_access() {
+    let files = MtlsFileFixture::new();
+    let sentinel = "direct-url-sentinel.example.invalid";
+    let url = files.connection_url(sentinel);
+    let config = PostgresNamespaceConfig::new_with_url(
+        url,
+        "codex".to_string(),
+        PostgresPoolConfig::default(),
+    )
+    .expect("direct PostgreSQL namespace config should be valid");
+
+    let descriptor = resolve_connection_descriptor(&config, |_| {
+        panic!("direct URL resolution must not read the process environment")
+    })
+    .expect("direct passwordless mTLS descriptor should be accepted");
+
+    assert_eq!(
+        format!("{descriptor:?}"),
+        "PostgresMtlsConnectionDescriptor([REDACTED])"
+    );
+    assert!(!format!("{config:?} {descriptor:?}").contains(sentinel));
+}
+
+#[test]
+fn invalid_direct_url_errors_and_debug_output_are_redacted() {
+    let files = MtlsFileFixture::new();
+    let sentinel = "direct-secret-sentinel.example.invalid";
+    let url = files.connection_url_with_parameters(
+        &format!("postgresql://codex:secret@{sentinel}/codex"),
+        &files.tls_parameters(),
+    );
+    let config = PostgresNamespaceConfig::new_with_url(
+        url.clone(),
+        "codex".to_string(),
+        PostgresPoolConfig::default(),
+    )
+    .expect("direct PostgreSQL namespace config should be retained securely");
+
+    let error = resolve_connection_descriptor(&config, |_| {
+        panic!("direct URL resolution must not read the process environment")
+    })
+    .expect_err("a direct URL containing a password should be rejected");
+    let rendered = format!("{config:?} {error:?} {error}");
+
+    assert!(rendered.contains("state.postgresql.url"));
+    assert!(!rendered.contains(&url));
+    assert!(!rendered.contains(sentinel));
+    assert!(!rendered.contains("secret@"));
+}
+
+#[test]
 fn connection_descriptor_reports_missing_and_empty_environment_values() {
     let config = test_config();
     let missing = resolve_connection_descriptor(&config, |_| None)

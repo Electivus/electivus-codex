@@ -2856,36 +2856,73 @@
       "type": "object"
     },
     "PostgresqlStateToml": {
-      "additionalProperties": false,
-      "description": "PostgreSQL Runtime State Namespace configuration.",
-      "properties": {
-        "pool": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/PostgresqlStatePoolToml"
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "description": "Preferred direct passwordless PostgreSQL mTLS Connection Descriptor.",
+          "properties": {
+            "pool": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/PostgresqlStatePoolToml"
+                }
+              ],
+              "default": {
+                "acquire_timeout_ms": 10000,
+                "max_connections": 10,
+                "statement_timeout_ms": 30000
+              },
+              "description": "Connection-pool configuration."
+            },
+            "schema": {
+              "default": "codex",
+              "description": "PostgreSQL schema containing this Runtime State Namespace.",
+              "type": "string"
+            },
+            "url": {
+              "description": "Preferred direct passwordless PostgreSQL mTLS Connection Descriptor with `sslmode=verify-full` and absolute `sslrootcert`, `sslcert`, and `sslkey` paths.",
+              "type": "string"
             }
-          ],
-          "default": {
-            "acquire_timeout_ms": 10000,
-            "max_connections": 10,
-            "statement_timeout_ms": 30000
           },
-          "description": "Connection-pool configuration."
+          "required": [
+            "url"
+          ],
+          "type": "object"
         },
-        "schema": {
-          "default": "codex",
-          "description": "PostgreSQL schema containing this Runtime State Namespace.",
-          "type": "string"
-        },
-        "url_env": {
-          "description": "Name of the environment variable containing a passwordless PostgreSQL URL with `sslmode=verify-full` and absolute `sslrootcert`, `sslcert`, and `sslkey` paths.",
-          "type": "string"
+        {
+          "additionalProperties": false,
+          "description": "Compatible environment-backed PostgreSQL mTLS Connection Descriptor.",
+          "properties": {
+            "pool": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/PostgresqlStatePoolToml"
+                }
+              ],
+              "default": {
+                "acquire_timeout_ms": 10000,
+                "max_connections": 10,
+                "statement_timeout_ms": 30000
+              },
+              "description": "Connection-pool configuration."
+            },
+            "schema": {
+              "default": "codex",
+              "description": "PostgreSQL schema containing this Runtime State Namespace.",
+              "type": "string"
+            },
+            "url_env": {
+              "description": "Compatible alternative naming an environment variable containing the passwordless PostgreSQL mTLS Connection Descriptor.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "url_env"
+          ],
+          "type": "object"
         }
-      },
-      "required": [
-        "url_env"
       ],
-      "type": "object"
+      "description": "PostgreSQL Runtime State Namespace configuration with exactly one connection source."
     },
     "ProfileTui": {
       "additionalProperties": false,
