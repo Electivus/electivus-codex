@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use url::ParseError;
 use url::Url;
 
+use super::config::DirectUrlOrigin;
 use super::config::PostgresConnectionSource;
 
 /// A validated passwordless PostgreSQL mTLS connection description.
@@ -231,9 +232,14 @@ fn validate_client_key_permissions(
 
 fn invalid_descriptor(source: &PostgresConnectionSource, reason: &str) -> anyhow::Error {
     match source {
-        PostgresConnectionSource::Direct { .. } => anyhow!(
-            "Direct PostgreSQL URL in `state.postgresql.url` does not contain a valid passwordless mTLS Connection Descriptor: it must satisfy this requirement: {reason}"
-        ),
+        PostgresConnectionSource::Direct { origin, .. } => match origin {
+            DirectUrlOrigin::StableConfig => anyhow!(
+                "Direct PostgreSQL URL in `state.postgresql.url` does not contain a valid passwordless mTLS Connection Descriptor: it must satisfy this requirement: {reason}"
+            ),
+            DirectUrlOrigin::CommandLine => anyhow!(
+                "Direct PostgreSQL URL supplied with `--url` does not contain a valid passwordless mTLS Connection Descriptor: it must satisfy this requirement: {reason}"
+            ),
+        },
         PostgresConnectionSource::Environment { url_env } => anyhow!(
             "PostgreSQL URL environment variable `{url_env}` does not contain a valid passwordless mTLS Connection Descriptor: it must satisfy this requirement: {reason}"
         ),

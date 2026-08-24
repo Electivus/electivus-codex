@@ -1,12 +1,16 @@
+use clap::ArgGroup;
 use clap::Args;
 use clap::Parser;
+use codex_core::config::ConfigBuilder;
 use codex_state::PostgresNamespaceAction;
 use codex_state::PostgresNamespaceConfig;
 use codex_state::PostgresNamespaceStatus;
 use codex_state::PostgresPoolConfig;
+use codex_state::RuntimeStateBackendConfig;
 use codex_state::manage_postgres_namespace;
 use codex_thread_store::PostgresThreadProjectionMaterializer;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_cli::CliConfigOverrides;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -43,26 +47,35 @@ enum PostgresSchemaAction {
 }
 
 #[derive(Debug, Args)]
+#[command(group(
+    ArgGroup::new("connection_source")
+        .args(["url", "url_env"])
+        .multiple(false)
+))]
 struct PostgresNamespaceArgs {
+    /// Direct passwordless PostgreSQL URL with `sslmode=verify-full` and absolute `sslrootcert`, `sslcert`, and `sslkey` paths.
+    #[arg(long, value_name = "URL", conflicts_with = "url_env")]
+    url: Option<String>,
+
     /// Environment variable containing a passwordless PostgreSQL URL with `sslmode=verify-full` and absolute `sslrootcert`, `sslcert`, and `sslkey` paths.
-    #[arg(long, value_name = "ENV_VAR")]
-    url_env: String,
+    #[arg(long, value_name = "ENV_VAR", conflicts_with = "url")]
+    url_env: Option<String>,
 
-    /// PostgreSQL schema containing the Runtime State Namespace.
-    #[arg(long, default_value = "codex")]
-    schema: String,
+    /// PostgreSQL schema containing the Runtime State Namespace (defaults to `codex` with an explicit source).
+    #[arg(long, requires = "connection_source")]
+    schema: Option<String>,
 
-    /// Maximum number of connections in this namespace pool.
-    #[arg(long, default_value = "10")]
-    max_connections: NonZeroU32,
+    /// Maximum number of connections in this namespace pool (defaults to 10 with an explicit source).
+    #[arg(long, requires = "connection_source")]
+    max_connections: Option<NonZeroU32>,
 
-    /// Maximum time to wait for a pooled connection, in milliseconds.
-    #[arg(long, default_value_t = 10_000)]
-    acquire_timeout_ms: u64,
+    /// Maximum time to wait for a pooled connection, in milliseconds (defaults to 10000 with an explicit source).
+    #[arg(long, requires = "connection_source")]
+    acquire_timeout_ms: Option<u64>,
 
-    /// PostgreSQL statement timeout, in milliseconds.
-    #[arg(long, default_value_t = 30_000)]
-    statement_timeout_ms: u64,
+    /// PostgreSQL statement timeout, in milliseconds (defaults to 30000 with an explicit source).
+    #[arg(long, requires = "connection_source")]
+    statement_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Args)]
@@ -75,37 +88,52 @@ struct RuntimeStateMigrationArgs {
     destination: PostgresNamespaceArgs,
 }
 
-pub async fn run(command: StateCommand) -> anyhow::Result<()> {
+pub async fn run(
+    command: StateCommand,
+    config_overrides: CliConfigOverrides,
+) -> anyhow::Result<()> {
     match command.subcommand {
-        StateSubcommand::Schema(command) => run_schema(command).await,
-        StateSubcommand::Initialize(args) => run_initialize(args).await,
-        StateSubcommand::Migrate(args) => run_migration(args).await,
+        StateSubcommand::Schema(command) => run_schema(command, &config_overrides).await,
+        StateSubcommand::Initialize(args) => run_initialize(args, &config_overrides).await,
+        StateSubcommand::Migrate(args) => run_migration(args, &config_overrides).await,
     }
 }
 
-async fn run_schema(command: PostgresSchemaCommand) -> anyhow::Result<()> {
+async fn run_schema(
+    command: PostgresSchemaCommand,
+    config_overrides: &CliConfigOverrides,
+) -> anyhow::Result<()> {
     let (action, args) = match command.action {
         PostgresSchemaAction::Migrate(args) => (PostgresNamespaceAction::Migrate, args),
         PostgresSchemaAction::Validate(args) => (PostgresNamespaceAction::Validate, args),
     };
-    let config = postgres_config(args)?;
+    let config = postgres_config(args, config_overrides).await?;
     let status = manage_postgres_namespace(config, action).await?;
     print_status(action, status);
     Ok(())
 }
 
-async fn run_initialize(args: PostgresNamespaceArgs) -> anyhow::Result<()> {
-    let report = codex_state::initialize_postgres_runtime_state(postgres_config(args)?).await?;
+async fn run_initialize(
+    args: PostgresNamespaceArgs,
+    config_overrides: &CliConfigOverrides,
+) -> anyhow::Result<()> {
+    let report = codex_state::initialize_postgres_runtime_state(
+        postgres_config(args, config_overrides).await?,
+    )
+    .await?;
     let output =
         format_initialization_success(report.schema(), report.fencing_token(), report.evidence())?;
     print!("{output}");
     Ok(())
 }
 
-async fn run_migration(args: RuntimeStateMigrationArgs) -> anyhow::Result<()> {
+async fn run_migration(
+    args: RuntimeStateMigrationArgs,
+    config_overrides: &CliConfigOverrides,
+) -> anyhow::Result<()> {
     let source =
         codex_state::SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(args.sqlite_home)?);
-    let destination = postgres_config(args.destination)?;
+    let destination = postgres_config(args.destination, config_overrides).await?;
     let projection_materializer = PostgresThreadProjectionMaterializer::new(&destination);
     let report = codex_state::migrate_runtime_state(
         source,
@@ -154,13 +182,52 @@ pub(super) fn format_migration_success(
     ))
 }
 
-fn postgres_config(args: PostgresNamespaceArgs) -> anyhow::Result<PostgresNamespaceConfig> {
+async fn postgres_config(
+    args: PostgresNamespaceArgs,
+    config_overrides: &CliConfigOverrides,
+) -> anyhow::Result<PostgresNamespaceConfig> {
+    let source = match (args.url, args.url_env) {
+        (Some(url), None) => Some(PostgresCliConnectionSource::Direct(url)),
+        (None, Some(url_env)) => Some(PostgresCliConnectionSource::Environment(url_env)),
+        (None, None) => None,
+        (Some(_), Some(_)) => anyhow::bail!("`--url` and `--url-env` are mutually exclusive"),
+    };
+    let Some(source) = source else {
+        let cli_overrides = config_overrides
+            .parse_overrides()
+            .map_err(anyhow::Error::msg)?;
+        let config = ConfigBuilder::default()
+            .cli_overrides(cli_overrides)
+            .build()
+            .await?;
+        return match config.runtime_state_backend {
+            RuntimeStateBackendConfig::Postgresql { namespace, .. } => Ok(namespace),
+            RuntimeStateBackendConfig::Sqlite(_) => anyhow::bail!(
+                "PostgreSQL Runtime State is not configured; select `state.backend = \"postgresql\"` in config.toml or provide `--url <URL>` or `--url-env <ENV_VAR>`"
+            ),
+            _ => anyhow::bail!("the configured Runtime State Backend is not PostgreSQL"),
+        };
+    };
     let pool = PostgresPoolConfig::new(
-        args.max_connections,
-        Duration::from_millis(args.acquire_timeout_ms),
-        Duration::from_millis(args.statement_timeout_ms),
+        args.max_connections
+            .unwrap_or_else(|| NonZeroU32::new(10).unwrap_or(NonZeroU32::MIN)),
+        Duration::from_millis(args.acquire_timeout_ms.unwrap_or(10_000)),
+        Duration::from_millis(args.statement_timeout_ms.unwrap_or(30_000)),
     )?;
-    PostgresNamespaceConfig::new(args.url_env, args.schema, pool)
+    let schema = args.schema.unwrap_or_else(|| "codex".to_string());
+    match source {
+        PostgresCliConnectionSource::Direct(url) => {
+            PostgresNamespaceConfig::new_with_cli_url(url, schema, pool)
+        }
+        PostgresCliConnectionSource::Environment(url_env) => {
+            PostgresNamespaceConfig::new(url_env, schema, pool)
+        }
+    }
+}
+
+enum PostgresCliConnectionSource {
+    Direct(String),
+    Environment(String),
 }
 
 fn print_status(action: PostgresNamespaceAction, status: PostgresNamespaceStatus) {
