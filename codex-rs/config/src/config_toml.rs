@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::fmt;
 use std::num::NonZeroU32;
 use std::num::NonZeroU64;
 use std::path::Path;
@@ -541,20 +542,94 @@ pub enum StateToml {
     Postgresql { postgresql: PostgresqlStateToml },
 }
 
-/// PostgreSQL Runtime State Namespace configuration.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+/// PostgreSQL Runtime State Namespace configuration with exactly one connection source.
+#[derive(Serialize, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(untagged)]
 #[schemars(deny_unknown_fields)]
-pub struct PostgresqlStateToml {
-    /// Name of the environment variable containing a passwordless PostgreSQL URL with `sslmode=verify-full` and absolute `sslrootcert`, `sslcert`, and `sslkey` paths.
-    pub url_env: String,
+pub enum PostgresqlStateToml {
+    /// Preferred direct passwordless PostgreSQL mTLS Connection Descriptor.
+    Direct {
+        /// Preferred direct passwordless PostgreSQL mTLS Connection Descriptor with `sslmode=verify-full` and absolute `sslrootcert`, `sslcert`, and `sslkey` paths.
+        url: String,
 
-    /// PostgreSQL schema containing this Runtime State Namespace.
+        /// PostgreSQL schema containing this Runtime State Namespace.
+        #[serde(default = "default_postgresql_state_schema")]
+        schema: String,
+
+        /// Connection-pool configuration.
+        #[serde(default)]
+        pool: PostgresqlStatePoolToml,
+    },
+    /// Compatible environment-backed PostgreSQL mTLS Connection Descriptor.
+    Environment {
+        /// Compatible alternative naming an environment variable containing the passwordless PostgreSQL mTLS Connection Descriptor.
+        url_env: String,
+
+        /// PostgreSQL schema containing this Runtime State Namespace.
+        #[serde(default = "default_postgresql_state_schema")]
+        schema: String,
+
+        /// Connection-pool configuration.
+        #[serde(default)]
+        pool: PostgresqlStatePoolToml,
+    },
+}
+
+#[derive(Deserialize)]
+struct PostgresqlStateTomlWire {
+    url: Option<String>,
+    url_env: Option<String>,
     #[serde(default = "default_postgresql_state_schema")]
-    pub schema: String,
-
-    /// Connection-pool configuration.
+    schema: String,
     #[serde(default)]
-    pub pool: PostgresqlStatePoolToml,
+    pool: PostgresqlStatePoolToml,
+}
+
+impl<'de> Deserialize<'de> for PostgresqlStateToml {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = PostgresqlStateTomlWire::deserialize(deserializer)?;
+        match (wire.url, wire.url_env) {
+            (Some(url), None) => Ok(Self::Direct {
+                url,
+                schema: wire.schema,
+                pool: wire.pool,
+            }),
+            (None, Some(url_env)) => Ok(Self::Environment {
+                url_env,
+                schema: wire.schema,
+                pool: wire.pool,
+            }),
+            (Some(_), Some(_)) | (None, None) => Err(D::Error::custom(
+                "PostgreSQL Runtime State config must define exactly one of `url` or `url_env`",
+            )),
+        }
+    }
+}
+
+impl fmt::Debug for PostgresqlStateToml {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Direct { schema, pool, .. } => formatter
+                .debug_struct("Direct")
+                .field("url", &"[REDACTED]")
+                .field("schema", schema)
+                .field("pool", pool)
+                .finish(),
+            Self::Environment {
+                url_env,
+                schema,
+                pool,
+            } => formatter
+                .debug_struct("Environment")
+                .field("url_env", url_env)
+                .field("schema", schema)
+                .field("pool", pool)
+                .finish(),
+        }
+    }
 }
 
 /// PostgreSQL Runtime State connection-pool settings.
@@ -1119,7 +1194,79 @@ url_env = "CODEX_POSTGRES_URL"
         assert_eq!(
             config.state,
             Some(StateToml::Postgresql {
-                postgresql: PostgresqlStateToml {
+                postgresql: PostgresqlStateToml::Environment {
+                    url_env: "CODEX_POSTGRES_URL".to_string(),
+                    schema: "codex".to_string(),
+                    pool: PostgresqlStatePoolToml::default(),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn postgresql_state_config_deserializes_direct_url() {
+        const URL: &str = "postgresql://codex@db.example/codex?sslmode=verify-full&sslrootcert=/tls/ca.crt&sslcert=/tls/client.crt&sslkey=/tls/client.key";
+        let config: ConfigToml = toml::from_str(&format!(
+            r#"
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+url = "{URL}"
+"#,
+        ))
+        .expect("direct PostgreSQL state URL should deserialize");
+
+        let serialized = serde_json::to_value(&config).expect("config should serialize");
+        assert_eq!(
+            serialized.pointer("/state/postgresql/url"),
+            Some(&serde_json::json!(URL))
+        );
+        assert!(!format!("{config:?}").contains(URL));
+    }
+
+    #[test]
+    fn postgresql_state_config_requires_exactly_one_connection_source() {
+        let both = r#"
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+url = "postgresql://codex@db.example/codex"
+url_env = "CODEX_POSTGRES_URL"
+"#;
+        let neither = r#"
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+schema = "codex"
+"#;
+
+        for config in [both, neither] {
+            toml::from_str::<ConfigToml>(config)
+                .expect_err("exactly one PostgreSQL connection source should be required");
+        }
+    }
+
+    #[test]
+    fn postgresql_state_config_ignores_unrelated_fields_during_normal_deserialization() {
+        let config: ConfigToml = toml::from_str(
+            r#"
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+url_env = "CODEX_POSTGRES_URL"
+future_option = true
+"#,
+        )
+        .expect("ordinary config parsing should ignore unrelated PostgreSQL state fields");
+
+        assert_eq!(
+            config.state,
+            Some(StateToml::Postgresql {
+                postgresql: PostgresqlStateToml::Environment {
                     url_env: "CODEX_POSTGRES_URL".to_string(),
                     schema: "codex".to_string(),
                     pool: PostgresqlStatePoolToml::default(),

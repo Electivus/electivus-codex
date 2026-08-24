@@ -1,7 +1,7 @@
 version = 1
 
 [postgres_contracts]
-database_count = 115
+database_count = 116
 process_count = 2
 packages = [
     "codex-app-server",
@@ -23,6 +23,7 @@ packages = [
 'codex-rs/app-server/tests/suite/v2/analytics.rs::unified_plugin_script_emits_measurement_analytics::cfg_attr(windows,ignore="plugin metrics fixture is Unix-only")' = "out-of-boundary-platform"
 'codex-rs/app-server/tests/suite/v2/postgres_goal_service.rs::postgres_contract_goal_service_is_backend_neutral_across_replicas::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/app-server/tests/suite/v2/postgres_runtime_state.rs::postgres_contract_app_server_fails_closed_and_redacts_unavailable_url::ignore="requires the PostgreSQL Runtime State process contract environment"' = "specialized-environment"
+'codex-rs/app-server/tests/suite/v2/postgres_runtime_state.rs::postgres_contract_app_server_initializes_from_direct_url_without_environment::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/app-server/tests/suite/v2/postgres_runtime_state.rs::postgres_contract_app_server_rejects_missing_feature_gate_without_sqlite_fallback::ignore="requires the PostgreSQL Runtime State process contract environment"' = "specialized-environment"
 'codex-rs/app-server/tests/suite/v2/postgres_runtime_state.rs::postgres_contract_app_server_shares_runtime_state_without_sqlite_access::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/app-server/tests/suite/v2/postgres_runtime_state.rs::postgres_contract_external_agent_import_reports_persistence_failure::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"

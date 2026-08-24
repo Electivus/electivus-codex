@@ -101,6 +101,62 @@ disable_on_external_context = true
 }
 
 #[test]
+fn postgresql_state_connection_source_from_higher_layer_displaces_lower_source() {
+    let cases = [
+        (
+            r#"
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+url_env = "CODEX_POSTGRES_URL"
+schema = "lower"
+"#,
+            r#"
+[state.postgresql]
+url = "postgresql://codex@db.example/codex"
+"#,
+            r#"
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+url = "postgresql://codex@db.example/codex"
+schema = "lower"
+"#,
+        ),
+        (
+            r#"
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+url = "postgresql://codex@db.example/codex"
+schema = "lower"
+"#,
+            r#"
+[state.postgresql]
+url_env = "CODEX_POSTGRES_URL"
+"#,
+            r#"
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+url_env = "CODEX_POSTGRES_URL"
+schema = "lower"
+"#,
+        ),
+    ];
+
+    for (base, overlay, expected) in cases {
+        let mut base = parse_toml(base);
+        merge_toml_values(&mut base, &parse_toml(overlay));
+        assert_eq!(base, parse_toml(expected));
+    }
+}
+
+#[test]
 fn merge_toml_values_normalizes_legacy_agents_key_across_layers() {
     let mut base = parse_toml(
         r#"

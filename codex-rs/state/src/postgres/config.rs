@@ -6,6 +6,7 @@ use sqlx::ConnectOptions;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use std::ffi::OsString;
+use std::fmt;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -47,16 +48,36 @@ impl Default for PostgresPoolConfig {
     }
 }
 
-/// Non-secret configuration identifying one PostgreSQL Runtime State Namespace.
+/// Configuration identifying one PostgreSQL Runtime State Namespace.
 ///
-/// `url_env` is the name of the environment variable containing the connection
-/// URL. The URL itself is resolved only while performing an operation and is
-/// never retained in this configuration or included in its debug output.
+/// The connection source is retained so each operation can compile it into the
+/// same passwordless mTLS descriptor. Debug output always redacts a direct URL.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PostgresNamespaceConfig {
-    pub(super) url_env: String,
+    connection: PostgresConnectionSource,
     pub(super) schema: String,
     pool: PostgresPoolConfig,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub(super) enum PostgresConnectionSource {
+    Direct { url: String },
+    Environment { url_env: String },
+}
+
+impl fmt::Debug for PostgresConnectionSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Direct { .. } => formatter
+                .debug_struct("Direct")
+                .field("url", &"[REDACTED]")
+                .finish(),
+            Self::Environment { url_env } => formatter
+                .debug_struct("Environment")
+                .field("url_env", url_env)
+                .finish(),
+        }
+    }
 }
 
 impl PostgresNamespaceConfig {
@@ -64,7 +85,21 @@ impl PostgresNamespaceConfig {
         validate_url_environment_variable(&url_env)?;
         validate_schema_name(&schema)?;
         Ok(Self {
-            url_env,
+            connection: PostgresConnectionSource::Environment { url_env },
+            schema,
+            pool,
+        })
+    }
+
+    /// Retains a direct URL behind redacting debug output for descriptor validation at connection.
+    pub fn new_with_url(
+        url: String,
+        schema: String,
+        pool: PostgresPoolConfig,
+    ) -> anyhow::Result<Self> {
+        validate_schema_name(&schema)?;
+        Ok(Self {
+            connection: PostgresConnectionSource::Direct { url },
             schema,
             pool,
         })
@@ -73,10 +108,6 @@ impl PostgresNamespaceConfig {
     /// Returns the non-secret namespace schema name.
     pub fn schema(&self) -> &str {
         &self.schema
-    }
-
-    pub(crate) fn url_env(&self) -> &str {
-        &self.url_env
     }
 }
 
@@ -110,29 +141,26 @@ pub(super) async fn connect_pool_with_descriptor(
         })
         .connect_with(connect_options)
         .await
-        .map_err(|_| connection_failed(&config.url_env))
+        .map_err(|_| connection_failed(config))
 }
 
-fn resolve_url(
-    config: &PostgresNamespaceConfig,
+fn resolve_environment_url(
+    url_env: &str,
     get_environment_variable: impl FnOnce(&str) -> Option<OsString>,
 ) -> anyhow::Result<String> {
-    let value = get_environment_variable(&config.url_env).ok_or_else(|| {
+    let value = get_environment_variable(url_env).ok_or_else(|| {
         anyhow!(
-            "PostgreSQL URL environment variable `{}` is not set; set it to a PostgreSQL connection URL and retry",
-            config.url_env
+            "PostgreSQL URL environment variable `{url_env}` is not set; set it to a PostgreSQL connection URL and retry"
         )
     })?;
     let value = value.into_string().map_err(|_| {
         anyhow!(
-            "PostgreSQL URL environment variable `{}` is not valid Unicode; set it to a PostgreSQL connection URL and retry",
-            config.url_env
+            "PostgreSQL URL environment variable `{url_env}` is not valid Unicode; set it to a PostgreSQL connection URL and retry"
         )
     })?;
     if value.is_empty() {
         anyhow::bail!(
-            "PostgreSQL URL environment variable `{}` is empty; set it to a passwordless PostgreSQL mTLS Connection Descriptor and retry",
-            config.url_env
+            "PostgreSQL URL environment variable `{url_env}` is empty; set it to a passwordless PostgreSQL mTLS Connection Descriptor and retry"
         );
     }
     Ok(value)
@@ -142,8 +170,15 @@ pub(super) fn resolve_connection_descriptor(
     config: &PostgresNamespaceConfig,
     get_environment_variable: impl FnOnce(&str) -> Option<OsString>,
 ) -> anyhow::Result<PostgresMtlsConnectionDescriptor> {
-    let resolved_url = resolve_url(config, get_environment_variable)?;
-    PostgresMtlsConnectionDescriptor::parse(&resolved_url, &config.url_env)
+    match &config.connection {
+        PostgresConnectionSource::Direct { url } => {
+            PostgresMtlsConnectionDescriptor::parse(url, &config.connection)
+        }
+        PostgresConnectionSource::Environment { url_env } => {
+            let resolved_url = resolve_environment_url(url_env, get_environment_variable)?;
+            PostgresMtlsConnectionDescriptor::parse(&resolved_url, &config.connection)
+        }
+    }
 }
 
 fn validate_url_environment_variable(name: &str) -> anyhow::Result<()> {
@@ -175,8 +210,13 @@ fn validate_schema_name(schema: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) fn connection_failed(name: &str) -> anyhow::Error {
-    anyhow!(
-        "could not connect to PostgreSQL using environment variable `{name}`; check the mTLS descriptor, TLS files, session evidence, and network reachability"
-    )
+pub(crate) fn connection_failed(config: &PostgresNamespaceConfig) -> anyhow::Error {
+    match &config.connection {
+        PostgresConnectionSource::Direct { .. } => anyhow!(
+            "could not connect to PostgreSQL using direct `state.postgresql.url`; check the mTLS descriptor, TLS files, session evidence, and network reachability"
+        ),
+        PostgresConnectionSource::Environment { url_env } => anyhow!(
+            "could not connect to PostgreSQL using environment variable `{url_env}`; check the mTLS descriptor, TLS files, session evidence, and network reachability"
+        ),
+    }
 }

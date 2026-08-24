@@ -24,6 +24,10 @@ _Avoid_: User state, account state, tenant
 A passwordless PostgreSQL endpoint, user, and database together with `verify-full` and explicit absolute CA, client-certificate, and client-key file paths. Every connection source must compile to this descriptor before a Runtime State Backend pool is created.
 _Avoid_: PostgreSQL credential, permissive connection URL, TLS options
 
+**PostgreSQL Connection Source**:
+Exactly one stable configuration source for a PostgreSQL mTLS Connection Descriptor: the preferred direct `state.postgresql.url`, or the compatible `state.postgresql.url_env` environment-variable reference. Source selection does not change descriptor, file, session-evidence, redaction, or no-fallback validation.
+_Avoid_: PostgreSQL authentication mode, plugin environment, backend fallback
+
 **Client-observable mTLS Session Evidence**:
 The current backend's `pg_stat_ssl` result showing TLS active and a non-empty client-certificate distinguished name. This proves that the session uses TLS and presented a client certificate, but not which PostgreSQL HBA rule authenticated it; operators separately enforce the server-side `cert` or `clientcert=verify-full` invariant.
 _Avoid_: Authentication-policy proof, HBA evidence, certificate authorization

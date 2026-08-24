@@ -6069,6 +6069,50 @@ schema = "codex_test"
 }
 
 #[tokio::test]
+async fn postgresql_runtime_state_backend_carries_direct_url_to_namespace_config()
+-> std::io::Result<()> {
+    const URL: &str = "postgresql://codex@db.example/codex?sslmode=verify-full&sslrootcert=/tls/ca.crt&sslcert=/tls/client.crt&sslkey=/tls/client.key";
+    let codex_home = TempDir::new()?;
+    let config_toml = toml::from_str(&format!(
+        r#"
+[features]
+postgresql_state = true
+
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+url = "{URL}"
+schema = "codex_direct"
+"#,
+    ))
+    .expect("parse direct URL config");
+
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.runtime_state_backend,
+        RuntimeStateBackendConfig::Postgresql {
+            codex_home: codex_home.abs(),
+            namespace: PostgresNamespaceConfig::new_with_url(
+                URL.to_string(),
+                "codex_direct".to_string(),
+                PostgresPoolConfig::default(),
+            )
+            .expect("valid direct URL namespace config"),
+        }
+    );
+    assert!(!format!("{config:?}").contains(URL));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn workspace_write_includes_configured_writable_root_once_without_memories_root()
 -> std::io::Result<()> {
     let codex_home = TempDir::new()?;

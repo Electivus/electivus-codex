@@ -974,13 +974,14 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `sqlite_home` | <code>string</code> | Directory where Codex stores the SQLite state DB. Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`. |
 | `state` | <code>table</code> | Selects and configures the Runtime State Backend. SQLite is used when this section is omitted. |
 | `state.backend` | <code>string (&quot;sqlite&quot;, &quot;postgresql&quot;)</code> | _No description available._ |
-| `state.postgresql` | <code>table</code> | PostgreSQL Runtime State Namespace configuration. |
+| `state.postgresql` | <code>table</code> | PostgreSQL Runtime State Namespace configuration with exactly one connection source.<br><br>Options: Preferred direct passwordless PostgreSQL mTLS Connection Descriptor. Compatible environment-backed PostgreSQL mTLS Connection Descriptor. |
 | `state.postgresql.pool` | <code>table</code> | Connection-pool configuration. |
 | `state.postgresql.pool.acquire_timeout_ms` | <code>integer</code> | _No description available._ |
 | `state.postgresql.pool.max_connections` | <code>integer</code> | _No description available._ |
 | `state.postgresql.pool.statement_timeout_ms` | <code>integer</code> | _No description available._ |
 | `state.postgresql.schema` | <code>string</code> | PostgreSQL schema containing this Runtime State Namespace. |
-| `state.postgresql.url_env` | <code>string</code> | Name of the environment variable containing a passwordless PostgreSQL URL with `sslmode=verify-full` and absolute `sslrootcert`, `sslcert`, and `sslkey` paths. |
+| `state.postgresql.url` | <code>string</code> | Preferred direct passwordless PostgreSQL mTLS Connection Descriptor with `sslmode=verify-full` and absolute `sslrootcert`, `sslcert`, and `sslkey` paths. |
+| `state.postgresql.url_env` | <code>string</code> | Compatible alternative naming an environment variable containing the passwordless PostgreSQL mTLS Connection Descriptor. |
 | `suppress_unstable_features_warning` | <code>boolean</code> | Suppress warnings about unstable (under development) features. |
 | `tool_execution` | <code>table</code> | Timing policy for model-controlled command execution. |
 | `tool_execution.timeout` | <code>table</code> | Hard command deadline range. Omitted fields use 10000 / 600000 / 3600000 ms. |

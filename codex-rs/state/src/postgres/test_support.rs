@@ -5,6 +5,7 @@ use super::PostgresNamespaceStatus;
 use super::PostgresPoolConfig;
 use super::acquire_namespace_lock;
 use super::config::connect_pool_with_descriptor;
+use super::config::resolve_connection_descriptor;
 use super::connection_descriptor::PostgresMtlsConnectionDescriptor;
 use super::connection_failed;
 use super::manage_postgres_namespace_with_connection;
@@ -57,8 +58,7 @@ impl PostgresContractFixture {
             schema,
             PostgresPoolConfig::default(),
         )?;
-        let descriptor =
-            PostgresMtlsConnectionDescriptor::parse(&database_url, TEST_DATABASE_URL_ENV)?;
+        let descriptor = resolve_connection_descriptor(&config, |_| Some(database_url.into()))?;
         Ok(Self {
             config,
             descriptor,
@@ -88,7 +88,7 @@ impl PostgresContractFixture {
             let mut connection = pool
                 .acquire()
                 .await
-                .map_err(|_| connection_failed(&self.config.url_env))?;
+                .map_err(|_| connection_failed(&self.config))?;
             let mut transaction = connection.begin().await.map_err(|error| {
                 map_sql_error(self.schema(), "begin read-only validation", error)
             })?;
@@ -120,7 +120,7 @@ impl PostgresContractFixture {
             let mut connection = pool
                 .acquire()
                 .await
-                .map_err(|_| connection_failed(&self.config.url_env))?;
+                .map_err(|_| connection_failed(&self.config))?;
             schema_exists(&mut connection, self.schema()).await
         }
         .await;
@@ -134,7 +134,7 @@ impl PostgresContractFixture {
             let mut connection = pool
                 .acquire()
                 .await
-                .map_err(|_| connection_failed(&self.config.url_env))?;
+                .map_err(|_| connection_failed(&self.config))?;
             read_migration_history(&mut connection, self.schema()).await
         }
         .await;
@@ -162,7 +162,7 @@ impl PostgresContractFixture {
             let mut connection = pool
                 .acquire()
                 .await
-                .map_err(|_| connection_failed(&self.config.url_env))?;
+                .map_err(|_| connection_failed(&self.config))?;
             let schema = quote_identifier(self.schema());
             sqlx::query(AssertSqlSafe(format!(
                 "DROP SCHEMA IF EXISTS {schema} CASCADE"

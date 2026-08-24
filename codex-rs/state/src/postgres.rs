@@ -216,7 +216,7 @@ impl PostgresRuntimeStatePool {
             let mut connection = pool
                 .acquire()
                 .await
-                .map_err(|_| connection_failed(&config.url_env))?;
+                .map_err(|_| connection_failed(&config))?;
             manage_postgres_namespace_with_connection(
                 &config,
                 &mut connection,
@@ -296,7 +296,7 @@ async fn manage_postgres_namespace_with_pool(
         let mut connection = pool
             .acquire()
             .await
-            .map_err(|_| connection_failed(&config.url_env))?;
+            .map_err(|_| connection_failed(config))?;
         manage_postgres_namespace_with_connection(config, &mut connection, action).await
     }
     .await;
