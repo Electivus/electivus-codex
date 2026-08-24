@@ -207,7 +207,11 @@ async fn postgres_contract_app_server_fails_closed_and_redacts_unavailable_url()
     let schema = format!("codex_app_unavailable_{}", Uuid::new_v4().simple());
     let model_server = create_mock_responses_server_repeating_assistant("unused").await;
     let home = RuntimeHome::new(&schema, &model_server.uri())?;
-    let unavailable_url = format!("postgresql://codex:{SECRET}@127.0.0.1:1/codex");
+    let configured_url = url::Url::parse(&std::env::var(DATABASE_URL_ENV)?)?;
+    let tls_query = configured_url
+        .query()
+        .context("PostgreSQL process contract URL must contain mTLS parameters")?;
+    let unavailable_url = format!("postgresql://{SECRET}@127.0.0.1:1/codex?{tls_query}");
     let mut app_server = TestAppServer::builder()
         .with_codex_home(home.path())
         .without_managed_config()

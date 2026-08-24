@@ -2,7 +2,6 @@ use anyhow::anyhow;
 use sqlx::ConnectOptions;
 use sqlx::postgres::PgConnectOptions;
 use std::fmt;
-use std::fs::File;
 use std::path::Path;
 use std::path::PathBuf;
 use url::ParseError;
@@ -173,7 +172,24 @@ fn validate_tls_file(
     path: &Path,
     source_name: &str,
 ) -> anyhow::Result<std::fs::Metadata> {
-    let file = File::open(path).map_err(|_| invalid_tls_file(source_name, parameter))?;
+    if !std::fs::metadata(path)
+        .map_err(|_| invalid_tls_file(source_name, parameter))?
+        .is_file()
+    {
+        return Err(invalid_tls_file(source_name, parameter));
+    }
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+    };
+    #[cfg(not(unix))]
+    let file = std::fs::File::open(path);
+    let file = file.map_err(|_| invalid_tls_file(source_name, parameter))?;
     let metadata = file
         .metadata()
         .map_err(|_| invalid_tls_file(source_name, parameter))?;

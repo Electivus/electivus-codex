@@ -5,6 +5,7 @@ use super::*;
 use pretty_assertions::assert_eq;
 use std::ffi::OsString;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 
 fn test_config() -> PostgresNamespaceConfig {
@@ -18,9 +19,6 @@ fn test_config() -> PostgresNamespaceConfig {
 
 struct MtlsFileFixture {
     root: PathBuf,
-    root_certificate: PathBuf,
-    client_certificate: PathBuf,
-    client_key: PathBuf,
 }
 
 impl MtlsFileFixture {
@@ -28,52 +26,30 @@ impl MtlsFileFixture {
         let root =
             std::env::temp_dir().join(format!("codex-postgres-mtls-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&root).expect("mTLS fixture directory should be created");
-        let root_certificate = root.join("root.pem");
-        let client_certificate = root.join("client.pem");
-        let client_key = root.join("client.key");
-        for path in [&root_certificate, &client_certificate, &client_key] {
-            fs::write(path, "test certificate material")
+        for name in ["root.pem", "client.pem", "client.key"] {
+            fs::write(root.join(name), "test certificate material")
                 .expect("mTLS fixture file should be written");
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
 
-            fs::set_permissions(&client_key, fs::Permissions::from_mode(0o600))
+            fs::set_permissions(root.join("client.key"), fs::Permissions::from_mode(0o600))
                 .expect("test client key permissions should be restricted");
         }
-        Self {
-            root,
-            root_certificate,
-            client_certificate,
-            client_key,
-        }
+        Self { root }
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.root.join(name)
     }
 
     fn tls_parameters(&self) -> Vec<(&'static str, String)> {
         vec![
             ("sslmode", "verify-full".to_string()),
-            (
-                "sslrootcert",
-                self.root_certificate
-                    .to_str()
-                    .expect("test root certificate path should be Unicode")
-                    .to_string(),
-            ),
-            (
-                "sslcert",
-                self.client_certificate
-                    .to_str()
-                    .expect("test client certificate path should be Unicode")
-                    .to_string(),
-            ),
-            (
-                "sslkey",
-                self.client_key
-                    .to_str()
-                    .expect("test client key path should be Unicode")
-                    .to_string(),
-            ),
+            ("sslrootcert", path_value(&self.path("root.pem"))),
+            ("sslcert", path_value(&self.path("client.pem"))),
+            ("sslkey", path_value(&self.path("client.key"))),
         ]
     }
 
@@ -96,6 +72,12 @@ impl Drop for MtlsFileFixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+fn path_value(path: &Path) -> String {
+    path.to_str()
+        .expect("test TLS path should be Unicode")
+        .to_string()
 }
 
 #[test]
@@ -190,23 +172,18 @@ fn mtls_connection_descriptor_rejects_noncanonical_url_identity() {
     let sentinel = "unique-url-sentinel.example.invalid";
     let parameters = files.tls_parameters();
     let accepted_url = files.connection_url(sentinel);
+    let with_tls = |base: &str| files.connection_url_with_parameters(base, &parameters);
     let query = accepted_url
         .split_once('?')
         .map(|(_, query)| query)
         .expect("accepted test URL should contain TLS parameters");
     let cases = [
         (
-            files.connection_url_with_parameters(
-                &format!("https://codex@{sentinel}/codex"),
-                &parameters,
-            ),
+            with_tls(&format!("https://codex@{sentinel}/codex")),
             "use the `postgres` or `postgresql` scheme",
         ),
         (
-            files.connection_url_with_parameters(
-                &format!("postgresql://{sentinel}/codex"),
-                &parameters,
-            ),
+            with_tls(&format!("postgresql://{sentinel}/codex")),
             "include a non-empty PostgreSQL user",
         ),
         (
@@ -214,17 +191,11 @@ fn mtls_connection_descriptor_rejects_noncanonical_url_identity() {
             "include a non-empty PostgreSQL host",
         ),
         (
-            files.connection_url_with_parameters(
-                &format!("postgresql://codex@{sentinel}"),
-                &parameters,
-            ),
+            with_tls(&format!("postgresql://codex@{sentinel}")),
             "include a non-empty PostgreSQL database",
         ),
         (
-            files.connection_url_with_parameters(
-                &format!("postgresql://codex:password@{sentinel}/codex"),
-                &parameters,
-            ),
+            with_tls(&format!("postgresql://codex:password@{sentinel}/codex")),
             "must not contain a password",
         ),
         (
@@ -247,6 +218,9 @@ fn mtls_connection_descriptor_rejects_noncanonical_url_identity() {
 
 #[test]
 fn mtls_connection_descriptor_requires_exactly_the_canonical_tls_parameters() {
+    const EXACT_PARAMETERS: &str =
+        "include exactly one each of `sslmode`, `sslrootcert`, `sslcert`, and `sslkey`";
+    const CANONICAL_PARAMETERS: &str = "contain only the canonical TLS parameters";
     let files = MtlsFileFixture::new();
     let sentinel = "unique-url-sentinel.example.invalid";
     let base = format!("postgresql://codex@{sentinel}/codex");
@@ -263,31 +237,14 @@ fn mtls_connection_descriptor_requires_exactly_the_canonical_tls_parameters() {
     password.push(("password", "must-not-be-accepted".to_string()));
     let mut wrong_mode = valid.clone();
     wrong_mode[0].1 = "verify-ca".to_string();
+    let url = |parameters| files.connection_url_with_parameters(&base, parameters);
     let cases = [
-        (
-            files.connection_url_with_parameters(&base, &missing),
-            "include exactly one each of `sslmode`, `sslrootcert`, `sslcert`, and `sslkey`",
-        ),
-        (
-            files.connection_url_with_parameters(&base, &duplicate),
-            "include exactly one each of `sslmode`, `sslrootcert`, `sslcert`, and `sslkey`",
-        ),
-        (
-            files.connection_url_with_parameters(&base, &alias),
-            "contain only the canonical TLS parameters",
-        ),
-        (
-            files.connection_url_with_parameters(&base, &unrelated),
-            "contain only the canonical TLS parameters",
-        ),
-        (
-            files.connection_url_with_parameters(&base, &password),
-            "contain only the canonical TLS parameters",
-        ),
-        (
-            files.connection_url_with_parameters(&base, &wrong_mode),
-            "set `sslmode` to `verify-full`",
-        ),
+        (url(&missing), EXACT_PARAMETERS),
+        (url(&duplicate), EXACT_PARAMETERS),
+        (url(&alias), CANONICAL_PARAMETERS),
+        (url(&unrelated), CANONICAL_PARAMETERS),
+        (url(&password), CANONICAL_PARAMETERS),
+        (url(&wrong_mode), "set `sslmode` to `verify-full`"),
     ];
 
     for (url, expected_reason) in cases {
@@ -311,18 +268,9 @@ fn mtls_connection_descriptor_requires_absolute_readable_regular_tls_files() {
     let mut empty_certificate = files.tls_parameters();
     empty_certificate[2].1.clear();
     let mut directory_key = files.tls_parameters();
-    directory_key[3].1 = files
-        .root
-        .to_str()
-        .expect("test fixture path should be Unicode")
-        .to_string();
+    directory_key[3].1 = path_value(&files.root);
     let mut missing_key = files.tls_parameters();
-    missing_key[3].1 = files
-        .root
-        .join("missing-unique-url-sentinel.key")
-        .to_str()
-        .expect("test fixture path should be Unicode")
-        .to_string();
+    missing_key[3].1 = path_value(&files.path("missing-unique-url-sentinel.key"));
     let cases = [
         (
             files.connection_url_with_parameters(&base, &relative_root),
@@ -355,11 +303,35 @@ fn mtls_connection_descriptor_requires_absolute_readable_regular_tls_files() {
 
 #[cfg(unix)]
 #[test]
+fn mtls_connection_descriptor_rejects_a_fifo_without_blocking() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let files = MtlsFileFixture::new();
+    let fifo = files.path("client-key.fifo");
+    let fifo_path = CString::new(fifo.as_os_str().as_bytes()).expect("FIFO path has no NUL");
+    // SAFETY: fifo_path is a valid NUL-terminated path owned for the duration of the call.
+    assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+    let mut parameters = files.tls_parameters();
+    parameters[3].1 = path_value(&fifo);
+    let url = files.connection_url_with_parameters(
+        "postgresql://codex@unique-url-sentinel.example.invalid/codex",
+        &parameters,
+    );
+
+    let error = resolve_connection_descriptor(&test_config(), |_| Some(url.into()))
+        .expect_err("a FIFO client key should be rejected");
+    assert!(error.to_string().contains("readable regular file"));
+}
+
+#[cfg(unix)]
+#[test]
 fn mtls_connection_descriptor_rejects_permissive_unix_key_without_changing_it() {
     use std::os::unix::fs::PermissionsExt;
 
     let files = MtlsFileFixture::new();
-    fs::set_permissions(&files.client_key, fs::Permissions::from_mode(0o640))
+    let client_key = files.path("client.key");
+    fs::set_permissions(&client_key, fs::Permissions::from_mode(0o640))
         .expect("test client key permissions should be changed");
     let url = files.connection_url("unique-url-sentinel.example.invalid");
 
@@ -371,7 +343,7 @@ fn mtls_connection_descriptor_rejects_permissive_unix_key_without_changing_it() 
             .to_string()
             .contains("client key must not grant any group or other permissions")
     );
-    let mode = fs::metadata(&files.client_key)
+    let mode = fs::metadata(client_key)
         .expect("test client key metadata should remain readable")
         .permissions()
         .mode()
