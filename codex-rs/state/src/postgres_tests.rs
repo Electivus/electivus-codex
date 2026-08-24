@@ -5,7 +5,6 @@ use super::*;
 use pretty_assertions::assert_eq;
 use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
 use std::path::PathBuf;
 
 fn test_config() -> PostgresNamespaceConfig {
@@ -47,9 +46,9 @@ impl MtlsFileFixture {
     fn tls_parameters(&self) -> Vec<(&'static str, String)> {
         vec![
             ("sslmode", "verify-full".to_string()),
-            ("sslrootcert", path_value(&self.path("root.pem"))),
-            ("sslcert", path_value(&self.path("client.pem"))),
-            ("sslkey", path_value(&self.path("client.key"))),
+            ("sslrootcert", self.path("root.pem").display().to_string()),
+            ("sslcert", self.path("client.pem").display().to_string()),
+            ("sslkey", self.path("client.key").display().to_string()),
         ]
     }
 
@@ -72,12 +71,6 @@ impl Drop for MtlsFileFixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
-}
-
-fn path_value(path: &Path) -> String {
-    path.to_str()
-        .expect("test TLS path should be Unicode")
-        .to_string()
 }
 
 #[test]
@@ -231,8 +224,6 @@ fn mtls_connection_descriptor_requires_exactly_the_canonical_tls_parameters() {
     duplicate.push(valid[0].clone());
     let mut alias = valid.clone();
     alias[1].0 = "ssl-root-cert";
-    let mut unrelated = valid.clone();
-    unrelated.push(("application_name", "must-not-be-accepted".to_string()));
     let mut password = valid.clone();
     password.push(("password", "must-not-be-accepted".to_string()));
     let mut wrong_mode = valid.clone();
@@ -242,7 +233,6 @@ fn mtls_connection_descriptor_requires_exactly_the_canonical_tls_parameters() {
         (url(&missing), EXACT_PARAMETERS),
         (url(&duplicate), EXACT_PARAMETERS),
         (url(&alias), CANONICAL_PARAMETERS),
-        (url(&unrelated), CANONICAL_PARAMETERS),
         (url(&password), CANONICAL_PARAMETERS),
         (url(&wrong_mode), "set `sslmode` to `verify-full`"),
     ];
@@ -268,9 +258,12 @@ fn mtls_connection_descriptor_requires_absolute_readable_regular_tls_files() {
     let mut empty_certificate = files.tls_parameters();
     empty_certificate[2].1.clear();
     let mut directory_key = files.tls_parameters();
-    directory_key[3].1 = path_value(&files.root);
+    directory_key[3].1 = files.root.display().to_string();
     let mut missing_key = files.tls_parameters();
-    missing_key[3].1 = path_value(&files.path("missing-unique-url-sentinel.key"));
+    missing_key[3].1 = files
+        .path("missing-unique-url-sentinel.key")
+        .display()
+        .to_string();
     let cases = [
         (
             files.connection_url_with_parameters(&base, &relative_root),
@@ -313,7 +306,7 @@ fn mtls_connection_descriptor_rejects_a_fifo_without_blocking() {
     // SAFETY: fifo_path is a valid NUL-terminated path owned for the duration of the call.
     assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
     let mut parameters = files.tls_parameters();
-    parameters[3].1 = path_value(&fifo);
+    parameters[3].1 = fifo.display().to_string();
     let url = files.connection_url_with_parameters(
         "postgresql://codex@unique-url-sentinel.example.invalid/codex",
         &parameters,

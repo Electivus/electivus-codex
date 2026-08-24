@@ -2878,7 +2878,7 @@
           "type": "string"
         },
         "url_env": {
-          "description": "Name of the environment variable containing the PostgreSQL connection URL.",
+          "description": "Name of the environment variable containing a passwordless PostgreSQL URL with `sslmode=verify-full` and absolute `sslrootcert`, `sslcert`, and `sslkey` paths.",
           "type": "string"
         }
       },
