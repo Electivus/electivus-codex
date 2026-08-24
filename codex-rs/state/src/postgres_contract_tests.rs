@@ -42,7 +42,7 @@ use std::time::Duration;
 const REPOSITORY_IDENTITY_MIGRATION_VERSION: i64 = 21;
 
 #[tokio::test]
-#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to a dedicated mTLS PostgreSQL 18 endpoint"]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
 async fn postgres_contract_pool_observes_mtls_session_evidence() -> Result<()> {
     let database_url = test_database_url()?;
     let mut fixture = PostgresContractFixture::new(database_url, "mtls_session_evidence")?;

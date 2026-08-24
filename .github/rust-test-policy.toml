@@ -1,7 +1,7 @@
 version = 1
 
 [postgres_contracts]
-database_count = 114
+database_count = 115
 process_count = 2
 packages = [
     "codex-app-server",
@@ -154,6 +154,7 @@ packages = [
 'codex-rs/state/src/postgres_contract_tests.rs::postgres_contract_migration_uses_namespace_advisory_lock::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/state/src/postgres_contract_tests.rs::postgres_contract_phase2_enqueue_and_claim_are_shared_between_replicas::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/state/src/postgres_contract_tests.rs::postgres_contract_phase2_success_matches_sqlite_across_replicas::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
+'codex-rs/state/src/postgres_contract_tests.rs::postgres_contract_pool_observes_mtls_session_evidence::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/state/src/postgres_contract_tests.rs::postgres_contract_remote_control_concurrent_upserts_keep_one_valid_record::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/state/src/postgres_contract_tests.rs::postgres_contract_remote_control_failures_are_backend_independent_and_sanitized::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/state/src/postgres_contract_tests.rs::postgres_contract_remote_control_is_shared_between_replicas::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
