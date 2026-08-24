@@ -543,8 +543,8 @@ pub enum StateToml {
 }
 
 /// PostgreSQL Runtime State Namespace configuration with exactly one connection source.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema)]
-#[serde(untagged, deny_unknown_fields)]
+#[derive(Serialize, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(untagged)]
 #[schemars(deny_unknown_fields)]
 pub enum PostgresqlStateToml {
     /// Preferred direct passwordless PostgreSQL mTLS Connection Descriptor.
@@ -573,6 +573,40 @@ pub enum PostgresqlStateToml {
         #[serde(default)]
         pool: PostgresqlStatePoolToml,
     },
+}
+
+#[derive(Deserialize)]
+struct PostgresqlStateTomlWire {
+    url: Option<String>,
+    url_env: Option<String>,
+    #[serde(default = "default_postgresql_state_schema")]
+    schema: String,
+    #[serde(default)]
+    pool: PostgresqlStatePoolToml,
+}
+
+impl<'de> Deserialize<'de> for PostgresqlStateToml {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = PostgresqlStateTomlWire::deserialize(deserializer)?;
+        match (wire.url, wire.url_env) {
+            (Some(url), None) => Ok(Self::Direct {
+                url,
+                schema: wire.schema,
+                pool: wire.pool,
+            }),
+            (None, Some(url_env)) => Ok(Self::Environment {
+                url_env,
+                schema: wire.schema,
+                pool: wire.pool,
+            }),
+            (Some(_), Some(_)) | (None, None) => Err(D::Error::custom(
+                "PostgreSQL Runtime State config must define exactly one of `url` or `url_env`",
+            )),
+        }
+    }
 }
 
 impl fmt::Debug for PostgresqlStateToml {
@@ -1213,6 +1247,32 @@ schema = "codex"
             toml::from_str::<ConfigToml>(config)
                 .expect_err("exactly one PostgreSQL connection source should be required");
         }
+    }
+
+    #[test]
+    fn postgresql_state_config_ignores_unrelated_fields_during_normal_deserialization() {
+        let config: ConfigToml = toml::from_str(
+            r#"
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+url_env = "CODEX_POSTGRES_URL"
+future_option = true
+"#,
+        )
+        .expect("ordinary config parsing should ignore unrelated PostgreSQL state fields");
+
+        assert_eq!(
+            config.state,
+            Some(StateToml::Postgresql {
+                postgresql: PostgresqlStateToml::Environment {
+                    url_env: "CODEX_POSTGRES_URL".to_string(),
+                    schema: "codex".to_string(),
+                    pool: PostgresqlStatePoolToml::default(),
+                },
+            })
+        );
     }
 
     #[test]

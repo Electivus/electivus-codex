@@ -94,6 +94,24 @@ fn merge_toml_values_at_path(base: &mut TomlValue, overlay: &TomlValue, path: &m
     if let TomlValue::Table(overlay_table) = overlay
         && let TomlValue::Table(base_table) = base
     {
+        // A higher layer that selects one PostgreSQL connection source replaces the other
+        // source instead of producing an invalid effective configuration.
+        if matches!(path.as_slice(), [state, postgresql] if state == "state" && postgresql == "postgresql")
+        {
+            match (
+                overlay_table.contains_key("url"),
+                overlay_table.contains_key("url_env"),
+            ) {
+                (true, false) => {
+                    base_table.remove("url_env");
+                }
+                (false, true) => {
+                    base_table.remove("url");
+                }
+                (true, true) | (false, false) => {}
+            }
+        }
+
         normalize_key_aliases(path, base_table);
         let mut overlay_table = overlay_table.clone();
         normalize_key_aliases(path, &mut overlay_table);
