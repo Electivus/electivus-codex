@@ -19,7 +19,6 @@ jobs:
         working-directory: codex-rs
     env:
       CARGO_INCREMENTAL: "0"
-      CODEX_TEST_POSTGRES_URL: postgresql://codex:codex-test@localhost:5432/codex_runtime_state_test
       NEXTEST_ARCHIVE_FILE: nextest-${{ inputs.artifact_id }}.tar.zst
       NEXTEST_JUNIT_FILE: ${{ github.workspace }}/codex-rs/target/nextest/default/junit.xml
       TEST_HELPERS_ARTIFACT: nextest-test-helpers-${{ inputs.artifact_id }}
@@ -44,6 +43,30 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-ci
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Configure passwordless PostgreSQL mTLS
+        shell: bash
+        run: |
+          set -euo pipefail
+          tls_dir="${RUNNER_TEMP}/postgres-mtls"
+          mkdir -p "${tls_dir}"
+          printf '%s\n' "CODEX_TEST_POSTGRES_URL=postgresql://codex@localhost:5432/codex_runtime_state_test?sslmode=verify-full&sslrootcert=${tls_dir}/ca.crt&sslcert=${tls_dir}/client.crt&sslkey=${tls_dir}/client.key" >> "${GITHUB_ENV}"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=Codex test CA" -keyout "${tls_dir}/ca.key" -out "${tls_dir}/ca.crt"
+          openssl req -newkey rsa:2048 -nodes -subj "/CN=localhost" -keyout "${tls_dir}/server.key" -out "${tls_dir}/server.csr"
+          openssl x509 -req -days 1 -sha256 -in "${tls_dir}/server.csr" -CA "${tls_dir}/ca.crt" -CAkey "${tls_dir}/ca.key" -CAcreateserial -out "${tls_dir}/server.crt" -extfile <(printf '%s\n' 'subjectAltName=DNS:localhost,IP:127.0.0.1' 'extendedKeyUsage=serverAuth')
+          openssl req -newkey rsa:2048 -nodes -subj "/CN=codex" -keyout "${tls_dir}/client.key" -out "${tls_dir}/client.csr"
+          openssl x509 -req -days 1 -sha256 -in "${tls_dir}/client.csr" -CA "${tls_dir}/ca.crt" -CAkey "${tls_dir}/ca.key" -CAserial "${tls_dir}/ca.srl" -out "${tls_dir}/client.crt" -extfile <(printf '%s\n' 'extendedKeyUsage=clientAuth')
+          chmod 600 "${tls_dir}/client.key" "${tls_dir}/server.key"
+
+          container="${{ job.services.postgres.id }}"
+          pgdata="$(docker exec "${container}" printenv PGDATA)"
+          for file in ca.crt server.crt server.key; do docker cp "${tls_dir}/${file}" "${container}:${pgdata}/${file}"; done
+          docker exec "${container}" chown postgres:postgres "${pgdata}/ca.crt" "${pgdata}/server.crt" "${pgdata}/server.key"
+          docker exec "${container}" chmod 600 "${pgdata}/server.key"
+          docker exec -u postgres "${container}" psql -U codex -d codex_runtime_state_test -v ON_ERROR_STOP=1 -c "ALTER SYSTEM SET ssl = 'on'" -c "ALTER SYSTEM SET ssl_ca_file = 'ca.crt'" -c "ALTER SYSTEM SET ssl_cert_file = 'server.crt'" -c "ALTER SYSTEM SET ssl_key_file = 'server.key'"
+          docker exec -u postgres "${container}" sh -c 'printf "%s\n" "local all all trust" "hostssl all all 0.0.0.0/0 cert" "hostssl all all ::/0 cert" "hostnossl all all 0.0.0.0/0 reject" "hostnossl all all ::/0 reject" > "$PGDATA/pg_hba.conf"'
+          docker restart "${container}"
+          for attempt in {1..30}; do docker exec "${container}" pg_isready -U codex -d codex_runtime_state_test && break; [[ "${attempt}" == 30 ]] && exit 1; sleep 1; done
 
       - name: Compute lockfile hash
         if: ${{ inputs.artifact_id == '' }}

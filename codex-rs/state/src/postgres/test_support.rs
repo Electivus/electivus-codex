@@ -4,8 +4,8 @@ use super::PostgresNamespaceConfig;
 use super::PostgresNamespaceStatus;
 use super::PostgresPoolConfig;
 use super::acquire_namespace_lock;
-use super::config::ResolvedUrl;
-use super::config::connect_pool_with_url;
+use super::config::connect_pool_with_descriptor;
+use super::connection_descriptor::PostgresMtlsConnectionDescriptor;
 use super::connection_failed;
 use super::manage_postgres_namespace_with_connection;
 use super::manage_postgres_namespace_with_pool;
@@ -45,7 +45,7 @@ pub(crate) fn test_database_url() -> anyhow::Result<String> {
 #[derive(Debug)]
 pub(crate) struct PostgresContractFixture {
     config: PostgresNamespaceConfig,
-    resolved_url: ResolvedUrl,
+    descriptor: PostgresMtlsConnectionDescriptor,
     cleanup_confirmed: bool,
 }
 
@@ -57,9 +57,11 @@ impl PostgresContractFixture {
             schema,
             PostgresPoolConfig::default(),
         )?;
+        let descriptor =
+            PostgresMtlsConnectionDescriptor::parse(&database_url, TEST_DATABASE_URL_ENV)?;
         Ok(Self {
             config,
-            resolved_url: ResolvedUrl(database_url),
+            descriptor,
             cleanup_confirmed: false,
         })
     }
@@ -178,7 +180,7 @@ impl PostgresContractFixture {
     }
 
     pub(crate) async fn connect_pool(&self) -> anyhow::Result<PgPool> {
-        connect_pool_with_url(&self.config, &self.resolved_url).await
+        connect_pool_with_descriptor(&self.config, &self.descriptor).await
     }
 
     pub(crate) async fn mark_runtime_ready_for_tests(&self) -> anyhow::Result<()> {

@@ -8,6 +8,10 @@ use sqlx::Transaction;
 
 #[path = "postgres/config.rs"]
 pub(crate) mod config;
+#[path = "postgres/connection_descriptor.rs"]
+mod connection_descriptor;
+#[path = "postgres/connection_validation.rs"]
+mod connection_validation;
 #[path = "postgres/initialize.rs"]
 mod initialize;
 #[path = "postgres/readiness.rs"]

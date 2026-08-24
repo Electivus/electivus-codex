@@ -980,7 +980,7 @@ Generated from `codex-rs/core/config.schema.json`. Dynamic table keys are shown 
 | `state.postgresql.pool.max_connections` | <code>integer</code> | _No description available._ |
 | `state.postgresql.pool.statement_timeout_ms` | <code>integer</code> | _No description available._ |
 | `state.postgresql.schema` | <code>string</code> | PostgreSQL schema containing this Runtime State Namespace. |
-| `state.postgresql.url_env` | <code>string</code> | Name of the environment variable containing the PostgreSQL connection URL. |
+| `state.postgresql.url_env` | <code>string</code> | Name of the environment variable containing a passwordless PostgreSQL URL with `sslmode=verify-full` and absolute `sslrootcert`, `sslcert`, and `sslkey` paths. |
 | `suppress_unstable_features_warning` | <code>boolean</code> | Suppress warnings about unstable (under development) features. |
 | `tool_execution` | <code>table</code> | Timing policy for model-controlled command execution. |
 | `tool_execution.timeout` | <code>table</code> | Hard command deadline range. Omitted fields use 10000 / 600000 / 3600000 ms. |

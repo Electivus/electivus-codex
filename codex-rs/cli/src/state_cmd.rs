@@ -44,7 +44,7 @@ enum PostgresSchemaAction {
 
 #[derive(Debug, Args)]
 struct PostgresNamespaceArgs {
-    /// Environment variable containing the PostgreSQL connection URL.
+    /// Environment variable containing a passwordless PostgreSQL URL with `sslmode=verify-full` and absolute `sslrootcert`, `sslcert`, and `sslkey` paths.
     #[arg(long, value_name = "ENV_VAR")]
     url_env: String,
 

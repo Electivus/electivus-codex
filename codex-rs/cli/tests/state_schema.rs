@@ -39,7 +39,7 @@ fn state_schema_errors_never_print_the_connection_url() -> Result<()> {
         .assert()
         .failure()
         .stderr(
-            contains("does not contain a valid PostgreSQL connection URL")
+            contains("does not contain a valid passwordless mTLS Connection Descriptor")
                 .and(contains(secret_url).not())
                 .and(contains("super-secret-password").not()),
         );

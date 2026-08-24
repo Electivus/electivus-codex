@@ -43,6 +43,23 @@ const REPOSITORY_IDENTITY_MIGRATION_VERSION: i64 = 21;
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+async fn postgres_contract_pool_observes_mtls_session_evidence() -> Result<()> {
+    let database_url = test_database_url()?;
+    let mut fixture = PostgresContractFixture::new(database_url, "mtls_session_evidence")?;
+    let pool = fixture.connect_pool().await?;
+    let valid_evidence = sqlx::query_scalar::<_, bool>(
+        "SELECT ssl AND NULLIF(BTRIM(client_dn), '') IS NOT NULL FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(valid_evidence);
+
+    pool.close().await;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
 async fn postgres_contract_runtime_reads_resume_metadata_and_deletes_integrally() -> Result<()> {
     let database_url = test_database_url()?;
     let mut fixture = PostgresContractFixture::new(database_url, "runtime_lifecycle")?;

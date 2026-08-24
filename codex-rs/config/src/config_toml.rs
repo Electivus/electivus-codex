@@ -545,7 +545,7 @@ pub enum StateToml {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct PostgresqlStateToml {
-    /// Name of the environment variable containing the PostgreSQL connection URL.
+    /// Name of the environment variable containing a passwordless PostgreSQL URL with `sslmode=verify-full` and absolute `sslrootcert`, `sslcert`, and `sslkey` paths.
     pub url_env: String,
 
     /// PostgreSQL schema containing this Runtime State Namespace.
