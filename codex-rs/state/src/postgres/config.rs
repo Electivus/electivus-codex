@@ -61,8 +61,19 @@ pub struct PostgresNamespaceConfig {
 
 #[derive(Clone, Eq, PartialEq)]
 pub(super) enum PostgresConnectionSource {
-    Direct { url: String },
-    Environment { url_env: String },
+    Direct {
+        url: String,
+        origin: DirectUrlOrigin,
+    },
+    Environment {
+        url_env: String,
+    },
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum DirectUrlOrigin {
+    StableConfig,
+    CommandLine,
 }
 
 impl fmt::Debug for PostgresConnectionSource {
@@ -97,9 +108,27 @@ impl PostgresNamespaceConfig {
         schema: String,
         pool: PostgresPoolConfig,
     ) -> anyhow::Result<Self> {
+        Self::new_with_direct_url(url, schema, pool, DirectUrlOrigin::StableConfig)
+    }
+
+    /// Retains a direct CLI URL behind redacting debug output for descriptor validation.
+    pub fn new_with_cli_url(
+        url: String,
+        schema: String,
+        pool: PostgresPoolConfig,
+    ) -> anyhow::Result<Self> {
+        Self::new_with_direct_url(url, schema, pool, DirectUrlOrigin::CommandLine)
+    }
+
+    fn new_with_direct_url(
+        url: String,
+        schema: String,
+        pool: PostgresPoolConfig,
+        origin: DirectUrlOrigin,
+    ) -> anyhow::Result<Self> {
         validate_schema_name(&schema)?;
         Ok(Self {
-            connection: PostgresConnectionSource::Direct { url },
+            connection: PostgresConnectionSource::Direct { url, origin },
             schema,
             pool,
         })
@@ -171,7 +200,7 @@ pub(super) fn resolve_connection_descriptor(
     get_environment_variable: impl FnOnce(&str) -> Option<OsString>,
 ) -> anyhow::Result<PostgresMtlsConnectionDescriptor> {
     match &config.connection {
-        PostgresConnectionSource::Direct { url } => {
+        PostgresConnectionSource::Direct { url, .. } => {
             PostgresMtlsConnectionDescriptor::parse(url, &config.connection)
         }
         PostgresConnectionSource::Environment { url_env } => {
@@ -212,9 +241,14 @@ fn validate_schema_name(schema: &str) -> anyhow::Result<()> {
 
 pub(crate) fn connection_failed(config: &PostgresNamespaceConfig) -> anyhow::Error {
     match &config.connection {
-        PostgresConnectionSource::Direct { .. } => anyhow!(
-            "could not connect to PostgreSQL using direct `state.postgresql.url`; check the mTLS descriptor, TLS files, session evidence, and network reachability"
-        ),
+        PostgresConnectionSource::Direct { origin, .. } => match origin {
+            DirectUrlOrigin::StableConfig => anyhow!(
+                "could not connect to PostgreSQL using direct `state.postgresql.url`; check the mTLS descriptor, TLS files, session evidence, and network reachability"
+            ),
+            DirectUrlOrigin::CommandLine => anyhow!(
+                "could not connect to PostgreSQL using the direct `--url` override; check the mTLS descriptor, TLS files, session evidence, and network reachability"
+            ),
+        },
         PostgresConnectionSource::Environment { url_env } => anyhow!(
             "could not connect to PostgreSQL using environment variable `{url_env}`; check the mTLS descriptor, TLS files, session evidence, and network reachability"
         ),

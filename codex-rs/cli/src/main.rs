@@ -1612,7 +1612,7 @@ async fn cli_main(
                 root_remote_auth_token_env.as_deref(),
                 "state",
             )?;
-            state_cmd::run(state_command).await?;
+            state_cmd::run(state_command, root_config_overrides).await?;
         }
         Some(Subcommand::Cloud(mut cloud_cli)) => {
             reject_remote_mode_for_subcommand(
