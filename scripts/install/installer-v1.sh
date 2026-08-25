@@ -24,6 +24,9 @@ resolved_channel=""
 installer_digest=""
 manifest_digest=""
 download_pid=""
+download_reader_pid=""
+active_download_pipe=""
+cleanup_done=false
 
 usage() {
   cat <<'EOF'
@@ -121,6 +124,29 @@ require_command() {
   }
 }
 
+stop_active_download() {
+  if [ -n "$download_reader_pid" ]; then
+    kill "$download_reader_pid" 2>/dev/null || true
+  fi
+  if [ -n "$download_pid" ]; then
+    kill "$download_pid" 2>/dev/null || true
+  fi
+  if [ -n "$download_reader_pid" ]; then
+    kill -KILL "$download_reader_pid" 2>/dev/null || true
+    wait "$download_reader_pid" 2>/dev/null || true
+    download_reader_pid=""
+  fi
+  if [ -n "$download_pid" ]; then
+    kill -KILL "$download_pid" 2>/dev/null || true
+    wait "$download_pid" 2>/dev/null || true
+    download_pid=""
+  fi
+  if [ -n "$active_download_pipe" ]; then
+    rm -f "$active_download_pipe"
+    active_download_pipe=""
+  fi
+}
+
 download_file() {
   url="$1"
   output="$2"
@@ -129,24 +155,23 @@ download_file() {
   download_pipe="$tmp_dir/download.$$.fifo"
   rm -f "$download_pipe"
   mkfifo "$download_pipe"
+  active_download_pipe="$download_pipe"
   curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
     --connect-timeout 10 --max-time 300 "$url" >"$download_pipe" &
   download_pid=$!
   head_status=0
-  head -c $((max_bytes + 1)) "$download_pipe" >"$output" || head_status=$?
+  head -c $((max_bytes + 1)) "$download_pipe" >"$output" &
+  download_reader_pid=$!
+  wait "$download_reader_pid" || head_status=$?
+  download_reader_pid=""
   if [ "$head_status" -ne 0 ]; then
-    kill "$download_pid" 2>/dev/null || true
-    wait "$download_pid" 2>/dev/null || true
-    download_pid=""
-    rm -f "$download_pipe" "$output"
+    stop_active_download
+    rm -f "$output"
     return 1
   fi
   downloaded_bytes="$(wc -c <"$output" | tr -d ' ')"
   if [ "$downloaded_bytes" -gt "$max_bytes" ]; then
-    kill "$download_pid" 2>/dev/null || true
-    wait "$download_pid" 2>/dev/null || true
-    download_pid=""
-    rm -f "$download_pipe"
+    stop_active_download
     rm -f "$output"
     echo "Download from $url exceeded the $max_bytes-byte safety limit." >&2
     return 1
@@ -156,6 +181,7 @@ download_file() {
   wait "$download_pid" || curl_status=$?
   download_pid=""
   rm -f "$download_pipe"
+  active_download_pipe=""
   if [ "$curl_status" -ne 0 ]; then
     rm -f "$output"
     return 1
@@ -221,6 +247,7 @@ resolve_release() {
   selection_path="$tmp_dir/selection"
   if ! python3 - "$requested_kind" "$requested_version" "$tmp_dir/metadata" >"$selection_path" <<'PY'
 import functools
+from datetime import datetime
 import json
 from pathlib import Path
 import re
@@ -242,6 +269,10 @@ semver_pattern = re.compile(
     r"(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)"
     r"(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
+published_at_pattern = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})"
 )
 
 
@@ -274,10 +305,23 @@ def compare_versions(left, right):
     return (len(left_pre) > len(right_pre)) - (len(left_pre) < len(right_pre))
 
 
+def valid_published_at(value):
+    if not isinstance(value, str) or published_at_pattern.fullmatch(value) is None:
+        return False
+    if int(value[11:13]) > 23 or int(value[14:16]) > 59 or int(value[17:19]) > 59:
+        return False
+    normalized = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+    try:
+        datetime.fromisoformat(normalized)
+    except ValueError:
+        return False
+    return True
+
+
 def candidate(release):
     if not isinstance(release, dict) or release.get("draft") is not False:
         return None
-    if not isinstance(release.get("published_at"), str) or not release["published_at"]:
+    if not valid_published_at(release.get("published_at")):
         return None
     tag = release.get("tag_name")
     if not isinstance(tag, str) or not tag.startswith("electivus-v"):
@@ -469,14 +513,21 @@ require_command head
 require_command mkfifo
 tmp_dir="$(mktemp -d)"
 cleanup() {
-  if [ -n "$download_pid" ]; then
-    kill "$download_pid" 2>/dev/null || true
-    wait "$download_pid" 2>/dev/null || true
-    download_pid=""
-  fi
+  [ "$cleanup_done" = false ] || return
+  cleanup_done=true
+  trap - EXIT HUP INT TERM
+  stop_active_download
   rm -rf "$tmp_dir"
 }
-trap cleanup EXIT INT TERM HUP
+handle_signal() {
+  signal_status="$1"
+  cleanup
+  exit "$signal_status"
+}
+trap cleanup EXIT
+trap 'handle_signal 129' HUP
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
 
 fetch_metadata
 resolve_release

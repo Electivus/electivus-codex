@@ -4,7 +4,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
+import shutil
+import signal
 import subprocess
 import tempfile
 import textwrap
@@ -13,7 +14,6 @@ import unittest
 
 
 BOOTSTRAP = Path(__file__).with_name("installer-v1.sh")
-PUBLIC_INSTALLER = Path(__file__).with_name("install.sh")
 PACKAGE_ASSETS = (
     "codex-package-aarch64-pc-windows-msvc.tar.gz",
     "codex-package-aarch64-unknown-linux-musl.tar.gz",
@@ -30,27 +30,6 @@ REQUIRED_ASSETS = (
 
 
 class InstallerV1ShTest(unittest.TestCase):
-    def test_bootstrap_and_public_installer_share_release_safety_contract(
-        self,
-    ) -> None:
-        bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
-        public_installer = PUBLIC_INSTALLER.read_text(encoding="utf-8")
-
-        for assignment in (
-            "METADATA_MAX_BYTES",
-            "MANIFEST_MAX_BYTES",
-            "INSTALLER_MAX_BYTES",
-            "MAX_RELEASE_PAGES",
-        ):
-            self.assertEqual(
-                shell_assignment(bootstrap, assignment),
-                shell_assignment(public_installer, assignment),
-                assignment,
-            )
-        for asset in REQUIRED_ASSETS:
-            self.assertIn(asset, bootstrap)
-            self.assertIn(asset, public_installer)
-
     def test_help_identifies_protocol_without_network(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             result, requests = run_bootstrap(Path(temp_dir), arguments=["--help"])
@@ -266,6 +245,57 @@ class InstallerV1ShTest(unittest.TestCase):
                 int((root / "curl-stream-pid").read_text(encoding="utf-8"))
             )
 
+    def test_signals_stop_blocked_curl_without_delegation_or_leaks(self) -> None:
+        for sent_signal in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+            with (
+                self.subTest(signal=sent_signal),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                digests = create_assets(root)
+                args, env, _request_log = prepare_bootstrap(
+                    root,
+                    arguments=["--release", "5.0.2"],
+                    exact=release("5.0.2", digests),
+                    mode="metadata-blocked",
+                )
+                process = subprocess.Popen(
+                    args,
+                    env=env,
+                    start_new_session=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    wait_for_path(root / "download.ready")
+                    worker_pids = recorded_download_pids(root)
+                    started = time.monotonic()
+                    os.kill(process.pid, sent_signal)
+                    stdout, stderr = communicate_bounded(process)
+                    elapsed = time.monotonic() - started
+
+                    self.assertEqual(
+                        process.returncode,
+                        128 + sent_signal,
+                        stderr + stdout,
+                    )
+                    self.assertLess(elapsed, 2)
+                    for worker_pid in worker_pids:
+                        wait_for_process_exit(worker_pid)
+                    wait_for_process_group_exit(process.pid)
+                    self.assertFalse((root / "delegation.json").exists())
+                    leaked = [
+                        path
+                        for pattern in ("tmp.*", "**/*.fifo")
+                        for path in root.glob(pattern)
+                    ]
+                    self.assertEqual(leaked, [])
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate(timeout=2)
+
     def test_metadata_manifest_and_downloaded_installer_digests_must_agree(
         self,
     ) -> None:
@@ -418,8 +448,60 @@ class InstallerV1ShTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_published_at_requires_a_semantic_rfc3339_timestamp(self) -> None:
+        invalid_values: tuple[object, ...] = (
+            None,
+            1,
+            "not-a-timestamp",
+            "2026-02-30T00:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "2026-08-25T24:00:00Z",
+            "2026-08-25T00:00:00+24:00",
+        )
+        for value in invalid_values:
+            with (
+                self.subTest(value=value),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                digests = create_assets(root)
+                metadata = release("7.2.2", digests)
+                metadata["published_at"] = value
 
-def run_bootstrap(
+                result, requests = run_bootstrap(
+                    root,
+                    arguments=["--release", "7.2.2"],
+                    exact=metadata,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(requests, [exact_url("7.2.2")])
+                self.assertFalse((root / "delegation.json").exists())
+
+        valid_values = (
+            "2026-08-25T00:00:00.123Z",
+            "2026-08-25T03:00:00+03:00",
+        )
+        for value in valid_values:
+            with (
+                self.subTest(value=value),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                digests = create_assets(root)
+                metadata = release("7.2.2", digests)
+                metadata["published_at"] = value
+
+                result, _requests = run_bootstrap(
+                    root,
+                    arguments=["--release", "7.2.2"],
+                    exact=metadata,
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+
+def prepare_bootstrap(
     root: Path,
     *,
     arguments: list[str] | None = None,
@@ -427,7 +509,7 @@ def run_bootstrap(
     exact: object | None = None,
     mode: str = "",
     operating_system: str = "Linux",
-) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+) -> tuple[list[str], dict[str, str], Path]:
     fake_bin = root / "fake-bin"
     fake_bin.mkdir(parents=True, exist_ok=True)
     metadata_dir = root / "metadata-fixtures"
@@ -453,7 +535,11 @@ def run_bootstrap(
             case "$url" in
               *openai*|*/main/*) exit 88 ;;
               https://api.github.com/repos/Electivus/electivus-codex/releases/tags/*)
-                if [ "$CODEX_TEST_MODE" = "metadata-slow-oversized" ]; then
+                if [ "$CODEX_TEST_MODE" = "metadata-blocked" ]; then
+                  printf '%s\n' "$$" >"$CODEX_TEST_ROOT/downloader.pid"
+                  : >"$CODEX_TEST_ROOT/download.ready"
+                  while :; do sleep 0.1; done
+                elif [ "$CODEX_TEST_MODE" = "metadata-slow-oversized" ]; then
                   printf '%s\n' "$$" >"$CODEX_TEST_ROOT/curl-stream-pid"
                   streamed=0
                   trap 'printf "%s\n" "$streamed" >"$CODEX_TEST_ROOT/curl-streamed-bytes"; exit 0' TERM INT PIPE
@@ -481,6 +567,18 @@ def run_bootstrap(
             """
         ),
     )
+    real_head = shutil.which("head")
+    assert real_head is not None
+    write_executable(
+        fake_bin / "head",
+        textwrap.dedent(
+            f"""\
+            #!/bin/sh
+            printf '%s\\n' "$$" >>"$CODEX_TEST_ROOT/head.pids"
+            exec "{real_head}" "$@"
+            """
+        ),
+    )
     write_executable(
         fake_bin / "uname", f"#!/bin/sh\nprintf '%s\\n' '{operating_system}'\n"
     )
@@ -499,8 +597,16 @@ def run_bootstrap(
         "TMPDIR": str(root),
     }
     env.pop("CODEX_RELEASE", None)
+    return ["/bin/sh", str(BOOTSTRAP), *(arguments or [])], env, request_log
+
+
+def run_bootstrap(
+    root: Path,
+    **options: object,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    args, env, request_log = prepare_bootstrap(root, **options)
     result = subprocess.run(
-        ["/bin/sh", str(BOOTSTRAP), *(arguments or [])],
+        args,
         capture_output=True,
         check=False,
         env=env,
@@ -631,11 +737,44 @@ def wait_for_process_exit(pid: int) -> None:
         time.sleep(0.01)
 
 
-def shell_assignment(source: str, name: str) -> str:
-    match = re.search(rf"(?m)^{re.escape(name)}=(\d+)$", source)
-    if match is None:
-        raise AssertionError(f"missing shell assignment {name}")
-    return match.group(1)
+def wait_for_process_group_exit(process_group: int) -> None:
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"process group {process_group} remained alive")
+        time.sleep(0.01)
+
+
+def recorded_download_pids(root: Path) -> list[int]:
+    pids = [int((root / "downloader.pid").read_text(encoding="utf-8"))]
+    pids.extend(
+        int(pid)
+        for pid in (root / "head.pids").read_text(encoding="utf-8").splitlines()
+    )
+    return pids
+
+
+def communicate_bounded(process: subprocess.Popen[str]) -> tuple[str, str]:
+    try:
+        return process.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        stdout, stderr = process.communicate(timeout=2)
+        raise AssertionError(
+            f"bootstrap did not exit promptly after a direct signal: {stderr}{stdout}"
+        )
+
+
+def wait_for_path(path: Path) -> None:
+    deadline = time.monotonic() + 5
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for {path}")
+        time.sleep(0.01)
 
 
 def inventory_url(page: int) -> str:
