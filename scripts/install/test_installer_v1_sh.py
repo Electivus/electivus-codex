@@ -1,0 +1,465 @@
+#!/usr/bin/env python3
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import textwrap
+import unittest
+
+
+BOOTSTRAP = Path(__file__).with_name("installer-v1.sh")
+PACKAGE_ASSETS = (
+    "codex-package-aarch64-pc-windows-msvc.tar.gz",
+    "codex-package-aarch64-unknown-linux-musl.tar.gz",
+    "codex-package-x86_64-pc-windows-msvc.tar.gz",
+    "codex-package-x86_64-unknown-linux-musl.tar.gz",
+)
+REQUIRED_ASSETS = (
+    *PACKAGE_ASSETS,
+    "codex-package_SHA256SUMS",
+    "install.sh",
+    "install.ps1",
+    "installer_SHA256SUMS",
+)
+
+
+class InstallerV1ShTest(unittest.TestCase):
+    def test_help_identifies_protocol_without_network(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result, requests = run_bootstrap(Path(temp_dir), arguments=["--help"])
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Electivus Installer protocol v1", result.stdout)
+            self.assertEqual(requests, [])
+
+    def test_stable_default_selects_greatest_complete_stable_and_delegates_exactly(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_assets(root)
+            inventory = [
+                release("9.0.0-alpha.1", digests),
+                release("1.9.0", digests),
+                release("2.0.0", digests),
+                release("99.0.0", digests, draft=True),
+                release("3.0.0", digests, omit={"install.ps1"}),
+            ]
+
+            result, requests = run_bootstrap(root, inventory=inventory)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                read_delegation(root),
+                {
+                    "arguments": [
+                        "--release",
+                        "2.0.0",
+                        "--channel",
+                        "stable",
+                        "--installer-protocol",
+                        "installer-v1",
+                    ],
+                    "release": "2.0.0",
+                    "channel": "stable",
+                    "protocol": "installer-v1",
+                    "non_interactive": "1",
+                },
+            )
+            self.assertEqual(
+                requests,
+                [
+                    inventory_url(1),
+                    asset_url("2.0.0", "installer_SHA256SUMS"),
+                    asset_url("2.0.0", "install.sh"),
+                ],
+            )
+            assert_fork_only_requests(requests)
+
+    def test_stable_absence_reports_explicit_prerelease_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_assets(root)
+
+            result, requests = run_bootstrap(
+                root,
+                inventory=[release("2.0.0-alpha.1", digests)],
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "installer-v1.sh --release pre-release",
+                result.stderr,
+            )
+            self.assertEqual(requests, [inventory_url(1)])
+            self.assertFalse((root / "delegation.json").exists())
+
+    def test_prerelease_uses_full_numeric_semver_precedence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_assets(root)
+            inventory = [
+                release("2.0.0-alpha.9", digests),
+                release("2.0.0-alpha.12", digests),
+                release("1.0.0", digests),
+            ]
+
+            result, requests = run_bootstrap(
+                root,
+                arguments=["--release", "pre-release"],
+                inventory=inventory,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(read_delegation(root)["release"], "2.0.0-alpha.12")
+            self.assertEqual(read_delegation(root)["channel"], "pre-release")
+            self.assertEqual(
+                requests[-1],
+                asset_url("2.0.0-alpha.12", "install.sh"),
+            )
+            assert_fork_only_requests(requests)
+
+    def test_bare_and_tag_exact_selectors_use_the_same_exact_release(self) -> None:
+        for selector in ("3.4.5", "electivus-v3.4.5"):
+            with (
+                self.subTest(selector=selector),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                digests = create_assets(root)
+                metadata = release("3.4.5", digests)
+
+                result, requests = run_bootstrap(
+                    root,
+                    arguments=["--release", selector],
+                    exact=metadata,
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(read_delegation(root)["release"], "3.4.5")
+                self.assertEqual(
+                    requests,
+                    [
+                        exact_url("3.4.5"),
+                        asset_url("3.4.5", "installer_SHA256SUMS"),
+                        asset_url("3.4.5", "install.sh"),
+                    ],
+                )
+                assert_fork_only_requests(requests)
+
+    def test_invalid_draft_malformed_and_incomplete_releases_fail_closed(self) -> None:
+        cases: tuple[tuple[str, object], ...] = (
+            ("draft", None),
+            ("malformed-json", '{"tag_name":'),
+            ("incomplete", None),
+            ("wrong-tag", None),
+        )
+        for case, raw_metadata in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                digests = create_assets(root)
+                if raw_metadata is not None:
+                    metadata = raw_metadata
+                elif case == "draft":
+                    metadata = release("4.0.0", digests, draft=True)
+                elif case == "incomplete":
+                    metadata = release("4.0.0", digests, omit={"install.ps1"})
+                else:
+                    metadata = release("4.0.1", digests)
+
+                result, requests = run_bootstrap(
+                    root,
+                    arguments=["--release", "4.0.0"],
+                    exact=metadata,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(requests, [exact_url("4.0.0")])
+                self.assertFalse((root / "delegation.json").exists())
+                assert_fork_only_requests(requests)
+
+        for selector in ("latest", "rust-v4.0.0", "v4.0.0", "0.0.0", "4.0"):
+            with (
+                self.subTest(selector=selector),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                result, requests = run_bootstrap(
+                    Path(temp_dir),
+                    arguments=["--release", selector],
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(requests, [])
+
+    def test_metadata_and_installer_body_limits_fail_before_delegation(self) -> None:
+        for mode, expected_limit in (
+            ("metadata-oversized", "1048576-byte safety limit"),
+            ("installer-oversized", "4194304-byte safety limit"),
+        ):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                installer = b"x" * 4194305 if mode == "installer-oversized" else None
+                digests = create_assets(root, installer=installer)
+
+                result, requests = run_bootstrap(
+                    root,
+                    arguments=["--release", "5.0.0"],
+                    exact=release("5.0.0", digests),
+                    mode=mode,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected_limit, result.stderr)
+                self.assertFalse((root / "delegation.json").exists())
+                assert_fork_only_requests(requests)
+
+    def test_metadata_manifest_and_downloaded_installer_digests_must_agree(
+        self,
+    ) -> None:
+        for case in ("metadata-disagreement", "corrupt-manifest", "corrupt-installer"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                digests = create_assets(root)
+                metadata_digests = dict(digests)
+                if case == "metadata-disagreement":
+                    metadata_digests["install.sh"] = "0" * 64
+                elif case == "corrupt-manifest":
+                    (root / "assets/installer_SHA256SUMS").write_text(
+                        "corrupt\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    (root / "assets/install.sh").write_bytes(b"corrupt\n")
+
+                result, requests = run_bootstrap(
+                    root,
+                    arguments=["--release", "6.0.0"],
+                    exact=release("6.0.0", metadata_digests),
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((root / "delegation.json").exists())
+                if case == "metadata-disagreement":
+                    self.assertIn("digest disagreement for install.sh", result.stderr)
+                    self.assertNotIn(asset_url("6.0.0", "install.sh"), requests)
+                else:
+                    self.assertIn("SHA-256 mismatch", result.stderr)
+                assert_fork_only_requests(requests)
+
+    def test_inventory_page_and_platform_bounds_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_assets(root)
+            full_page = [release(f"7.0.{index}", digests) for index in range(100)]
+
+            result, requests = run_bootstrap(root, inventory=full_page)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("4-page safety limit", result.stderr)
+            self.assertEqual(requests, [inventory_url(page) for page in range(1, 5)])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result, requests = run_bootstrap(Path(temp_dir), operating_system="Darwin")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("does not support macOS", result.stderr)
+            self.assertEqual(requests, [])
+
+
+def run_bootstrap(
+    root: Path,
+    *,
+    arguments: list[str] | None = None,
+    inventory: list[dict[str, object]] | None = None,
+    exact: object | None = None,
+    mode: str = "",
+    operating_system: str = "Linux",
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    fake_bin = root / "fake-bin"
+    fake_bin.mkdir(parents=True, exist_ok=True)
+    request_log = root / "requests.log"
+    write_executable(
+        fake_bin / "curl",
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            url=""
+            output=""
+            previous=""
+            for argument in "$@"; do
+              case "$argument" in https://*) url="$argument" ;; esac
+              if [ "$previous" = "-o" ]; then output="$argument"; fi
+              previous="$argument"
+            done
+            printf '%s\n' "$url" >>"$CODEX_TEST_REQUEST_LOG"
+            case "$url" in
+              *openai*|*/main/*) exit 88 ;;
+              https://api.github.com/repos/Electivus/electivus-codex/releases/tags/*)
+                if [ "$CODEX_TEST_MODE" = "metadata-oversized" ]; then
+                  dd if=/dev/zero bs=1048577 count=1 2>/dev/null | tr '\\000' x >"$output"
+                else
+                  printf '%s\n' "$CODEX_TEST_EXACT" >"$output"
+                fi
+                ;;
+              'https://api.github.com/repos/Electivus/electivus-codex/releases?per_page=100&page='*)
+                printf '%s\n' "$CODEX_TEST_INVENTORY" >"$output"
+                ;;
+              https://github.com/Electivus/electivus-codex/releases/download/*)
+                cp "$CODEX_TEST_ASSETS/${url##*/}" "$output"
+                ;;
+              *) exit 89 ;;
+            esac
+            """
+        ),
+    )
+    write_executable(
+        fake_bin / "uname", f"#!/bin/sh\nprintf '%s\\n' '{operating_system}'\n"
+    )
+    home = root / "home"
+    home.mkdir(exist_ok=True)
+    env = {
+        **os.environ,
+        "CODEX_TEST_ASSETS": str(root / "assets"),
+        "CODEX_TEST_DELEGATION": str(root / "delegation.json"),
+        "CODEX_TEST_EXACT": exact
+        if isinstance(exact, str)
+        else json.dumps(exact or {}),
+        "CODEX_TEST_INVENTORY": json.dumps(inventory or []),
+        "CODEX_TEST_MODE": mode,
+        "CODEX_TEST_REQUEST_LOG": str(request_log),
+        "HOME": str(home),
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "TMPDIR": str(root),
+    }
+    env.pop("CODEX_RELEASE", None)
+    result = subprocess.run(
+        ["/bin/sh", str(BOOTSTRAP), *(arguments or [])],
+        capture_output=True,
+        check=False,
+        env=env,
+        text=True,
+    )
+    requests = (
+        request_log.read_text(encoding="utf-8").splitlines()
+        if request_log.exists()
+        else []
+    )
+    return result, requests
+
+
+def create_assets(root: Path, *, installer: bytes | None = None) -> dict[str, str]:
+    assets = root / "assets"
+    assets.mkdir()
+    installer_path = assets / "install.sh"
+    installer_path.write_bytes(installer or DELEGATING_INSTALLER.encode())
+    (assets / "install.ps1").write_text("# installer fixture\n", encoding="utf-8")
+    installer_digests = {
+        name: sha256(assets / name) for name in ("install.sh", "install.ps1")
+    }
+    manifest = assets / "installer_SHA256SUMS"
+    manifest.write_text(
+        "".join(
+            f"{installer_digests[name]}  {name}\n"
+            for name in ("install.sh", "install.ps1")
+        ),
+        encoding="utf-8",
+    )
+    digests = {
+        name: hashlib.sha256(name.encode()).hexdigest() for name in PACKAGE_ASSETS
+    }
+    digests["codex-package_SHA256SUMS"] = hashlib.sha256(b"packages").hexdigest()
+    return {
+        **digests,
+        **installer_digests,
+        "installer_SHA256SUMS": sha256(manifest),
+    }
+
+
+DELEGATING_INSTALLER = """#!/bin/sh
+python3 - "$@" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+Path(os.environ["CODEX_TEST_DELEGATION"]).write_text(
+    json.dumps(
+        {
+            "arguments": sys.argv[1:],
+            "release": os.environ.get("CODEX_RELEASE"),
+            "channel": os.environ.get("CODEX_UPDATE_CHANNEL"),
+            "protocol": os.environ.get("CODEX_INSTALLER_PROTOCOL"),
+            "non_interactive": os.environ.get("CODEX_NON_INTERACTIVE"),
+        }
+    ),
+    encoding="utf-8",
+)
+PY
+"""
+
+
+def release(
+    version: str,
+    digests: dict[str, str],
+    *,
+    draft: bool = False,
+    omit: set[str] | None = None,
+) -> dict[str, object]:
+    omitted = omit or set()
+    return {
+        "tag_name": f"electivus-v{version}",
+        "draft": draft,
+        "prerelease": "-" in version.split("+", 1)[0],
+        "published_at": "2026-08-25T00:00:00Z",
+        "assets": [
+            {"name": name, "digest": f"sha256:{digests[name]}"}
+            for name in REQUIRED_ASSETS
+            if name not in omitted
+        ],
+    }
+
+
+def read_delegation(root: Path) -> dict[str, object]:
+    return json.loads((root / "delegation.json").read_text(encoding="utf-8"))
+
+
+def assert_fork_only_requests(requests: list[str]) -> None:
+    for request in requests:
+        if "openai" in request.lower() or "/main/" in request:
+            raise AssertionError(f"non-Electivus or mutable request: {request}")
+
+
+def inventory_url(page: int) -> str:
+    return (
+        "https://api.github.com/repos/Electivus/electivus-codex/"
+        f"releases?per_page=100&page={page}"
+    )
+
+
+def exact_url(version: str) -> str:
+    return (
+        "https://api.github.com/repos/Electivus/electivus-codex/releases/tags/"
+        f"electivus-v{version}"
+    )
+
+
+def asset_url(version: str, asset: str) -> str:
+    return (
+        "https://github.com/Electivus/electivus-codex/releases/download/"
+        f"electivus-v{version}/{asset}"
+    )
+
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_executable(path: Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o755)
+
+
+if __name__ == "__main__":
+    unittest.main()
