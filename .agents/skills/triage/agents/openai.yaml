@@ -1,0 +1,4 @@
+interface:
+  display_name: "Triage"
+  short_description: "Move issues through triage roles"
+
