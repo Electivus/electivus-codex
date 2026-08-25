@@ -37,6 +37,11 @@ EOF
 
 validate_version() {
   version="$1"
+  version_bytes="$(printf '%s' "$version" | LC_ALL=C wc -c | tr -d ' ')"
+  if [ "$version_bytes" -gt 128 ]; then
+    echo "Invalid Electivus release version: values must not exceed the 128-byte safety limit." >&2
+    return 1
+  fi
   semver_without_build="${version%%+*}"
   case "$semver_without_build" in
     *-*) core="${semver_without_build%%-*}"; prerelease="${semver_without_build#*-}" ;;
@@ -215,7 +220,7 @@ semver_pattern = re.compile(
 
 
 def parse_version(value):
-    if not isinstance(value, str) or len(value) > 128:
+    if not isinstance(value, str) or len(value.encode("utf-8")) > 128:
         return None
     match = semver_pattern.fullmatch(value)
     if match is None or value == "0.0.0":
@@ -266,9 +271,26 @@ def candidate(release):
         if not isinstance(asset, dict):
             return None
         name, digest = asset.get("name"), asset.get("digest")
-        if not isinstance(name, str) or len(name) > 256 or name in digests:
+        state, size = asset.get("state"), asset.get("size")
+        if (
+            not isinstance(name, str)
+            or len(name.encode("utf-8")) > 256
+            or name in digests
+        ):
             return None
         if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest) is None:
+            return None
+        if state != "uploaded" or isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+            return None
+        if name.startswith("codex-package-") and name.endswith(".tar.gz"):
+            size_limit = 1_073_741_824
+        elif name in {"install.sh", "install.ps1"}:
+            size_limit = 4_194_304
+        elif name in {"codex-package_SHA256SUMS", "installer_SHA256SUMS"}:
+            size_limit = 1_048_576
+        else:
+            size_limit = 1_073_741_824
+        if size > size_limit:
             return None
         digests[name] = digest[len("sha256:") :].lower()
     if not required_assets.issubset(digests):
@@ -392,10 +414,12 @@ delegate() {
     CODEX_RELEASE="$resolved_version" \
     CODEX_UPDATE_CHANNEL="$resolved_channel" \
     CODEX_INSTALLER_PROTOCOL="$PROTOCOL" \
+    CODEX_INSTALLER_DIGEST="$installer_digest" \
     /bin/sh "$tmp_dir/install.sh" \
       --release "$resolved_version" \
       --channel "$resolved_channel" \
-      --installer-protocol "$PROTOCOL"
+      --installer-protocol "$PROTOCOL" \
+      --installer-digest "$installer_digest"
 }
 
 parse_args "$@"

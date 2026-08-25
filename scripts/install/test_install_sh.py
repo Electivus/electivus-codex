@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -64,7 +65,7 @@ class InstallShTest(unittest.TestCase):
                     "target": TARGET,
                     "package_digest": digests[f"codex-package-{TARGET}.tar.gz"],
                     "installer_digest": digests["install.sh"],
-                    "installer_protocol": "installer-v1",
+                    "installer_protocol": "direct",
                 },
             )
 
@@ -99,7 +100,7 @@ class InstallShTest(unittest.TestCase):
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(len(requests), 2)
+            self.assertEqual(len(requests), 1)
             self.assertIn("install.sh --release pre-release", result.stderr)
 
     def test_bare_and_electivus_tag_inputs_resolve_the_same_exact_release(self) -> None:
@@ -133,12 +134,110 @@ class InstallShTest(unittest.TestCase):
                 exact=release_metadata("1.4.3", digests),
                 channel="pre-release",
                 protocol="installer-v1",
+                installer_digest=digests["install.sh"],
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
             receipt = read_receipt(root, "1.4.3")
             self.assertEqual(receipt["update_channel"], "pre-release")
             self.assertEqual(receipt["installer_protocol"], "installer-v1")
+            clear_requests(root)
+            missing_digest, requests = run_installer(
+                root,
+                selector="1.4.3",
+                exact=release_metadata("1.4.3", digests),
+                protocol="installer-v1",
+            )
+            self.assertNotEqual(missing_digest.returncode, 0)
+            self.assertEqual(len(requests), 1)
+            self.assertIn(
+                "requires the exact verified installer digest", missing_digest.stderr
+            )
+
+    def test_direct_installer_binds_the_receipt_to_its_executing_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_release_assets(root, "1.4.5")
+            installer = root / "assets/install.sh"
+            installer.write_bytes(
+                installer.read_bytes() + b"# different release installer\n"
+            )
+            digests["install.sh"] = sha256(installer)
+            installer_manifest = root / "assets/installer_SHA256SUMS"
+            installer_manifest.write_text(
+                f"{digests['install.sh']}  install.sh\n"
+                f"{digests['install.ps1']}  install.ps1\n",
+                encoding="utf-8",
+            )
+            digests["installer_SHA256SUMS"] = sha256(installer_manifest)
+
+            result, requests = run_installer(
+                root,
+                selector="1.4.5",
+                exact=release_metadata("1.4.5", digests),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(len(requests), 1)
+            self.assertIn("executing install.sh digest", result.stderr)
+
+    def test_matching_managed_installation_rejects_full_semver_downgrades(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current_version = "2.0.0-rc.10+build.1"
+            current_digests = create_release_assets(root, current_version)
+            installed, _requests = run_installer(
+                root,
+                selector=current_version,
+                exact=release_metadata(current_version, current_digests),
+                channel="pre-release",
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            downgrade_version = "2.0.0-rc.9+build.999"
+            digests = create_release_assets(root, downgrade_version)
+            clear_requests(root)
+
+            result, requests = run_installer(
+                root,
+                selector=downgrade_version,
+                exact=release_metadata(downgrade_version, digests),
+                channel="pre-release",
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(len(requests), 1)
+            self.assertIn("Refusing to downgrade", result.stderr)
+            current = root / "codex-home/packages/standalone/current"
+            self.assertEqual(current.resolve(), release_dir(root, current_version))
+
+    def test_pre_release_channel_promotes_to_compatible_newer_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current_digests = create_release_assets(root, "2.0.0-rc.1")
+            installed, _requests = run_installer(
+                root,
+                selector="2.0.0-rc.1",
+                exact=release_metadata("2.0.0-rc.1", current_digests),
+                channel="pre-release",
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            digests = create_release_assets(root, "2.0.0")
+            clear_requests(root)
+            inventory = [
+                release_metadata("2.0.0-rc.2", digests),
+                release_metadata("2.0.0", digests),
+                release_metadata("3.0.0", digests),
+            ]
+
+            result, _requests = run_installer(
+                root, selector="pre-release", inventory=inventory
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Resolved version: 2.0.0", result.stdout)
+            self.assertEqual(
+                read_receipt(root, "2.0.0")["update_channel"], "pre-release"
+            )
 
     def test_rejects_ambiguous_upstream_and_invalid_selectors_before_network(
         self,
@@ -205,6 +304,137 @@ class InstallShTest(unittest.TestCase):
                     self.assertIn("1048576-byte safety limit", result.stderr)
                 else:
                     self.assertIn("Could not parse", result.stderr)
+
+    def test_release_version_and_inventory_pagination_bounds_fail_closed(self) -> None:
+        cases = (
+            ("version", "1.2.3+" + "a" * 123, None, "128-byte"),
+            ("oversized-page", None, [[{}] * 101], "exceeds 100 releases"),
+            (
+                "four-full-pages",
+                None,
+                [[{}] * 100 for _ in range(4)],
+                "4-page safety limit",
+            ),
+            ("wrong-root", None, [{"not": "an inventory"}], "must be a JSON array"),
+            ("non-release-entry", None, [[None]], "Could not parse"),
+        )
+        for case, selector, pages, message in cases:
+            with (
+                self.subTest(case=case),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                result, requests = run_installer(
+                    Path(temp_dir), selector=selector, inventory_pages=pages
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                if case == "version":
+                    self.assertEqual(requests, [])
+                elif case == "four-full-pages":
+                    self.assertEqual(len(requests), 4)
+
+    def test_full_inventory_page_followed_by_short_terminal_page_is_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_release_assets(root, "7.0.0")
+            pages = [[{}] * 100, [release_metadata("7.0.0", digests)]]
+
+            result, requests = run_installer(root, selector=None, inventory_pages=pages)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            metadata_requests = [
+                request for request in requests if "api.github.com" in request
+            ]
+            self.assertEqual(metadata_requests, [inventory_url(1), inventory_url(2)])
+            self.assertIn("Resolved version: 7.0.0", result.stdout)
+
+    def test_asset_state_size_count_and_name_bounds_fail_closed(self) -> None:
+        cases = ("state", "zero-size", "oversized-package", "too-many", "long-name")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                digests = create_release_assets(root, "7.1.0")
+                metadata = release_metadata("7.1.0", digests)
+                assets = metadata["assets"]
+                assert isinstance(assets, list)
+                if case == "state":
+                    assets[0]["state"] = "new"
+                elif case == "zero-size":
+                    assets[0]["size"] = 0
+                elif case == "oversized-package":
+                    assets[0]["size"] = 1_073_741_825
+                elif case == "too-many":
+                    assets.extend(valid_extra_assets(57))
+                else:
+                    assets.extend(valid_extra_assets(1, final_name="x" * 257))
+
+                result, requests = run_installer(root, selector="7.1.0", exact=metadata)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(len(requests), 1)
+                self.assertIn("not published, valid, and complete", result.stderr)
+
+    def test_asset_count_name_and_type_size_upper_boundaries_are_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_release_assets(root, "7.1.1")
+            metadata = release_metadata("7.1.1", digests)
+            assets = metadata["assets"]
+            assert isinstance(assets, list)
+            for asset in assets:
+                name = asset["name"]
+                if str(name).startswith("codex-package-") and str(name).endswith(
+                    ".tar.gz"
+                ):
+                    asset["size"] = 1_073_741_824
+                elif name in {"install.sh", "install.ps1"}:
+                    asset["size"] = 4_194_304
+                else:
+                    asset["size"] = 1_048_576
+            assets.extend(valid_extra_assets(56, final_name="x" * 256))
+
+            result, _requests = run_installer(root, selector="7.1.1", exact=metadata)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_wget_transport_succeeds_with_a_streaming_hard_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_release_assets(root, "7.1.2")
+
+            result, requests = run_installer(
+                root,
+                selector="7.1.2",
+                exact=release_metadata("7.1.2", digests),
+                transport="wget",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                requests,
+                [
+                    exact_url("7.1.2"),
+                    asset_url("7.1.2", "codex-package_SHA256SUMS"),
+                    asset_url("7.1.2", "installer_SHA256SUMS"),
+                    asset_url("7.1.2", f"codex-package-{TARGET}.tar.gz"),
+                ],
+            )
+
+    def test_wget_transport_stops_an_oversized_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            result, requests = run_installer(
+                root,
+                selector="7.1.3",
+                metadata_mode="oversized",
+                transport="wget",
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(requests, [exact_url("7.1.3")])
+            self.assertIn("exceeded the 1048576-byte safety limit", result.stderr)
 
     def test_package_metadata_and_manifest_digests_must_agree(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -352,19 +582,30 @@ def run_installer(
     *,
     selector: str | None = "stable",
     inventory: list[dict[str, object]] | None = None,
+    inventory_pages: list[object] | None = None,
     exact: dict[str, object] | str | None = None,
     channel: str = "",
     protocol: str = "",
+    installer_digest: str = "",
     force_macos: bool = False,
     metadata_mode: str = "",
+    transport: str = "curl",
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     fake_bin = root / "fake-bin"
     fake_bin.mkdir(parents=True, exist_ok=True)
+    metadata_dir = root / "metadata"
+    metadata_dir.mkdir(exist_ok=True)
+    exact_document = exact if isinstance(exact, str) else json.dumps(exact or {})
+    (metadata_dir / "exact.json").write_text(exact_document, encoding="utf-8")
+    pages = inventory_pages if inventory_pages is not None else [inventory or []]
+    for page_number, page_document in enumerate(pages, start=1):
+        (metadata_dir / f"page-{page_number}.json").write_text(
+            json.dumps(page_document), encoding="utf-8"
+        )
     request_log = root / "requests.log"
     fake_curl = fake_bin / "curl"
-    fake_curl.write_text(
-        textwrap.dedent(
-            """\
+    curl_script = textwrap.dedent(
+        """\
             #!/bin/sh
             url=""
             output=""
@@ -381,14 +622,16 @@ def run_installer(
                 if [ "$CODEX_TEST_METADATA_MODE" = "oversized" ]; then
                   dd if=/dev/zero bs=1048577 count=1 2>/dev/null | tr '\\000' x >"$output"
                 else
-                  printf '%s\n' "$CODEX_TEST_EXACT_METADATA" >"$output"
+                  cp "$CODEX_TEST_METADATA_DIR/exact.json" "$output"
                 fi
                 ;;
-              'https://api.github.com/repos/Electivus/electivus-codex/releases?per_page=100&page=1')
-                printf '%s\n' "$CODEX_TEST_INVENTORY_METADATA" >"$output"
-                ;;
               'https://api.github.com/repos/Electivus/electivus-codex/releases?per_page=100&page='*)
-                printf '[]\n' >"$output"
+                page="${url##*page=}"
+                if [ -f "$CODEX_TEST_METADATA_DIR/page-$page.json" ]; then
+                  cp "$CODEX_TEST_METADATA_DIR/page-$page.json" "$output"
+                else
+                  printf '[]\n' >"$output"
+                fi
                 ;;
               https://github.com/Electivus/electivus-codex/releases/download/*)
                 asset="${url##*/}"
@@ -397,15 +640,89 @@ def run_installer(
               *) exit 89 ;;
             esac
             """
-        ),
-        encoding="utf-8",
     )
-    fake_curl.chmod(0o755)
-    if force_macos:
+    if transport == "curl":
+        write_executable(fake_curl, curl_script)
+    else:
+        for command in (
+            "awk",
+            "basename",
+            "cat",
+            "chmod",
+            "cmp",
+            "cp",
+            "date",
+            "dd",
+            "dirname",
+            "find",
+            "fold",
+            "grep",
+            "gzip",
+            "head",
+            "ln",
+            "mkdir",
+            "mkfifo",
+            "mktemp",
+            "mv",
+            "readlink",
+            "rm",
+            "sed",
+            "sha256sum",
+            "sleep",
+            "sort",
+            "tar",
+            "tr",
+            "wc",
+        ):
+            command_path = shutil.which(command)
+            assert command_path is not None
+            (fake_bin / command).symlink_to(command_path)
+        write_executable(
+            fake_bin / "wget",
+            textwrap.dedent(
+                """\
+                #!/bin/sh
+                url=""
+                output=""
+                previous=""
+                for arg in "$@"; do
+                  case "$arg" in https://*) url="$arg" ;; esac
+                  if [ "$previous" = "-O" ]; then output="$arg"; fi
+                  previous="$arg"
+                done
+                printf '%s\n' "$url" >>"$CODEX_TEST_REQUEST_LOG"
+                case "$url" in
+                  https://api.github.com/repos/Electivus/electivus-codex/releases/tags/*)
+                    if [ "$CODEX_TEST_METADATA_MODE" = "oversized" ]; then
+                      dd if=/dev/zero bs=1048577 count=1 2>/dev/null | tr '\\000' x >"$output"
+                    else
+                      cp "$CODEX_TEST_METADATA_DIR/exact.json" "$output"
+                    fi
+                    ;;
+                  'https://api.github.com/repos/Electivus/electivus-codex/releases?per_page=100&page='*)
+                    page="${url##*page=}"
+                    if [ -f "$CODEX_TEST_METADATA_DIR/page-$page.json" ]; then
+                      cp "$CODEX_TEST_METADATA_DIR/page-$page.json" "$output"
+                    else
+                      printf '[]\n' >"$output"
+                    fi
+                    ;;
+                  https://github.com/Electivus/electivus-codex/releases/download/*)
+                    asset="${url##*/}"
+                    cp "$CODEX_TEST_ASSET_DIR/$asset" "$output"
+                    ;;
+                  *) exit 89 ;;
+                esac
+                """
+            ),
+        )
+    if force_macos or transport == "wget":
         fake_uname = fake_bin / "uname"
         write_executable(
             fake_uname,
-            '#!/bin/sh\ncase "$1" in -s) echo Darwin ;; -m) echo arm64 ;; esac\n',
+            '#!/bin/sh\ncase "$1" in '
+            f"-s) echo {'Darwin' if force_macos else 'Linux'} ;; "
+            f"-m) echo {'arm64' if force_macos else 'x86_64'} ;; esac\n",
         )
 
     home = root / "home"
@@ -417,14 +734,13 @@ def run_installer(
             "CODEX_INSTALL_DIR": str(root / "install-bin"),
             "CODEX_NON_INTERACTIVE": "1",
             "CODEX_TEST_ASSET_DIR": str(root / "assets"),
-            "CODEX_TEST_EXACT_METADATA": (
-                exact if isinstance(exact, str) else json.dumps(exact or {})
-            ),
-            "CODEX_TEST_INVENTORY_METADATA": json.dumps(inventory or []),
+            "CODEX_TEST_METADATA_DIR": str(metadata_dir),
             "CODEX_TEST_METADATA_MODE": metadata_mode,
             "CODEX_TEST_REQUEST_LOG": str(request_log),
             "HOME": str(home),
-            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "PATH": f"{fake_bin}:/usr/bin:/bin"
+            if transport == "curl"
+            else str(fake_bin),
             "SHELL": "/bin/sh",
         }
     )
@@ -435,6 +751,8 @@ def run_installer(
         args.extend(("--channel", channel))
     if protocol:
         args.extend(("--installer-protocol", protocol))
+    if installer_digest:
+        args.extend(("--installer-digest", installer_digest))
     result = subprocess.run(args, capture_output=True, check=False, env=env, text=True)
     requests = (
         request_log.read_text(encoding="utf-8").splitlines()
@@ -450,9 +768,9 @@ def create_release_assets(
     assets = root / "assets"
     assets.mkdir(exist_ok=True)
     package = root / "package"
-    (package / "bin").mkdir(parents=True)
-    (package / "codex-path").mkdir()
-    (package / "codex-resources").mkdir()
+    (package / "bin").mkdir(parents=True, exist_ok=True)
+    (package / "codex-path").mkdir(exist_ok=True)
+    (package / "codex-resources").mkdir(exist_ok=True)
     (package / "codex-package.json").write_text("{}\n", encoding="utf-8")
     if fail_during_activation:
         counter = root / "candidate-invocations"
@@ -527,6 +845,8 @@ def release_metadata(
                 "digest": f"sha256:{digests[asset]}"
                 if digests[asset] is not None
                 else None,
+                "state": "uploaded",
+                "size": 1,
             }
             for asset in REQUIRED_ASSETS
             if asset not in omitted
@@ -535,6 +855,23 @@ def release_metadata(
         "tag_name": f"electivus-v{version}",
         "draft": draft,
     }
+
+
+def valid_extra_assets(
+    count: int, *, final_name: str | None = None
+) -> list[dict[str, object]]:
+    names = [f"extra-{index}" for index in range(count)]
+    if final_name is not None:
+        names[-1] = final_name
+    return [
+        {
+            "name": name,
+            "digest": "sha256:" + hashlib.sha256(name.encode()).hexdigest(),
+            "state": "uploaded",
+            "size": 1,
+        }
+        for name in names
+    ]
 
 
 def release_dir(root: Path, version: str) -> Path:
@@ -561,6 +898,27 @@ def read_receipt(root: Path, version: str) -> dict[str, str]:
 
 def clear_requests(root: Path) -> None:
     (root / "requests.log").unlink(missing_ok=True)
+
+
+def inventory_url(page: int) -> str:
+    return (
+        "https://api.github.com/repos/Electivus/electivus-codex/"
+        f"releases?per_page=100&page={page}"
+    )
+
+
+def exact_url(version: str) -> str:
+    return (
+        "https://api.github.com/repos/Electivus/electivus-codex/"
+        f"releases/tags/electivus-v{version}"
+    )
+
+
+def asset_url(version: str, asset: str) -> str:
+    return (
+        "https://github.com/Electivus/electivus-codex/releases/download/"
+        f"electivus-v{version}/{asset}"
+    )
 
 
 def sha256(path: Path) -> str:

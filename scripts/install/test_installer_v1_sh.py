@@ -62,10 +62,13 @@ class InstallerV1ShTest(unittest.TestCase):
                         "stable",
                         "--installer-protocol",
                         "installer-v1",
+                        "--installer-digest",
+                        digests["install.sh"],
                     ],
                     "release": "2.0.0",
                     "channel": "stable",
                     "protocol": "installer-v1",
+                    "installer_digest": digests["install.sh"],
                     "non_interactive": "1",
                 },
             )
@@ -261,11 +264,111 @@ class InstallerV1ShTest(unittest.TestCase):
             self.assertEqual(requests, [inventory_url(page) for page in range(1, 5)])
 
         with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_assets(root)
+
+            result, requests = run_bootstrap(
+                root,
+                inventory=[release(f"7.1.{index}", digests) for index in range(101)],
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("exceeds 100 releases", result.stderr)
+            self.assertEqual(requests, [inventory_url(1)])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
             result, requests = run_bootstrap(Path(temp_dir), operating_system="Darwin")
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("does not support macOS", result.stderr)
             self.assertEqual(requests, [])
+
+    def test_release_version_byte_bound_is_enforced_before_network(self) -> None:
+        maximum_version = "1.2.3+" + "a" * 122
+        self.assertEqual(len(maximum_version.encode()), 128)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_assets(root)
+
+            accepted, _requests = run_bootstrap(
+                root,
+                arguments=["--release", maximum_version],
+                exact=release(maximum_version, digests),
+            )
+
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rejected, requests = run_bootstrap(
+                Path(temp_dir), arguments=["--release", maximum_version + "a"]
+            )
+
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("128-byte safety limit", rejected.stderr)
+            self.assertEqual(requests, [])
+
+    def test_asset_state_size_count_and_name_bounds_fail_closed(self) -> None:
+        cases = (
+            "state",
+            "zero-size",
+            "oversized-package",
+            "too-many",
+            "long-name",
+            "long-multibyte-name",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                digests = create_assets(root)
+                metadata = release("7.2.0", digests)
+                assets = metadata["assets"]
+                assert isinstance(assets, list)
+                if case == "state":
+                    assets[0]["state"] = "new"
+                elif case == "zero-size":
+                    assets[0]["size"] = 0
+                elif case == "oversized-package":
+                    assets[0]["size"] = 1_073_741_825
+                elif case == "too-many":
+                    assets.extend(valid_extra_assets(57))
+                elif case == "long-name":
+                    assets.extend(valid_extra_assets(1, final_name="x" * 257))
+                else:
+                    assets.extend(valid_extra_assets(1, final_name="é" * 129))
+
+                result, requests = run_bootstrap(
+                    root, arguments=["--release", "7.2.0"], exact=metadata
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(requests, [exact_url("7.2.0")])
+                self.assertFalse((root / "delegation.json").exists())
+
+    def test_asset_count_name_and_type_size_upper_boundaries_are_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_assets(root)
+            metadata = release("7.2.1", digests)
+            assets = metadata["assets"]
+            assert isinstance(assets, list)
+            for asset in assets:
+                name = asset["name"]
+                if str(name).startswith("codex-package-") and str(name).endswith(
+                    ".tar.gz"
+                ):
+                    asset["size"] = 1_073_741_824
+                elif name in {"install.sh", "install.ps1"}:
+                    asset["size"] = 4_194_304
+                else:
+                    asset["size"] = 1_048_576
+            assets.extend(valid_extra_assets(55, final_name="x" * 256))
+            assets.extend(valid_extra_assets(1, final_name="é" * 128))
+
+            result, _requests = run_bootstrap(
+                root, arguments=["--release", "7.2.1"], exact=metadata
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
 
 
 def run_bootstrap(
@@ -279,6 +382,15 @@ def run_bootstrap(
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     fake_bin = root / "fake-bin"
     fake_bin.mkdir(parents=True, exist_ok=True)
+    metadata_dir = root / "metadata-fixtures"
+    metadata_dir.mkdir(exist_ok=True)
+    (metadata_dir / "exact.json").write_text(
+        exact if isinstance(exact, str) else json.dumps(exact or {}),
+        encoding="utf-8",
+    )
+    (metadata_dir / "inventory.json").write_text(
+        json.dumps(inventory or []), encoding="utf-8"
+    )
     request_log = root / "requests.log"
     write_executable(
         fake_bin / "curl",
@@ -300,11 +412,11 @@ def run_bootstrap(
                 if [ "$CODEX_TEST_MODE" = "metadata-oversized" ]; then
                   dd if=/dev/zero bs=1048577 count=1 2>/dev/null | tr '\\000' x >"$output"
                 else
-                  printf '%s\n' "$CODEX_TEST_EXACT" >"$output"
+                  cp "$CODEX_TEST_METADATA_DIR/exact.json" "$output"
                 fi
                 ;;
               'https://api.github.com/repos/Electivus/electivus-codex/releases?per_page=100&page='*)
-                printf '%s\n' "$CODEX_TEST_INVENTORY" >"$output"
+                cp "$CODEX_TEST_METADATA_DIR/inventory.json" "$output"
                 ;;
               https://github.com/Electivus/electivus-codex/releases/download/*)
                 cp "$CODEX_TEST_ASSETS/${url##*/}" "$output"
@@ -323,10 +435,7 @@ def run_bootstrap(
         **os.environ,
         "CODEX_TEST_ASSETS": str(root / "assets"),
         "CODEX_TEST_DELEGATION": str(root / "delegation.json"),
-        "CODEX_TEST_EXACT": exact
-        if isinstance(exact, str)
-        else json.dumps(exact or {}),
-        "CODEX_TEST_INVENTORY": json.dumps(inventory or []),
+        "CODEX_TEST_METADATA_DIR": str(metadata_dir),
         "CODEX_TEST_MODE": mode,
         "CODEX_TEST_REQUEST_LOG": str(request_log),
         "HOME": str(home),
@@ -391,6 +500,7 @@ Path(os.environ["CODEX_TEST_DELEGATION"]).write_text(
             "release": os.environ.get("CODEX_RELEASE"),
             "channel": os.environ.get("CODEX_UPDATE_CHANNEL"),
             "protocol": os.environ.get("CODEX_INSTALLER_PROTOCOL"),
+            "installer_digest": os.environ.get("CODEX_INSTALLER_DIGEST"),
             "non_interactive": os.environ.get("CODEX_NON_INTERACTIVE"),
         }
     ),
@@ -414,11 +524,33 @@ def release(
         "prerelease": "-" in version.split("+", 1)[0],
         "published_at": "2026-08-25T00:00:00Z",
         "assets": [
-            {"name": name, "digest": f"sha256:{digests[name]}"}
+            {
+                "name": name,
+                "digest": f"sha256:{digests[name]}",
+                "state": "uploaded",
+                "size": 1,
+            }
             for name in REQUIRED_ASSETS
             if name not in omitted
         ],
     }
+
+
+def valid_extra_assets(
+    count: int, *, final_name: str | None = None
+) -> list[dict[str, object]]:
+    names = [f"extra-{index}" for index in range(count)]
+    if final_name is not None:
+        names[-1] = final_name
+    return [
+        {
+            "name": name,
+            "digest": "sha256:" + hashlib.sha256(name.encode()).hexdigest(),
+            "state": "uploaded",
+            "size": 1,
+        }
+        for name in names
+    ]
 
 
 def read_delegation(root: Path) -> dict[str, object]:

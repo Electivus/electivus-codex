@@ -272,7 +272,9 @@ class InstallLocalShTest(unittest.TestCase):
                 (root / "codex-home" / "packages" / "standalone" / "current").exists()
             )
 
-    def test_worktree_lock_serializes_different_install_roots(self) -> None:
+    def test_mkdir_fallback_locks_serialize_without_publishing_pidless_directories(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             repo = create_repo(root)
@@ -286,8 +288,9 @@ class InstallLocalShTest(unittest.TestCase):
                 repo,
                 build_mode="hold",
                 extra_env={"CODEX_TEST_CONTINUE": str(continue_path)},
+                force_mkdir_locks=True,
             )
-            second_env = installer_env(second_root, repo)
+            second_env = installer_env(second_root, repo, force_mkdir_locks=True)
             command = [
                 "sh",
                 str(repo / "scripts/install/install-local.sh"),
@@ -305,6 +308,18 @@ class InstallLocalShTest(unittest.TestCase):
             second = None
             try:
                 wait_for_path(first_root / "build.ready")
+                first_install_lock = (
+                    first_root / "codex-home/packages/standalone/install.lock.d"
+                )
+                shared_version_lock = version_lock_path(repo)
+                self.assertTrue(first_install_lock.is_file())
+                self.assertTrue(
+                    first_install_lock.read_text().splitlines()[0].isdigit()
+                )
+                self.assertTrue(shared_version_lock.is_file())
+                self.assertTrue(
+                    shared_version_lock.read_text().splitlines()[0].isdigit()
+                )
                 second = subprocess.Popen(
                     command,
                     cwd=repo,
@@ -314,7 +329,14 @@ class InstallLocalShTest(unittest.TestCase):
                     stderr=subprocess.PIPE,
                 )
                 wait_for_path(
-                    second_root / "codex-home/packages/standalone/install.lock"
+                    second_root / "codex-home/packages/standalone/install.lock.d"
+                )
+                second_install_lock = (
+                    second_root / "codex-home/packages/standalone/install.lock.d"
+                )
+                self.assertTrue(second_install_lock.is_file())
+                self.assertTrue(
+                    second_install_lock.read_text().splitlines()[0].isdigit()
                 )
                 self.assertFalse((second_root / "build.json").exists())
                 continue_path.touch()
@@ -327,6 +349,25 @@ class InstallLocalShTest(unittest.TestCase):
                     if process is not None and process.poll() is None:
                         process.kill()
                         process.communicate()
+
+    def test_fallback_reclaims_a_stale_legacy_mkdir_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            legacy_lock = version_lock_path(repo)
+            legacy_lock.mkdir(parents=True)
+            (legacy_lock / "pid").write_text("2147483647\n", encoding="utf-8")
+            (legacy_lock / "started_at").write_text("1\n", encoding="utf-8")
+
+            result = run_installer(
+                root,
+                repo,
+                arguments=["--use-upstream-version"],
+                force_mkdir_locks=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(legacy_lock.exists())
 
     def test_local_ripgrep_and_successful_retention_remain_supported(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -465,6 +506,7 @@ def run_installer(
     codex_exit: int = 0,
     mutate_lock: bool = False,
     extra_env: dict[str, str] | None = None,
+    force_mkdir_locks: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["sh", str(repo / "scripts/install/install-local.sh"), *(arguments or [])],
@@ -476,6 +518,7 @@ def run_installer(
             codex_exit=codex_exit,
             mutate_lock=mutate_lock,
             extra_env=extra_env,
+            force_mkdir_locks=force_mkdir_locks,
         ),
         text=True,
         capture_output=True,
@@ -491,6 +534,7 @@ def installer_env(
     codex_exit: int = 0,
     mutate_lock: bool = False,
     extra_env: dict[str, str] | None = None,
+    force_mkdir_locks: bool = False,
 ) -> dict[str, str]:
     fake_bin = root / "fake-bin"
     fake_bin.mkdir(exist_ok=True)
@@ -501,6 +545,33 @@ def installer_env(
         fake_bin / "uname",
         '#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo x86_64;; *) echo Linux;; esac\n',
     )
+    if force_mkdir_locks:
+        for command in (
+            "awk",
+            "basename",
+            "cat",
+            "chmod",
+            "cmp",
+            "cp",
+            "dirname",
+            "find",
+            "git",
+            "grep",
+            "ln",
+            "mkdir",
+            "mktemp",
+            "mv",
+            "python3",
+            "readlink",
+            "rm",
+            "sed",
+            "sh",
+            "sleep",
+            "sort",
+        ):
+            command_path = shutil.which(command)
+            assert command_path is not None
+            (fake_bin / command).symlink_to(command_path)
     write_executable(
         fake_bin / "date",
         '#!/bin/sh\ncase "$1" in '
@@ -510,7 +581,7 @@ def installer_env(
     )
     env = {
         **os.environ,
-        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "PATH": str(fake_bin) if force_mkdir_locks else f"{fake_bin}:/usr/bin:/bin",
         "HOME": str(home),
         "SHELL": "/bin/sh",
         "CODEX_HOME": str(root / "codex-home"),
@@ -552,6 +623,10 @@ def version_transaction_dir(repo: Path) -> Path:
             "codex-local-version/transaction",
         ).stdout.strip()
     )
+
+
+def version_lock_path(repo: Path) -> Path:
+    return version_transaction_dir(repo).parent / "version.lock.d"
 
 
 def read_build_log(root: Path) -> dict[str, object]:

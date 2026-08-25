@@ -20,6 +20,7 @@ export CODEX_REPO_ROOT
 path_action="already"
 path_profile=""
 lock_kind=""
+lock_owner_dir=""
 tmp_dir=""
 python_bin=""
 cargo_toml_backup=""
@@ -28,6 +29,7 @@ version_state_dir=""
 version_lock_file=""
 version_lock_dir=""
 version_lock_kind=""
+version_lock_owner_dir=""
 version_transaction_dir=""
 version_transaction_owned=false
 use_upstream_version=false
@@ -231,15 +233,64 @@ restore_cargo_manifest_files() {
   return "$restore_failed"
 }
 
-version_mkdir_lock_is_stale() {
-  [ -d "$version_lock_dir" ] || return 1
-
-  pid="$(cat "$version_lock_dir/pid" 2>/dev/null || true)"
+fallback_lock_is_stale() {
+  fallback_lock="$1"
+  stale_after="$2"
+  if [ -d "$fallback_lock" ]; then
+    pid="$(cat "$fallback_lock/pid" 2>/dev/null || true)"
+    started_at="$(cat "$fallback_lock/started_at" 2>/dev/null || true)"
+  elif [ -f "$fallback_lock" ]; then
+    pid="$(sed -n '1p' "$fallback_lock" 2>/dev/null || true)"
+    started_at="$(sed -n '2p' "$fallback_lock" 2>/dev/null || true)"
+  else
+    return 1
+  fi
+  case "$pid" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     return 1
   fi
+  if [ "$stale_after" -eq 0 ]; then
+    return 0
+  fi
+  case "$started_at" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  now="$(date +%s 2>/dev/null || printf '0')"
+  if [ "$now" -eq 0 ]; then
+    return 1
+  fi
+  [ $((now - started_at)) -ge "$stale_after" ]
+}
 
-  return 0
+reclaim_fallback_lock() {
+  fallback_lock="$1"
+  owner_prefix="$2"
+  reclaimed_lock="$fallback_lock.stale.$$"
+  mv "$fallback_lock" "$reclaimed_lock" 2>/dev/null || return 1
+  reclaimed_owner="$(sed -n '3p' "$reclaimed_lock" 2>/dev/null || true)"
+  rm -rf "$reclaimed_lock"
+  case "$reclaimed_owner" in
+    "$owner_prefix"*)
+      rm -rf "$reclaimed_owner"
+      ;;
+  esac
+}
+
+try_claim_fallback_lock() {
+  fallback_owner="$1"
+  fallback_lock="$2"
+
+  ln "$fallback_owner" "$fallback_lock" 2>/dev/null || return 1
+  if [ -f "$fallback_lock" ] && cmp -s "$fallback_lock" "$fallback_owner"; then
+    return 0
+  fi
+
+  # POSIX ln treats an existing directory as a destination directory. Remove
+  # the hard link it created there and keep waiting for that legacy lock.
+  rm -f "$fallback_lock/$(basename "$fallback_owner")" 2>/dev/null || true
+  return 1
 }
 
 acquire_version_lock() {
@@ -259,25 +310,46 @@ acquire_version_lock() {
     return
   fi
 
-  while ! mkdir "$version_lock_dir" 2>/dev/null; do
-    if version_mkdir_lock_is_stale; then
+  version_lock_owner_dir="$version_state_dir/version.lock.owner.$$"
+  rm -f "$version_lock_owner_dir"
+  {
+    printf '%s\n' "$$"
+    date +%s 2>/dev/null || printf '0\n'
+    printf '%s\n' "$version_lock_owner_dir"
+  } >"$version_lock_owner_dir"
+
+  while ! try_claim_fallback_lock "$version_lock_owner_dir" "$version_lock_dir"; do
+    if [ ! -e "$version_lock_dir" ] && [ ! -L "$version_lock_dir" ]; then
+      if try_claim_fallback_lock "$version_lock_owner_dir" "$version_lock_dir"; then
+        break
+      fi
+      echo "Could not create atomic local-version lock at $version_lock_dir." >&2
+      rm -f "$version_lock_owner_dir"
+      return 1
+    fi
+    if fallback_lock_is_stale "$version_lock_dir" 0; then
       warn "Removing stale local-version lock at $version_lock_dir"
-      rm -rf "$version_lock_dir"
+      reclaim_fallback_lock \
+        "$version_lock_dir" \
+        "$version_state_dir/version.lock.owner." || true
       continue
     fi
     sleep 1
   done
-  printf '%s\n' "$$" >"$version_lock_dir/pid"
-  version_lock_kind="mkdir"
+  version_lock_kind="hardlink"
 }
 
 release_version_lock() {
-  if [ "$version_lock_kind" = "mkdir" ]; then
-    rm -rf "$version_lock_dir" 2>/dev/null || true
+  if [ "$version_lock_kind" = "hardlink" ]; then
+    if [ -f "$version_lock_dir" ] && cmp -s "$version_lock_dir" "$version_lock_owner_dir"; then
+      rm -f "$version_lock_dir" 2>/dev/null || true
+    fi
+    rm -f "$version_lock_owner_dir" 2>/dev/null || true
   elif [ "$version_lock_kind" = "flock" ]; then
     exec 8>&- 2>/dev/null || true
   fi
   version_lock_kind=""
+  version_lock_owner_dir=""
 }
 
 begin_version_transaction() {
@@ -506,30 +578,6 @@ print_launch_instructions() {
   esac
 }
 
-mkdir_lock_is_stale() {
-  [ -d "$LOCK_DIR" ] || return 1
-
-  pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-  started_at="$(cat "$LOCK_DIR/started_at" 2>/dev/null || true)"
-  now="$(date +%s 2>/dev/null || printf '0')"
-
-  case "$started_at" in
-    '' | *[!0-9]*)
-      started_at=0
-      ;;
-  esac
-
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    return 1
-  fi
-
-  if [ "$started_at" -eq 0 ] || [ "$now" -eq 0 ]; then
-    return 0
-  fi
-
-  [ $((now - started_at)) -ge "$LOCK_STALE_AFTER_SECS" ]
-}
-
 acquire_install_lock() {
   mkdir -p "$STANDALONE_ROOT"
 
@@ -540,27 +588,47 @@ acquire_install_lock() {
     return
   fi
 
-  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
-    if mkdir_lock_is_stale; then
+  lock_owner_dir="$STANDALONE_ROOT/install.lock.owner.$$"
+  rm -f "$lock_owner_dir"
+  {
+    printf '%s\n' "$$"
+    date +%s 2>/dev/null || printf '0\n'
+    printf '%s\n' "$lock_owner_dir"
+  } >"$lock_owner_dir"
+
+  while ! try_claim_fallback_lock "$lock_owner_dir" "$LOCK_DIR"; do
+    if [ ! -e "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ]; then
+      if try_claim_fallback_lock "$lock_owner_dir" "$LOCK_DIR"; then
+        break
+      fi
+      echo "Could not create atomic installer lock at $LOCK_DIR." >&2
+      rm -f "$lock_owner_dir"
+      return 1
+    fi
+    if fallback_lock_is_stale "$LOCK_DIR" "$LOCK_STALE_AFTER_SECS"; then
       warn "Removing stale installer lock at $LOCK_DIR"
-      rm -rf "$LOCK_DIR"
+      reclaim_fallback_lock \
+        "$LOCK_DIR" \
+        "$STANDALONE_ROOT/install.lock.owner." || true
       continue
     fi
     sleep 1
   done
 
-  printf '%s\n' "$$" >"$LOCK_DIR/pid"
-  date +%s >"$LOCK_DIR/started_at" 2>/dev/null || true
-  lock_kind="mkdir"
+  lock_kind="hardlink"
 }
 
 release_install_lock() {
-  if [ "$lock_kind" = "mkdir" ]; then
-    rm -rf "$LOCK_DIR" 2>/dev/null || true
+  if [ "$lock_kind" = "hardlink" ]; then
+    if [ -f "$LOCK_DIR" ] && cmp -s "$LOCK_DIR" "$lock_owner_dir"; then
+      rm -f "$LOCK_DIR" 2>/dev/null || true
+    fi
+    rm -f "$lock_owner_dir" 2>/dev/null || true
   elif [ "$lock_kind" = "flock" ]; then
     exec 9>&- 2>/dev/null || true
   fi
   lock_kind=""
+  lock_owner_dir=""
 }
 
 cleanup_stale_install_artifacts() {

@@ -4,7 +4,8 @@ set -eu
 
 RELEASE="${CODEX_RELEASE:-stable}"
 UPDATE_CHANNEL="${CODEX_UPDATE_CHANNEL:-}"
-INSTALLER_PROTOCOL="${CODEX_INSTALLER_PROTOCOL:-installer-v1}"
+INSTALLER_PROTOCOL="${CODEX_INSTALLER_PROTOCOL:-direct}"
+INSTALLER_DIGEST="${CODEX_INSTALLER_DIGEST:-}"
 NON_INTERACTIVE="${CODEX_NON_INTERACTIVE:-false}"
 PUBLISHER="Electivus"
 REPOSITORY="Electivus/electivus-codex"
@@ -13,6 +14,7 @@ GITHUB_API_BASE="https://api.github.com/repos/$REPOSITORY"
 GITHUB_RELEASE_BASE="https://github.com/$REPOSITORY/releases/download"
 METADATA_MAX_BYTES=1048576
 MANIFEST_MAX_BYTES=1048576
+INSTALLER_MAX_BYTES=4194304
 PACKAGE_MAX_BYTES=1073741824
 MAX_RELEASE_PAGES=4
 
@@ -32,6 +34,7 @@ path_profile=""
 conflict_manager=""
 lock_kind=""
 tmp_dir=""
+download_pid=""
 
 step() {
   printf '==> %s\n' "$1"
@@ -43,6 +46,11 @@ warn() {
 
 validate_version() {
   version="$1"
+  version_bytes="$(printf '%s' "$version" | LC_ALL=C wc -c | tr -d ' ')"
+  if [ "$version_bytes" -gt 128 ]; then
+    echo "Invalid Electivus release version: values must not exceed the 128-byte safety limit." >&2
+    return 1
+  fi
   semver_without_build="${version%%+*}"
   case "$semver_without_build" in
     *-*) core="${semver_without_build%%-*}"; prerelease="${semver_without_build#*-}" ;;
@@ -84,10 +92,15 @@ validate_channel() {
 }
 
 validate_installer_protocol() {
-  if ! printf '%s\n' "$1" | grep -Eq '^installer-v[1-9][0-9]*$'; then
-    echo "Invalid Installer protocol: $1. Expected installer-vN." >&2
-    return 1
-  fi
+  case "$1" in
+    direct) ;;
+    *)
+      if ! printf '%s\n' "$1" | grep -Eq '^installer-v[1-9][0-9]*$'; then
+        echo "Invalid Installer protocol: $1. Expected direct or installer-vN." >&2
+        return 1
+      fi
+      ;;
+  esac
 }
 
 parse_args() {
@@ -117,6 +130,14 @@ parse_args() {
         INSTALLER_PROTOCOL="$2"
         shift
         ;;
+      --installer-digest)
+        if [ "$#" -lt 2 ]; then
+          echo "--installer-digest requires a SHA-256 digest." >&2
+          exit 1
+        fi
+        INSTALLER_DIGEST="$2"
+        shift
+        ;;
       --help | -h)
         cat <<EOF
 Usage: install.sh [--release stable|pre-release|VERSION] [--channel CHANNEL]
@@ -126,6 +147,8 @@ Environment:
   CODEX_UPDATE_CHANNEL   Persisted channel for an exact install.
   CODEX_INSTALLER_PROTOCOL
                          Installer protocol recorded in the receipt.
+  CODEX_INSTALLER_DIGEST Verified SHA-256 of the executing installer, supplied
+                         by an immutable Installer protocol bootstrap.
   CODEX_NON_INTERACTIVE  Set to 1, true, or yes to skip prompts.
 EOF
         exit 0
@@ -147,7 +170,32 @@ download_file() {
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL --connect-timeout 10 --max-time 300 --max-filesize "$max_bytes" "$url" -o "$output" || return 1
   elif command -v wget >/dev/null 2>&1; then
-    wget -q -t 1 -T 300 -O "$output" "$url" || return 1
+    require_command head
+    require_command mkfifo
+    download_pipe="$tmp_dir/download.$$.fifo"
+    rm -f "$download_pipe"
+    mkfifo "$download_pipe"
+    wget -q -t 1 -T 300 --https-only --secure-protocol=TLSv1_2 \
+      -O "$download_pipe" "$url" &
+    download_pid=$!
+    head_status=0
+    head -c $((max_bytes + 1)) "$download_pipe" >"$output" || head_status=$?
+    wget_status=0
+    wait "$download_pid" || wget_status=$?
+    download_pid=""
+    rm -f "$download_pipe"
+
+    downloaded_bytes="$(wc -c <"$output" | tr -d ' ')"
+    if [ "$downloaded_bytes" -gt "$max_bytes" ]; then
+      rm -f "$output"
+      echo "Download from $url exceeded the $max_bytes-byte safety limit." >&2
+      return 1
+    fi
+    if [ "$head_status" -ne 0 ] || [ "$wget_status" -ne 0 ]; then
+      rm -f "$output"
+      return 1
+    fi
+    return 0
   else
     echo "curl or wget is required to install Electivus Codex." >&2
     exit 1
@@ -196,6 +244,10 @@ parse_release_metadata() {
           asset_name = value
         } else if (key == "digest") {
           asset_digest = value
+        } else if (key == "state") {
+          asset_state = value
+        } else if (key == "size") {
+          asset_size = value
         }
       }
       expecting_value = 0
@@ -229,6 +281,12 @@ parse_release_metadata() {
           } else {
             invalid = 1
           }
+        }
+
+        if (!in_string && root_kind == "array" && array_depth == 1 &&
+            object_depth == 0 && char !~ /[[:space:]]/ &&
+            char != "{" && char != "]" && char != ",") {
+          invalid = 1
         }
 
         if (in_string) {
@@ -273,6 +331,8 @@ parse_release_metadata() {
             asset_object_depth = object_depth
             asset_name = ""
             asset_digest = ""
+            asset_state = ""
+            asset_size = ""
           }
           expecting_value = 0
           primitive = ""
@@ -280,12 +340,12 @@ parse_release_metadata() {
         } else if (char == "}") {
           finish_primitive()
           if (object_depth == asset_object_depth) {
-            if (asset_name != "") {
-              print "asset|" asset_name "|" asset_digest
-            }
+            print "asset|" asset_name "|" asset_digest "|" asset_state "|" asset_size
             asset_object_depth = 0
             asset_name = ""
             asset_digest = ""
+            asset_state = ""
+            asset_size = ""
           }
           if (object_depth == release_object_depth) {
             print "release|" release_tag "|" release_draft "|" release_prerelease "|" release_published_at
@@ -432,6 +492,33 @@ asset_digest_in_metadata() {
 release_assets_are_complete() {
   complete_metadata="$1"
 
+  printf '%s\n' "$complete_metadata" | LC_ALL=C awk -F '|' \
+    -v package_limit="$PACKAGE_MAX_BYTES" \
+    -v manifest_limit="$MANIFEST_MAX_BYTES" \
+    -v installer_limit="$INSTALLER_MAX_BYTES" '
+      $1 == "asset" {
+        count++
+        name = $2
+        digest = $3
+        state = $4
+        size = $5
+        if (name == "" || length(name) > 256 || seen[name]++) invalid = 1
+        if (digest !~ /^sha256:[0-9a-fA-F]{64}$/) invalid = 1
+        if (state != "uploaded" || size !~ /^[0-9]+$/ || size == 0) invalid = 1
+        limit = package_limit
+        if (name == "install.sh" || name == "install.ps1") {
+          limit = installer_limit
+        } else if (name == "codex-package_SHA256SUMS" ||
+            name == "installer_SHA256SUMS") {
+          limit = manifest_limit
+        }
+        if (size > limit) invalid = 1
+      }
+      END {
+        if (invalid || count == 0 || count > 64) exit 1
+      }
+    ' || return 1
+
   for required_asset in \
     codex-package-aarch64-pc-windows-msvc.tar.gz \
     codex-package-aarch64-unknown-linux-musl.tar.gz \
@@ -473,8 +560,20 @@ consider_release() {
     exact)
       [ "$c_version" = "$requested_version" ] || return 0
       ;;
-    stable | pre-release)
-      [ "$c_channel" = "$requested_kind" ] || return 0
+    stable)
+      [ "$c_channel" = "stable" ] || return 0
+      ;;
+    pre-release)
+      if [ "$c_channel" != "pre-release" ]; then
+        [ "$c_channel" = "stable" ] || return 0
+        [ "$installed_managed_channel" = "pre-release" ] || return 0
+        version_is_prerelease "$installed_managed_version" || return 0
+        installed_core="${installed_managed_version%%+*}"
+        installed_core="${installed_core%%-*}"
+        candidate_core="${c_version%%+*}"
+        [ "$candidate_core" = "$installed_core" ] || return 0
+        [ "$(semver_compare "$c_version" "$installed_managed_version")" -gt 0 ] || return 0
+      fi
       ;;
   esac
 
@@ -506,7 +605,7 @@ select_release_from_records() {
     case "$record_kind" in
       asset)
         pending_assets="${pending_assets}${pending_assets:+
-}$record_kind|$record_one|$record_two"
+}$record_kind|$record_one|$record_two|$record_three|$record_four"
         ;;
       release)
         record_tag="$record_one"
@@ -533,6 +632,26 @@ EOF
 parse_release_document() {
   document="$1"
   description="$2"
+  expected_root="$3"
+  root_char="$(printf '%s' "$document" | LC_ALL=C awk '
+    {
+      for (i = 1; i <= length($0); i++) {
+        char = substr($0, i, 1)
+        if (char !~ /[[:space:]]/) {
+          print char
+          exit
+        }
+      }
+    }
+  ')"
+  if [ "$root_char" != "$expected_root" ]; then
+    case "$expected_root" in
+      '[') expected_description="a JSON array" ;;
+      *) expected_description="a JSON object" ;;
+    esac
+    echo "$description must be $expected_description." >&2
+    return 1
+  fi
   if ! parsed_document="$(printf '%s\n' "$document" | parse_release_metadata)"; then
     echo "Could not parse $description as bounded GitHub release metadata." >&2
     return 1
@@ -600,25 +719,44 @@ resolve_release() {
       echo "Could not fetch published Electivus release metadata for $requested_tag." >&2
       return 1
     fi
-    records="$(parse_release_document "$release_json" "$requested_tag")" || return 1
+    records="$(parse_release_document "$release_json" "$requested_tag" '{')" || return 1
     select_release_from_records "$records" || return 1
   else
     page=1
     records=""
+    inventory_count=0
+    terminal_page=false
     while [ "$page" -le "$MAX_RELEASE_PAGES" ]; do
       metadata_url="$GITHUB_API_BASE/releases?per_page=100&page=$page"
       if ! release_json="$(download_text "$metadata_url")"; then
         echo "Could not fetch bounded Electivus release inventory page $page." >&2
         return 1
       fi
-      page_records="$(parse_release_document "$release_json" "Electivus release inventory page $page")" || return 1
-      if [ -z "$page_records" ]; then
+      page_records="$(parse_release_document "$release_json" "Electivus release inventory page $page" '[')" || return 1
+      page_count="$(printf '%s\n' "$page_records" | awk -F '|' '$1 == "release" { count++ } END { print count + 0 }')"
+      if [ "$page_count" -gt 100 ]; then
+        echo "Electivus release inventory page $page exceeds 100 releases." >&2
+        return 1
+      fi
+      inventory_count=$((inventory_count + page_count))
+      if [ "$inventory_count" -gt $((MAX_RELEASE_PAGES * 100)) ]; then
+        echo "Electivus release inventory exceeds the bounded 400-release safety limit." >&2
+        return 1
+      fi
+      if [ -n "$page_records" ]; then
+        records="${records}${records:+
+}$page_records"
+      fi
+      if [ "$page_count" -lt 100 ]; then
+        terminal_page=true
         break
       fi
-      records="${records}${records:+
-}$page_records"
       page=$((page + 1))
     done
+    if [ "$terminal_page" != true ]; then
+      echo "Electivus release inventory exceeds the $MAX_RELEASE_PAGES-page safety limit." >&2
+      return 1
+    fi
     select_release_from_records "$records" || return 1
   fi
 
@@ -733,6 +871,94 @@ write_installation_receipt() {
   "installer_protocol": "$INSTALLER_PROTOCOL"
 }
 EOF
+}
+
+receipt_string_field() {
+  receipt_path="$1"
+  receipt_key="$2"
+
+  sed -n "s/.*\"$receipt_key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+    "$receipt_path" | head -n 1
+}
+
+load_current_managed_receipt() {
+  installed_managed_version=""
+  installed_managed_channel=""
+  receipt_path="$CURRENT_LINK/installation-receipt.json"
+  [ -f "$receipt_path" ] || return 0
+
+  receipt_publisher="$(receipt_string_field "$receipt_path" publisher)"
+  receipt_repository="$(receipt_string_field "$receipt_path" repository)"
+  receipt_tag="$(receipt_string_field "$receipt_path" tag)"
+  receipt_channel="$(receipt_string_field "$receipt_path" update_channel)"
+  receipt_target="$(receipt_string_field "$receipt_path" target)"
+  receipt_package_digest="$(receipt_string_field "$receipt_path" package_digest)"
+  receipt_installer_digest="$(receipt_string_field "$receipt_path" installer_digest)"
+  receipt_protocol="$(receipt_string_field "$receipt_path" installer_protocol)"
+
+  [ "$receipt_publisher" = "$PUBLISHER" ] &&
+    [ "$receipt_repository" = "$REPOSITORY" ] &&
+    [ "$receipt_target" = "$vendor_target" ] || return 0
+  case "$receipt_tag" in
+    "$TAG_PREFIX"*) receipt_version="${receipt_tag#"$TAG_PREFIX"}" ;;
+    *) return 0 ;;
+  esac
+  validate_version "$receipt_version" >/dev/null 2>&1 || return 0
+  validate_channel "$receipt_channel" >/dev/null 2>&1 || return 0
+  validate_installer_protocol "$receipt_protocol" >/dev/null 2>&1 || return 0
+  printf '%s\n' "$receipt_package_digest" | grep -Eq '^[0-9a-fA-F]{64}$' || return 0
+  printf '%s\n' "$receipt_installer_digest" | grep -Eq '^[0-9a-fA-F]{64}$' || return 0
+  if version_is_prerelease "$receipt_version"; then
+    [ "$receipt_channel" = "pre-release" ] || return 0
+  fi
+  receipt_binary_version="$(current_installed_version)"
+  [ "$receipt_binary_version" = "$receipt_version" ] || return 0
+
+  installed_managed_version="$receipt_version"
+  installed_managed_channel="$receipt_channel"
+}
+
+bind_installer_provenance() {
+  metadata_installer_digest="$1"
+  if [ ! -f "$0" ] || [ ! -r "$0" ]; then
+    echo "Cannot prove the executing install.sh bytes at $0; refusing to write installer provenance." >&2
+    return 1
+  fi
+  executing_installer_digest="$(file_sha256 "$0")"
+
+  case "$INSTALLER_PROTOCOL" in
+    direct)
+      if [ -n "$INSTALLER_DIGEST" ]; then
+        echo "A verified installer digest requires an immutable installer-vN protocol." >&2
+        return 1
+      fi
+      ;;
+    *)
+      if [ -z "$INSTALLER_DIGEST" ]; then
+        echo "Installer protocol $INSTALLER_PROTOCOL requires the exact verified installer digest from its bootstrap." >&2
+        return 1
+      fi
+      printf '%s\n' "$INSTALLER_DIGEST" | grep -Eq '^[0-9a-fA-F]{64}$' || {
+        echo "Invalid verified installer digest: expected 64 hexadecimal SHA-256 characters." >&2
+        return 1
+      }
+      INSTALLER_DIGEST="$(printf '%s\n' "$INSTALLER_DIGEST" | tr 'A-F' 'a-f')"
+      if [ "$INSTALLER_DIGEST" != "$metadata_installer_digest" ]; then
+        echo "Verified installer digest disagrees with the selected Electivus release metadata." >&2
+        return 1
+      fi
+      ;;
+  esac
+
+  if [ "$executing_installer_digest" != "$metadata_installer_digest" ]; then
+    echo "The executing install.sh digest does not match the selected Electivus release metadata." >&2
+    return 1
+  fi
+  if [ -n "$INSTALLER_DIGEST" ] && [ "$executing_installer_digest" != "$INSTALLER_DIGEST" ]; then
+    echo "The executing install.sh digest does not match the bootstrap-verified digest." >&2
+    return 1
+  fi
+  resolved_installer_digest="$executing_installer_digest"
 }
 
 receipt_matches() {
@@ -1359,6 +1585,11 @@ fi
 
 tmp_dir="$(mktemp -d)"
 cleanup() {
+  if [ -n "$download_pid" ]; then
+    kill "$download_pid" 2>/dev/null || true
+    wait "$download_pid" 2>/dev/null || true
+    download_pid=""
+  fi
   release_install_lock
   if [ -n "$tmp_dir" ]; then
     rm -rf "$tmp_dir"
@@ -1366,15 +1597,22 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+load_current_managed_receipt
 resolve_release
 release_dir="$RELEASES_DIR/$resolved_version/$vendor_target"
 package_metadata_digest="$(release_asset_digest "$package_asset")"
 installer_metadata_digest="$(release_asset_digest "$installer_asset")"
+bind_installer_provenance "$installer_metadata_digest"
+if [ -n "$installed_managed_version" ] &&
+  [ "$(semver_compare "$resolved_version" "$installed_managed_version")" -lt 0 ]; then
+  echo "Refusing to downgrade managed Electivus Codex from $installed_managed_version to $resolved_version." >&2
+  exit 1
+fi
 expected_receipt="$tmp_dir/installation-receipt.json"
 write_installation_receipt \
   "$expected_receipt" \
   "$package_metadata_digest" \
-  "$installer_metadata_digest"
+  "$resolved_installer_digest"
 current_version="$(current_installed_version)"
 
 if [ -n "$current_version" ] && [ "$current_version" != "$resolved_version" ]; then
