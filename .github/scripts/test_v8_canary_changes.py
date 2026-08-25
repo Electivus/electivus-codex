@@ -5,6 +5,7 @@ from pathlib import Path
 
 from v8_canary_changes import CanaryDecision
 from v8_canary_changes import CanaryMetadata
+from v8_canary_changes import EXACT_V8_IRRELEVANT_PATHS
 from v8_canary_changes import changed_files
 from v8_canary_changes import canary_required
 from v8_canary_changes import classify_changed_files
@@ -16,6 +17,94 @@ from v8_canary_changes import windows_source_required
 
 
 class V8CanaryChangesTest(unittest.TestCase):
+    def test_exact_installer_and_version_paths_are_irrelevant(self) -> None:
+        expected_paths = {
+            ".github/scripts/check_installer_v1_topology.py",
+            ".github/scripts/test_check_installer_v1_topology.py",
+            ".github/workflows/installer-v1-release.yml",
+            "scripts/codex_package/test_version.py",
+            "scripts/codex_package/version.py",
+            "scripts/install/install-local.ps1",
+            "scripts/install/install-local.sh",
+            "scripts/install/install.ps1",
+            "scripts/install/install.sh",
+            "scripts/install/installer-v1.ps1",
+            "scripts/install/installer-v1.sh",
+            "scripts/install/test_install_local_ps1.py",
+            "scripts/install/test_install_local_sh.py",
+            "scripts/install/test_install_ps1.py",
+            "scripts/install/test_install_sh.py",
+            "scripts/install/test_installer_v1_ps1.py",
+            "scripts/install/test_installer_v1_sh.py",
+        }
+        self.assertEqual(expected_paths, EXACT_V8_IRRELEVANT_PATHS)
+
+        for path in expected_paths:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    CanaryDecision(
+                        False,
+                        "all 1 changed path is explicitly V8-irrelevant",
+                    ),
+                    classify_changed_files({path}, "149.2.0", "149.2.0"),
+                )
+
+    def test_nearby_installer_and_package_paths_remain_fail_closed(self) -> None:
+        relevant_paths = (
+            ".github/scripts/check_installer_v2_topology.py",
+            ".github/workflows/electivus-release.yml",
+            ".github/workflows/installer-v2-release.yml",
+            "scripts/build_codex_package.py",
+            "scripts/codex_package/cargo.py",
+            "scripts/codex_package/test_cargo.py",
+            "scripts/codex_package/v8.py",
+            "scripts/codex_package/version_helper.py",
+            "scripts/install/helper.py",
+            "scripts/install/install.sh.backup",
+            "scripts/install/installer-v2.sh",
+            "scripts/install/nested/install.sh",
+            "scripts/install/test_install.py",
+        )
+
+        for path in relevant_paths:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    CanaryDecision(True, f"unknown V8 impact: {path}"),
+                    classify_changed_files({path}, "149.2.0", "149.2.0"),
+                )
+
+    def test_mixed_installer_changes_require_canary(self) -> None:
+        cases = (
+            (
+                "scripts/codex_package/v8.py",
+                CanaryDecision(
+                    True,
+                    "unknown V8 impact: scripts/codex_package/v8.py",
+                ),
+            ),
+            (
+                "third_party/v8/BUILD.bazel",
+                CanaryDecision(
+                    True,
+                    "V8 canary path changed: third_party/v8/BUILD.bazel",
+                ),
+            ),
+        )
+        for path, expected in cases:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    expected,
+                    classify_changed_files(
+                        {
+                            "scripts/codex_package/version.py",
+                            "scripts/install/install.sh",
+                            path,
+                        },
+                        "149.2.0",
+                        "149.2.0",
+                    ),
+                )
+
     def test_relevant_known_irrelevant_and_unknown_paths(self) -> None:
         cases = (
             (
@@ -52,6 +141,10 @@ class V8CanaryChangesTest(unittest.TestCase):
         self.assertEqual(
             CanaryDecision(True, "v8 version changed from 149.2.0 to 150.0.0"),
             classify_changed_files(set(), "149.2.0", "150.0.0"),
+        )
+        self.assertEqual(
+            CanaryDecision(True, "comparison returned no changed paths"),
+            classify_changed_files(set(), "149.2.0", "149.2.0"),
         )
 
     def test_manual_missing_comparison_and_git_error_require_canary(self) -> None:
