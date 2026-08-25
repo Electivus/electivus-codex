@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from functools import total_ordering
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -16,6 +17,7 @@ SEMVER_PATTERN = re.compile(
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
 RELEASE_SUBJECT_PATTERN = re.compile(r"^Release (?P<version>.+)$")
+UPSTREAM_VERSION_ENV_VAR = "CODEX_UPSTREAM_VERSION"
 WORKSPACE_VERSION_BLOCK_PATTERN = re.compile(
     r'(?ms)(^\[workspace\.package\]\s+(?:(?!^\[).)*?^\s*version\s*=\s*")([^"]+)(")'
 )
@@ -88,6 +90,16 @@ def _parse_semver(version: str) -> SemVer | None:
     )
 
 
+def validate_upstream_build_version(version: str, source: str) -> str:
+    if _parse_semver(version) is None or version == "0.0.0":
+        raise RuntimeError(
+            f"Invalid upstream build version from {source}: {version!r}. "
+            "Expected a bare SemVer other than 0.0.0 (for example, "
+            "0.148.0-alpha.5); tag prefixes are not accepted."
+        )
+    return version
+
+
 def _workspace_version_from_text(manifest_text: str, manifest_path: Path | str) -> str:
     match = WORKSPACE_VERSION_BLOCK_PATTERN.search(manifest_text)
     if match is None:
@@ -133,10 +145,20 @@ def _run_git(arguments: list[str], error_message: str) -> str:
     return result.stdout
 
 
-def resolve_upstream_build_version() -> str:
+def resolve_upstream_build_version(explicit_version: str | None = None) -> str:
     current_workspace_version = read_workspace_version()
     if current_workspace_version != "0.0.0":
         return current_workspace_version
+
+    if explicit_version is not None:
+        return validate_upstream_build_version(explicit_version, "--upstream-version")
+
+    environment_version = os.environ.get(UPSTREAM_VERSION_ENV_VAR)
+    if environment_version is not None:
+        return validate_upstream_build_version(
+            environment_version,
+            UPSTREAM_VERSION_ENV_VAR,
+        )
 
     log_output = _run_git(
         [
@@ -144,8 +166,6 @@ def resolve_upstream_build_version() -> str:
             "--full-history",
             "--format=%H%x09%s",
             "HEAD",
-            "--",
-            "codex-rs/Cargo.toml",
         ],
         "Could not inspect repository history for the upstream release version.",
     )
@@ -167,17 +187,28 @@ def resolve_upstream_build_version() -> str:
         if semantic_version is None or version_text == "0.0.0":
             continue
 
-        manifest_text = _run_git(
-            ["show", f"{commit_sha}:codex-rs/Cargo.toml"],
-            f"Could not inspect Cargo.toml at release candidate {commit_sha}.",
+        manifest_result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPO_ROOT),
+                "show",
+                f"{commit_sha}:codex-rs/Cargo.toml",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
         )
-        if (
-            _workspace_version_from_text(
-                manifest_text,
+        if manifest_result.returncode != 0:
+            continue
+        try:
+            manifest_version = _workspace_version_from_text(
+                manifest_result.stdout,
                 f"{commit_sha}:codex-rs/Cargo.toml",
             )
-            != version_text
-        ):
+        except RuntimeError:
+            continue
+        if manifest_version != version_text:
             continue
 
         if selected_version is None or selected_version < semantic_version:
@@ -186,7 +217,10 @@ def resolve_upstream_build_version() -> str:
 
     if selected_version_text is None:
         raise RuntimeError(
-            "Could not find a valid upstream release version in HEAD's ancestry."
+            "Could not prove a valid upstream Release baseline in HEAD's ancestry. "
+            "This can happen in a shallow or synthetic checkout. History was not "
+            "fetched. Retry with --upstream-version <SEMVER> or set "
+            f"{UPSTREAM_VERSION_ENV_VAR}."
         )
 
     return selected_version_text

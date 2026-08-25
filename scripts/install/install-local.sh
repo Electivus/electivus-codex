@@ -24,7 +24,15 @@ tmp_dir=""
 python_bin=""
 cargo_toml_backup=""
 cargo_lock_backup=""
+version_state_dir=""
+version_lock_file=""
+version_lock_dir=""
+version_lock_kind=""
+version_transaction_dir=""
+version_transaction_owned=false
 use_upstream_version=false
+upstream_version_override=""
+upstream_version_override_set=false
 
 step() {
   printf '==> %s\n' "$1"
@@ -36,10 +44,15 @@ warn() {
 
 usage() {
   cat <<'EOF'
-Usage: install-local.sh [--use-upstream-version]
+Usage: install-local.sh [--use-upstream-version] [--upstream-version VERSION]
 
-  --use-upstream-version  Build with the upstream release or pre-release
-                          version persisted by upstream sync instead of 0.0.0.
+  --use-upstream-version   Discover the greatest upstream Release baseline in
+                           the current commit's ancestry and use it for the build.
+  --upstream-version VER   Use an explicit bare SemVer Release baseline. This
+                           overrides CODEX_UPSTREAM_VERSION and enables versioning.
+
+CODEX_UPSTREAM_VERSION supplies a validated override and enables versioning when
+no explicit version argument is present.
 
 On Windows Git Bash/MSYS/Cygwin, this delegates to install-local.ps1.
 EOF
@@ -53,6 +66,21 @@ parse_args() {
         exit 0
         ;;
       --use-upstream-version)
+        use_upstream_version=true
+        ;;
+      --upstream-version)
+        if [ "$#" -lt 2 ]; then
+          echo "--upstream-version requires a bare SemVer argument." >&2
+          exit 1
+        fi
+        upstream_version_override="$2"
+        upstream_version_override_set=true
+        use_upstream_version=true
+        shift
+        ;;
+      --upstream-version=*)
+        upstream_version_override=${1#*=}
+        upstream_version_override_set=true
         use_upstream_version=true
         ;;
       *)
@@ -95,7 +123,14 @@ read_workspace_version() {
 }
 
 resolve_upstream_build_version() {
-  python_with_scripts_path -c 'from codex_package.version import resolve_upstream_build_version; print(resolve_upstream_build_version())'
+  if [ "$upstream_version_override_set" = true ]; then
+    python_with_scripts_path -c \
+      'import sys; from codex_package.version import resolve_upstream_build_version; print(resolve_upstream_build_version(sys.argv[1]))' \
+      "$upstream_version_override"
+  else
+    python_with_scripts_path -c \
+      'from codex_package.version import resolve_upstream_build_version; print(resolve_upstream_build_version())'
+  fi
 }
 
 set_workspace_version() {
@@ -114,32 +149,71 @@ backup_cargo_manifest_files() {
   cargo_toml="$CODEX_RS_DIR/Cargo.toml"
   cargo_lock="$CODEX_RS_DIR/Cargo.lock"
 
-  cargo_toml_backup="$tmp_dir/Cargo.toml.original"
-  cp "$cargo_toml" "$cargo_toml_backup"
+  cargo_toml_backup="$version_transaction_dir/Cargo.toml.original"
+  cp "$cargo_toml" "$cargo_toml_backup" || return 1
 
   if [ -f "$cargo_lock" ]; then
-    cargo_lock_backup="$tmp_dir/Cargo.lock.original"
-    cp "$cargo_lock" "$cargo_lock_backup"
+    cargo_lock_backup="$version_transaction_dir/Cargo.lock.original"
+    cp "$cargo_lock" "$cargo_lock_backup" || return 1
   else
-    cargo_lock_backup="__missing__"
+    cargo_lock_backup="$version_transaction_dir/Cargo.lock.missing"
+    : >"$cargo_lock_backup" || return 1
   fi
+}
+
+print_version_transaction_recovery() {
+  transaction_dir="$1"
+
+  echo "A local Release-baseline version transaction is present at:" >&2
+  echo "  $transaction_dir" >&2
+  echo "The retained backups are:" >&2
+  echo "  $transaction_dir/Cargo.toml.original" >&2
+  if [ -f "$transaction_dir/Cargo.lock.original" ]; then
+    echo "  $transaction_dir/Cargo.lock.original" >&2
+  else
+    echo "  $transaction_dir/Cargo.lock.missing (Cargo.lock was originally absent)" >&2
+  fi
+  echo "Refusing to restore or mutate the workspace automatically." >&2
+  echo "Recovery steps:" >&2
+  echo "  1. Inspect the current Cargo.toml and Cargo.lock and the retained backups." >&2
+  echo "  2. Restore Cargo.toml.original to $CODEX_RS_DIR/Cargo.toml." >&2
+  if [ -f "$transaction_dir/Cargo.lock.original" ]; then
+    echo "  3. Restore Cargo.lock.original to $CODEX_RS_DIR/Cargo.lock." >&2
+  else
+    echo "  3. Remove $CODEX_RS_DIR/Cargo.lock if it was created by the transaction." >&2
+  fi
+  echo "  4. Verify the restored files byte for byte, then remove $transaction_dir." >&2
 }
 
 restore_cargo_manifest_files() {
   restore_failed=0
 
-  if [ -n "$cargo_toml_backup" ]; then
-    if ! cp "$cargo_toml_backup" "$CODEX_RS_DIR/Cargo.toml"; then
+  if [ "$version_transaction_owned" != true ]; then
+    return 0
+  fi
+
+  if ! cp "$cargo_toml_backup" "$CODEX_RS_DIR/Cargo.toml"; then
+    restore_failed=1
+  elif ! cmp -s "$cargo_toml_backup" "$CODEX_RS_DIR/Cargo.toml"; then
+    restore_failed=1
+  fi
+
+  if [ -f "$version_transaction_dir/Cargo.lock.original" ]; then
+    if ! cp "$cargo_lock_backup" "$CODEX_RS_DIR/Cargo.lock"; then
+      restore_failed=1
+    elif ! cmp -s "$cargo_lock_backup" "$CODEX_RS_DIR/Cargo.lock"; then
+      restore_failed=1
+    fi
+  else
+    if ! rm -f "$CODEX_RS_DIR/Cargo.lock"; then
+      restore_failed=1
+    elif [ -e "$CODEX_RS_DIR/Cargo.lock" ] || [ -L "$CODEX_RS_DIR/Cargo.lock" ]; then
       restore_failed=1
     fi
   fi
 
-  if [ -n "$cargo_lock_backup" ]; then
-    if [ "$cargo_lock_backup" = "__missing__" ]; then
-      if ! rm -f "$CODEX_RS_DIR/Cargo.lock"; then
-        restore_failed=1
-      fi
-    elif ! cp "$cargo_lock_backup" "$CODEX_RS_DIR/Cargo.lock"; then
+  if [ "$restore_failed" -eq 0 ]; then
+    if ! rm -rf "$version_transaction_dir"; then
       restore_failed=1
     fi
   fi
@@ -147,21 +221,129 @@ restore_cargo_manifest_files() {
   if [ "$restore_failed" -eq 0 ]; then
     cargo_toml_backup=""
     cargo_lock_backup=""
+    version_transaction_dir=""
+    version_transaction_owned=false
+  else
+    echo "Failed to restore and verify the Cargo workspace byte for byte." >&2
+    print_version_transaction_recovery "$version_transaction_dir"
   fi
 
   return "$restore_failed"
 }
 
+version_mkdir_lock_is_stale() {
+  [ -d "$version_lock_dir" ] || return 1
+
+  pid="$(cat "$version_lock_dir/pid" 2>/dev/null || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    return 1
+  fi
+
+  return 0
+}
+
+acquire_version_lock() {
+  version_state_dir="$(
+    git -C "$REPO_ROOT" rev-parse \
+      --path-format=absolute \
+      --git-path codex-local-version
+  )"
+  version_lock_file="$version_state_dir/version.lock"
+  version_lock_dir="$version_state_dir/version.lock.d"
+  mkdir -p "$version_state_dir"
+
+  if command -v flock >/dev/null 2>&1; then
+    exec 8>"$version_lock_file"
+    flock 8
+    version_lock_kind="flock"
+    return
+  fi
+
+  while ! mkdir "$version_lock_dir" 2>/dev/null; do
+    if version_mkdir_lock_is_stale; then
+      warn "Removing stale local-version lock at $version_lock_dir"
+      rm -rf "$version_lock_dir"
+      continue
+    fi
+    sleep 1
+  done
+  printf '%s\n' "$$" >"$version_lock_dir/pid"
+  version_lock_kind="mkdir"
+}
+
+release_version_lock() {
+  if [ "$version_lock_kind" = "mkdir" ]; then
+    rm -rf "$version_lock_dir" 2>/dev/null || true
+  elif [ "$version_lock_kind" = "flock" ]; then
+    exec 8>&- 2>/dev/null || true
+  fi
+  version_lock_kind=""
+}
+
+begin_version_transaction() {
+  final_transaction_dir="$version_state_dir/transaction"
+  pending_transaction_dir="$version_state_dir/.transaction.prepare.$$"
+
+  rm -rf "$pending_transaction_dir"
+  if ! mkdir "$pending_transaction_dir"; then
+    return 1
+  fi
+
+  version_transaction_dir="$pending_transaction_dir"
+  if ! backup_cargo_manifest_files; then
+    rm -rf "$pending_transaction_dir"
+    version_transaction_dir=""
+    cargo_toml_backup=""
+    cargo_lock_backup=""
+    return 1
+  fi
+  {
+    printf 'pid=%s\n' "$$"
+    printf 'worktree=%s\n' "$REPO_ROOT"
+  } >"$pending_transaction_dir/transaction.info"
+
+  if ! mv "$pending_transaction_dir" "$final_transaction_dir"; then
+    rm -rf "$pending_transaction_dir"
+    version_transaction_dir=""
+    cargo_toml_backup=""
+    cargo_lock_backup=""
+    return 1
+  fi
+
+  version_transaction_dir="$final_transaction_dir"
+  cargo_toml_backup="$version_transaction_dir/Cargo.toml.original"
+  if [ -f "$version_transaction_dir/Cargo.lock.original" ]; then
+    cargo_lock_backup="$version_transaction_dir/Cargo.lock.original"
+  else
+    cargo_lock_backup="$version_transaction_dir/Cargo.lock.missing"
+  fi
+  version_transaction_owned=true
+}
+
 prepare_upstream_build_version() {
+  require_command git
+  require_command cmp
+  acquire_version_lock
+
+  version_transaction_dir="$version_state_dir/transaction"
+  if [ -d "$version_transaction_dir" ]; then
+    print_version_transaction_recovery "$version_transaction_dir"
+    return 1
+  fi
+  find "$version_state_dir" -mindepth 1 -maxdepth 1 \
+    -name '.transaction.prepare.*' -exec rm -rf {} +
+
   current_workspace_version="$(read_workspace_version)"
   upstream_build_version="$(resolve_upstream_build_version)"
 
   if [ "$upstream_build_version" = "$current_workspace_version" ]; then
+    version_transaction_dir=""
+    release_version_lock
     return
   fi
 
-  step "Using upstream release version $upstream_build_version for local build"
-  backup_cargo_manifest_files
+  step "Using upstream Release-baseline version $upstream_build_version for local build"
+  begin_version_transaction
   set_workspace_version "$upstream_build_version"
 }
 
@@ -351,14 +533,6 @@ mkdir_lock_is_stale() {
 acquire_install_lock() {
   mkdir -p "$STANDALONE_ROOT"
 
-  if [ "$(uname -s)" = "Darwin" ] && command -v lockf >/dev/null 2>&1; then
-    : >>"$LOCK_FILE"
-    exec 9<>"$LOCK_FILE"
-    lockf 9
-    lock_kind="lockf"
-    return
-  fi
-
   if command -v flock >/dev/null 2>&1; then
     exec 9>"$LOCK_FILE"
     flock 9
@@ -383,7 +557,7 @@ acquire_install_lock() {
 release_install_lock() {
   if [ "$lock_kind" = "mkdir" ]; then
     rm -rf "$LOCK_DIR" 2>/dev/null || true
-  elif [ "$lock_kind" = "flock" ] || [ "$lock_kind" = "lockf" ]; then
+  elif [ "$lock_kind" = "flock" ]; then
     exec 9>&- 2>/dev/null || true
   fi
   lock_kind=""
@@ -476,15 +650,14 @@ build_local_package() {
   rm -rf "$package_dir"
   # Keep fast dev builds while matching release behavior for recoverable
   # session-history invariants.
-  CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false
-  export CARGO_PROFILE_DEV_DEBUG_ASSERTIONS
   if [ -n "${CODEX_LOCAL_RG:-}" ]; then
     if [ ! -x "$CODEX_LOCAL_RG" ]; then
       echo "CODEX_LOCAL_RG must point to an executable rg." >&2
       return 1
     fi
 
-    "$python_bin" "$REPO_ROOT/scripts/build_codex_package.py" \
+    CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false \
+      "$python_bin" "$REPO_ROOT/scripts/build_codex_package.py" \
       --target "$target" \
       --variant codex \
       --cargo-profile dev \
@@ -492,7 +665,8 @@ build_local_package() {
       --rg-bin "$CODEX_LOCAL_RG" \
       --force
   else
-    "$python_bin" "$REPO_ROOT/scripts/build_codex_package.py" \
+    CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false \
+      "$python_bin" "$REPO_ROOT/scripts/build_codex_package.py" \
       --target "$target" \
       --variant codex \
       --cargo-profile dev \
@@ -580,6 +754,10 @@ PY
 
 parse_args "$@"
 
+if [ "${CODEX_UPSTREAM_VERSION+x}" = x ]; then
+  use_upstream_version=true
+fi
+
 if is_windows_uname; then
   run_windows_local_installer "$@"
   exit $?
@@ -596,13 +774,22 @@ release_dir="$RELEASES_DIR/$release_name"
 
 tmp_dir="$(mktemp -d)"
 cleanup() {
-  restore_cargo_manifest_files || warn "Failed to restore Cargo workspace version files"
+  cleanup_status=$?
+  trap - EXIT INT TERM HUP
+  if ! restore_cargo_manifest_files; then
+    cleanup_status=1
+  fi
+  release_version_lock
   release_install_lock
   if [ -n "$tmp_dir" ]; then
     rm -rf "$tmp_dir"
   fi
+  exit "$cleanup_status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 acquire_install_lock
 cleanup_stale_install_artifacts
@@ -612,7 +799,10 @@ if [ "$use_upstream_version" = true ]; then
   prepare_upstream_build_version
 fi
 build_local_package "$stage_release" "$platform_target"
-restore_cargo_manifest_files
+if ! restore_cargo_manifest_files; then
+  exit 1
+fi
+release_version_lock
 if ! release_dir_is_complete "$stage_release" "$platform_target"; then
   rm -rf "$stage_release"
   echo "Local release validation failed." >&2

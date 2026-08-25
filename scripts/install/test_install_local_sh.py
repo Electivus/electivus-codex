@@ -1,217 +1,614 @@
 #!/usr/bin/env python3
 
+import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
-import sys
 import tempfile
 import textwrap
+import time
 import unittest
 
 
 INSTALL_SCRIPT = Path(__file__).with_name("install-local.sh")
-REPO_ROOT = INSTALL_SCRIPT.parents[2]
-BUILD_SCRIPT = REPO_ROOT / "scripts" / "build_codex_package.py"
+SOURCE_REPO = INSTALL_SCRIPT.parents[2]
 TARGET = "x86_64-unknown-linux-gnu"
 RELEASE_PREFIX = f"local-debug-{TARGET}"
 
 
 class InstallLocalShTest(unittest.TestCase):
-    def test_upstream_version_build_sets_repository_root_for_package_helpers(
+    def test_default_build_preserves_dirty_workspace_and_uses_development_version(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
+            repo = create_repo(root)
+            cargo_toml = repo / "codex-rs" / "Cargo.toml"
+            cargo_lock = repo / "codex-rs" / "Cargo.lock"
+            cargo_toml.write_bytes(cargo_toml.read_bytes() + b"# dirty manifest\r\n")
+            cargo_lock.write_bytes(cargo_lock.read_bytes() + b"# dirty lock\r\n")
+            (repo / "untracked-probe.txt").write_text("untracked\n", encoding="utf-8")
+            original_files = cargo_toml.read_bytes(), cargo_lock.read_bytes()
 
-            result = run_installer(root, use_upstream_version=True)
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_dev_build_disables_debug_assertions_without_using_release(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-
-            result = run_installer(root)
+            result = run_installer(root, repo)
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(
-                (root / "build.log").read_text(encoding="utf-8").splitlines(),
-                ["cargo_profile=dev", "debug_assertions=false"],
+                read_build_log(root),
+                {
+                    "version": "0.0.0",
+                    "cargo_profile": "dev",
+                    "debug_assertions": "false",
+                    "rg_bin": None,
+                    "probe": "untracked\n",
+                },
+            )
+            self.assertEqual(
+                (cargo_toml.read_bytes(), cargo_lock.read_bytes()),
+                original_files,
             )
 
-    def test_successful_install_keeps_new_release_and_two_previous(self) -> None:
+    def test_automatic_version_uses_greatest_ancestral_release_and_restores_bytes(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            releases_dir = root / "codex-home" / "packages" / "standalone" / "releases"
-            releases_dir.mkdir(parents=True)
-            previous_releases = [
-                releases_dir / f"{RELEASE_PREFIX}-20260728072517-1",
-                releases_dir / f"{RELEASE_PREFIX}-20260728194547-2",
-                releases_dir / f"{RELEASE_PREFIX}-20260730171629-3",
-                releases_dir / f"{RELEASE_PREFIX}-20260730190235-4",
-            ]
-            for timestamp, release in enumerate(reversed(previous_releases), start=1):
-                release.mkdir()
-                os.utime(release, (timestamp, timestamp))
+            repo = create_repo(root)
+            cargo_toml = repo / "codex-rs" / "Cargo.toml"
+            cargo_lock = repo / "codex-rs" / "Cargo.lock"
+            original_files = cargo_toml.read_bytes(), cargo_lock.read_bytes()
 
-            result = run_installer(root)
+            result = run_installer(
+                root,
+                repo,
+                arguments=["--use-upstream-version"],
+                mutate_lock=True,
+            )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            retained = sorted(path.name for path in releases_dir.iterdir())
-            current = root / "codex-home" / "packages" / "standalone" / "current"
-            generated = current.resolve().name
+            self.assertEqual(read_build_log(root)["version"], "0.148.0-alpha.12")
             self.assertEqual(
-                retained,
-                sorted(
-                    [generated, previous_releases[-2].name, previous_releases[-1].name]
-                ),
+                (cargo_toml.read_bytes(), cargo_lock.read_bytes()),
+                original_files,
             )
 
-    def test_failed_install_does_not_prune_previous_releases(self) -> None:
+    def test_explicit_override_precedes_environment_and_already_versioned_wins(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            releases_dir = root / "codex-home" / "packages" / "standalone" / "releases"
-            releases_dir.mkdir(parents=True)
-            previous_releases = [
-                releases_dir / "previous-1",
-                releases_dir / "previous-2",
-                releases_dir / "previous-3",
-            ]
-            for release in previous_releases:
-                release.mkdir()
+            repo = create_repo(root)
 
-            result = run_installer(root, codex_exit=1)
+            result = run_installer(
+                root,
+                repo,
+                arguments=["--upstream-version", "2.0.0-beta.1"],
+                extra_env={"CODEX_UPSTREAM_VERSION": "3.0.0"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(read_build_log(root)["version"], "2.0.0-beta.1")
+
+            write_workspace_version(repo / "codex-rs" / "Cargo.toml", "4.5.6")
+            second_root = root / "second"
+            second_root.mkdir()
+            result = run_installer(
+                second_root,
+                repo,
+                arguments=["--upstream-version", "not-semver"],
+                extra_env={"CODEX_UPSTREAM_VERSION": "also-invalid"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(read_build_log(second_root)["version"], "4.5.6")
+
+    def test_environment_override_enables_versioning_and_invalid_value_fails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+
+            result = run_installer(
+                root,
+                repo,
+                extra_env={"CODEX_UPSTREAM_VERSION": "5.6.7+local.1"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(read_build_log(root)["version"], "5.6.7+local.1")
+
+            invalid_root = root / "invalid"
+            invalid_root.mkdir()
+            result = run_installer(
+                invalid_root,
+                repo,
+                extra_env={"CODEX_UPSTREAM_VERSION": "rust-v5.6.7"},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("tag prefixes are not accepted", result.stderr)
+            self.assertFalse((invalid_root / "build.json").exists())
+
+    def test_no_provable_baseline_fails_without_fetching(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root, include_releases=False)
+            refs_before = git(repo, "show-ref").stdout
+
+            result = run_installer(
+                root,
+                repo,
+                arguments=["--use-upstream-version"],
+            )
 
             self.assertNotEqual(result.returncode, 0)
-            retained = [path for path in releases_dir.iterdir() if path.is_dir()]
-            self.assertEqual(len(retained), 4)
-            for previous_release in previous_releases:
-                self.assertTrue(previous_release.is_dir())
+            self.assertIn("shallow or synthetic checkout", result.stderr)
+            self.assertIn("--upstream-version <SEMVER>", result.stderr)
+            self.assertEqual(git(repo, "show-ref").stdout, refs_before)
+
+    def test_build_failure_and_signal_restore_files_without_pruning(self) -> None:
+        for build_mode in ("fail", "signal"):
+            with self.subTest(build_mode=build_mode):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    repo = create_repo(root)
+                    releases_dir = prepare_previous_releases(root)
+                    cargo_toml = repo / "codex-rs" / "Cargo.toml"
+                    cargo_lock = repo / "codex-rs" / "Cargo.lock"
+                    original_files = cargo_toml.read_bytes(), cargo_lock.read_bytes()
+
+                    result = run_installer(
+                        root,
+                        repo,
+                        arguments=["--use-upstream-version"],
+                        build_mode=build_mode,
+                        mutate_lock=True,
+                    )
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(
+                        (cargo_toml.read_bytes(), cargo_lock.read_bytes()),
+                        original_files,
+                    )
+                    self.assertEqual(
+                        sorted(path.name for path in releases_dir.iterdir()),
+                        ["previous-1", "previous-2", "previous-3"],
+                    )
+
+    def test_activation_failure_restores_files_and_does_not_prune(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            releases_dir = prepare_previous_releases(root)
+            cargo_toml = repo / "codex-rs" / "Cargo.toml"
+            cargo_lock = repo / "codex-rs" / "Cargo.lock"
+            original_files = cargo_toml.read_bytes(), cargo_lock.read_bytes()
+
+            result = run_installer(
+                root,
+                repo,
+                arguments=["--use-upstream-version"],
+                codex_exit=19,
+                mutate_lock=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(
+                (cargo_toml.read_bytes(), cargo_lock.read_bytes()),
+                original_files,
+            )
+            self.assertGreaterEqual(len(list(releases_dir.iterdir())), 4)
+
+    def test_missing_lockfile_is_restored_as_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            cargo_lock = repo / "codex-rs" / "Cargo.lock"
+            cargo_lock.unlink()
+
+            result = run_installer(
+                root,
+                repo,
+                arguments=["--use-upstream-version"],
+                mutate_lock=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(cargo_lock.exists())
+
+    def test_forced_termination_marker_blocks_other_install_root_without_restoring(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+
+            killed = run_installer(
+                root,
+                repo,
+                arguments=["--use-upstream-version"],
+                build_mode="kill",
+                mutate_lock=True,
+            )
+            self.assertNotEqual(killed.returncode, 0)
+            transaction_dir = version_transaction_dir(repo)
+            self.assertTrue((transaction_dir / "Cargo.toml.original").is_file())
+            self.assertTrue((transaction_dir / "Cargo.lock.original").is_file())
+
+            cargo_toml = repo / "codex-rs" / "Cargo.toml"
+            cargo_toml.write_bytes(cargo_toml.read_bytes() + b"# edit after crash\n")
+            post_crash_bytes = cargo_toml.read_bytes()
+            retry_root = root / "retry"
+            retry_root.mkdir()
+            retry = run_installer(
+                retry_root,
+                repo,
+                arguments=["--upstream-version", "9.9.9"],
+            )
+
+            self.assertNotEqual(retry.returncode, 0)
+            self.assertEqual(cargo_toml.read_bytes(), post_crash_bytes)
+            self.assertIn(str(transaction_dir), retry.stderr)
+            self.assertIn("Refusing to restore or mutate", retry.stderr)
+            self.assertIn("Recovery steps", retry.stderr)
+
+    def test_restore_verification_failure_retains_backups_before_activation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+
+            result = run_installer(
+                root,
+                repo,
+                arguments=["--use-upstream-version"],
+                build_mode="break-restore",
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            transaction_dir = version_transaction_dir(repo)
+            self.assertTrue((transaction_dir / "Cargo.toml.original").is_file())
+            self.assertIn("Failed to restore and verify", result.stderr)
+            self.assertFalse(
+                (root / "codex-home" / "packages" / "standalone" / "current").exists()
+            )
+
+    def test_worktree_lock_serializes_different_install_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            first_root = root / "first"
+            second_root = root / "second"
+            first_root.mkdir()
+            second_root.mkdir()
+            continue_path = root / "continue"
+            first_env = installer_env(
+                first_root,
+                repo,
+                build_mode="hold",
+                extra_env={"CODEX_TEST_CONTINUE": str(continue_path)},
+            )
+            second_env = installer_env(second_root, repo)
+            command = [
+                "sh",
+                str(repo / "scripts/install/install-local.sh"),
+                "--use-upstream-version",
+            ]
+
+            first = subprocess.Popen(
+                command,
+                cwd=repo,
+                env=first_env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            second = None
+            try:
+                wait_for_path(first_root / "build.ready")
+                second = subprocess.Popen(
+                    command,
+                    cwd=repo,
+                    env=second_env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                wait_for_path(
+                    second_root / "codex-home/packages/standalone/install.lock"
+                )
+                self.assertFalse((second_root / "build.json").exists())
+                continue_path.touch()
+                first_stdout, first_stderr = first.communicate(timeout=10)
+                second_stdout, second_stderr = second.communicate(timeout=10)
+                self.assertEqual(first.returncode, 0, first_stderr + first_stdout)
+                self.assertEqual(second.returncode, 0, second_stderr + second_stdout)
+            finally:
+                for process in (first, second):
+                    if process is not None and process.poll() is None:
+                        process.kill()
+                        process.communicate()
+
+    def test_local_ripgrep_and_successful_retention_remain_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            releases_dir = prepare_previous_releases(root, timestamped=True)
+            local_rg = root / "local-rg"
+            write_executable(local_rg, "#!/bin/sh\nexit 0\n")
+
+            result = run_installer(
+                root,
+                repo,
+                extra_env={"CODEX_LOCAL_RG": str(local_rg)},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(read_build_log(root)["rg_bin"], str(local_rg))
+            current = root / "codex-home/packages/standalone/current"
+            self.assertEqual(len(list(releases_dir.iterdir())), 3)
+            self.assertTrue(current.resolve().is_dir())
+
+
+def create_repo(root: Path, *, include_releases: bool = True) -> Path:
+    repo = root / "repo"
+    (repo / "scripts/install").mkdir(parents=True)
+    (repo / "scripts/codex_package").mkdir()
+    (repo / "codex-rs").mkdir()
+    shutil.copy2(INSTALL_SCRIPT, repo / "scripts/install/install-local.sh")
+    for name in ("__init__.py", "targets.py", "version.py"):
+        shutil.copy2(
+            SOURCE_REPO / "scripts/codex_package" / name,
+            repo / "scripts/codex_package" / name,
+        )
+    (repo / "scripts/build_codex_package.py").write_text(
+        BUILD_STUB,
+        encoding="utf-8",
+    )
+    write_workspace_version(repo / "codex-rs/Cargo.toml", "0.0.0")
+    (repo / "codex-rs/Cargo.lock").write_bytes(b"# original lock\r\nversion = 4\r\n")
+    git(repo, "init", "--initial-branch=main")
+    git(repo, "config", "user.name", "Installer Test")
+    git(repo, "config", "user.email", "installer@example.test")
+    commit_all(repo, "Initial source", day=1)
+    if not include_releases:
+        return repo
+
+    cargo_toml = repo / "codex-rs/Cargo.toml"
+    for day, release in ((2, "0.148.0-alpha.9"), (3, "0.148.0-alpha.12")):
+        write_workspace_version(cargo_toml, release)
+        commit_all(repo, f"Release {release}", day=day)
+    write_workspace_version(cargo_toml, "0.0.0")
+    commit_all(repo, "Resume development", day=4)
+    git(repo, "switch", "--create", "unmerged-release")
+    write_workspace_version(cargo_toml, "0.148.0-alpha.19")
+    commit_all(repo, "Release 0.148.0-alpha.19", day=5)
+    git(repo, "switch", "main")
+    git(repo, "tag", "rust-v99.0.0")
+    return repo
+
+
+BUILD_STUB = textwrap.dedent(
+    r"""
+    import json
+    import os
+    from pathlib import Path
+    import re
+    import signal
+    import sys
+    import time
+
+    repo = Path(__file__).parents[1]
+    cargo_toml = repo / "codex-rs/Cargo.toml"
+    cargo_lock = repo / "codex-rs/Cargo.lock"
+    version = re.search(
+        r'(?ms)^\[workspace\.package\].*?^version\s*=\s*"([^"]+)"',
+        cargo_toml.read_text(encoding="utf-8"),
+    ).group(1)
+    args = sys.argv[1:]
+    value_after = lambda name: args[args.index(name) + 1] if name in args else None
+    log = {
+        "version": version,
+        "cargo_profile": value_after("--cargo-profile"),
+        "debug_assertions": os.environ.get("CARGO_PROFILE_DEV_DEBUG_ASSERTIONS"),
+        "rg_bin": value_after("--rg-bin"),
+        "probe": (repo / "untracked-probe.txt").read_text(encoding="utf-8")
+        if (repo / "untracked-probe.txt").exists()
+        else None,
+    }
+    Path(os.environ["CODEX_TEST_BUILD_LOG"]).write_text(json.dumps(log), encoding="utf-8")
+    if os.environ.get("CODEX_TEST_MUTATE_LOCK") == "1":
+        cargo_lock.write_bytes(b"mutated by builder\n")
+    mode = os.environ.get("CODEX_TEST_BUILD_MODE", "success")
+    if mode == "fail":
+        raise SystemExit(23)
+    if mode == "signal":
+        os.kill(os.getppid(), signal.SIGTERM)
+        raise SystemExit(23)
+    if mode == "kill":
+        os.kill(os.getppid(), signal.SIGKILL)
+        raise SystemExit(23)
+    if mode == "hold":
+        Path(os.environ["CODEX_TEST_READY"]).touch()
+        while not Path(os.environ["CODEX_TEST_CONTINUE"]).exists():
+            time.sleep(0.01)
+
+    package_dir = Path(value_after("--package-dir"))
+    target = value_after("--target")
+    for directory in ("bin", "codex-path", "codex-resources"):
+        (package_dir / directory).mkdir(parents=True, exist_ok=True)
+    codex_exit = os.environ.get("CODEX_TEST_CODEX_EXIT", "0")
+    files = {
+        "bin/codex": f"#!/bin/sh\nexit {codex_exit}\n",
+        "codex-path/rg": "#!/bin/sh\nexit 0\n",
+        "codex-resources/bwrap": "#!/bin/sh\nexit 0\n",
+    }
+    for name, content in files.items():
+        path = package_dir / name
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o755)
+    (package_dir / "codex-package.json").write_text(
+        json.dumps({"target": target}), encoding="utf-8"
+    )
+    if mode == "break-restore":
+        cargo_toml.unlink()
+        cargo_toml.mkdir()
+    """
+).lstrip()
 
 
 def run_installer(
-    root: Path, *, codex_exit: int = 0, use_upstream_version: bool = False
+    root: Path,
+    repo: Path,
+    *,
+    arguments: list[str] | None = None,
+    build_mode: str = "success",
+    codex_exit: int = 0,
+    mutate_lock: bool = False,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    fake_bin = root / "fake-bin"
-    fake_bin.mkdir()
-    home = root / "home"
-    home.mkdir()
-    install_bin = root / "install-bin"
-
-    write_executable(fake_bin / "cargo", "#!/bin/sh\nexit 0\n")
-    write_executable(
-        fake_bin / "uname",
-        """\
-        #!/bin/sh
-        case "$1" in
-          -s) printf 'Linux\n' ;;
-          -m) printf 'x86_64\n' ;;
-          *) printf 'Linux\n' ;;
-        esac
-        """,
-    )
-    write_executable(
-        fake_bin / "date",
-        """\
-        #!/bin/sh
-        case "$1" in
-          +%Y%m%d%H%M%S) printf '20260731120000\n' ;;
-          +%s) printf '1785500000\n' ;;
-          *) exec /bin/date "$@" ;;
-        esac
-        """,
-    )
-    write_executable(
-        fake_bin / "python3",
-        f"""\
-        #!/bin/sh
-        if [ "$1" = "-c" ]; then
-          case "$2" in
-            *read_workspace_version*)
-              printf '0.0.0\n'
-              exit 0
-              ;;
-            *resolve_upstream_build_version*)
-              if [ "${{CODEX_REPO_ROOT-}}" != "$CODEX_TEST_EXPECTED_REPO_ROOT" ]; then
-                printf 'unexpected CODEX_REPO_ROOT: %s\n' "${{CODEX_REPO_ROOT-}}" >&2
-                exit 1
-              fi
-              printf '0.0.0\n'
-              exit 0
-              ;;
-          esac
-        fi
-
-        if [ "$1" != "{BUILD_SCRIPT}" ]; then
-          exec "{sys.executable}" "$@"
-        fi
-
-        shift
-        package_dir=""
-        target=""
-        cargo_profile=""
-        while [ "$#" -gt 0 ]; do
-          case "$1" in
-            --package-dir)
-              shift
-              package_dir="$1"
-              ;;
-            --target)
-              shift
-              target="$1"
-              ;;
-            --cargo-profile)
-              shift
-              cargo_profile="$1"
-              ;;
-          esac
-          shift
-        done
-
-        printf 'cargo_profile=%s\ndebug_assertions=%s\n' \
-          "$cargo_profile" "${{CARGO_PROFILE_DEV_DEBUG_ASSERTIONS-unset}}" \
-          >"$CODEX_TEST_BUILD_LOG"
-        mkdir -p "$package_dir/bin" "$package_dir/codex-path" \
-          "$package_dir/codex-resources"
-        printf '#!/bin/sh\nexit %s\n' "$CODEX_TEST_CODEX_EXIT" \
-          >"$package_dir/bin/codex"
-        printf '#!/bin/sh\nexit 0\n' >"$package_dir/codex-path/rg"
-        printf '#!/bin/sh\nexit 0\n' >"$package_dir/codex-resources/bwrap"
-        chmod +x "$package_dir/bin/codex" "$package_dir/codex-path/rg" \
-          "$package_dir/codex-resources/bwrap"
-        printf '{{"target": "%s"}}\n' "$target" \
-          >"$package_dir/codex-package.json"
-        """,
-    )
-
-    env = {
-        **os.environ,
-        "PATH": f"{fake_bin}:/usr/bin:/bin",
-        "HOME": str(home),
-        "SHELL": "/bin/sh",
-        "CODEX_HOME": str(root / "codex-home"),
-        "CODEX_INSTALL_DIR": str(install_bin),
-        "CODEX_TEST_BUILD_LOG": str(root / "build.log"),
-        "CODEX_TEST_CODEX_EXIT": str(codex_exit),
-        "CODEX_TEST_EXPECTED_REPO_ROOT": str(REPO_ROOT),
-        "TMPDIR": str(root),
-    }
-    env.pop("CODEX_REPO_ROOT", None)
-    arguments = ["sh", str(INSTALL_SCRIPT)]
-    if use_upstream_version:
-        arguments.append("--use-upstream-version")
     return subprocess.run(
-        arguments,
-        cwd=REPO_ROOT,
-        env=env,
+        ["sh", str(repo / "scripts/install/install-local.sh"), *(arguments or [])],
+        cwd=repo,
+        env=installer_env(
+            root,
+            repo,
+            build_mode=build_mode,
+            codex_exit=codex_exit,
+            mutate_lock=mutate_lock,
+            extra_env=extra_env,
+        ),
         text=True,
         capture_output=True,
         check=False,
     )
 
 
+def installer_env(
+    root: Path,
+    repo: Path,
+    *,
+    build_mode: str = "success",
+    codex_exit: int = 0,
+    mutate_lock: bool = False,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    fake_bin = root / "fake-bin"
+    fake_bin.mkdir(exist_ok=True)
+    home = root / "home"
+    home.mkdir(exist_ok=True)
+    write_executable(fake_bin / "cargo", "#!/bin/sh\nexit 0\n")
+    write_executable(
+        fake_bin / "uname",
+        '#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo x86_64;; *) echo Linux;; esac\n',
+    )
+    write_executable(
+        fake_bin / "date",
+        '#!/bin/sh\ncase "$1" in '
+        "+%Y%m%d%H%M%S) echo 20260825120000;; "
+        "+%s) echo 1787659200;; "
+        '*) exec /bin/date "$@";; esac\n',
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "HOME": str(home),
+        "SHELL": "/bin/sh",
+        "CODEX_HOME": str(root / "codex-home"),
+        "CODEX_INSTALL_DIR": str(root / "install-bin"),
+        "CODEX_TEST_BUILD_LOG": str(root / "build.json"),
+        "CODEX_TEST_BUILD_MODE": build_mode,
+        "CODEX_TEST_CODEX_EXIT": str(codex_exit),
+        "CODEX_TEST_MUTATE_LOCK": "1" if mutate_lock else "0",
+        "CODEX_TEST_READY": str(root / "build.ready"),
+        "TMPDIR": str(root),
+        "CARGO_PROFILE_DEV_DEBUG_ASSERTIONS": "caller-value",
+    }
+    env.pop("CODEX_REPO_ROOT", None)
+    env.pop("CODEX_UPSTREAM_VERSION", None)
+    env.update(extra_env or {})
+    return env
+
+
+def prepare_previous_releases(root: Path, *, timestamped: bool = False) -> Path:
+    releases_dir = root / "codex-home/packages/standalone/releases"
+    releases_dir.mkdir(parents=True)
+    for index in range(1, 4):
+        name = (
+            f"{RELEASE_PREFIX}-2026082{index}120000-{index}"
+            if timestamped
+            else f"previous-{index}"
+        )
+        (releases_dir / name).mkdir()
+    return releases_dir
+
+
+def version_transaction_dir(repo: Path) -> Path:
+    return Path(
+        git(
+            repo,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "codex-local-version/transaction",
+        ).stdout.strip()
+    )
+
+
+def read_build_log(root: Path) -> dict[str, object]:
+    return json.loads((root / "build.json").read_text(encoding="utf-8"))
+
+
+def wait_for_path(path: Path) -> None:
+    deadline = time.monotonic() + 5
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for {path}")
+        time.sleep(0.01)
+
+
+def write_workspace_version(path: Path, workspace_version: str) -> None:
+    path.write_bytes(
+        textwrap.dedent(
+            f'''\
+            [workspace]
+            resolver = "2"
+
+            [workspace.package]
+            version = "{workspace_version}"
+            edition = "2024"
+            '''
+        )
+        .replace("\n", "\r\n")
+        .encode()
+    )
+
+
+def commit_all(repo: Path, message: str, *, day: int) -> None:
+    git(repo, "add", ".")
+    timestamp = f"2026-08-{day:02d}T12:00:00+00:00"
+    git(
+        repo,
+        "commit",
+        "--message",
+        message,
+        extra_env={"GIT_AUTHOR_DATE": timestamp, "GIT_COMMITTER_DATE": timestamp},
+    )
+
+
+def git(
+    repo: Path, *arguments: str, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(repo), *arguments],
+        env={**os.environ, **(extra_env or {})},
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+
 def write_executable(path: Path, content: str) -> None:
-    path.write_text(textwrap.dedent(content), encoding="utf-8")
+    path.write_text(content, encoding="utf-8")
     path.chmod(0o755)
 
 
