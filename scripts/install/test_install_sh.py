@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 import shutil
@@ -413,6 +414,74 @@ class InstallShTest(unittest.TestCase):
                 self.assertEqual(requests, [exact_url("7.1.4")])
                 self.assertIn("not published, valid, and complete", result.stderr)
 
+    def test_published_at_requires_a_semantic_rfc3339_timestamp(self) -> None:
+        invalid_values: tuple[object, ...] = (
+            None,
+            1,
+            "not-a-timestamp",
+            "2026-02-30T00:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "2026-08-25T24:00:00Z",
+            "2026-08-25T00:00:00+24:00",
+        )
+        for value in invalid_values:
+            with (
+                self.subTest(value=value),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                digests = create_release_assets(root, "7.1.9")
+                metadata = release_metadata("7.1.9", digests)
+                metadata["published_at"] = value
+
+                result, requests = run_installer(root, selector="7.1.9", exact=metadata)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(requests, [exact_url("7.1.9")])
+                self.assertFalse((root / "install-bin/codex").exists())
+
+        valid_values = (
+            "2026-08-25T00:00:00.123Z",
+            "2026-08-25T03:00:00+03:00",
+        )
+        for value in valid_values:
+            with (
+                self.subTest(value=value),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                digests = create_release_assets(root, "7.1.9")
+                metadata = release_metadata("7.1.9", digests)
+                metadata["published_at"] = value
+
+                result, _requests = run_installer(
+                    root, selector="7.1.9", exact=metadata
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_assets_array_rejects_every_non_object_entry(self) -> None:
+        for value in (None, "scalar", 1, True):
+            with (
+                self.subTest(value=value),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                digests = create_release_assets(root, "7.1.10")
+                metadata = release_metadata("7.1.10", digests)
+                assets = metadata["assets"]
+                assert isinstance(assets, list)
+                assets.append(value)
+
+                result, requests = run_installer(
+                    root, selector="7.1.10", exact=metadata
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(requests, [exact_url("7.1.10")])
+                self.assertIn("Could not parse", result.stderr)
+                self.assertFalse((root / "install-bin/codex").exists())
+
     def test_asset_count_name_and_type_size_upper_boundaries_are_valid(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -499,6 +568,62 @@ class InstallShTest(unittest.TestCase):
             wait_for_process_exit(
                 int((root / "curl-stream-pid").read_text(encoding="utf-8"))
             )
+
+    def test_signals_stop_blocked_curl_and_drip_wget_without_leaks(self) -> None:
+        cases = (
+            ("blocked-curl", "curl", signal.SIGHUP),
+            ("blocked-curl", "curl", signal.SIGINT),
+            ("blocked-curl", "curl", signal.SIGTERM),
+            ("drip-wget", "wget", signal.SIGHUP),
+            ("drip-wget", "wget", signal.SIGINT),
+            ("drip-wget", "wget", signal.SIGTERM),
+        )
+        for mode, transport, sent_signal in cases:
+            with (
+                self.subTest(mode=mode, signal=sent_signal),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                digests = create_release_assets(root, "7.1.7")
+                invocation = prepare_installer(
+                    root,
+                    selector="7.1.7",
+                    exact=release_metadata("7.1.7", digests),
+                    force_fallback_lock=True,
+                    metadata_mode=mode,
+                    transport=transport,
+                )
+                invocation.env["TMPDIR"] = str(root)
+                process = subprocess.Popen(
+                    invocation.args,
+                    env=invocation.env,
+                    start_new_session=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    wait_for_path(root / "download.ready")
+                    worker_pids = recorded_download_pids(root)
+                    started = time.monotonic()
+                    os.kill(process.pid, sent_signal)
+                    stdout, stderr = communicate_bounded(process)
+                    elapsed = time.monotonic() - started
+
+                    self.assertEqual(
+                        process.returncode,
+                        128 + sent_signal,
+                        stderr + stdout,
+                    )
+                    self.assertLess(elapsed, 2)
+                    for worker_pid in worker_pids:
+                        wait_for_process_exit(worker_pid)
+                    wait_for_process_group_exit(process.pid)
+                    assert_interrupted_install_left_no_state(root, "7.1.7")
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate(timeout=2)
 
     def test_package_metadata_and_manifest_digests_must_agree(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -617,6 +742,95 @@ class InstallShTest(unittest.TestCase):
                     if process.poll() is None:
                         process.kill()
                         process.communicate()
+
+    def test_signal_cleanup_cannot_unlink_a_successor_reclaim_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_release_assets(root, "7.1.8")
+            invocation = prepare_installer(
+                root,
+                selector="7.1.8",
+                exact=release_metadata("7.1.8", digests),
+                force_fallback_lock=True,
+            )
+            standalone_root = root / "codex-home/packages/standalone"
+            lock_path = standalone_root / "install.lock.d"
+            lock_path.mkdir(parents=True)
+            (lock_path / "pid").write_text("2147483647\n", encoding="utf-8")
+            (lock_path / "started_at").write_text("1\n", encoding="utf-8")
+            successor_marker = Path(f"{lock_path}.reclaim.successor")
+            successor_guard = Path(f"{lock_path}.reclaim.guard")
+            invocation.env["CODEX_TEST_SUCCESSOR_MARKER"] = str(successor_marker)
+            install_guard_unlink_successor_signal(invocation.env)
+
+            process = subprocess.Popen(
+                invocation.args,
+                env=invocation.env,
+                start_new_session=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = communicate_bounded(process)
+
+                self.assertEqual(process.returncode, 143, stderr + stdout)
+                self.assertTrue(successor_marker.is_file())
+                self.assertTrue(successor_guard.is_file())
+                self.assertTrue(os.path.samefile(successor_marker, successor_guard))
+                self.assertFalse((standalone_root / "current").exists())
+                self.assertFalse((root / "install-bin/codex").exists())
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=2)
+
+    def test_live_reused_or_unverifiable_lock_pid_fails_closed_promptly(self) -> None:
+        for case in ("fingerprint-mismatch", "unknown-identity"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                digests = create_release_assets(root, "7.1.11")
+                invocation = prepare_installer(
+                    root,
+                    selector="7.1.11",
+                    exact=release_metadata("7.1.11", digests),
+                    force_fallback_lock=True,
+                )
+                standalone_root = root / "codex-home/packages/standalone"
+                standalone_root.mkdir(parents=True)
+                lock_path = standalone_root / "install.lock.d"
+                lock_lines = [str(os.getpid()), str(int(time.time())), "foreign-owner"]
+                if case == "fingerprint-mismatch":
+                    lock_lines.append("fingerprint=definitely-not-this-process")
+                lock_contents = "\n".join(lock_lines) + "\n"
+                lock_path.write_text(lock_contents, encoding="utf-8")
+
+                process = subprocess.Popen(
+                    invocation.args,
+                    env=invocation.env,
+                    start_new_session=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    started = time.monotonic()
+                    stdout, stderr = communicate_bounded(process)
+                    elapsed = time.monotonic() - started
+
+                    self.assertNotEqual(process.returncode, 0, stdout)
+                    self.assertLess(elapsed, 2)
+                    self.assertIn(str(lock_path), stderr)
+                    self.assertIn("manual recovery", stderr)
+                    self.assertEqual(
+                        lock_path.read_text(encoding="utf-8"), lock_contents
+                    )
+                    self.assertFalse((standalone_root / "current").exists())
+                    self.assertFalse((root / "install-bin/codex").exists())
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate(timeout=2)
 
     def test_macos_fails_before_any_network_request(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -799,9 +1013,11 @@ def prepare_installer(
                 ;;
               https://github.com/Electivus/electivus-codex/releases/download/*)
                 asset="${url##*/}"
-                if [ "$CODEX_TEST_METADATA_MODE" = "hold-first-manifest" ] &&
+                if { [ "$CODEX_TEST_METADATA_MODE" = "hold-first-manifest" ] ||
+                    [ "$CODEX_TEST_METADATA_MODE" = "blocked-curl" ]; } &&
                   [ "$asset" = "codex-package_SHA256SUMS" ] &&
                   mkdir "$CODEX_TEST_ROOT/download-holder" 2>/dev/null; then
+                  printf '%s\n' "$$" >"$CODEX_TEST_ROOT/downloader.pid"
                   : >"$CODEX_TEST_ROOT/download.ready"
                   while [ ! -e "$CODEX_TEST_DOWNLOAD_CONTINUE" ]; do
                     sleep 0.01
@@ -849,6 +1065,20 @@ def prepare_installer(
             command_path = shutil.which(command)
             assert command_path is not None
             (fake_bin / command).symlink_to(command_path)
+        fake_head = fake_bin / "head"
+        fake_head.unlink()
+        real_head = shutil.which("head")
+        assert real_head is not None
+        write_executable(
+            fake_head,
+            textwrap.dedent(
+                f"""\
+                #!/bin/sh
+                printf '%s\\n' "$$" >>"$CODEX_TEST_ROOT/head.pids"
+                exec "{real_head}" "$@"
+                """
+            ),
+        )
         if transport == "wget":
             write_executable(
                 fake_bin / "wget",
@@ -866,7 +1096,14 @@ def prepare_installer(
                 printf '%s\n' "$url" >>"$CODEX_TEST_REQUEST_LOG"
                 case "$url" in
                   https://api.github.com/repos/Electivus/electivus-codex/releases/tags/*)
-                    if [ "$CODEX_TEST_METADATA_MODE" = "oversized" ]; then
+                    if [ "$CODEX_TEST_METADATA_MODE" = "drip-wget" ]; then
+                      printf '%s\n' "$$" >"$CODEX_TEST_ROOT/downloader.pid"
+                      : >"$CODEX_TEST_ROOT/download.ready"
+                      while :; do
+                        printf x
+                        sleep 0.1
+                      done
+                    elif [ "$CODEX_TEST_METADATA_MODE" = "oversized" ]; then
                       dd if=/dev/zero bs=1048577 count=1 2>/dev/null | tr '\\000' x >"$output"
                     else
                       cp "$CODEX_TEST_METADATA_DIR/exact.json" "$output"
@@ -1106,6 +1343,64 @@ def wait_for_process_exit(pid: int) -> None:
         time.sleep(0.01)
 
 
+def wait_for_process_group_exit(process_group: int) -> None:
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"process group {process_group} remained alive")
+        time.sleep(0.01)
+
+
+def recorded_download_pids(root: Path) -> list[int]:
+    pids = [int((root / "downloader.pid").read_text(encoding="utf-8"))]
+    if (root / "head.pids").exists():
+        pids.extend(
+            int(pid)
+            for pid in (root / "head.pids").read_text(encoding="utf-8").splitlines()
+        )
+    return pids
+
+
+def communicate_bounded(process: subprocess.Popen[str]) -> tuple[str, str]:
+    try:
+        return process.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        stdout, stderr = process.communicate(timeout=2)
+        raise AssertionError(
+            f"installer did not exit promptly after a direct signal: {stderr}{stdout}"
+        )
+
+
+def assert_interrupted_install_left_no_state(root: Path, version: str) -> None:
+    standalone_root = root / "codex-home/packages/standalone"
+    self_owned_artifacts = (
+        standalone_root / "install.lock.d",
+        root / "install-bin/codex",
+        standalone_root / "current",
+        release_dir(root, version),
+    )
+    for artifact in self_owned_artifacts:
+        if artifact.exists() or artifact.is_symlink():
+            raise AssertionError(f"interrupted installer leaked {artifact}")
+    leaked = [
+        path
+        for pattern in (
+            "tmp.*",
+            "**/*.fifo",
+            "**/install.lock.owner.*",
+            "**/*.reclaim.*",
+        )
+        for path in root.glob(pattern)
+    ]
+    if leaked:
+        raise AssertionError(f"interrupted installer leaked temporary state: {leaked}")
+
+
 def wait_for_path(path: Path) -> None:
     deadline = time.monotonic() + 5
     while not path.exists():
@@ -1142,6 +1437,37 @@ def install_reclaim_guard_barrier(env: dict[str, str]) -> None:
               ;;
             esac
             exec /usr/bin/ln "$@"
+            """
+        ),
+    )
+
+
+def install_guard_unlink_successor_signal(env: dict[str, str]) -> None:
+    fake_rm = Path(env["PATH"]) / "rm"
+    fake_rm.unlink()
+    write_executable(
+        fake_rm,
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            last=""
+            for argument in "$@"; do last="$argument"; done
+            case "$last" in
+            *.reclaim.guard)
+              if mkdir "$CODEX_TEST_ROOT/guard-unlink-once" 2>/dev/null; then
+                /usr/bin/rm "$@"
+                {
+                  printf '%s\n' "$$"
+                  date +%s
+                  printf '%s\n' 'fingerprint=successor'
+                } >"$CODEX_TEST_SUCCESSOR_MARKER"
+                /usr/bin/ln "$CODEX_TEST_SUCCESSOR_MARKER" "$last"
+                kill -TERM "$PPID"
+                exit 0
+              fi
+              ;;
+            esac
+            exec /usr/bin/rm "$@"
             """
         ),
     )

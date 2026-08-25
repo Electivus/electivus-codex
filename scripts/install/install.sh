@@ -36,6 +36,9 @@ lock_kind=""
 lock_owner_file=""
 tmp_dir=""
 download_pid=""
+download_reader_pid=""
+active_download_pipe=""
+cleanup_done=false
 active_reclaim_marker=""
 active_reclaim_guard=""
 
@@ -165,6 +168,29 @@ EOF
   done
 }
 
+stop_active_download() {
+  if [ -n "$download_reader_pid" ]; then
+    kill "$download_reader_pid" 2>/dev/null || true
+  fi
+  if [ -n "$download_pid" ]; then
+    kill "$download_pid" 2>/dev/null || true
+  fi
+  if [ -n "$download_reader_pid" ]; then
+    kill -KILL "$download_reader_pid" 2>/dev/null || true
+    wait "$download_reader_pid" 2>/dev/null || true
+    download_reader_pid=""
+  fi
+  if [ -n "$download_pid" ]; then
+    kill -KILL "$download_pid" 2>/dev/null || true
+    wait "$download_pid" 2>/dev/null || true
+    download_pid=""
+  fi
+  if [ -n "$active_download_pipe" ]; then
+    rm -f "$active_download_pipe"
+    active_download_pipe=""
+  fi
+}
+
 download_file() {
   url="$1"
   output="$2"
@@ -175,6 +201,7 @@ download_file() {
   download_pipe="$tmp_dir/download.$$.fifo"
   rm -f "$download_pipe"
   mkfifo "$download_pipe"
+  active_download_pipe="$download_pipe"
 
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
@@ -190,20 +217,18 @@ download_file() {
 
   download_pid=$!
   head_status=0
-  head -c $((max_bytes + 1)) "$download_pipe" >"$output" || head_status=$?
+  head -c $((max_bytes + 1)) "$download_pipe" >"$output" &
+  download_reader_pid=$!
+  wait "$download_reader_pid" || head_status=$?
+  download_reader_pid=""
   if [ "$head_status" -ne 0 ]; then
-    kill "$download_pid" 2>/dev/null || true
-    wait "$download_pid" 2>/dev/null || true
-    download_pid=""
-    rm -f "$download_pipe" "$output"
+    stop_active_download
+    rm -f "$output"
     return 1
   fi
   downloaded_bytes="$(wc -c <"$output" | tr -d ' ')"
   if [ "$downloaded_bytes" -gt "$max_bytes" ]; then
-    kill "$download_pid" 2>/dev/null || true
-    wait "$download_pid" 2>/dev/null || true
-    download_pid=""
-    rm -f "$download_pipe"
+    stop_active_download
     rm -f "$output"
     echo "Download from $url exceeded the $max_bytes-byte safety limit." >&2
     return 1
@@ -213,6 +238,7 @@ download_file() {
   wait "$download_pid" || transport_status=$?
   download_pid=""
   rm -f "$download_pipe"
+  active_download_pipe=""
   if [ "$transport_status" -ne 0 ]; then
     rm -f "$output"
     return 1
@@ -221,9 +247,8 @@ download_file() {
 
 download_text() {
   url="$1"
-  output="$tmp_dir/metadata.json"
-  download_file "$url" "$output" "$METADATA_MAX_BYTES" || return 1
-  cat "$output"
+  output="$2"
+  download_file "$url" "$output" "$METADATA_MAX_BYTES"
 }
 
 parse_release_metadata() {
@@ -303,6 +328,14 @@ parse_release_metadata() {
         if (!in_string && root_kind == "array" && array_depth == 1 &&
             object_depth == 0 && char !~ /[[:space:]]/ &&
             char != "{" && char != "]" && char != ",") {
+          invalid = 1
+        }
+
+        if (!in_string && assets_array_depth != 0 &&
+            array_depth == assets_array_depth &&
+            object_depth == release_object_depth &&
+            char !~ /[[:space:]]/ && char != "{" &&
+            char != "]" && char != ",") {
           invalid = 1
         }
 
@@ -549,6 +582,63 @@ release_assets_are_complete() {
   done
 }
 
+published_at_is_valid() {
+  printf '%s\n' "$1" | LC_ALL=C awk '
+    function all_digits(value) {
+      return value != "" && value !~ /[^0-9]/
+    }
+    function leap_year(year) {
+      return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    }
+    {
+      value = $0
+      if (length(value) < 20 || substr(value, 5, 1) != "-" ||
+          substr(value, 8, 1) != "-" || substr(value, 11, 1) != "T" ||
+          substr(value, 14, 1) != ":" || substr(value, 17, 1) != ":") exit 1
+      year_text = substr(value, 1, 4)
+      month_text = substr(value, 6, 2)
+      day_text = substr(value, 9, 2)
+      hour_text = substr(value, 12, 2)
+      minute_text = substr(value, 15, 2)
+      second_text = substr(value, 18, 2)
+      if (!all_digits(year_text) || !all_digits(month_text) ||
+          !all_digits(day_text) || !all_digits(hour_text) ||
+          !all_digits(minute_text) || !all_digits(second_text)) exit 1
+      year = year_text + 0
+      month = month_text + 0
+      day = day_text + 0
+      hour = hour_text + 0
+      minute = minute_text + 0
+      second = second_text + 0
+      if (year < 1 || month < 1 || month > 12 || hour > 23 ||
+          minute > 59 || second > 59) exit 1
+      month_days = 31
+      if (month == 4 || month == 6 || month == 9 || month == 11) {
+        month_days = 30
+      } else if (month == 2) {
+        month_days = leap_year(year) ? 29 : 28
+      }
+      if (day < 1 || day > month_days) exit 1
+
+      suffix = substr(value, 20)
+      if (substr(suffix, 1, 1) == ".") {
+        position = 2
+        while (position <= length(suffix) &&
+            substr(suffix, position, 1) ~ /[0-9]/) position++
+        if (position == 2) exit 1
+        suffix = substr(suffix, position)
+      }
+      if (suffix == "Z") exit 0
+      if (length(suffix) != 6 || substr(suffix, 1, 1) !~ /[+-]/ ||
+          substr(suffix, 4, 1) != ":") exit 1
+      offset_hour = substr(suffix, 2, 2)
+      offset_minute = substr(suffix, 5, 2)
+      if (!all_digits(offset_hour) || !all_digits(offset_minute) ||
+          offset_hour + 0 > 23 || offset_minute + 0 > 59) exit 1
+    }
+  '
+}
+
 consider_release() {
   c_tag="$1"
   c_draft="$2"
@@ -557,7 +647,7 @@ consider_release() {
   c_assets="$5"
 
   [ "$c_draft" = "false" ] || return 0
-  [ -n "$c_published_at" ] && [ "$c_published_at" != "null" ] || return 0
+  [ -n "$c_published_at" ] && published_at_is_valid "$c_published_at" || return 0
   case "$c_tag" in
     "$TAG_PREFIX"*) c_version="${c_tag#"$TAG_PREFIX"}" ;;
     *) return 0 ;;
@@ -734,10 +824,12 @@ resolve_release() {
   if [ "$requested_kind" = "exact" ]; then
     requested_tag="$TAG_PREFIX$requested_version"
     metadata_url="$(release_metadata_url "$requested_tag")"
-    if ! release_json="$(download_text "$metadata_url")"; then
+    metadata_path="$tmp_dir/metadata.json"
+    if ! download_text "$metadata_url" "$metadata_path"; then
       echo "Could not fetch published Electivus release metadata for $requested_tag." >&2
       return 1
     fi
+    release_json="$(cat "$metadata_path")"
     records="$(parse_release_document "$release_json" "$requested_tag" '{')" || return 1
     select_release_from_records "$records" || return 1
   else
@@ -747,10 +839,12 @@ resolve_release() {
     terminal_page=false
     while [ "$page" -le "$MAX_RELEASE_PAGES" ]; do
       metadata_url="$GITHUB_API_BASE/releases?per_page=100&page=$page"
-      if ! release_json="$(download_text "$metadata_url")"; then
+      metadata_path="$tmp_dir/metadata.json"
+      if ! download_text "$metadata_url" "$metadata_path"; then
         echo "Could not fetch bounded Electivus release inventory page $page." >&2
         return 1
       fi
+      release_json="$(cat "$metadata_path")"
       page_records="$(parse_release_document "$release_json" "Electivus release inventory page $page" '[')" || return 1
       page_count="$(printf '%s\n' "$page_records" | awk -F '|' '$1 == "release" { count++ } END { print count + 0 }')"
       if [ "$page_count" -gt 100 ]; then
@@ -1143,15 +1237,48 @@ rewrite_path_block() {
   mv "$tmp_profile" "$profile"
 }
 
+process_start_fingerprint() {
+  identity_pid="$1"
+  if [ -r "/proc/$identity_pid/stat" ]; then
+    identity_start="$(sed 's/.*) //' "/proc/$identity_pid/stat" 2>/dev/null | awk '{ print $20 }')"
+    identity_boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+    case "$identity_start" in
+      '' | *[!0-9]*) return 1 ;;
+    esac
+    [ -n "$identity_boot" ] || return 1
+    printf 'linux-proc:%s:%s\n' "$identity_boot" "$identity_start"
+    return
+  fi
+
+  if command -v ps >/dev/null 2>&1; then
+    identity_start="$(LC_ALL=C ps -o lstart= -p "$identity_pid" 2>/dev/null |
+      awk '{$1=$1; print}')"
+    [ -n "$identity_start" ] || return 1
+    printf 'ps-lstart:%s\n' "$(printf '%s' "$identity_start" | tr ' ' '_')"
+    return
+  fi
+  return 1
+}
+
+report_unverifiable_lock() {
+  unverifiable_lock="$1"
+  unverifiable_description="$2"
+  echo "Cannot safely verify the live process recorded by the $unverifiable_description lock at $unverifiable_lock: $fallback_lock_issue Refusing automatic deletion; manual recovery is required after confirming that no installer owns this path." >&2
+}
+
 fallback_lock_is_stale() {
   stale_lock="$1"
   stale_threshold="$2"
+  fallback_lock_issue=""
+  stale_fingerprint=""
   if [ -d "$stale_lock" ]; then
     stale_pid="$(cat "$stale_lock/pid" 2>/dev/null || true)"
     stale_started_at="$(cat "$stale_lock/started_at" 2>/dev/null || true)"
+    stale_fingerprint="$(cat "$stale_lock/fingerprint" 2>/dev/null || true)"
   elif [ -f "$stale_lock" ]; then
     stale_pid="$(sed -n '1p' "$stale_lock" 2>/dev/null || true)"
     stale_started_at="$(sed -n '2p' "$stale_lock" 2>/dev/null || true)"
+    stale_fingerprint="$(sed -n 's/^fingerprint=//p' "$stale_lock" 2>/dev/null | head -n 1)"
   else
     return 1
   fi
@@ -1159,6 +1286,30 @@ fallback_lock_is_stale() {
     '' | *[!0-9]*) return 1 ;;
   esac
   if [ -n "$stale_pid" ] && kill -0 "$stale_pid" 2>/dev/null; then
+    case "$stale_started_at" in
+      '' | *[!0-9]*)
+        fallback_lock_issue="its started_at metadata is missing or malformed."
+        return 2
+        ;;
+    esac
+    stale_now="$(date +%s 2>/dev/null || printf '0')"
+    if [ "$stale_now" -eq 0 ] || [ "$stale_started_at" -gt "$stale_now" ]; then
+      fallback_lock_issue="its started_at metadata cannot describe the current live process."
+      return 2
+    fi
+    if [ -z "$stale_fingerprint" ]; then
+      fallback_lock_issue="it has no process-start fingerprint, so PID $stale_pid cannot be proven to be the original owner."
+      return 2
+    fi
+    current_fingerprint="$(process_start_fingerprint "$stale_pid" || true)"
+    if [ -z "$current_fingerprint" ]; then
+      fallback_lock_issue="this platform cannot prove the process-start identity of PID $stale_pid."
+      return 2
+    fi
+    if [ "$current_fingerprint" != "$stale_fingerprint" ]; then
+      fallback_lock_issue="PID $stale_pid is live but its process-start fingerprint does not match the recorded owner."
+      return 2
+    fi
     return 1
   fi
   if [ "$stale_threshold" -eq 0 ]; then
@@ -1196,6 +1347,9 @@ cleanup_stale_reclaim_markers() {
     [ "$cleanup_marker" = "$cleanup_lock.reclaim.guard" ] && continue
     if fallback_lock_is_stale "$cleanup_marker" 0; then
       rm -f "$cleanup_marker" 2>/dev/null || true
+    elif [ -n "$fallback_lock_issue" ]; then
+      cleanup_reclaim_issue_path="$cleanup_marker"
+      return 1
     fi
   done
 }
@@ -1211,11 +1365,20 @@ reclaim_barrier_exists() {
 wait_for_reclaim_barrier() {
   barrier_lock="$1"
   while :; do
-    cleanup_stale_reclaim_markers "$barrier_lock"
-    barrier_guard="$barrier_lock.reclaim.guard"
-    if [ -f "$barrier_guard" ] && fallback_lock_is_stale "$barrier_guard" 0; then
-      echo "Stale reclaim guard at $barrier_guard requires manual removal; refusing an unsafe automatic takeover." >&2
+    cleanup_reclaim_issue_path=""
+    if ! cleanup_stale_reclaim_markers "$barrier_lock"; then
+      report_unverifiable_lock "$cleanup_reclaim_issue_path" "reclaim marker"
       return 1
+    fi
+    barrier_guard="$barrier_lock.reclaim.guard"
+    if [ -f "$barrier_guard" ]; then
+      if fallback_lock_is_stale "$barrier_guard" 0; then
+        echo "Stale reclaim guard at $barrier_guard requires manual removal; refusing an unsafe automatic takeover." >&2
+        return 1
+      elif [ -n "$fallback_lock_issue" ]; then
+        report_unverifiable_lock "$barrier_guard" "reclaim guard"
+        return 1
+      fi
     fi
     reclaim_barrier_exists "$barrier_lock" || return 0
     sleep 1
@@ -1230,6 +1393,11 @@ publish_reclaim_marker() {
   {
     printf '%s\n' "$$"
     date +%s 2>/dev/null || printf '0\n'
+    printf 'marker=%s\n' "$publish_suffix"
+    publish_fingerprint="$(process_start_fingerprint "$$" || true)"
+    if [ -n "$publish_fingerprint" ]; then
+      printf 'fingerprint=%s\n' "$publish_fingerprint"
+    fi
   } >"$publish_prepare"
   mv "$publish_prepare" "$published_marker"
   printf '%s\n' "$published_marker"
@@ -1239,26 +1407,41 @@ acquire_reclaim_guard() {
   guard_lock="$1"
   guard_marker="$2"
   reclaim_guard="$guard_lock.reclaim.guard"
+  active_reclaim_guard="$reclaim_guard"
   while ! ln "$guard_marker" "$reclaim_guard" 2>/dev/null; do
-    if [ -f "$reclaim_guard" ] && fallback_lock_is_stale "$reclaim_guard" 0; then
-      echo "Stale reclaim guard at $reclaim_guard requires manual removal; refusing an unsafe automatic takeover." >&2
-      return 1
+    if [ -f "$reclaim_guard" ]; then
+      if fallback_lock_is_stale "$reclaim_guard" 0; then
+        echo "Stale reclaim guard at $reclaim_guard requires manual removal; refusing an unsafe automatic takeover." >&2
+        return 1
+      elif [ -n "$fallback_lock_issue" ]; then
+        report_unverifiable_lock "$reclaim_guard" "reclaim guard"
+        return 1
+      fi
     fi
     sleep 1
   done
   if [ ! -f "$reclaim_guard" ] || ! cmp -s "$reclaim_guard" "$guard_marker"; then
+    remove_reclaim_guard_if_owned "$reclaim_guard" "$guard_marker"
+    active_reclaim_guard=""
     return 1
   fi
-  active_reclaim_guard="$reclaim_guard"
+}
+
+remove_reclaim_guard_if_owned() {
+  owned_guard="$1"
+  owned_marker="$2"
+  if [ -n "$owned_guard" ] &&
+    [ -n "$owned_marker" ] &&
+    [ -f "$owned_guard" ] &&
+    [ -f "$owned_marker" ] &&
+    cmp -s "$owned_guard" "$owned_marker"; then
+    rm -f "$owned_guard" 2>/dev/null || true
+  fi
 }
 
 release_reclaim_guard() {
   guard_marker="$1"
-  if [ -n "$active_reclaim_guard" ] &&
-    [ -f "$active_reclaim_guard" ] &&
-    cmp -s "$active_reclaim_guard" "$guard_marker"; then
-    rm -f "$active_reclaim_guard" 2>/dev/null || true
-  fi
+  remove_reclaim_guard_if_owned "$active_reclaim_guard" "$guard_marker"
   active_reclaim_guard=""
 }
 
@@ -1271,6 +1454,7 @@ reclaim_fallback_lock() {
   if ! acquire_reclaim_guard "$reclaim_lock" "$active_reclaim_marker"; then
     rm -f "$active_reclaim_marker" 2>/dev/null || true
     active_reclaim_marker=""
+    active_reclaim_guard=""
     return 1
   fi
 
@@ -1321,6 +1505,10 @@ acquire_fallback_lock() {
         "$claim_lock" "$claim_owner_prefix" "$claim_stale_threshold" || true
       continue
     fi
+    if [ -n "$fallback_lock_issue" ]; then
+      report_unverifiable_lock "$claim_lock" "$claim_description"
+      return 1
+    fi
     sleep 1
   done
 }
@@ -1348,6 +1536,10 @@ acquire_install_lock() {
     printf '%s\n' "$$"
     date +%s 2>/dev/null || printf '0\n'
     printf '%s\n' "$lock_owner_file"
+    owner_fingerprint="$(process_start_fingerprint "$$" || true)"
+    if [ -n "$owner_fingerprint" ]; then
+      printf 'fingerprint=%s\n' "$owner_fingerprint"
+    fi
   } >"$lock_owner_file"
 
   acquire_fallback_lock \
@@ -1370,7 +1562,7 @@ release_install_lock() {
     rm -f "$lock_owner_file" 2>/dev/null || true
   fi
   if [ -n "$active_reclaim_guard" ]; then
-    rm -f "$active_reclaim_guard" 2>/dev/null || true
+    remove_reclaim_guard_if_owned "$active_reclaim_guard" "$active_reclaim_marker"
     active_reclaim_guard=""
   fi
   if [ -n "$active_reclaim_marker" ]; then
@@ -1780,17 +1972,24 @@ fi
 
 tmp_dir="$(mktemp -d)"
 cleanup() {
-  if [ -n "$download_pid" ]; then
-    kill "$download_pid" 2>/dev/null || true
-    wait "$download_pid" 2>/dev/null || true
-    download_pid=""
-  fi
+  [ "$cleanup_done" = false ] || return
+  cleanup_done=true
+  trap - EXIT HUP INT TERM
+  stop_active_download
   release_install_lock
   if [ -n "$tmp_dir" ]; then
     rm -rf "$tmp_dir"
   fi
 }
-trap cleanup EXIT INT TERM
+handle_signal() {
+  signal_status="$1"
+  cleanup
+  exit "$signal_status"
+}
+trap cleanup EXIT
+trap 'handle_signal 129' HUP
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
 
 load_current_managed_receipt
 resolve_release
