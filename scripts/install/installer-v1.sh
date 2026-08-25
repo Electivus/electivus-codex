@@ -23,6 +23,7 @@ resolved_tag=""
 resolved_channel=""
 installer_digest=""
 manifest_digest=""
+download_pid=""
 
 usage() {
   cat <<'EOF'
@@ -125,13 +126,38 @@ download_file() {
   output="$2"
   max_bytes="$3"
 
+  download_pipe="$tmp_dir/download.$$.fifo"
+  rm -f "$download_pipe"
+  mkfifo "$download_pipe"
   curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
-    --connect-timeout 10 --max-time 300 --max-filesize "$max_bytes" \
-    "$url" -o "$output" || return 1
+    --connect-timeout 10 --max-time 300 "$url" >"$download_pipe" &
+  download_pid=$!
+  head_status=0
+  head -c $((max_bytes + 1)) "$download_pipe" >"$output" || head_status=$?
+  if [ "$head_status" -ne 0 ]; then
+    kill "$download_pid" 2>/dev/null || true
+    wait "$download_pid" 2>/dev/null || true
+    download_pid=""
+    rm -f "$download_pipe" "$output"
+    return 1
+  fi
   downloaded_bytes="$(wc -c <"$output" | tr -d ' ')"
   if [ "$downloaded_bytes" -gt "$max_bytes" ]; then
+    kill "$download_pid" 2>/dev/null || true
+    wait "$download_pid" 2>/dev/null || true
+    download_pid=""
+    rm -f "$download_pipe"
     rm -f "$output"
     echo "Download from $url exceeded the $max_bytes-byte safety limit." >&2
+    return 1
+  fi
+
+  curl_status=0
+  wait "$download_pid" || curl_status=$?
+  download_pid=""
+  rm -f "$download_pipe"
+  if [ "$curl_status" -ne 0 ]; then
+    rm -f "$output"
     return 1
   fi
 }
@@ -439,8 +465,18 @@ require_command curl
 require_command python3
 require_command sha256sum
 require_command mktemp
+require_command head
+require_command mkfifo
 tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT INT TERM HUP
+cleanup() {
+  if [ -n "$download_pid" ]; then
+    kill "$download_pid" 2>/dev/null || true
+    wait "$download_pid" 2>/dev/null || true
+    download_pid=""
+  fi
+  rm -rf "$tmp_dir"
+}
+trap cleanup EXIT INT TERM HUP
 
 fetch_metadata
 resolve_release

@@ -3,12 +3,14 @@
 import hashlib
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 import shutil
 import subprocess
 import tarfile
 import tempfile
 import textwrap
+import time
 import unittest
 
 
@@ -236,7 +238,17 @@ class InstallShTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Resolved version: 2.0.0", result.stdout)
             self.assertEqual(
-                read_receipt(root, "2.0.0")["update_channel"], "pre-release"
+                read_receipt(root, "2.0.0"),
+                {
+                    "publisher": "Electivus",
+                    "repository": REPOSITORY,
+                    "tag": "electivus-v2.0.0",
+                    "update_channel": "stable",
+                    "target": TARGET,
+                    "package_digest": digests[f"codex-package-{TARGET}.tar.gz"],
+                    "installer_digest": digests["install.sh"],
+                    "installer_protocol": "direct",
+                },
             )
 
     def test_rejects_ambiguous_upstream_and_invalid_selectors_before_network(
@@ -375,6 +387,32 @@ class InstallShTest(unittest.TestCase):
                 self.assertEqual(len(requests), 1)
                 self.assertIn("not published, valid, and complete", result.stderr)
 
+    def test_release_metadata_scalar_types_fail_closed(self) -> None:
+        cases: tuple[tuple[str, tuple[object, ...], object], ...] = (
+            ("string-draft", ("draft",), "false"),
+            ("string-prerelease", ("prerelease",), "false"),
+            ("null-published-at", ("published_at",), None),
+            ("number-published-at", ("published_at",), 1),
+            ("null-tag", ("tag_name",), None),
+            ("number-name", ("assets", 0, "name"), 1),
+            ("null-digest", ("assets", 0, "digest"), None),
+            ("boolean-state", ("assets", 0, "state"), True),
+            ("string-size", ("assets", 0, "size"), "1"),
+            ("boolean-size", ("assets", 0, "size"), True),
+        )
+        for case, path, value in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                digests = create_release_assets(root, "7.1.4")
+                metadata = release_metadata("7.1.4", digests)
+                assign_nested(metadata, path, value)
+
+                result, requests = run_installer(root, selector="7.1.4", exact=metadata)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(requests, [exact_url("7.1.4")])
+                self.assertIn("not published, valid, and complete", result.stderr)
+
     def test_asset_count_name_and_type_size_upper_boundaries_are_valid(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -436,6 +474,32 @@ class InstallShTest(unittest.TestCase):
             self.assertEqual(requests, [exact_url("7.1.3")])
             self.assertIn("exceeded the 1048576-byte safety limit", result.stderr)
 
+    def test_curl_transport_stops_a_slow_unknown_length_stream_near_the_cap(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            started = time.monotonic()
+            result, requests = run_installer(
+                root,
+                selector="7.1.5",
+                metadata_mode="slow-oversized",
+            )
+            elapsed = time.monotonic() - started
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(requests, [exact_url("7.1.5")])
+            self.assertIn("exceeded the 1048576-byte safety limit", result.stderr)
+            self.assertLess(elapsed, 5)
+            self.assertLessEqual(
+                int((root / "curl-streamed-bytes").read_text(encoding="utf-8")),
+                1_114_112,
+            )
+            wait_for_process_exit(
+                int((root / "curl-stream-pid").read_text(encoding="utf-8"))
+            )
+
     def test_package_metadata_and_manifest_digests_must_agree(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -487,6 +551,72 @@ class InstallShTest(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("digest disagreement for install.sh", result.stderr)
+
+    def test_fallback_reclaimers_cannot_remove_a_new_installer_lock_owner(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_release_assets(root, "7.1.6")
+            invocation = prepare_installer(
+                root,
+                selector="7.1.6",
+                exact=release_metadata("7.1.6", digests),
+                force_fallback_lock=True,
+                metadata_mode="hold-first-manifest",
+            )
+            standalone_root = root / "codex-home/packages/standalone"
+            lock_path = standalone_root / "install.lock.d"
+            lock_path.mkdir(parents=True)
+            (lock_path / "pid").write_text("2147483647\n", encoding="utf-8")
+            (lock_path / "started_at").write_text("1\n", encoding="utf-8")
+            reclaim_continue = root / "allow-reclaim"
+            invocation.env["CODEX_TEST_RECLAIM_CONTINUE"] = str(reclaim_continue)
+            install_reclaim_guard_barrier(invocation.env)
+            processes: list[subprocess.Popen[str]] = []
+            try:
+                for _index in range(2):
+                    processes.append(
+                        subprocess.Popen(
+                            invocation.args,
+                            env=invocation.env,
+                            text=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                        )
+                    )
+
+                wait_for_glob_count(f"{lock_path}.reclaim.*", 2)
+                reclaim_continue.touch()
+                wait_for_path(root / "download.ready")
+                live_owner = lock_path.read_text(encoding="utf-8")
+                live_pid = int(live_owner.splitlines()[0])
+                os.kill(live_pid, 0)
+
+                processes.append(
+                    subprocess.Popen(
+                        invocation.args,
+                        env=invocation.env,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                )
+                time.sleep(0.2)
+                self.assertIsNone(processes[-1].poll())
+                self.assertEqual(lock_path.read_text(encoding="utf-8"), live_owner)
+
+                (root / "allow-download").touch()
+                for process in processes:
+                    stdout, stderr = process.communicate(timeout=10)
+                    self.assertEqual(process.returncode, 0, stderr + stdout)
+            finally:
+                reclaim_continue.touch(exist_ok=True)
+                (root / "allow-download").touch(exist_ok=True)
+                for process in processes:
+                    if process.poll() is None:
+                        process.kill()
+                        process.communicate()
 
     def test_macos_fails_before_any_network_request(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -577,7 +707,29 @@ class InstallShTest(unittest.TestCase):
             )
 
 
+@dataclass(frozen=True)
+class InstallerInvocation:
+    args: list[str]
+    env: dict[str, str]
+    request_log: Path
+
+
 def run_installer(
+    root: Path,
+    **options: object,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    invocation = prepare_installer(root, **options)
+    result = subprocess.run(
+        invocation.args,
+        capture_output=True,
+        check=False,
+        env=invocation.env,
+        text=True,
+    )
+    return result, read_requests(invocation.request_log)
+
+
+def prepare_installer(
     root: Path,
     *,
     selector: str | None = "stable",
@@ -588,9 +740,10 @@ def run_installer(
     protocol: str = "",
     installer_digest: str = "",
     force_macos: bool = False,
+    force_fallback_lock: bool = False,
     metadata_mode: str = "",
     transport: str = "curl",
-) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+) -> InstallerInvocation:
     fake_bin = root / "fake-bin"
     fake_bin.mkdir(parents=True, exist_ok=True)
     metadata_dir = root / "metadata"
@@ -619,23 +772,42 @@ def run_installer(
             case "$url" in
               *openai*) exit 88 ;;
               https://api.github.com/repos/Electivus/electivus-codex/releases/tags/*)
-                if [ "$CODEX_TEST_METADATA_MODE" = "oversized" ]; then
-                  dd if=/dev/zero bs=1048577 count=1 2>/dev/null | tr '\\000' x >"$output"
+                if [ "$CODEX_TEST_METADATA_MODE" = "slow-oversized" ]; then
+                  printf '%s\n' "$$" >"$CODEX_TEST_ROOT/curl-stream-pid"
+                  streamed=0
+                  trap 'printf "%s\n" "$streamed" >"$CODEX_TEST_ROOT/curl-streamed-bytes"; exit 0' TERM INT PIPE
+                  while :; do
+                    dd if=/dev/zero bs=65536 count=1 2>/dev/null | tr '\\000' x || break
+                    streamed=$((streamed + 65536))
+                    printf '%s\n' "$streamed" >"$CODEX_TEST_ROOT/curl-streamed-bytes"
+                    sleep 0.01
+                  done
+                  exit 0
+                elif [ "$CODEX_TEST_METADATA_MODE" = "oversized" ]; then
+                  dd if=/dev/zero bs=1048577 count=1 2>/dev/null | tr '\\000' x
                 else
-                  cp "$CODEX_TEST_METADATA_DIR/exact.json" "$output"
+                  cat "$CODEX_TEST_METADATA_DIR/exact.json"
                 fi
                 ;;
               'https://api.github.com/repos/Electivus/electivus-codex/releases?per_page=100&page='*)
                 page="${url##*page=}"
                 if [ -f "$CODEX_TEST_METADATA_DIR/page-$page.json" ]; then
-                  cp "$CODEX_TEST_METADATA_DIR/page-$page.json" "$output"
+                  cat "$CODEX_TEST_METADATA_DIR/page-$page.json"
                 else
-                  printf '[]\n' >"$output"
+                  printf '[]\n'
                 fi
                 ;;
               https://github.com/Electivus/electivus-codex/releases/download/*)
                 asset="${url##*/}"
-                cp "$CODEX_TEST_ASSET_DIR/$asset" "$output"
+                if [ "$CODEX_TEST_METADATA_MODE" = "hold-first-manifest" ] &&
+                  [ "$asset" = "codex-package_SHA256SUMS" ] &&
+                  mkdir "$CODEX_TEST_ROOT/download-holder" 2>/dev/null; then
+                  : >"$CODEX_TEST_ROOT/download.ready"
+                  while [ ! -e "$CODEX_TEST_DOWNLOAD_CONTINUE" ]; do
+                    sleep 0.01
+                  done
+                fi
+                cat "$CODEX_TEST_ASSET_DIR/$asset"
                 ;;
               *) exit 89 ;;
             esac
@@ -643,7 +815,7 @@ def run_installer(
     )
     if transport == "curl":
         write_executable(fake_curl, curl_script)
-    else:
+    if transport == "wget" or force_fallback_lock:
         for command in (
             "awk",
             "basename",
@@ -677,10 +849,11 @@ def run_installer(
             command_path = shutil.which(command)
             assert command_path is not None
             (fake_bin / command).symlink_to(command_path)
-        write_executable(
-            fake_bin / "wget",
-            textwrap.dedent(
-                """\
+        if transport == "wget":
+            write_executable(
+                fake_bin / "wget",
+                textwrap.dedent(
+                    """\
                 #!/bin/sh
                 url=""
                 output=""
@@ -713,10 +886,10 @@ def run_installer(
                     ;;
                   *) exit 89 ;;
                 esac
-                """
-            ),
-        )
-    if force_macos or transport == "wget":
+                    """
+                ),
+            )
+    if force_macos or transport == "wget" or force_fallback_lock:
         fake_uname = fake_bin / "uname"
         write_executable(
             fake_uname,
@@ -737,10 +910,12 @@ def run_installer(
             "CODEX_TEST_METADATA_DIR": str(metadata_dir),
             "CODEX_TEST_METADATA_MODE": metadata_mode,
             "CODEX_TEST_REQUEST_LOG": str(request_log),
+            "CODEX_TEST_ROOT": str(root),
+            "CODEX_TEST_DOWNLOAD_CONTINUE": str(root / "allow-download"),
             "HOME": str(home),
-            "PATH": f"{fake_bin}:/usr/bin:/bin"
-            if transport == "curl"
-            else str(fake_bin),
+            "PATH": str(fake_bin)
+            if transport == "wget" or force_fallback_lock
+            else f"{fake_bin}:/usr/bin:/bin",
             "SHELL": "/bin/sh",
         }
     )
@@ -753,13 +928,15 @@ def run_installer(
         args.extend(("--installer-protocol", protocol))
     if installer_digest:
         args.extend(("--installer-digest", installer_digest))
-    result = subprocess.run(args, capture_output=True, check=False, env=env, text=True)
-    requests = (
+    return InstallerInvocation(args=args, env=env, request_log=request_log)
+
+
+def read_requests(request_log: Path) -> list[str]:
+    return (
         request_log.read_text(encoding="utf-8").splitlines()
         if request_log.exists()
         else []
     )
-    return result, requests
 
 
 def create_release_assets(
@@ -874,6 +1051,23 @@ def valid_extra_assets(
     ]
 
 
+def assign_nested(
+    value: dict[str, object], path: tuple[object, ...], replacement: object
+) -> None:
+    container: object = value
+    for component in path[:-1]:
+        if isinstance(component, str):
+            assert isinstance(container, dict)
+            container = container[component]
+        else:
+            assert isinstance(container, list)
+            container = container[component]
+    final = path[-1]
+    assert isinstance(final, str)
+    assert isinstance(container, dict)
+    container[final] = replacement
+
+
 def release_dir(root: Path, version: str) -> Path:
     return (
         root
@@ -898,6 +1092,59 @@ def read_receipt(root: Path, version: str) -> dict[str, str]:
 
 def clear_requests(root: Path) -> None:
     (root / "requests.log").unlink(missing_ok=True)
+
+
+def wait_for_process_exit(pid: int) -> None:
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"process {pid} remained alive")
+        time.sleep(0.01)
+
+
+def wait_for_path(path: Path) -> None:
+    deadline = time.monotonic() + 5
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for {path}")
+        time.sleep(0.01)
+
+
+def wait_for_glob_count(pattern: str, count: int) -> None:
+    deadline = time.monotonic() + 5
+    parent = Path(pattern).parent
+    name = Path(pattern).name
+    while len(list(parent.glob(name))) < count:
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for {count} matches of {pattern}")
+        time.sleep(0.01)
+
+
+def install_reclaim_guard_barrier(env: dict[str, str]) -> None:
+    fake_ln = Path(env["PATH"]) / "ln"
+    fake_ln.unlink()
+    write_executable(
+        fake_ln,
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            last=""
+            for argument in "$@"; do last="$argument"; done
+            case "$last" in
+            *.reclaim.guard)
+              while [ ! -e "$CODEX_TEST_RECLAIM_CONTINUE" ]; do
+                sleep 0.01
+              done
+              ;;
+            esac
+            exec /usr/bin/ln "$@"
+            """
+        ),
+    )
 
 
 def inventory_url(page: int) -> str:

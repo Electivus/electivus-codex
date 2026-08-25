@@ -9,10 +9,10 @@ STANDALONE_ROOT="$CODEX_HOME_DIR/packages/standalone"
 RELEASES_DIR="$STANDALONE_ROOT/releases"
 CURRENT_LINK="$STANDALONE_ROOT/current"
 LOCK_FILE="$STANDALONE_ROOT/install.lock"
-LOCK_DIR="$STANDALONE_ROOT/install.lock.d"
+LOCK_PATH="$STANDALONE_ROOT/install.lock.d"
 LOCK_STALE_AFTER_SECS=600
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
+REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd)
 CODEX_RS_DIR="$REPO_ROOT/codex-rs"
 CODEX_REPO_ROOT="$REPO_ROOT"
 export CODEX_REPO_ROOT
@@ -20,18 +20,20 @@ export CODEX_REPO_ROOT
 path_action="already"
 path_profile=""
 lock_kind=""
-lock_owner_dir=""
+lock_owner_file=""
 tmp_dir=""
 python_bin=""
 cargo_toml_backup=""
 cargo_lock_backup=""
 version_state_dir=""
 version_lock_file=""
-version_lock_dir=""
+version_lock_path=""
 version_lock_kind=""
-version_lock_owner_dir=""
+version_lock_owner_file=""
 version_transaction_dir=""
 version_transaction_owned=false
+active_reclaim_marker=""
+active_reclaim_guard=""
 use_upstream_version=false
 upstream_version_override=""
 upstream_version_override_set=false
@@ -234,63 +236,185 @@ restore_cargo_manifest_files() {
 }
 
 fallback_lock_is_stale() {
-  fallback_lock="$1"
-  stale_after="$2"
-  if [ -d "$fallback_lock" ]; then
-    pid="$(cat "$fallback_lock/pid" 2>/dev/null || true)"
-    started_at="$(cat "$fallback_lock/started_at" 2>/dev/null || true)"
-  elif [ -f "$fallback_lock" ]; then
-    pid="$(sed -n '1p' "$fallback_lock" 2>/dev/null || true)"
-    started_at="$(sed -n '2p' "$fallback_lock" 2>/dev/null || true)"
+  stale_lock="$1"
+  stale_threshold="$2"
+  if [ -d "$stale_lock" ]; then
+    stale_pid="$(cat "$stale_lock/pid" 2>/dev/null || true)"
+    stale_started_at="$(cat "$stale_lock/started_at" 2>/dev/null || true)"
+  elif [ -f "$stale_lock" ]; then
+    stale_pid="$(sed -n '1p' "$stale_lock" 2>/dev/null || true)"
+    stale_started_at="$(sed -n '2p' "$stale_lock" 2>/dev/null || true)"
   else
     return 1
   fi
-  case "$pid" in
+  case "$stale_pid" in
     '' | *[!0-9]*) return 1 ;;
   esac
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+  if [ -n "$stale_pid" ] && kill -0 "$stale_pid" 2>/dev/null; then
     return 1
   fi
-  if [ "$stale_after" -eq 0 ]; then
+  if [ "$stale_threshold" -eq 0 ]; then
     return 0
   fi
-  case "$started_at" in
+  case "$stale_started_at" in
     '' | *[!0-9]*) return 1 ;;
   esac
-  now="$(date +%s 2>/dev/null || printf '0')"
-  if [ "$now" -eq 0 ]; then
+  stale_now="$(date +%s 2>/dev/null || printf '0')"
+  if [ "$stale_now" -eq 0 ]; then
     return 1
   fi
-  [ $((now - started_at)) -ge "$stale_after" ]
-}
-
-reclaim_fallback_lock() {
-  fallback_lock="$1"
-  owner_prefix="$2"
-  reclaimed_lock="$fallback_lock.stale.$$"
-  mv "$fallback_lock" "$reclaimed_lock" 2>/dev/null || return 1
-  reclaimed_owner="$(sed -n '3p' "$reclaimed_lock" 2>/dev/null || true)"
-  rm -rf "$reclaimed_lock"
-  case "$reclaimed_owner" in
-    "$owner_prefix"*)
-      rm -rf "$reclaimed_owner"
-      ;;
-  esac
+  [ $((stale_now - stale_started_at)) -ge "$stale_threshold" ]
 }
 
 try_claim_fallback_lock() {
-  fallback_owner="$1"
-  fallback_lock="$2"
+  try_owner="$1"
+  try_lock="$2"
 
-  ln "$fallback_owner" "$fallback_lock" 2>/dev/null || return 1
-  if [ -f "$fallback_lock" ] && cmp -s "$fallback_lock" "$fallback_owner"; then
+  ln "$try_owner" "$try_lock" 2>/dev/null || return 1
+  if [ -f "$try_lock" ] && cmp -s "$try_lock" "$try_owner"; then
     return 0
   fi
 
   # POSIX ln treats an existing directory as a destination directory. Remove
   # the hard link it created there and keep waiting for that legacy lock.
-  rm -f "$fallback_lock/$(basename "$fallback_owner")" 2>/dev/null || true
+  rm -f "$try_lock/$(basename "$try_owner")" 2>/dev/null || true
   return 1
+}
+
+cleanup_stale_reclaim_markers() {
+  cleanup_lock="$1"
+  for cleanup_marker in "$cleanup_lock".reclaim.*; do
+    [ -f "$cleanup_marker" ] || continue
+    [ "$cleanup_marker" = "$cleanup_lock.reclaim.guard" ] && continue
+    if fallback_lock_is_stale "$cleanup_marker" 0; then
+      rm -f "$cleanup_marker" 2>/dev/null || true
+    fi
+  done
+}
+
+reclaim_barrier_exists() {
+  barrier_candidate_lock="$1"
+  for barrier_candidate in "$barrier_candidate_lock".reclaim.*; do
+    [ -f "$barrier_candidate" ] && return 0
+  done
+  return 1
+}
+
+wait_for_reclaim_barrier() {
+  barrier_lock="$1"
+  while :; do
+    cleanup_stale_reclaim_markers "$barrier_lock"
+    barrier_guard="$barrier_lock.reclaim.guard"
+    if [ -f "$barrier_guard" ] && fallback_lock_is_stale "$barrier_guard" 0; then
+      echo "Stale reclaim guard at $barrier_guard requires manual removal; refusing an unsafe automatic takeover." >&2
+      return 1
+    fi
+    reclaim_barrier_exists "$barrier_lock" || return 0
+    sleep 1
+  done
+}
+
+publish_reclaim_marker() {
+  publish_lock="$1"
+  publish_prepare="$(mktemp "$publish_lock.reclaim-prepare.XXXXXX")"
+  publish_suffix="${publish_prepare##*.}"
+  published_marker="$publish_lock.reclaim.$publish_suffix"
+  {
+    printf '%s\n' "$$"
+    date +%s 2>/dev/null || printf '0\n'
+  } >"$publish_prepare"
+  mv "$publish_prepare" "$published_marker"
+  printf '%s\n' "$published_marker"
+}
+
+acquire_reclaim_guard() {
+  guard_lock="$1"
+  guard_marker="$2"
+  reclaim_guard="$guard_lock.reclaim.guard"
+  while ! ln "$guard_marker" "$reclaim_guard" 2>/dev/null; do
+    if [ -f "$reclaim_guard" ] && fallback_lock_is_stale "$reclaim_guard" 0; then
+      echo "Stale reclaim guard at $reclaim_guard requires manual removal; refusing an unsafe automatic takeover." >&2
+      return 1
+    fi
+    sleep 1
+  done
+  if [ ! -f "$reclaim_guard" ] || ! cmp -s "$reclaim_guard" "$guard_marker"; then
+    return 1
+  fi
+  active_reclaim_guard="$reclaim_guard"
+}
+
+release_reclaim_guard() {
+  guard_marker="$1"
+  if [ -n "$active_reclaim_guard" ] &&
+    [ -f "$active_reclaim_guard" ] &&
+    cmp -s "$active_reclaim_guard" "$guard_marker"; then
+    rm -f "$active_reclaim_guard" 2>/dev/null || true
+  fi
+  active_reclaim_guard=""
+}
+
+reclaim_fallback_lock() {
+  reclaim_lock="$1"
+  reclaim_owner_prefix="$2"
+  reclaim_stale_threshold="$3"
+  active_reclaim_marker="$(publish_reclaim_marker "$reclaim_lock")" || return 1
+  reclaim_suffix="${active_reclaim_marker##*.}"
+  if ! acquire_reclaim_guard "$reclaim_lock" "$active_reclaim_marker"; then
+    rm -f "$active_reclaim_marker" 2>/dev/null || true
+    active_reclaim_marker=""
+    return 1
+  fi
+
+  if [ -d "$reclaim_lock" ]; then
+    if fallback_lock_is_stale "$reclaim_lock" "$reclaim_stale_threshold"; then
+      reclaimed_lock="$reclaim_lock.stale.$reclaim_suffix"
+      if mv "$reclaim_lock" "$reclaimed_lock" 2>/dev/null; then
+        rm -rf "$reclaimed_lock"
+      fi
+    fi
+  elif [ -f "$reclaim_lock" ]; then
+    reclaimed_lock="$reclaim_lock.snapshot.$reclaim_suffix"
+    if ln "$reclaim_lock" "$reclaimed_lock" 2>/dev/null; then
+      if fallback_lock_is_stale "$reclaimed_lock" "$reclaim_stale_threshold"; then
+        reclaimed_owner="$(sed -n '3p' "$reclaimed_lock" 2>/dev/null || true)"
+        rm -f "$reclaim_lock" 2>/dev/null || true
+        case "$reclaimed_owner" in
+          "$reclaim_owner_prefix"*) rm -f "$reclaimed_owner" 2>/dev/null || true ;;
+        esac
+      fi
+      rm -f "$reclaimed_lock" 2>/dev/null || true
+    fi
+  fi
+  release_reclaim_guard "$active_reclaim_marker"
+  rm -f "$active_reclaim_marker" 2>/dev/null || true
+  active_reclaim_marker=""
+}
+
+acquire_fallback_lock() {
+  claim_owner="$1"
+  claim_lock="$2"
+  claim_owner_prefix="$3"
+  claim_stale_threshold="$4"
+  claim_description="$5"
+
+  while :; do
+    wait_for_reclaim_barrier "$claim_lock"
+    if try_claim_fallback_lock "$claim_owner" "$claim_lock"; then
+      wait_for_reclaim_barrier "$claim_lock"
+      if [ -f "$claim_lock" ] && cmp -s "$claim_lock" "$claim_owner"; then
+        return
+      fi
+      continue
+    fi
+    if fallback_lock_is_stale "$claim_lock" "$claim_stale_threshold"; then
+      warn "Removing stale $claim_description lock at $claim_lock"
+      reclaim_fallback_lock \
+        "$claim_lock" "$claim_owner_prefix" "$claim_stale_threshold" || true
+      continue
+    fi
+    sleep 1
+  done
 }
 
 acquire_version_lock() {
@@ -300,7 +424,7 @@ acquire_version_lock() {
       --git-path codex-local-version
   )"
   version_lock_file="$version_state_dir/version.lock"
-  version_lock_dir="$version_state_dir/version.lock.d"
+  version_lock_path="$version_state_dir/version.lock.d"
   mkdir -p "$version_state_dir"
 
   if command -v flock >/dev/null 2>&1; then
@@ -310,46 +434,42 @@ acquire_version_lock() {
     return
   fi
 
-  version_lock_owner_dir="$version_state_dir/version.lock.owner.$$"
-  rm -f "$version_lock_owner_dir"
+  version_lock_owner_file="$(mktemp "$version_state_dir/version.lock.owner.XXXXXX")"
   {
     printf '%s\n' "$$"
     date +%s 2>/dev/null || printf '0\n'
-    printf '%s\n' "$version_lock_owner_dir"
-  } >"$version_lock_owner_dir"
+    printf '%s\n' "$version_lock_owner_file"
+  } >"$version_lock_owner_file"
 
-  while ! try_claim_fallback_lock "$version_lock_owner_dir" "$version_lock_dir"; do
-    if [ ! -e "$version_lock_dir" ] && [ ! -L "$version_lock_dir" ]; then
-      if try_claim_fallback_lock "$version_lock_owner_dir" "$version_lock_dir"; then
-        break
-      fi
-      echo "Could not create atomic local-version lock at $version_lock_dir." >&2
-      rm -f "$version_lock_owner_dir"
-      return 1
-    fi
-    if fallback_lock_is_stale "$version_lock_dir" 0; then
-      warn "Removing stale local-version lock at $version_lock_dir"
-      reclaim_fallback_lock \
-        "$version_lock_dir" \
-        "$version_state_dir/version.lock.owner." || true
-      continue
-    fi
-    sleep 1
-  done
+  acquire_fallback_lock \
+    "$version_lock_owner_file" \
+    "$version_lock_path" \
+    "$version_state_dir/version.lock.owner." \
+    0 \
+    local-version
   version_lock_kind="hardlink"
 }
 
 release_version_lock() {
-  if [ "$version_lock_kind" = "hardlink" ]; then
-    if [ -f "$version_lock_dir" ] && cmp -s "$version_lock_dir" "$version_lock_owner_dir"; then
-      rm -f "$version_lock_dir" 2>/dev/null || true
-    fi
-    rm -f "$version_lock_owner_dir" 2>/dev/null || true
-  elif [ "$version_lock_kind" = "flock" ]; then
+  if [ "$version_lock_kind" = "flock" ]; then
     exec 8>&- 2>/dev/null || true
   fi
+  if [ -n "$version_lock_owner_file" ]; then
+    if [ -f "$version_lock_path" ] && cmp -s "$version_lock_path" "$version_lock_owner_file"; then
+      rm -f "$version_lock_path" 2>/dev/null || true
+    fi
+    rm -f "$version_lock_owner_file" 2>/dev/null || true
+  fi
+  if [ -n "$active_reclaim_guard" ]; then
+    rm -f "$active_reclaim_guard" 2>/dev/null || true
+    active_reclaim_guard=""
+  fi
+  if [ -n "$active_reclaim_marker" ]; then
+    rm -f "$active_reclaim_marker" 2>/dev/null || true
+    active_reclaim_marker=""
+  fi
   version_lock_kind=""
-  version_lock_owner_dir=""
+  version_lock_owner_file=""
 }
 
 begin_version_transaction() {
@@ -588,47 +708,43 @@ acquire_install_lock() {
     return
   fi
 
-  lock_owner_dir="$STANDALONE_ROOT/install.lock.owner.$$"
-  rm -f "$lock_owner_dir"
+  lock_owner_file="$(mktemp "$STANDALONE_ROOT/install.lock.owner.XXXXXX")"
   {
     printf '%s\n' "$$"
     date +%s 2>/dev/null || printf '0\n'
-    printf '%s\n' "$lock_owner_dir"
-  } >"$lock_owner_dir"
+    printf '%s\n' "$lock_owner_file"
+  } >"$lock_owner_file"
 
-  while ! try_claim_fallback_lock "$lock_owner_dir" "$LOCK_DIR"; do
-    if [ ! -e "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ]; then
-      if try_claim_fallback_lock "$lock_owner_dir" "$LOCK_DIR"; then
-        break
-      fi
-      echo "Could not create atomic installer lock at $LOCK_DIR." >&2
-      rm -f "$lock_owner_dir"
-      return 1
-    fi
-    if fallback_lock_is_stale "$LOCK_DIR" "$LOCK_STALE_AFTER_SECS"; then
-      warn "Removing stale installer lock at $LOCK_DIR"
-      reclaim_fallback_lock \
-        "$LOCK_DIR" \
-        "$STANDALONE_ROOT/install.lock.owner." || true
-      continue
-    fi
-    sleep 1
-  done
+  acquire_fallback_lock \
+    "$lock_owner_file" \
+    "$LOCK_PATH" \
+    "$STANDALONE_ROOT/install.lock.owner." \
+    "$LOCK_STALE_AFTER_SECS" \
+    installer
 
   lock_kind="hardlink"
 }
 
 release_install_lock() {
-  if [ "$lock_kind" = "hardlink" ]; then
-    if [ -f "$LOCK_DIR" ] && cmp -s "$LOCK_DIR" "$lock_owner_dir"; then
-      rm -f "$LOCK_DIR" 2>/dev/null || true
-    fi
-    rm -f "$lock_owner_dir" 2>/dev/null || true
-  elif [ "$lock_kind" = "flock" ]; then
+  if [ "$lock_kind" = "flock" ]; then
     exec 9>&- 2>/dev/null || true
   fi
+  if [ -n "$lock_owner_file" ]; then
+    if [ -f "$LOCK_PATH" ] && cmp -s "$LOCK_PATH" "$lock_owner_file"; then
+      rm -f "$LOCK_PATH" 2>/dev/null || true
+    fi
+    rm -f "$lock_owner_file" 2>/dev/null || true
+  fi
+  if [ -n "$active_reclaim_guard" ]; then
+    rm -f "$active_reclaim_guard" 2>/dev/null || true
+    active_reclaim_guard=""
+  fi
+  if [ -n "$active_reclaim_marker" ]; then
+    rm -f "$active_reclaim_marker" 2>/dev/null || true
+    active_reclaim_marker=""
+  fi
   lock_kind=""
-  lock_owner_dir=""
+  lock_owner_file=""
 }
 
 cleanup_stale_install_artifacts() {

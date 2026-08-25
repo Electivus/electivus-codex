@@ -26,15 +26,18 @@ STANDALONE_ROOT="$CODEX_HOME_DIR/packages/standalone"
 RELEASES_DIR="$STANDALONE_ROOT/releases/$PUBLISHER/electivus-codex"
 CURRENT_LINK="$STANDALONE_ROOT/current"
 LOCK_FILE="$STANDALONE_ROOT/install.lock"
-LOCK_DIR="$STANDALONE_ROOT/install.lock.d"
+LOCK_PATH="$STANDALONE_ROOT/install.lock.d"
 LOCK_STALE_AFTER_SECS=600
 
 path_action="already"
 path_profile=""
 conflict_manager=""
 lock_kind=""
+lock_owner_file=""
 tmp_dir=""
 download_pid=""
+active_reclaim_marker=""
+active_reclaim_guard=""
 
 step() {
   printf '==> %s\n' "$1"
@@ -167,44 +170,51 @@ download_file() {
   output="$2"
   max_bytes="${3:-$PACKAGE_MAX_BYTES}"
 
+  require_command head
+  require_command mkfifo
+  download_pipe="$tmp_dir/download.$$.fifo"
+  rm -f "$download_pipe"
+  mkfifo "$download_pipe"
+
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --connect-timeout 10 --max-time 300 --max-filesize "$max_bytes" "$url" -o "$output" || return 1
+    curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+      --connect-timeout 10 --max-time 300 "$url" >"$download_pipe" &
   elif command -v wget >/dev/null 2>&1; then
-    require_command head
-    require_command mkfifo
-    download_pipe="$tmp_dir/download.$$.fifo"
-    rm -f "$download_pipe"
-    mkfifo "$download_pipe"
     wget -q -t 1 -T 300 --https-only --secure-protocol=TLSv1_2 \
       -O "$download_pipe" "$url" &
-    download_pid=$!
-    head_status=0
-    head -c $((max_bytes + 1)) "$download_pipe" >"$output" || head_status=$?
-    wget_status=0
-    wait "$download_pid" || wget_status=$?
-    download_pid=""
-    rm -f "$download_pipe"
-
-    downloaded_bytes="$(wc -c <"$output" | tr -d ' ')"
-    if [ "$downloaded_bytes" -gt "$max_bytes" ]; then
-      rm -f "$output"
-      echo "Download from $url exceeded the $max_bytes-byte safety limit." >&2
-      return 1
-    fi
-    if [ "$head_status" -ne 0 ] || [ "$wget_status" -ne 0 ]; then
-      rm -f "$output"
-      return 1
-    fi
-    return 0
   else
+    rm -f "$download_pipe"
     echo "curl or wget is required to install Electivus Codex." >&2
     exit 1
   fi
 
+  download_pid=$!
+  head_status=0
+  head -c $((max_bytes + 1)) "$download_pipe" >"$output" || head_status=$?
+  if [ "$head_status" -ne 0 ]; then
+    kill "$download_pid" 2>/dev/null || true
+    wait "$download_pid" 2>/dev/null || true
+    download_pid=""
+    rm -f "$download_pipe" "$output"
+    return 1
+  fi
   downloaded_bytes="$(wc -c <"$output" | tr -d ' ')"
   if [ "$downloaded_bytes" -gt "$max_bytes" ]; then
+    kill "$download_pid" 2>/dev/null || true
+    wait "$download_pid" 2>/dev/null || true
+    download_pid=""
+    rm -f "$download_pipe"
     rm -f "$output"
     echo "Download from $url exceeded the $max_bytes-byte safety limit." >&2
+    return 1
+  fi
+
+  transport_status=0
+  wait "$download_pid" || transport_status=$?
+  download_pid=""
+  rm -f "$download_pipe"
+  if [ "$transport_status" -ne 0 ]; then
+    rm -f "$output"
     return 1
   fi
 }
@@ -228,26 +238,26 @@ parse_release_metadata() {
       release_published_at = ""
     }
 
-    function save_value(value) {
+    function save_value(value, value_type) {
       if (object_depth == release_object_depth) {
         if (key == "tag_name") {
-          release_tag = value
+          release_tag = value_type == "string" ? value : ""
         } else if (key == "draft") {
-          release_draft = value
+          release_draft = value_type == "boolean" ? value : ""
         } else if (key == "prerelease") {
-          release_prerelease = value
+          release_prerelease = value_type == "boolean" ? value : ""
         } else if (key == "published_at") {
-          release_published_at = value
+          release_published_at = value_type == "string" ? value : ""
         }
       } else if (object_depth == asset_object_depth) {
         if (key == "name") {
-          asset_name = value
+          asset_name = value_type == "string" ? value : ""
         } else if (key == "digest") {
-          asset_digest = value
+          asset_digest = value_type == "string" ? value : ""
         } else if (key == "state") {
-          asset_state = value
+          asset_state = value_type == "string" ? value : ""
         } else if (key == "size") {
-          asset_size = value
+          asset_size = value_type == "number" ? value : ""
         }
       }
       expecting_value = 0
@@ -258,7 +268,14 @@ parse_release_metadata() {
     function finish_primitive() {
       if (expecting_value && primitive != "") {
         if (primitive ~ /^(true|false|null|-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?)$/) {
-          save_value(primitive)
+          if (primitive == "true" || primitive == "false") {
+            primitive_type = "boolean"
+          } else if (primitive == "null") {
+            primitive_type = "null"
+          } else {
+            primitive_type = "number"
+          }
+          save_value(primitive, primitive_type)
         } else {
           invalid = 1
         }
@@ -298,7 +315,7 @@ parse_release_metadata() {
           } else if (char == "\"") {
             in_string = 0
             if (string_is_value) {
-              save_value(token)
+              save_value(token, "string")
             } else {
               pending_key = token
             }
@@ -590,6 +607,7 @@ consider_release() {
 
   selected_version="$c_version"
   selected_tag="$c_tag"
+  selected_channel="$c_channel"
   selected_release_metadata="$c_assets"
 }
 
@@ -710,6 +728,7 @@ resolve_release() {
   normalize_release_request
   selected_version=""
   selected_tag=""
+  selected_channel=""
   selected_release_metadata=""
 
   if [ "$requested_kind" = "exact" ]; then
@@ -775,6 +794,9 @@ resolve_release() {
   release_tag="$selected_tag"
   release_metadata="$selected_release_metadata"
   resolved_channel="$requested_channel"
+  if [ "$requested_kind" = "pre-release" ] && [ "$selected_channel" = "stable" ]; then
+    resolved_channel="stable"
+  fi
   select_release_assets
 }
 
@@ -1121,28 +1143,186 @@ rewrite_path_block() {
   mv "$tmp_profile" "$profile"
 }
 
-mkdir_lock_is_stale() {
-  [ -d "$LOCK_DIR" ] || return 1
-
-  pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-  started_at="$(cat "$LOCK_DIR/started_at" 2>/dev/null || true)"
-  now="$(date +%s 2>/dev/null || printf '0')"
-
-  case "$started_at" in
-    ''|*[!0-9]*)
-      started_at=0
-      ;;
-  esac
-
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+fallback_lock_is_stale() {
+  stale_lock="$1"
+  stale_threshold="$2"
+  if [ -d "$stale_lock" ]; then
+    stale_pid="$(cat "$stale_lock/pid" 2>/dev/null || true)"
+    stale_started_at="$(cat "$stale_lock/started_at" 2>/dev/null || true)"
+  elif [ -f "$stale_lock" ]; then
+    stale_pid="$(sed -n '1p' "$stale_lock" 2>/dev/null || true)"
+    stale_started_at="$(sed -n '2p' "$stale_lock" 2>/dev/null || true)"
+  else
     return 1
   fi
+  case "$stale_pid" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  if [ -n "$stale_pid" ] && kill -0 "$stale_pid" 2>/dev/null; then
+    return 1
+  fi
+  if [ "$stale_threshold" -eq 0 ]; then
+    return 0
+  fi
+  case "$stale_started_at" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  stale_now="$(date +%s 2>/dev/null || printf '0')"
+  if [ "$stale_now" -eq 0 ]; then
+    return 1
+  fi
+  [ $((stale_now - stale_started_at)) -ge "$stale_threshold" ]
+}
 
-  if [ "$started_at" -eq 0 ] || [ "$now" -eq 0 ]; then
+try_claim_fallback_lock() {
+  try_owner="$1"
+  try_lock="$2"
+
+  ln "$try_owner" "$try_lock" 2>/dev/null || return 1
+  if [ -f "$try_lock" ] && cmp -s "$try_lock" "$try_owner"; then
     return 0
   fi
 
-  [ $((now - started_at)) -ge "$LOCK_STALE_AFTER_SECS" ]
+  # POSIX ln treats an existing directory as a destination directory. Remove
+  # the hard link it created there and keep waiting for that legacy lock.
+  rm -f "$try_lock/$(basename "$try_owner")" 2>/dev/null || true
+  return 1
+}
+
+cleanup_stale_reclaim_markers() {
+  cleanup_lock="$1"
+  for cleanup_marker in "$cleanup_lock".reclaim.*; do
+    [ -f "$cleanup_marker" ] || continue
+    [ "$cleanup_marker" = "$cleanup_lock.reclaim.guard" ] && continue
+    if fallback_lock_is_stale "$cleanup_marker" 0; then
+      rm -f "$cleanup_marker" 2>/dev/null || true
+    fi
+  done
+}
+
+reclaim_barrier_exists() {
+  barrier_candidate_lock="$1"
+  for barrier_candidate in "$barrier_candidate_lock".reclaim.*; do
+    [ -f "$barrier_candidate" ] && return 0
+  done
+  return 1
+}
+
+wait_for_reclaim_barrier() {
+  barrier_lock="$1"
+  while :; do
+    cleanup_stale_reclaim_markers "$barrier_lock"
+    barrier_guard="$barrier_lock.reclaim.guard"
+    if [ -f "$barrier_guard" ] && fallback_lock_is_stale "$barrier_guard" 0; then
+      echo "Stale reclaim guard at $barrier_guard requires manual removal; refusing an unsafe automatic takeover." >&2
+      return 1
+    fi
+    reclaim_barrier_exists "$barrier_lock" || return 0
+    sleep 1
+  done
+}
+
+publish_reclaim_marker() {
+  publish_lock="$1"
+  publish_prepare="$(mktemp "$publish_lock.reclaim-prepare.XXXXXX")"
+  publish_suffix="${publish_prepare##*.}"
+  published_marker="$publish_lock.reclaim.$publish_suffix"
+  {
+    printf '%s\n' "$$"
+    date +%s 2>/dev/null || printf '0\n'
+  } >"$publish_prepare"
+  mv "$publish_prepare" "$published_marker"
+  printf '%s\n' "$published_marker"
+}
+
+acquire_reclaim_guard() {
+  guard_lock="$1"
+  guard_marker="$2"
+  reclaim_guard="$guard_lock.reclaim.guard"
+  while ! ln "$guard_marker" "$reclaim_guard" 2>/dev/null; do
+    if [ -f "$reclaim_guard" ] && fallback_lock_is_stale "$reclaim_guard" 0; then
+      echo "Stale reclaim guard at $reclaim_guard requires manual removal; refusing an unsafe automatic takeover." >&2
+      return 1
+    fi
+    sleep 1
+  done
+  if [ ! -f "$reclaim_guard" ] || ! cmp -s "$reclaim_guard" "$guard_marker"; then
+    return 1
+  fi
+  active_reclaim_guard="$reclaim_guard"
+}
+
+release_reclaim_guard() {
+  guard_marker="$1"
+  if [ -n "$active_reclaim_guard" ] &&
+    [ -f "$active_reclaim_guard" ] &&
+    cmp -s "$active_reclaim_guard" "$guard_marker"; then
+    rm -f "$active_reclaim_guard" 2>/dev/null || true
+  fi
+  active_reclaim_guard=""
+}
+
+reclaim_fallback_lock() {
+  reclaim_lock="$1"
+  reclaim_owner_prefix="$2"
+  reclaim_stale_threshold="$3"
+  active_reclaim_marker="$(publish_reclaim_marker "$reclaim_lock")" || return 1
+  reclaim_suffix="${active_reclaim_marker##*.}"
+  if ! acquire_reclaim_guard "$reclaim_lock" "$active_reclaim_marker"; then
+    rm -f "$active_reclaim_marker" 2>/dev/null || true
+    active_reclaim_marker=""
+    return 1
+  fi
+
+  if [ -d "$reclaim_lock" ]; then
+    if fallback_lock_is_stale "$reclaim_lock" "$reclaim_stale_threshold"; then
+      reclaimed_lock="$reclaim_lock.stale.$reclaim_suffix"
+      if mv "$reclaim_lock" "$reclaimed_lock" 2>/dev/null; then
+        rm -rf "$reclaimed_lock"
+      fi
+    fi
+  elif [ -f "$reclaim_lock" ]; then
+    reclaimed_lock="$reclaim_lock.snapshot.$reclaim_suffix"
+    if ln "$reclaim_lock" "$reclaimed_lock" 2>/dev/null; then
+      if fallback_lock_is_stale "$reclaimed_lock" "$reclaim_stale_threshold"; then
+        reclaimed_owner="$(sed -n '3p' "$reclaimed_lock" 2>/dev/null || true)"
+        rm -f "$reclaim_lock" 2>/dev/null || true
+        case "$reclaimed_owner" in
+          "$reclaim_owner_prefix"*) rm -f "$reclaimed_owner" 2>/dev/null || true ;;
+        esac
+      fi
+      rm -f "$reclaimed_lock" 2>/dev/null || true
+    fi
+  fi
+  release_reclaim_guard "$active_reclaim_marker"
+  rm -f "$active_reclaim_marker" 2>/dev/null || true
+  active_reclaim_marker=""
+}
+
+acquire_fallback_lock() {
+  claim_owner="$1"
+  claim_lock="$2"
+  claim_owner_prefix="$3"
+  claim_stale_threshold="$4"
+  claim_description="$5"
+
+  while :; do
+    wait_for_reclaim_barrier "$claim_lock"
+    if try_claim_fallback_lock "$claim_owner" "$claim_lock"; then
+      wait_for_reclaim_barrier "$claim_lock"
+      if [ -f "$claim_lock" ] && cmp -s "$claim_lock" "$claim_owner"; then
+        return
+      fi
+      continue
+    fi
+    if fallback_lock_is_stale "$claim_lock" "$claim_stale_threshold"; then
+      warn "Removing stale $claim_description lock at $claim_lock"
+      reclaim_fallback_lock \
+        "$claim_lock" "$claim_owner_prefix" "$claim_stale_threshold" || true
+      continue
+    fi
+    sleep 1
+  done
 }
 
 acquire_install_lock() {
@@ -1163,27 +1343,42 @@ acquire_install_lock() {
     return
   fi
 
-  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
-    if mkdir_lock_is_stale; then
-      warn "Removing stale installer lock at $LOCK_DIR"
-      rm -rf "$LOCK_DIR"
-      continue
-    fi
-    sleep 1
-  done
+  lock_owner_file="$(mktemp "$STANDALONE_ROOT/install.lock.owner.XXXXXX")"
+  {
+    printf '%s\n' "$$"
+    date +%s 2>/dev/null || printf '0\n'
+    printf '%s\n' "$lock_owner_file"
+  } >"$lock_owner_file"
 
-  printf '%s\n' "$$" >"$LOCK_DIR/pid"
-  date +%s >"$LOCK_DIR/started_at" 2>/dev/null || true
-  lock_kind="mkdir"
+  acquire_fallback_lock \
+    "$lock_owner_file" \
+    "$LOCK_PATH" \
+    "$STANDALONE_ROOT/install.lock.owner." \
+    "$LOCK_STALE_AFTER_SECS" \
+    installer
+  lock_kind="hardlink"
 }
 
 release_install_lock() {
-  if [ "$lock_kind" = "mkdir" ]; then
-    rm -rf "$LOCK_DIR" 2>/dev/null || true
-  elif [ "$lock_kind" = "flock" ] || [ "$lock_kind" = "lockf" ]; then
+  if [ "$lock_kind" = "flock" ] || [ "$lock_kind" = "lockf" ]; then
     exec 9>&- 2>/dev/null || true
   fi
+  if [ -n "$lock_owner_file" ]; then
+    if [ -f "$LOCK_PATH" ] && cmp -s "$LOCK_PATH" "$lock_owner_file"; then
+      rm -f "$LOCK_PATH" 2>/dev/null || true
+    fi
+    rm -f "$lock_owner_file" 2>/dev/null || true
+  fi
+  if [ -n "$active_reclaim_guard" ]; then
+    rm -f "$active_reclaim_guard" 2>/dev/null || true
+    active_reclaim_guard=""
+  fi
+  if [ -n "$active_reclaim_marker" ]; then
+    rm -f "$active_reclaim_marker" 2>/dev/null || true
+    active_reclaim_marker=""
+  fi
   lock_kind=""
+  lock_owner_file=""
 }
 
 cleanup_stale_install_artifacts() {

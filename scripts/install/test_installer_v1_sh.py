@@ -4,13 +4,16 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 
 
 BOOTSTRAP = Path(__file__).with_name("installer-v1.sh")
+PUBLIC_INSTALLER = Path(__file__).with_name("install.sh")
 PACKAGE_ASSETS = (
     "codex-package-aarch64-pc-windows-msvc.tar.gz",
     "codex-package-aarch64-unknown-linux-musl.tar.gz",
@@ -27,6 +30,27 @@ REQUIRED_ASSETS = (
 
 
 class InstallerV1ShTest(unittest.TestCase):
+    def test_bootstrap_and_public_installer_share_release_safety_contract(
+        self,
+    ) -> None:
+        bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
+        public_installer = PUBLIC_INSTALLER.read_text(encoding="utf-8")
+
+        for assignment in (
+            "METADATA_MAX_BYTES",
+            "MANIFEST_MAX_BYTES",
+            "INSTALLER_MAX_BYTES",
+            "MAX_RELEASE_PAGES",
+        ):
+            self.assertEqual(
+                shell_assignment(bootstrap, assignment),
+                shell_assignment(public_installer, assignment),
+                assignment,
+            )
+        for asset in REQUIRED_ASSETS:
+            self.assertIn(asset, bootstrap)
+            self.assertIn(asset, public_installer)
+
     def test_help_identifies_protocol_without_network(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             result, requests = run_bootstrap(Path(temp_dir), arguments=["--help"])
@@ -218,6 +242,30 @@ class InstallerV1ShTest(unittest.TestCase):
                 self.assertFalse((root / "delegation.json").exists())
                 assert_fork_only_requests(requests)
 
+    def test_curl_stops_a_slow_unknown_length_stream_near_the_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            started = time.monotonic()
+            result, requests = run_bootstrap(
+                root,
+                arguments=["--release", "5.0.1"],
+                mode="metadata-slow-oversized",
+            )
+            elapsed = time.monotonic() - started
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(requests, [exact_url("5.0.1")])
+            self.assertIn("1048576-byte safety limit", result.stderr)
+            self.assertLess(elapsed, 5)
+            self.assertLessEqual(
+                int((root / "curl-streamed-bytes").read_text(encoding="utf-8")),
+                1_114_112,
+            )
+            wait_for_process_exit(
+                int((root / "curl-stream-pid").read_text(encoding="utf-8"))
+            )
+
     def test_metadata_manifest_and_downloaded_installer_digests_must_agree(
         self,
     ) -> None:
@@ -398,28 +446,35 @@ def run_bootstrap(
             """\
             #!/bin/sh
             url=""
-            output=""
-            previous=""
             for argument in "$@"; do
               case "$argument" in https://*) url="$argument" ;; esac
-              if [ "$previous" = "-o" ]; then output="$argument"; fi
-              previous="$argument"
             done
             printf '%s\n' "$url" >>"$CODEX_TEST_REQUEST_LOG"
             case "$url" in
               *openai*|*/main/*) exit 88 ;;
               https://api.github.com/repos/Electivus/electivus-codex/releases/tags/*)
-                if [ "$CODEX_TEST_MODE" = "metadata-oversized" ]; then
-                  dd if=/dev/zero bs=1048577 count=1 2>/dev/null | tr '\\000' x >"$output"
+                if [ "$CODEX_TEST_MODE" = "metadata-slow-oversized" ]; then
+                  printf '%s\n' "$$" >"$CODEX_TEST_ROOT/curl-stream-pid"
+                  streamed=0
+                  trap 'printf "%s\n" "$streamed" >"$CODEX_TEST_ROOT/curl-streamed-bytes"; exit 0' TERM INT PIPE
+                  while :; do
+                    dd if=/dev/zero bs=65536 count=1 2>/dev/null | tr '\\000' x || break
+                    streamed=$((streamed + 65536))
+                    printf '%s\n' "$streamed" >"$CODEX_TEST_ROOT/curl-streamed-bytes"
+                    sleep 0.01
+                  done
+                  exit 0
+                elif [ "$CODEX_TEST_MODE" = "metadata-oversized" ]; then
+                  dd if=/dev/zero bs=1048577 count=1 2>/dev/null | tr '\\000' x
                 else
-                  cp "$CODEX_TEST_METADATA_DIR/exact.json" "$output"
+                  cat "$CODEX_TEST_METADATA_DIR/exact.json"
                 fi
                 ;;
               'https://api.github.com/repos/Electivus/electivus-codex/releases?per_page=100&page='*)
-                cp "$CODEX_TEST_METADATA_DIR/inventory.json" "$output"
+                cat "$CODEX_TEST_METADATA_DIR/inventory.json"
                 ;;
               https://github.com/Electivus/electivus-codex/releases/download/*)
-                cp "$CODEX_TEST_ASSETS/${url##*/}" "$output"
+                cat "$CODEX_TEST_ASSETS/${url##*/}"
                 ;;
               *) exit 89 ;;
             esac
@@ -438,6 +493,7 @@ def run_bootstrap(
         "CODEX_TEST_METADATA_DIR": str(metadata_dir),
         "CODEX_TEST_MODE": mode,
         "CODEX_TEST_REQUEST_LOG": str(request_log),
+        "CODEX_TEST_ROOT": str(root),
         "HOME": str(home),
         "PATH": f"{fake_bin}:/usr/bin:/bin",
         "TMPDIR": str(root),
@@ -561,6 +617,25 @@ def assert_fork_only_requests(requests: list[str]) -> None:
     for request in requests:
         if "openai" in request.lower() or "/main/" in request:
             raise AssertionError(f"non-Electivus or mutable request: {request}")
+
+
+def wait_for_process_exit(pid: int) -> None:
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"process {pid} remained alive")
+        time.sleep(0.01)
+
+
+def shell_assignment(source: str, name: str) -> str:
+    match = re.search(rf"(?m)^{re.escape(name)}=(\d+)$", source)
+    if match is None:
+        raise AssertionError(f"missing shell assignment {name}")
+    return match.group(1)
 
 
 def inventory_url(page: int) -> str:

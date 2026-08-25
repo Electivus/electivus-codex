@@ -272,7 +272,7 @@ class InstallLocalShTest(unittest.TestCase):
                 (root / "codex-home" / "packages" / "standalone" / "current").exists()
             )
 
-    def test_mkdir_fallback_locks_serialize_without_publishing_pidless_directories(
+    def test_fallback_locks_serialize_without_publishing_pidless_directories(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -288,9 +288,9 @@ class InstallLocalShTest(unittest.TestCase):
                 repo,
                 build_mode="hold",
                 extra_env={"CODEX_TEST_CONTINUE": str(continue_path)},
-                force_mkdir_locks=True,
+                force_fallback_locks=True,
             )
-            second_env = installer_env(second_root, repo, force_mkdir_locks=True)
+            second_env = installer_env(second_root, repo, force_fallback_locks=True)
             command = [
                 "sh",
                 str(repo / "scripts/install/install-local.sh"),
@@ -363,11 +363,118 @@ class InstallLocalShTest(unittest.TestCase):
                 root,
                 repo,
                 arguments=["--use-upstream-version"],
-                force_mkdir_locks=True,
+                force_fallback_locks=True,
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(legacy_lock.exists())
+
+    def test_fallback_reclaimers_cannot_remove_a_new_version_lock_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            version_lock = version_lock_path(repo)
+            version_lock.parent.mkdir(parents=True, exist_ok=True)
+            version_lock.write_text(
+                "2147483647\n1\n" + str(version_lock.parent / "missing-owner") + "\n",
+                encoding="utf-8",
+            )
+            reclaim_continue = root / "allow-reclaim"
+            build_continue = root / "allow-build"
+            command = [
+                "sh",
+                str(repo / "scripts/install/install-local.sh"),
+                "--use-upstream-version",
+            ]
+            processes: list[subprocess.Popen[str]] = []
+            process_roots = [root / name for name in ("first", "second", "third")]
+            try:
+                for process_root in process_roots[:2]:
+                    process_root.mkdir()
+                    env = installer_env(
+                        process_root,
+                        repo,
+                        build_mode="hold",
+                        extra_env={
+                            "CODEX_TEST_CONTINUE": str(build_continue),
+                            "CODEX_TEST_RECLAIM_CONTINUE": str(reclaim_continue),
+                        },
+                        force_fallback_locks=True,
+                    )
+                    install_reclaim_guard_barrier(env)
+                    processes.append(
+                        subprocess.Popen(
+                            command,
+                            cwd=repo,
+                            env=env,
+                            text=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                        )
+                    )
+
+                wait_for_glob_count(f"{version_lock}.reclaim.*", 2)
+                reclaim_continue.touch()
+                wait_for_any_path(
+                    [process_root / "build.ready" for process_root in process_roots[:2]]
+                )
+                live_owner = version_lock.read_text(encoding="utf-8")
+                live_pid = int(live_owner.splitlines()[0])
+                os.kill(live_pid, 0)
+
+                third_root = process_roots[2]
+                third_root.mkdir()
+                third_env = installer_env(
+                    third_root,
+                    repo,
+                    build_mode="hold",
+                    extra_env={
+                        "CODEX_TEST_CONTINUE": str(build_continue),
+                        "CODEX_TEST_RECLAIM_CONTINUE": str(reclaim_continue),
+                    },
+                    force_fallback_locks=True,
+                )
+                install_reclaim_guard_barrier(third_env)
+                processes.append(
+                    subprocess.Popen(
+                        command,
+                        cwd=repo,
+                        env=third_env,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                )
+                time.sleep(0.2)
+                self.assertFalse((third_root / "build.ready").exists())
+                self.assertEqual(version_lock.read_text(encoding="utf-8"), live_owner)
+
+                build_continue.touch()
+                for process in processes:
+                    stdout, stderr = process.communicate(timeout=10)
+                    self.assertEqual(process.returncode, 0, stderr + stdout)
+            finally:
+                reclaim_continue.touch(exist_ok=True)
+                build_continue.touch(exist_ok=True)
+                for process in processes:
+                    if process.poll() is None:
+                        process.kill()
+                        process.communicate()
+
+    def test_public_and_local_fallback_lock_protocols_remain_in_parity(self) -> None:
+        local_script = INSTALL_SCRIPT.read_text(encoding="utf-8")
+        public_script = INSTALL_SCRIPT.with_name("install.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertEqual(
+            shell_block(
+                local_script, "fallback_lock_is_stale()", "acquire_version_lock()"
+            ),
+            shell_block(
+                public_script, "fallback_lock_is_stale()", "acquire_install_lock()"
+            ),
+        )
 
     def test_local_ripgrep_and_successful_retention_remain_supported(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -506,7 +613,7 @@ def run_installer(
     codex_exit: int = 0,
     mutate_lock: bool = False,
     extra_env: dict[str, str] | None = None,
-    force_mkdir_locks: bool = False,
+    force_fallback_locks: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["sh", str(repo / "scripts/install/install-local.sh"), *(arguments or [])],
@@ -518,7 +625,7 @@ def run_installer(
             codex_exit=codex_exit,
             mutate_lock=mutate_lock,
             extra_env=extra_env,
-            force_mkdir_locks=force_mkdir_locks,
+            force_fallback_locks=force_fallback_locks,
         ),
         text=True,
         capture_output=True,
@@ -534,7 +641,7 @@ def installer_env(
     codex_exit: int = 0,
     mutate_lock: bool = False,
     extra_env: dict[str, str] | None = None,
-    force_mkdir_locks: bool = False,
+    force_fallback_locks: bool = False,
 ) -> dict[str, str]:
     fake_bin = root / "fake-bin"
     fake_bin.mkdir(exist_ok=True)
@@ -545,7 +652,7 @@ def installer_env(
         fake_bin / "uname",
         '#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo x86_64;; *) echo Linux;; esac\n',
     )
-    if force_mkdir_locks:
+    if force_fallback_locks:
         for command in (
             "awk",
             "basename",
@@ -581,7 +688,7 @@ def installer_env(
     )
     env = {
         **os.environ,
-        "PATH": str(fake_bin) if force_mkdir_locks else f"{fake_bin}:/usr/bin:/bin",
+        "PATH": str(fake_bin) if force_fallback_locks else f"{fake_bin}:/usr/bin:/bin",
         "HOME": str(home),
         "SHELL": "/bin/sh",
         "CODEX_HOME": str(root / "codex-home"),
@@ -639,6 +746,51 @@ def wait_for_path(path: Path) -> None:
         if time.monotonic() >= deadline:
             raise AssertionError(f"timed out waiting for {path}")
         time.sleep(0.01)
+
+
+def wait_for_any_path(paths: list[Path]) -> None:
+    deadline = time.monotonic() + 5
+    while not any(path.exists() for path in paths):
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for one of {paths}")
+        time.sleep(0.01)
+
+
+def wait_for_glob_count(pattern: str, count: int) -> None:
+    deadline = time.monotonic() + 5
+    parent = Path(pattern).parent
+    name = Path(pattern).name
+    while len(list(parent.glob(name))) < count:
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for {count} matches of {pattern}")
+        time.sleep(0.01)
+
+
+def install_reclaim_guard_barrier(env: dict[str, str]) -> None:
+    fake_ln = Path(env["PATH"]) / "ln"
+    fake_ln.unlink()
+    write_executable(
+        fake_ln,
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            last=""
+            for argument in "$@"; do last="$argument"; done
+            case "$last" in
+            *.reclaim.guard)
+              while [ ! -e "$CODEX_TEST_RECLAIM_CONTINUE" ]; do
+                sleep 0.01
+              done
+              ;;
+            esac
+            exec /usr/bin/ln "$@"
+            """
+        ),
+    )
+
+
+def shell_block(source: str, start: str, end: str) -> str:
+    return source[source.index(start) : source.index(end, source.index(start))]
 
 
 def write_workspace_version(path: Path, workspace_version: str) -> None:
