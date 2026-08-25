@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import tempfile
 import textwrap
@@ -461,20 +462,83 @@ class InstallLocalShTest(unittest.TestCase):
                         process.kill()
                         process.communicate()
 
-    def test_public_and_local_fallback_lock_protocols_remain_in_parity(self) -> None:
-        local_script = INSTALL_SCRIPT.read_text(encoding="utf-8")
-        public_script = INSTALL_SCRIPT.with_name("install.sh").read_text(
-            encoding="utf-8"
-        )
+    def test_live_reused_or_unverifiable_install_lock_pid_fails_closed(self) -> None:
+        for case in ("fingerprint-mismatch", "unknown-identity"):
+            with (
+                self.subTest(case=case),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                repo = create_repo(root)
+                env = installer_env(root, repo, force_fallback_locks=True)
+                standalone_root = root / "codex-home/packages/standalone"
+                standalone_root.mkdir(parents=True)
+                lock_path = standalone_root / "install.lock.d"
+                lock_lines = [str(os.getpid()), "1787659200", "foreign-owner"]
+                if case == "fingerprint-mismatch":
+                    lock_lines.append("fingerprint=definitely-not-this-process")
+                lock_contents = "\n".join(lock_lines) + "\n"
+                lock_path.write_text(lock_contents, encoding="utf-8")
+                process = subprocess.Popen(
+                    ["sh", str(repo / "scripts/install/install-local.sh")],
+                    cwd=repo,
+                    env=env,
+                    start_new_session=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    stdout, stderr = communicate_bounded(process)
 
-        self.assertEqual(
-            shell_block(
-                local_script, "fallback_lock_is_stale()", "acquire_version_lock()"
-            ),
-            shell_block(
-                public_script, "fallback_lock_is_stale()", "acquire_install_lock()"
-            ),
-        )
+                    self.assertNotEqual(process.returncode, 0, stdout)
+                    self.assertIn(str(lock_path), stderr)
+                    self.assertIn("manual recovery", stderr)
+                    self.assertEqual(
+                        lock_path.read_text(encoding="utf-8"), lock_contents
+                    )
+                    self.assertFalse((root / "build.json").exists())
+                    self.assertFalse((standalone_root / "current").exists())
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate(timeout=2)
+
+    def test_signal_cleanup_preserves_a_successor_reclaim_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            env = installer_env(root, repo, force_fallback_locks=True)
+            standalone_root = root / "codex-home/packages/standalone"
+            lock_path = standalone_root / "install.lock.d"
+            lock_path.mkdir(parents=True)
+            (lock_path / "pid").write_text("2147483647\n", encoding="utf-8")
+            (lock_path / "started_at").write_text("1\n", encoding="utf-8")
+            successor_marker = Path(f"{lock_path}.reclaim.successor")
+            successor_guard = Path(f"{lock_path}.reclaim.guard")
+            env["CODEX_TEST_SUCCESSOR_MARKER"] = str(successor_marker)
+            install_guard_unlink_successor_signal(env)
+            process = subprocess.Popen(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                start_new_session=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = communicate_bounded(process)
+
+                self.assertEqual(process.returncode, 143, stderr + stdout)
+                self.assertTrue(successor_marker.is_file())
+                self.assertTrue(successor_guard.is_file())
+                self.assertTrue(os.path.samefile(successor_marker, successor_guard))
+                self.assertFalse((root / "build.json").exists())
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=2)
 
     def test_local_ripgrep_and_successful_retention_remain_supported(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -664,6 +728,7 @@ def installer_env(
             "find",
             "git",
             "grep",
+            "head",
             "ln",
             "mkdir",
             "mktemp",
@@ -675,6 +740,7 @@ def installer_env(
             "sh",
             "sleep",
             "sort",
+            "tr",
         ):
             command_path = shutil.which(command)
             assert command_path is not None
@@ -789,8 +855,46 @@ def install_reclaim_guard_barrier(env: dict[str, str]) -> None:
     )
 
 
-def shell_block(source: str, start: str, end: str) -> str:
-    return source[source.index(start) : source.index(end, source.index(start))]
+def install_guard_unlink_successor_signal(env: dict[str, str]) -> None:
+    fake_rm = Path(env["PATH"]) / "rm"
+    fake_rm.unlink()
+    write_executable(
+        fake_rm,
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            last=""
+            for argument in "$@"; do last="$argument"; done
+            case "$last" in
+            *.reclaim.guard)
+              if mkdir "$TMPDIR/guard-unlink-once" 2>/dev/null; then
+                /usr/bin/rm "$@"
+                {
+                  printf '%s\n' "$$"
+                  date +%s
+                  printf '%s\n' 'fingerprint=successor'
+                } >"$CODEX_TEST_SUCCESSOR_MARKER"
+                /usr/bin/ln "$CODEX_TEST_SUCCESSOR_MARKER" "$last"
+                kill -TERM "$PPID"
+                exit 0
+              fi
+              ;;
+            esac
+            exec /usr/bin/rm "$@"
+            """
+        ),
+    )
+
+
+def communicate_bounded(process: subprocess.Popen[str]) -> tuple[str, str]:
+    try:
+        return process.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        stdout, stderr = process.communicate(timeout=2)
+        raise AssertionError(
+            f"local installer did not fail closed promptly: {stderr}{stdout}"
+        )
 
 
 def write_workspace_version(path: Path, workspace_version: str) -> None:

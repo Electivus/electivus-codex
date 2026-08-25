@@ -235,15 +235,48 @@ restore_cargo_manifest_files() {
   return "$restore_failed"
 }
 
+process_start_fingerprint() {
+  identity_pid="$1"
+  if [ -r "/proc/$identity_pid/stat" ]; then
+    identity_start="$(sed 's/.*) //' "/proc/$identity_pid/stat" 2>/dev/null | awk '{ print $20 }')"
+    identity_boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+    case "$identity_start" in
+      '' | *[!0-9]*) return 1 ;;
+    esac
+    [ -n "$identity_boot" ] || return 1
+    printf 'linux-proc:%s:%s\n' "$identity_boot" "$identity_start"
+    return
+  fi
+
+  if command -v ps >/dev/null 2>&1; then
+    identity_start="$(LC_ALL=C ps -o lstart= -p "$identity_pid" 2>/dev/null |
+      awk '{$1=$1; print}')"
+    [ -n "$identity_start" ] || return 1
+    printf 'ps-lstart:%s\n' "$(printf '%s' "$identity_start" | tr ' ' '_')"
+    return
+  fi
+  return 1
+}
+
+report_unverifiable_lock() {
+  unverifiable_lock="$1"
+  unverifiable_description="$2"
+  echo "Cannot safely verify the live process recorded by the $unverifiable_description lock at $unverifiable_lock: $fallback_lock_issue Refusing automatic deletion; manual recovery is required after confirming that no installer owns this path." >&2
+}
+
 fallback_lock_is_stale() {
   stale_lock="$1"
   stale_threshold="$2"
+  fallback_lock_issue=""
+  stale_fingerprint=""
   if [ -d "$stale_lock" ]; then
     stale_pid="$(cat "$stale_lock/pid" 2>/dev/null || true)"
     stale_started_at="$(cat "$stale_lock/started_at" 2>/dev/null || true)"
+    stale_fingerprint="$(cat "$stale_lock/fingerprint" 2>/dev/null || true)"
   elif [ -f "$stale_lock" ]; then
     stale_pid="$(sed -n '1p' "$stale_lock" 2>/dev/null || true)"
     stale_started_at="$(sed -n '2p' "$stale_lock" 2>/dev/null || true)"
+    stale_fingerprint="$(sed -n 's/^fingerprint=//p' "$stale_lock" 2>/dev/null | head -n 1)"
   else
     return 1
   fi
@@ -251,6 +284,30 @@ fallback_lock_is_stale() {
     '' | *[!0-9]*) return 1 ;;
   esac
   if [ -n "$stale_pid" ] && kill -0 "$stale_pid" 2>/dev/null; then
+    case "$stale_started_at" in
+      '' | *[!0-9]*)
+        fallback_lock_issue="its started_at metadata is missing or malformed."
+        return 2
+        ;;
+    esac
+    stale_now="$(date +%s 2>/dev/null || printf '0')"
+    if [ "$stale_now" -eq 0 ] || [ "$stale_started_at" -gt "$stale_now" ]; then
+      fallback_lock_issue="its started_at metadata cannot describe the current live process."
+      return 2
+    fi
+    if [ -z "$stale_fingerprint" ]; then
+      fallback_lock_issue="it has no process-start fingerprint, so PID $stale_pid cannot be proven to be the original owner."
+      return 2
+    fi
+    current_fingerprint="$(process_start_fingerprint "$stale_pid" || true)"
+    if [ -z "$current_fingerprint" ]; then
+      fallback_lock_issue="this platform cannot prove the process-start identity of PID $stale_pid."
+      return 2
+    fi
+    if [ "$current_fingerprint" != "$stale_fingerprint" ]; then
+      fallback_lock_issue="PID $stale_pid is live but its process-start fingerprint does not match the recorded owner."
+      return 2
+    fi
     return 1
   fi
   if [ "$stale_threshold" -eq 0 ]; then
@@ -288,6 +345,9 @@ cleanup_stale_reclaim_markers() {
     [ "$cleanup_marker" = "$cleanup_lock.reclaim.guard" ] && continue
     if fallback_lock_is_stale "$cleanup_marker" 0; then
       rm -f "$cleanup_marker" 2>/dev/null || true
+    elif [ -n "$fallback_lock_issue" ]; then
+      cleanup_reclaim_issue_path="$cleanup_marker"
+      return 1
     fi
   done
 }
@@ -303,11 +363,20 @@ reclaim_barrier_exists() {
 wait_for_reclaim_barrier() {
   barrier_lock="$1"
   while :; do
-    cleanup_stale_reclaim_markers "$barrier_lock"
-    barrier_guard="$barrier_lock.reclaim.guard"
-    if [ -f "$barrier_guard" ] && fallback_lock_is_stale "$barrier_guard" 0; then
-      echo "Stale reclaim guard at $barrier_guard requires manual removal; refusing an unsafe automatic takeover." >&2
+    cleanup_reclaim_issue_path=""
+    if ! cleanup_stale_reclaim_markers "$barrier_lock"; then
+      report_unverifiable_lock "$cleanup_reclaim_issue_path" "reclaim marker"
       return 1
+    fi
+    barrier_guard="$barrier_lock.reclaim.guard"
+    if [ -f "$barrier_guard" ]; then
+      if fallback_lock_is_stale "$barrier_guard" 0; then
+        echo "Stale reclaim guard at $barrier_guard requires manual removal; refusing an unsafe automatic takeover." >&2
+        return 1
+      elif [ -n "$fallback_lock_issue" ]; then
+        report_unverifiable_lock "$barrier_guard" "reclaim guard"
+        return 1
+      fi
     fi
     reclaim_barrier_exists "$barrier_lock" || return 0
     sleep 1
@@ -322,6 +391,11 @@ publish_reclaim_marker() {
   {
     printf '%s\n' "$$"
     date +%s 2>/dev/null || printf '0\n'
+    printf 'marker=%s\n' "$publish_suffix"
+    publish_fingerprint="$(process_start_fingerprint "$$" || true)"
+    if [ -n "$publish_fingerprint" ]; then
+      printf 'fingerprint=%s\n' "$publish_fingerprint"
+    fi
   } >"$publish_prepare"
   mv "$publish_prepare" "$published_marker"
   printf '%s\n' "$published_marker"
@@ -331,26 +405,41 @@ acquire_reclaim_guard() {
   guard_lock="$1"
   guard_marker="$2"
   reclaim_guard="$guard_lock.reclaim.guard"
+  active_reclaim_guard="$reclaim_guard"
   while ! ln "$guard_marker" "$reclaim_guard" 2>/dev/null; do
-    if [ -f "$reclaim_guard" ] && fallback_lock_is_stale "$reclaim_guard" 0; then
-      echo "Stale reclaim guard at $reclaim_guard requires manual removal; refusing an unsafe automatic takeover." >&2
-      return 1
+    if [ -f "$reclaim_guard" ]; then
+      if fallback_lock_is_stale "$reclaim_guard" 0; then
+        echo "Stale reclaim guard at $reclaim_guard requires manual removal; refusing an unsafe automatic takeover." >&2
+        return 1
+      elif [ -n "$fallback_lock_issue" ]; then
+        report_unverifiable_lock "$reclaim_guard" "reclaim guard"
+        return 1
+      fi
     fi
     sleep 1
   done
   if [ ! -f "$reclaim_guard" ] || ! cmp -s "$reclaim_guard" "$guard_marker"; then
+    remove_reclaim_guard_if_owned "$reclaim_guard" "$guard_marker"
+    active_reclaim_guard=""
     return 1
   fi
-  active_reclaim_guard="$reclaim_guard"
+}
+
+remove_reclaim_guard_if_owned() {
+  owned_guard="$1"
+  owned_marker="$2"
+  if [ -n "$owned_guard" ] &&
+    [ -n "$owned_marker" ] &&
+    [ -f "$owned_guard" ] &&
+    [ -f "$owned_marker" ] &&
+    cmp -s "$owned_guard" "$owned_marker"; then
+    rm -f "$owned_guard" 2>/dev/null || true
+  fi
 }
 
 release_reclaim_guard() {
   guard_marker="$1"
-  if [ -n "$active_reclaim_guard" ] &&
-    [ -f "$active_reclaim_guard" ] &&
-    cmp -s "$active_reclaim_guard" "$guard_marker"; then
-    rm -f "$active_reclaim_guard" 2>/dev/null || true
-  fi
+  remove_reclaim_guard_if_owned "$active_reclaim_guard" "$guard_marker"
   active_reclaim_guard=""
 }
 
@@ -363,6 +452,7 @@ reclaim_fallback_lock() {
   if ! acquire_reclaim_guard "$reclaim_lock" "$active_reclaim_marker"; then
     rm -f "$active_reclaim_marker" 2>/dev/null || true
     active_reclaim_marker=""
+    active_reclaim_guard=""
     return 1
   fi
 
@@ -413,6 +503,10 @@ acquire_fallback_lock() {
         "$claim_lock" "$claim_owner_prefix" "$claim_stale_threshold" || true
       continue
     fi
+    if [ -n "$fallback_lock_issue" ]; then
+      report_unverifiable_lock "$claim_lock" "$claim_description"
+      return 1
+    fi
     sleep 1
   done
 }
@@ -439,6 +533,10 @@ acquire_version_lock() {
     printf '%s\n' "$$"
     date +%s 2>/dev/null || printf '0\n'
     printf '%s\n' "$version_lock_owner_file"
+    owner_fingerprint="$(process_start_fingerprint "$$" || true)"
+    if [ -n "$owner_fingerprint" ]; then
+      printf 'fingerprint=%s\n' "$owner_fingerprint"
+    fi
   } >"$version_lock_owner_file"
 
   acquire_fallback_lock \
@@ -461,7 +559,7 @@ release_version_lock() {
     rm -f "$version_lock_owner_file" 2>/dev/null || true
   fi
   if [ -n "$active_reclaim_guard" ]; then
-    rm -f "$active_reclaim_guard" 2>/dev/null || true
+    remove_reclaim_guard_if_owned "$active_reclaim_guard" "$active_reclaim_marker"
     active_reclaim_guard=""
   fi
   if [ -n "$active_reclaim_marker" ]; then
@@ -713,6 +811,10 @@ acquire_install_lock() {
     printf '%s\n' "$$"
     date +%s 2>/dev/null || printf '0\n'
     printf '%s\n' "$lock_owner_file"
+    owner_fingerprint="$(process_start_fingerprint "$$" || true)"
+    if [ -n "$owner_fingerprint" ]; then
+      printf 'fingerprint=%s\n' "$owner_fingerprint"
+    fi
   } >"$lock_owner_file"
 
   acquire_fallback_lock \
@@ -736,7 +838,7 @@ release_install_lock() {
     rm -f "$lock_owner_file" 2>/dev/null || true
   fi
   if [ -n "$active_reclaim_guard" ]; then
-    rm -f "$active_reclaim_guard" 2>/dev/null || true
+    remove_reclaim_guard_if_owned "$active_reclaim_guard" "$active_reclaim_marker"
     active_reclaim_guard=""
   fi
   if [ -n "$active_reclaim_marker" ]; then
