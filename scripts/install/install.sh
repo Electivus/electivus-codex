@@ -2,22 +2,26 @@
 
 set -eu
 
-RELEASE="${CODEX_RELEASE:-latest}"
+RELEASE="${CODEX_RELEASE:-stable}"
+UPDATE_CHANNEL="${CODEX_UPDATE_CHANNEL:-}"
+INSTALLER_PROTOCOL="${CODEX_INSTALLER_PROTOCOL:-installer-v1}"
 NON_INTERACTIVE="${CODEX_NON_INTERACTIVE:-false}"
-DEFAULT_PREFER_RELEASES_OPENAI_COM="true"
-PREFER_RELEASES_OPENAI_COM="${CODEX_INSTALLER_USE_RELEASES_OPENAI_COM:-$DEFAULT_PREFER_RELEASES_OPENAI_COM}"
-RELEASES_BASE_URL="https://releases.openai.com/codex"
-RELEASES_CONNECT_TIMEOUT=10
-RELEASES_METADATA_TIMEOUT=30
-RELEASES_ASSET_TIMEOUT=300
-release_source="github"
+PUBLISHER="Electivus"
+REPOSITORY="Electivus/electivus-codex"
+TAG_PREFIX="electivus-v"
+GITHUB_API_BASE="https://api.github.com/repos/$REPOSITORY"
+GITHUB_RELEASE_BASE="https://github.com/$REPOSITORY/releases/download"
+METADATA_MAX_BYTES=1048576
+MANIFEST_MAX_BYTES=1048576
+PACKAGE_MAX_BYTES=1073741824
+MAX_RELEASE_PAGES=4
 
 BIN_DIR="${CODEX_INSTALL_DIR:-$HOME/.local/bin}"
 BIN_PATH="$BIN_DIR/codex"
 CODE_MODE_HOST_BIN_PATH="$BIN_DIR/codex-code-mode-host"
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 STANDALONE_ROOT="$CODEX_HOME_DIR/packages/standalone"
-RELEASES_DIR="$STANDALONE_ROOT/releases"
+RELEASES_DIR="$STANDALONE_ROOT/releases/$PUBLISHER/electivus-codex"
 CURRENT_LINK="$STANDALONE_ROOT/current"
 LOCK_FILE="$STANDALONE_ROOT/install.lock"
 LOCK_DIR="$STANDALONE_ROOT/install.lock.d"
@@ -26,7 +30,6 @@ LOCK_STALE_AFTER_SECS=600
 path_action="already"
 path_profile=""
 conflict_manager=""
-conflict_path=""
 lock_kind=""
 tmp_dir=""
 
@@ -38,32 +41,51 @@ warn() {
   printf 'WARNING: %s\n' "$1" >&2
 }
 
-normalize_version() {
+validate_version() {
+  version="$1"
+  semver_without_build="${version%%+*}"
+  case "$semver_without_build" in
+    *-*) core="${semver_without_build%%-*}"; prerelease="${semver_without_build#*-}" ;;
+    *) core="$semver_without_build"; prerelease="" ;;
+  esac
+
+  if ! printf '%s\n' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
+    echo "Invalid Electivus release version: $version. Expected a valid SemVer value." >&2
+    return 1
+  fi
+
+  if [ -n "$prerelease" ] && printf '%s\n' "$prerelease" | tr '.' '\n' |
+    grep -Eq '^0[0-9]+$'; then
+    echo "Invalid Electivus release version: $version. Numeric pre-release identifiers cannot have leading zeroes." >&2
+    return 1
+  fi
+
+  [ "$core" != "0.0.0" ] || {
+    echo "Invalid Electivus release version: 0.0.0 is reserved for Fork development builds." >&2
+    return 1
+  }
+}
+
+version_is_prerelease() {
+  case "${1%%+*}" in
+    *-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_channel() {
   case "$1" in
-    "" | latest)
-      printf 'latest\n'
-      ;;
-    rust-v*)
-      printf '%s\n' "${1#rust-v}"
-      ;;
-    v*)
-      printf '%s\n' "${1#v}"
-      ;;
+    stable | pre-release) ;;
     *)
-      printf '%s\n' "$1"
+      echo "Invalid Electivus Update channel: $1. Expected stable or pre-release." >&2
+      return 1
       ;;
   esac
 }
 
-validate_version() {
-  version="$1"
-
-  if [ "$version" = "latest" ]; then
-    return
-  fi
-
-  if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-alpha(\.[0-9]+){0,2}|-beta(\.[0-9]+)?)?$'; then
-    echo "Invalid Codex release version: $version. Expected latest or x.y.z[-alpha[.N[.M]]|-beta[.N]]." >&2
+validate_installer_protocol() {
+  if ! printf '%s\n' "$1" | grep -Eq '^installer-v[1-9][0-9]*$'; then
+    echo "Invalid Installer protocol: $1. Expected installer-vN." >&2
     return 1
   fi
 }
@@ -79,15 +101,32 @@ parse_args() {
         RELEASE="$2"
         shift
         ;;
+      --channel)
+        if [ "$#" -lt 2 ]; then
+          echo "--channel requires a value." >&2
+          exit 1
+        fi
+        UPDATE_CHANNEL="$2"
+        shift
+        ;;
+      --installer-protocol)
+        if [ "$#" -lt 2 ]; then
+          echo "--installer-protocol requires a value." >&2
+          exit 1
+        fi
+        INSTALLER_PROTOCOL="$2"
+        shift
+        ;;
       --help | -h)
         cat <<EOF
-Usage: install.sh [--release VERSION]
+Usage: install.sh [--release stable|pre-release|VERSION] [--channel CHANNEL]
 
 Environment:
-  CODEX_RELEASE          Version to install; overridden by --release.
+  CODEX_RELEASE          stable, pre-release, bare SemVer, or electivus-v tag.
+  CODEX_UPDATE_CHANNEL   Persisted channel for an exact install.
+  CODEX_INSTALLER_PROTOCOL
+                         Installer protocol recorded in the receipt.
   CODEX_NON_INTERACTIVE  Set to 1, true, or yes to skip prompts.
-  CODEX_INSTALLER_USE_RELEASES_OPENAI_COM
-                         Set to 0, false, or no to use GitHub Releases.
 EOF
         exit 0
         ;;
@@ -103,97 +142,30 @@ EOF
 download_file() {
   url="$1"
   output="$2"
+  max_bytes="${3:-$PACKAGE_MAX_BYTES}"
 
   if command -v curl >/dev/null 2>&1; then
-    case "$url" in
-      "$RELEASES_BASE_URL"/*)
-        curl -fsSL --connect-timeout "$RELEASES_CONNECT_TIMEOUT" --max-time "$RELEASES_ASSET_TIMEOUT" "$url" -o "$output"
-        ;;
-      *)
-        curl -fsSL "$url" -o "$output"
-        ;;
-    esac
-    return
+    curl -fsSL --connect-timeout 10 --max-time 300 --max-filesize "$max_bytes" "$url" -o "$output" || return 1
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -t 1 -T 300 -O "$output" "$url" || return 1
+  else
+    echo "curl or wget is required to install Electivus Codex." >&2
+    exit 1
   fi
 
-  if command -v wget >/dev/null 2>&1; then
-    case "$url" in
-      "$RELEASES_BASE_URL"/*)
-        wget -q -t 1 -T "$RELEASES_ASSET_TIMEOUT" -O "$output" "$url"
-        ;;
-      *)
-        wget -q -O "$output" "$url"
-        ;;
-    esac
-    return
+  downloaded_bytes="$(wc -c <"$output" | tr -d ' ')"
+  if [ "$downloaded_bytes" -gt "$max_bytes" ]; then
+    rm -f "$output"
+    echo "Download from $url exceeded the $max_bytes-byte safety limit." >&2
+    return 1
   fi
-
-  echo "curl or wget is required to install Codex." >&2
-  exit 1
 }
 
 download_text() {
   url="$1"
-
-  if command -v curl >/dev/null 2>&1; then
-    case "$url" in
-      "$RELEASES_BASE_URL"/*)
-        curl -fsSL --connect-timeout "$RELEASES_CONNECT_TIMEOUT" --max-time "$RELEASES_METADATA_TIMEOUT" "$url"
-        ;;
-      *)
-        curl -fsSL "$url"
-        ;;
-    esac
-    return
-  fi
-
-  if command -v wget >/dev/null 2>&1; then
-    case "$url" in
-      "$RELEASES_BASE_URL"/*)
-        wget -q -t 1 -T "$RELEASES_METADATA_TIMEOUT" -O - "$url"
-        ;;
-      *)
-        wget -q -O - "$url"
-        ;;
-    esac
-    return
-  fi
-
-  echo "curl or wget is required to install Codex." >&2
-  exit 1
-}
-
-download_file_with_fallback() {
-  primary_url="$1"
-  fallback_url="$2"
-  output="$3"
-  expected_digest="$4"
-  fallback_asset="$5"
-  required_manifest_asset="${6:-}"
-
-  if download_file "$primary_url" "$output" &&
-    verify_archive_digest "$output" "$expected_digest" &&
-    { [ -z "$required_manifest_asset" ] || package_archive_digest "$required_manifest_asset" "$output" >/dev/null; }; then
-    return
-  fi
-
-  if [ -z "$fallback_url" ]; then
-    return 1
-  fi
-
-  warn "Could not download or verify $primary_url; retrying from GitHub Releases."
-  download_file "$fallback_url" "$output"
-  if verify_archive_digest "$output" "$expected_digest" &&
-    { [ -z "$required_manifest_asset" ] || package_archive_digest "$required_manifest_asset" "$output" >/dev/null; }; then
-    return
-  fi
-
-  resolve_release_from_github "$resolved_version"
-  fallback_digest="$(release_asset_digest "$fallback_asset")"
-  verify_archive_digest "$output" "$fallback_digest"
-  if [ -n "$required_manifest_asset" ]; then
-    package_archive_digest "$required_manifest_asset" "$output" >/dev/null
-  fi
+  output="$tmp_dir/metadata.json"
+  download_file "$url" "$output" "$METADATA_MAX_BYTES" || return 1
+  cat "$output"
 }
 
 parse_release_metadata() {
@@ -201,9 +173,24 @@ parse_release_metadata() {
   # supported awk implementation. JSON strings cannot contain literal newlines,
   # so the record boundaries inserted by fold do not change the document.
   LC_ALL=C fold -b -w 4096 | LC_ALL=C awk '
-    function finish_string(value) {
-      if (object_depth == 1 && key == "tag_name") {
-        print "tag_name\t" value
+    function reset_release() {
+      release_tag = ""
+      release_draft = ""
+      release_prerelease = ""
+      release_published_at = ""
+    }
+
+    function save_value(value) {
+      if (object_depth == release_object_depth) {
+        if (key == "tag_name") {
+          release_tag = value
+        } else if (key == "draft") {
+          release_draft = value
+        } else if (key == "prerelease") {
+          release_prerelease = value
+        } else if (key == "published_at") {
+          release_published_at = value
+        }
       } else if (object_depth == asset_object_depth) {
         if (key == "name") {
           asset_name = value
@@ -211,14 +198,38 @@ parse_release_metadata() {
           asset_digest = value
         }
       }
-
       expecting_value = 0
+      primitive = ""
       key = ""
+    }
+
+    function finish_primitive() {
+      if (expecting_value && primitive != "") {
+        if (primitive ~ /^(true|false|null|-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?)$/) {
+          save_value(primitive)
+        } else {
+          invalid = 1
+        }
+      }
     }
 
     {
       for (i = 1; i <= length($0); i++) {
         char = substr($0, i, 1)
+
+        if (root_closed && char !~ /[[:space:]]/) {
+          invalid = 1
+        }
+
+        if (root_kind == "" && char !~ /[[:space:]]/) {
+          if (char == "[") {
+            root_kind = "array"
+          } else if (char == "{") {
+            root_kind = "object"
+          } else {
+            invalid = 1
+          }
+        }
 
         if (in_string) {
           if (escaped) {
@@ -229,7 +240,7 @@ parse_release_metadata() {
           } else if (char == "\"") {
             in_string = 0
             if (string_is_value) {
-              finish_string(token)
+              save_value(token)
             } else {
               pending_key = token
             }
@@ -248,9 +259,15 @@ parse_release_metadata() {
           key = pending_key
           pending_key = ""
           expecting_value = 1
+          primitive = ""
         } else if (char == "{") {
           object_depth++
-          if (assets_array_depth != 0 &&
+          if (release_object_depth == 0 &&
+              ((root_kind == "object" && object_depth == 1 && array_depth == 0) ||
+               (root_kind == "array" && object_depth == 1 && array_depth == 1))) {
+            release_object_depth = object_depth
+            reset_release()
+          } else if (assets_array_depth != 0 &&
               array_depth == assets_array_depth &&
               asset_object_depth == 0) {
             asset_object_depth = object_depth
@@ -258,45 +275,68 @@ parse_release_metadata() {
             asset_digest = ""
           }
           expecting_value = 0
+          primitive = ""
           key = ""
         } else if (char == "}") {
+          finish_primitive()
           if (object_depth == asset_object_depth) {
-            if (asset_name != "" && asset_digest != "") {
-              print "asset\t" asset_name "\t" asset_digest
+            if (asset_name != "") {
+              print "asset|" asset_name "|" asset_digest
             }
             asset_object_depth = 0
             asset_name = ""
             asset_digest = ""
           }
+          if (object_depth == release_object_depth) {
+            print "release|" release_tag "|" release_draft "|" release_prerelease "|" release_published_at
+            print "end"
+            release_object_depth = 0
+          }
           object_depth--
+          if (root_kind == "object" && object_depth == 0) {
+            root_closed = 1
+          }
           expecting_value = 0
+          primitive = ""
           key = ""
           pending_key = ""
         } else if (char == "[") {
           array_depth++
-          if (expecting_value && key == "assets" && object_depth == 1) {
+          if (expecting_value && key == "assets" &&
+              object_depth == release_object_depth) {
             assets_array_depth = array_depth
           }
           expecting_value = 0
+          primitive = ""
           key = ""
         } else if (char == "]") {
+          finish_primitive()
           if (array_depth == assets_array_depth) {
             assets_array_depth = 0
           }
           array_depth--
+          if (root_kind == "array" && array_depth == 0) {
+            root_closed = 1
+          }
           expecting_value = 0
+          primitive = ""
           key = ""
           pending_key = ""
         } else if (char == ",") {
+          finish_primitive()
           expecting_value = 0
+          primitive = ""
           key = ""
           pending_key = ""
+        } else if (expecting_value && char !~ /[[:space:]]/) {
+          primitive = primitive char
         }
       }
     }
 
     END {
-      if (in_string || object_depth != 0 || array_depth != 0) {
+      if (invalid || root_kind == "" || !root_closed || in_string || object_depth != 0 ||
+          array_depth != 0 || release_object_depth != 0) {
         exit 1
       }
     }
@@ -305,141 +345,304 @@ parse_release_metadata() {
 
 release_url_for_asset() {
   asset="$1"
-  resolved_version="$2"
+  release_tag="$2"
 
-  printf 'https://github.com/openai/codex/releases/download/rust-v%s/%s\n' "$resolved_version" "$asset"
-}
-
-releases_url_for_asset() {
-  asset="$1"
-  resolved_version="$2"
-
-  printf '%s/releases/%s/%s\n' "$RELEASES_BASE_URL" "$resolved_version" "$asset"
+  printf '%s/%s/%s\n' "$GITHUB_RELEASE_BASE" "$release_tag" "$asset"
 }
 
 release_metadata_url() {
-  resolved_version="$1"
+  release_tag="$1"
 
-  printf 'https://api.github.com/repos/openai/codex/releases/tags/rust-v%s\n' "$resolved_version"
+  printf '%s/releases/tags/%s\n' "$GITHUB_API_BASE" "$release_tag"
 }
 
-parse_downloaded_release_metadata() {
-  requested_release="$1"
-  source_name="$2"
-  if ! release_metadata="$(printf '%s\n' "$release_json" | parse_release_metadata)"; then
-    echo "Could not parse $source_name release metadata for Codex $requested_release." >&2
-    return 1
-  fi
+semver_compare() {
+  LC_ALL=C awk -v left="$1" -v right="$2" '
+    function numeric_compare(a, b) {
+      sub(/^0+/, "", a)
+      sub(/^0+/, "", b)
+      if (a == "") a = "0"
+      if (b == "") b = "0"
+      if (length(a) != length(b)) return length(a) > length(b) ? 1 : -1
+      if (a == b) return 0
+      return a > b ? 1 : -1
+    }
+    function parse(version, core, pre, plus, dash) {
+      plus = index(version, "+")
+      if (plus) version = substr(version, 1, plus - 1)
+      dash = index(version, "-")
+      parsed_core = dash ? substr(version, 1, dash - 1) : version
+      parsed_pre = dash ? substr(version, dash + 1) : ""
+    }
+    BEGIN {
+      parse(left); left_core = parsed_core; left_pre = parsed_pre
+      parse(right); right_core = parsed_core; right_pre = parsed_pre
+      split(left_core, left_parts, ".")
+      split(right_core, right_parts, ".")
+      for (i = 1; i <= 3; i++) {
+        comparison = numeric_compare(left_parts[i], right_parts[i])
+        if (comparison) { print comparison; exit }
+      }
+      if (left_pre == "" && right_pre == "") { print 0; exit }
+      if (left_pre == "") { print 1; exit }
+      if (right_pre == "") { print -1; exit }
+      left_count = split(left_pre, left_ids, ".")
+      right_count = split(right_pre, right_ids, ".")
+      count = left_count > right_count ? left_count : right_count
+      for (i = 1; i <= count; i++) {
+        if (i > left_count) { print -1; exit }
+        if (i > right_count) { print 1; exit }
+        left_numeric = left_ids[i] ~ /^[0-9]+$/
+        right_numeric = right_ids[i] ~ /^[0-9]+$/
+        if (left_numeric && right_numeric) {
+          comparison = numeric_compare(left_ids[i], right_ids[i])
+        } else if (left_numeric != right_numeric) {
+          comparison = left_numeric ? -1 : 1
+        } else if (left_ids[i] == right_ids[i]) {
+          comparison = 0
+        } else {
+          comparison = left_ids[i] > right_ids[i] ? 1 : -1
+        }
+        if (comparison) { print comparison; exit }
+      }
+      print 0
+    }
+  '
 }
 
-resolve_metadata_version() {
-  release_tag="$(printf '%s\n' "$release_metadata" | awk -F '\t' '$1 == "tag_name" { print $2; exit }')"
-  case "$release_tag" in
-    rust-v*) metadata_version="${release_tag#rust-v}" ;;
-    *) metadata_version="" ;;
+asset_digest_in_metadata() {
+  lookup_asset="$1"
+  lookup_metadata="$2"
+
+  printf '%s\n' "$lookup_metadata" | awk -F '|' -v asset="$lookup_asset" '
+    $1 == "asset" && $2 == asset {
+      count++
+      digest = $3
+    }
+    END {
+      if (count != 1 || digest !~ /^sha256:[0-9a-fA-F]{64}$/) {
+        exit 1
+      }
+      sub(/^sha256:/, "", digest)
+      print tolower(digest)
+    }
+  '
+}
+
+release_assets_are_complete() {
+  complete_metadata="$1"
+
+  for required_asset in \
+    codex-package-aarch64-pc-windows-msvc.tar.gz \
+    codex-package-aarch64-unknown-linux-musl.tar.gz \
+    codex-package-x86_64-pc-windows-msvc.tar.gz \
+    codex-package-x86_64-unknown-linux-musl.tar.gz \
+    codex-package_SHA256SUMS \
+    install.sh \
+    install.ps1 \
+    installer_SHA256SUMS; do
+    asset_digest_in_metadata "$required_asset" "$complete_metadata" >/dev/null 2>&1 || return 1
+  done
+}
+
+consider_release() {
+  c_tag="$1"
+  c_draft="$2"
+  c_prerelease_flag="$3"
+  c_published_at="$4"
+  c_assets="$5"
+
+  [ "$c_draft" = "false" ] || return 0
+  [ -n "$c_published_at" ] && [ "$c_published_at" != "null" ] || return 0
+  case "$c_tag" in
+    "$TAG_PREFIX"*) c_version="${c_tag#"$TAG_PREFIX"}" ;;
+    *) return 0 ;;
   esac
-  if [ -z "$metadata_version" ]; then
-    echo "Failed to resolve the latest Codex release version." >&2
-    return 1
-  fi
-  validate_version "$metadata_version"
-}
+  validate_version "$c_version" >/dev/null 2>&1 || return 0
 
-resolve_release_from_github() {
-  normalized_version="$1"
-  if [ "$normalized_version" = "latest" ]; then
-    requested_release="latest"
-    metadata_url="https://api.github.com/repos/openai/codex/releases/latest"
+  if version_is_prerelease "$c_version"; then
+    [ "$c_prerelease_flag" = "true" ] || return 0
+    c_channel="pre-release"
   else
-    resolved_version="$normalized_version"
-    requested_release="$resolved_version"
-    metadata_url="$(release_metadata_url "$resolved_version")"
+    [ "$c_prerelease_flag" = "false" ] || return 0
+    c_channel="stable"
   fi
 
-  if ! release_json="$(download_text "$metadata_url")"; then
-    echo "Could not fetch GitHub release metadata for Codex $requested_release. GitHub API may be unavailable or rate limited." >&2
-    exit 1
-  fi
-
-  parse_downloaded_release_metadata "$requested_release" "GitHub"
-
-  if [ "$normalized_version" = "latest" ]; then
-    resolve_metadata_version
-    resolved_version="$metadata_version"
-  fi
-
-  release_source="github"
-}
-
-resolve_release_from_releases() {
-  normalized_version="$1"
-
-  if [ "$normalized_version" = "latest" ]; then
-    requested_release="latest"
-    metadata_url="$RELEASES_BASE_URL/channels/latest"
-  else
-    requested_release="$normalized_version"
-    metadata_url="$RELEASES_BASE_URL/releases/$normalized_version/release.json"
-  fi
-
-  if ! release_json="$(download_text "$metadata_url")"; then
-    return 1
-  fi
-
-  if ! parse_downloaded_release_metadata "$requested_release" "releases.openai.com"; then
-    return 1
-  fi
-  if ! resolve_metadata_version; then
-    return 1
-  fi
-  if [ "$normalized_version" != "latest" ] && [ "$metadata_version" != "$normalized_version" ]; then
-    echo "Release metadata version did not match requested Codex version $normalized_version." >&2
-    return 1
-  fi
-  resolved_version="$metadata_version"
-  release_source="releases.openai.com"
-}
-
-resolve_release() {
-  normalized_version="$(normalize_version "$RELEASE")"
-  validate_version "$normalized_version"
-
-  case "$PREFER_RELEASES_OPENAI_COM" in
-    1 | [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss])
-      if resolve_release_from_releases "$normalized_version" &&
-        select_release_assets; then
-        return
-      fi
-      warn "releases.openai.com is unavailable; falling back to GitHub Releases."
+  release_assets_are_complete "$c_assets" || return 0
+  case "$requested_kind" in
+    exact)
+      [ "$c_version" = "$requested_version" ] || return 0
+      ;;
+    stable | pre-release)
+      [ "$c_channel" = "$requested_kind" ] || return 0
       ;;
   esac
 
-  resolve_release_from_github "$normalized_version"
+  if [ -n "$selected_version" ]; then
+    c_comparison="$(semver_compare "$c_version" "$selected_version")"
+    if [ "$c_comparison" -lt 0 ]; then
+      return 0
+    fi
+    if [ "$c_comparison" -eq 0 ] && [ "$c_version" != "$selected_version" ]; then
+      echo "Electivus release inventory contains ambiguous equal-precedence versions $selected_version and $c_version." >&2
+      return 1
+    fi
+  fi
+
+  selected_version="$c_version"
+  selected_tag="$c_tag"
+  selected_release_metadata="$c_assets"
+}
+
+select_release_from_records() {
+  parsed_records="$1"
+  pending_assets=""
+  record_tag=""
+  record_draft=""
+  record_prerelease=""
+  record_published_at=""
+
+  while IFS='|' read -r record_kind record_one record_two record_three record_four; do
+    case "$record_kind" in
+      asset)
+        pending_assets="${pending_assets}${pending_assets:+
+}$record_kind|$record_one|$record_two"
+        ;;
+      release)
+        record_tag="$record_one"
+        record_draft="$record_two"
+        record_prerelease="$record_three"
+        record_published_at="$record_four"
+        ;;
+      end)
+        consider_release \
+          "$record_tag" \
+          "$record_draft" \
+          "$record_prerelease" \
+          "$record_published_at" \
+          "$pending_assets" || return 1
+        pending_assets=""
+        record_tag=""
+        ;;
+    esac
+  done <<EOF
+$parsed_records
+EOF
+}
+
+parse_release_document() {
+  document="$1"
+  description="$2"
+  if ! parsed_document="$(printf '%s\n' "$document" | parse_release_metadata)"; then
+    echo "Could not parse $description as bounded GitHub release metadata." >&2
+    return 1
+  fi
+  printf '%s\n' "$parsed_document"
+}
+
+normalize_release_request() {
+  validate_installer_protocol "$INSTALLER_PROTOCOL"
+  if [ -n "$UPDATE_CHANNEL" ]; then
+    validate_channel "$UPDATE_CHANNEL"
+  fi
+
+  case "$RELEASE" in
+    stable | pre-release)
+      requested_kind="$RELEASE"
+      if [ -n "$UPDATE_CHANNEL" ] && [ "$UPDATE_CHANNEL" != "$requested_kind" ]; then
+        echo "--release $RELEASE conflicts with Update channel $UPDATE_CHANNEL." >&2
+        return 1
+      fi
+      requested_channel="$requested_kind"
+      requested_version=""
+      ;;
+    latest | rust-v* | v* | "")
+      echo "Invalid Electivus release selector: ${RELEASE:-<empty>}. Use stable, pre-release, bare SemVer, or an electivus-v... tag." >&2
+      return 1
+      ;;
+    "$TAG_PREFIX"*)
+      requested_kind="exact"
+      requested_version="${RELEASE#"$TAG_PREFIX"}"
+      validate_version "$requested_version"
+      ;;
+    *)
+      requested_kind="exact"
+      requested_version="$RELEASE"
+      validate_version "$requested_version"
+      ;;
+  esac
+
+  if [ "$requested_kind" = "exact" ]; then
+    if [ -n "$UPDATE_CHANNEL" ]; then
+      requested_channel="$UPDATE_CHANNEL"
+    elif version_is_prerelease "$requested_version"; then
+      requested_channel="pre-release"
+    else
+      requested_channel="stable"
+    fi
+    if [ "$requested_channel" = "stable" ] && version_is_prerelease "$requested_version"; then
+      echo "Stable Update channel cannot install pre-release version $requested_version." >&2
+      return 1
+    fi
+  fi
+}
+
+resolve_release() {
+  normalize_release_request
+  selected_version=""
+  selected_tag=""
+  selected_release_metadata=""
+
+  if [ "$requested_kind" = "exact" ]; then
+    requested_tag="$TAG_PREFIX$requested_version"
+    metadata_url="$(release_metadata_url "$requested_tag")"
+    if ! release_json="$(download_text "$metadata_url")"; then
+      echo "Could not fetch published Electivus release metadata for $requested_tag." >&2
+      return 1
+    fi
+    records="$(parse_release_document "$release_json" "$requested_tag")" || return 1
+    select_release_from_records "$records" || return 1
+  else
+    page=1
+    records=""
+    while [ "$page" -le "$MAX_RELEASE_PAGES" ]; do
+      metadata_url="$GITHUB_API_BASE/releases?per_page=100&page=$page"
+      if ! release_json="$(download_text "$metadata_url")"; then
+        echo "Could not fetch bounded Electivus release inventory page $page." >&2
+        return 1
+      fi
+      page_records="$(parse_release_document "$release_json" "Electivus release inventory page $page")" || return 1
+      if [ -z "$page_records" ]; then
+        break
+      fi
+      records="${records}${records:+
+}$page_records"
+      page=$((page + 1))
+    done
+    select_release_from_records "$records" || return 1
+  fi
+
+  if [ -z "$selected_version" ]; then
+    if [ "$requested_kind" = "stable" ]; then
+      echo "No complete stable Electivus release is published. To opt into pre-releases, run install.sh --release pre-release." >&2
+    elif [ "$requested_kind" = "pre-release" ]; then
+      echo "No complete Electivus pre-release is published." >&2
+    else
+      echo "Electivus release $TAG_PREFIX$requested_version is not published, valid, and complete." >&2
+    fi
+    return 1
+  fi
+
+  resolved_version="$selected_version"
+  release_tag="$selected_tag"
+  release_metadata="$selected_release_metadata"
+  resolved_channel="$requested_channel"
   select_release_assets
 }
 
 release_asset_digest_or_empty() {
   asset="$1"
-
-  digest="$(printf '%s\n' "$release_metadata" | awk -F '\t' -v asset="$asset" '
-    $1 == "asset" && $2 == asset {
-      print $3
-      exit
-    }
-  ')"
-
-  case "$digest" in
-    sha256:????????????????????????????????????????????????????????????????)
-      digest="${digest#sha256:}"
-      case "$digest" in
-        *[!0-9a-fA-F]*) return 1 ;;
-      esac
-      printf '%s\n' "$digest"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  asset_digest_in_metadata "$asset" "$release_metadata"
 }
 
 release_asset_exists() {
@@ -453,7 +656,7 @@ release_asset_digest() {
 
   digest="$(release_asset_digest_or_empty "$asset" || true)"
   if [ -z "$digest" ]; then
-    echo "Could not find SHA-256 digest for release asset $asset." >&2
+    echo "Could not find one valid SHA-256 digest for Electivus release asset $asset." >&2
     exit 1
   fi
 
@@ -463,34 +666,13 @@ release_asset_digest() {
 select_release_assets() {
   package_asset="codex-package-$vendor_target.tar.gz"
   checksum_asset="codex-package_SHA256SUMS"
-  download_fallback_url=""
-  checksum_fallback_url=""
-
-  if release_asset_exists "$package_asset" &&
-    release_asset_exists "$checksum_asset"; then
-    install_layout="package"
-    asset="$package_asset"
-  elif release_asset_exists "codex-npm-$npm_tag-$resolved_version.tgz"; then
-    install_layout="legacy-platform-npm"
-    asset="codex-npm-$npm_tag-$resolved_version.tgz"
-  else
-    echo "Could not find Codex package or platform npm release assets for Codex $resolved_version." >&2
-    return 1
-  fi
-
-  if [ "$release_source" = "releases.openai.com" ]; then
-    download_url="$(releases_url_for_asset "$asset" "$resolved_version")"
-    download_fallback_url="$(release_url_for_asset "$asset" "$resolved_version")"
-    if [ "$install_layout" = "package" ]; then
-      checksum_url="$(releases_url_for_asset "$checksum_asset" "$resolved_version")"
-      checksum_fallback_url="$(release_url_for_asset "$checksum_asset" "$resolved_version")"
-    fi
-  else
-    download_url="$(release_url_for_asset "$asset" "$resolved_version")"
-    if [ "$install_layout" = "package" ]; then
-      checksum_url="$(release_url_for_asset "$checksum_asset" "$resolved_version")"
-    fi
-  fi
+  installer_asset="install.sh"
+  installer_checksum_asset="installer_SHA256SUMS"
+  install_layout="package"
+  asset="$package_asset"
+  download_url="$(release_url_for_asset "$asset" "$release_tag")"
+  checksum_url="$(release_url_for_asset "$checksum_asset" "$release_tag")"
+  installer_checksum_url="$(release_url_for_asset "$installer_checksum_asset" "$release_tag")"
 }
 
 package_archive_digest() {
@@ -499,14 +681,14 @@ package_archive_digest() {
 
   digest="$(awk -v asset="$asset" '
     $2 == asset && length($1) == 64 && $1 !~ /[^0-9a-fA-F]/ {
-      print tolower($1)
-      found = 1
-      exit
+      digest = tolower($1)
+      found++
     }
     END {
-      if (!found) {
+      if (found != 1) {
         exit 1
       }
+      print digest
     }
   ' "$manifest_path" 2>/dev/null || true)"
 
@@ -516,6 +698,49 @@ package_archive_digest() {
   fi
 
   printf '%s\n' "$digest"
+}
+
+verify_manifest_assets() {
+  manifest_path="$1"
+  shift
+
+  for manifest_asset in "$@"; do
+    manifest_digest="$(package_archive_digest "$manifest_asset" "$manifest_path")" || return 1
+    metadata_digest="$(release_asset_digest "$manifest_asset")"
+    if [ "$manifest_digest" != "$metadata_digest" ]; then
+      echo "SHA-256 digest disagreement for $manifest_asset between GitHub release metadata and $(basename "$manifest_path")." >&2
+      return 1
+    fi
+  done
+}
+
+write_installation_receipt() {
+  receipt_path="$1"
+  receipt_package_digest="$2"
+  receipt_installer_digest="$3"
+
+  # This schema is intentionally explicit and shared with the Windows
+  # installer and Rust installation-context consumers.
+  cat >"$receipt_path" <<EOF
+{
+  "publisher": "$PUBLISHER",
+  "repository": "$REPOSITORY",
+  "tag": "$release_tag",
+  "update_channel": "$resolved_channel",
+  "target": "$vendor_target",
+  "package_digest": "$receipt_package_digest",
+  "installer_digest": "$receipt_installer_digest",
+  "installer_protocol": "$INSTALLER_PROTOCOL"
+}
+EOF
+}
+
+receipt_matches() {
+  release_dir="$1"
+  expected_receipt="$2"
+
+  [ -f "$release_dir/installation-receipt.json" ] &&
+    cmp -s "$release_dir/installation-receipt.json" "$expected_receipt"
 }
 
 file_sha256() {
@@ -900,7 +1125,6 @@ detect_conflicting_install() {
   fi
 
   conflict_manager="$manager"
-  conflict_path="$existing_path"
   step "Detected existing $manager-managed Codex at $existing_path"
   warn "Multiple managed Codex installs can be ambiguous because PATH order decides which one runs."
 }
@@ -935,9 +1159,10 @@ handle_conflicting_install() {
 install_package_release() {
   release_dir="$1"
   archive_path="$2"
+  receipt_path="$3"
   stage_release="$RELEASES_DIR/.staging.$(basename "$release_dir").$$"
 
-  mkdir -p "$RELEASES_DIR"
+  mkdir -p "$RELEASES_DIR" "$(dirname "$release_dir")"
   rm -rf "$stage_release"
   mkdir -p "$stage_release"
   tar -xzf "$archive_path" -C "$stage_release"
@@ -949,33 +1174,7 @@ install_package_release() {
     chmod 0755 "$stage_release/codex-resources/bwrap"
   fi
   ln -sf "bin/codex" "$stage_release/codex"
-
-  if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
-    rm -rf "$release_dir"
-  fi
-  mv "$stage_release" "$release_dir"
-}
-
-install_legacy_platform_npm_release() {
-  release_dir="$1"
-  archive_path="$2"
-  target="$3"
-  stage_release="$RELEASES_DIR/.staging.$(basename "$release_dir").$$"
-  extract_dir="$tmp_dir/extract"
-  vendor_root="$extract_dir/package/vendor/$target"
-
-  mkdir -p "$RELEASES_DIR"
-  rm -rf "$stage_release" "$extract_dir"
-  mkdir -p "$stage_release/codex-resources" "$extract_dir"
-  tar -xzf "$archive_path" -C "$extract_dir"
-
-  cp "$vendor_root/codex/codex" "$stage_release/codex"
-  cp "$vendor_root/path/rg" "$stage_release/codex-resources/rg"
-  chmod 0755 "$stage_release/codex" "$stage_release/codex-resources/rg"
-  if [ -f "$vendor_root/codex-resources/bwrap" ]; then
-    cp "$vendor_root/codex-resources/bwrap" "$stage_release/codex-resources/bwrap"
-    chmod 0755 "$stage_release/codex-resources/bwrap"
-  fi
+  cp "$receipt_path" "$stage_release/installation-receipt.json"
 
   if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
     rm -rf "$release_dir"
@@ -988,9 +1187,11 @@ release_dir_is_complete() {
   expected_version="$2"
   expected_target="$3"
   layout="$4"
+  expected_receipt="$5"
 
   [ -d "$release_dir" ] &&
-    [ "$(basename "$release_dir")" = "$expected_version-$expected_target" ] ||
+    [ "$(basename "$release_dir")" = "$expected_target" ] &&
+    [ "$(basename "$(dirname "$release_dir")")" = "$expected_version" ] ||
     return 1
 
   case "$layout" in
@@ -1002,24 +1203,74 @@ release_dir_is_complete() {
         [ -x "$release_dir/codex-path/rg" ] ||
         return 1
       ;;
-    legacy-platform-npm)
-      [ -x "$release_dir/codex" ] &&
-        [ -x "$release_dir/codex-resources/rg" ] ||
-        return 1
-      ;;
     *)
       return 1
       ;;
   esac
 
   case "$layout:$expected_target" in
-    package:*linux* | legacy-platform-npm:*linux*)
+    package:*linux*)
       [ -x "$release_dir/codex-resources/bwrap" ] || return 1
       ;;
   esac
 
+  receipt_matches "$release_dir" "$expected_receipt" || return 1
+
   installed_version="$(version_from_binary "$release_dir/bin/codex" || version_from_binary "$release_dir/codex" || true)"
   [ "$installed_version" = "$expected_version" ]
+}
+
+save_activation_path() {
+  saved_path="$1"
+  saved_name="$2"
+  saved_type_path="$tmp_dir/$saved_name.type"
+  saved_value_path="$tmp_dir/$saved_name.value"
+
+  if [ -L "$saved_path" ]; then
+    printf 'link\n' >"$saved_type_path"
+    readlink "$saved_path" >"$saved_value_path"
+  elif [ -f "$saved_path" ]; then
+    printf 'file\n' >"$saved_type_path"
+    cp -p "$saved_path" "$saved_value_path"
+  else
+    printf 'absent\n' >"$saved_type_path"
+  fi
+}
+
+restore_activation_path() {
+  restored_path="$1"
+  restored_name="$2"
+  restored_type="$(cat "$tmp_dir/$restored_name.type")"
+
+  rm -f "$restored_path"
+  case "$restored_type" in
+    link)
+      ln -s "$(cat "$tmp_dir/$restored_name.value")" "$restored_path"
+      ;;
+    file)
+      cp -p "$tmp_dir/$restored_name.value" "$restored_path"
+      ;;
+    absent) ;;
+  esac
+}
+
+activate_release() {
+  release_dir="$1"
+  save_activation_path "$CURRENT_LINK" current
+  save_activation_path "$BIN_PATH" visible-codex
+  save_activation_path "$CODE_MODE_HOST_BIN_PATH" visible-code-mode-host
+
+  if update_current_link "$release_dir" &&
+    update_visible_command "$release_dir" &&
+    verify_visible_command; then
+    return 0
+  fi
+
+  warn "Activation failed; restoring the previous runnable installation."
+  restore_activation_path "$CURRENT_LINK" current
+  restore_activation_path "$BIN_PATH" visible-codex
+  restore_activation_path "$CODE_MODE_HOST_BIN_PATH" visible-code-mode-host
+  return 1
 }
 
 update_current_link() {
@@ -1059,7 +1310,7 @@ update_visible_command() {
 }
 
 verify_visible_command() {
-  "$BIN_PATH" --version >/dev/null
+  "$BIN_PATH" --version >/dev/null || return 1
   if [ "$os" = "darwin" ] && [ "$install_layout" = "package" ]; then
     [ -x "$CODE_MODE_HOST_BIN_PATH" ]
   fi
@@ -1069,16 +1320,18 @@ parse_args "$@"
 
 require_command mktemp
 require_command tar
+require_command cmp
 
 case "$(uname -s)" in
   Darwin)
-    os="darwin"
+    echo "Electivus does not yet publish or validate standalone macOS artifacts. This installer will not fall back to OpenAI Codex." >&2
+    exit 1
     ;;
   Linux)
     os="linux"
     ;;
   *)
-    echo "install.sh supports macOS and Linux. Use install.ps1 on Windows." >&2
+    echo "install.sh supports Linux only. Use the Electivus install.ps1 on Windows." >&2
     exit 1
     ;;
 esac
@@ -1096,37 +1349,32 @@ case "$(uname -m)" in
     ;;
 esac
 
-if [ "$os" = "darwin" ] && [ "$arch" = "x86_64" ]; then
-  if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = "1" ]; then
-    arch="aarch64"
-  fi
+if [ "$arch" = "aarch64" ]; then
+  vendor_target="aarch64-unknown-linux-musl"
+  platform_label="Linux (ARM64)"
+else
+  vendor_target="x86_64-unknown-linux-musl"
+  platform_label="Linux (x64)"
 fi
 
-if [ "$os" = "darwin" ]; then
-  if [ "$arch" = "aarch64" ]; then
-    npm_tag="darwin-arm64"
-    vendor_target="aarch64-apple-darwin"
-    platform_label="macOS (Apple Silicon)"
-  else
-    npm_tag="darwin-x64"
-    vendor_target="x86_64-apple-darwin"
-    platform_label="macOS (Intel)"
+tmp_dir="$(mktemp -d)"
+cleanup() {
+  release_install_lock
+  if [ -n "$tmp_dir" ]; then
+    rm -rf "$tmp_dir"
   fi
-else
-  if [ "$arch" = "aarch64" ]; then
-    npm_tag="linux-arm64"
-    vendor_target="aarch64-unknown-linux-musl"
-    platform_label="Linux (ARM64)"
-  else
-    npm_tag="linux-x64"
-    vendor_target="x86_64-unknown-linux-musl"
-    platform_label="Linux (x64)"
-  fi
-fi
+}
+trap cleanup EXIT INT TERM
 
 resolve_release
-release_name="$resolved_version-$vendor_target"
-release_dir="$RELEASES_DIR/$release_name"
+release_dir="$RELEASES_DIR/$resolved_version/$vendor_target"
+package_metadata_digest="$(release_asset_digest "$package_asset")"
+installer_metadata_digest="$(release_asset_digest "$installer_asset")"
+expected_receipt="$tmp_dir/installation-receipt.json"
+write_installation_receipt \
+  "$expected_receipt" \
+  "$package_metadata_digest" \
+  "$installer_metadata_digest"
 current_version="$(current_installed_version)"
 
 if [ -n "$current_version" ] && [ "$current_version" != "$resolved_version" ]; then
@@ -1138,54 +1386,52 @@ else
 fi
 step "Detected platform: $platform_label"
 step "Resolved version: $resolved_version"
+step "Update channel: $resolved_channel"
 
 detect_conflicting_install
-
-tmp_dir="$(mktemp -d)"
-cleanup() {
-  release_install_lock
-  if [ -n "$tmp_dir" ]; then
-    rm -rf "$tmp_dir"
-  fi
-}
-trap cleanup EXIT INT TERM
 
 acquire_install_lock
 cleanup_stale_install_artifacts
 
-if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target" "$install_layout"; then
+if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target" "$install_layout" "$expected_receipt"; then
   if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
-    warn "Found incomplete existing release at $release_dir; reinstalling."
+    warn "Found incomplete or provenance-mismatched Electivus release at $release_dir; reinstalling."
   fi
 
   archive_path="$tmp_dir/$asset"
   checksum_path="$tmp_dir/$checksum_asset"
+  installer_checksum_path="$tmp_dir/$installer_checksum_asset"
 
-  step "Downloading Codex CLI"
-  if [ "$install_layout" = "package" ]; then
-    checksum_digest="$(release_asset_digest "$checksum_asset")"
-    download_file_with_fallback "$checksum_url" "$checksum_fallback_url" "$checksum_path" "$checksum_digest" "$checksum_asset" "$asset"
-    expected_digest="$(package_archive_digest "$asset" "$checksum_path")"
-  else
-    expected_digest="$(release_asset_digest "$asset")"
-  fi
-  download_file_with_fallback "$download_url" "$download_fallback_url" "$archive_path" "$expected_digest" "$asset"
+  step "Downloading Electivus checksum manifests"
+  checksum_digest="$(release_asset_digest "$checksum_asset")"
+  download_file "$checksum_url" "$checksum_path" "$MANIFEST_MAX_BYTES"
+  verify_archive_digest "$checksum_path" "$checksum_digest"
+  verify_manifest_assets \
+    "$checksum_path" \
+    codex-package-aarch64-pc-windows-msvc.tar.gz \
+    codex-package-aarch64-unknown-linux-musl.tar.gz \
+    codex-package-x86_64-pc-windows-msvc.tar.gz \
+    codex-package-x86_64-unknown-linux-musl.tar.gz
 
-  step "Installing standalone package to $release_dir"
-  if [ "$install_layout" = "package" ]; then
-    install_package_release "$release_dir" "$archive_path"
-  else
-    install_legacy_platform_npm_release "$release_dir" "$archive_path" "$vendor_target"
-  fi
+  installer_checksum_digest="$(release_asset_digest "$installer_checksum_asset")"
+  download_file "$installer_checksum_url" "$installer_checksum_path" "$MANIFEST_MAX_BYTES"
+  verify_archive_digest "$installer_checksum_path" "$installer_checksum_digest"
+  verify_manifest_assets "$installer_checksum_path" install.sh install.ps1
+
+  expected_digest="$(package_archive_digest "$asset" "$checksum_path")"
+  step "Downloading Electivus Codex CLI"
+  download_file "$download_url" "$archive_path" "$PACKAGE_MAX_BYTES"
+  verify_archive_digest "$archive_path" "$expected_digest"
+
+  step "Installing Electivus standalone package to $release_dir"
+  install_package_release "$release_dir" "$archive_path" "$expected_receipt"
 fi
-if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target" "$install_layout"; then
-  echo "Installed Codex command did not report expected version $resolved_version." >&2
+if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target" "$install_layout" "$expected_receipt"; then
+  echo "Installed Electivus Codex command or receipt did not match expected release $resolved_version." >&2
   exit 1
 fi
-update_current_link "$release_dir"
-update_visible_command "$release_dir"
+activate_release "$release_dir"
 add_to_path
-verify_visible_command
 release_install_lock
 handle_conflicting_install
 
@@ -1205,5 +1451,5 @@ case "$path_action" in
     ;;
 esac
 
-printf 'Codex CLI %s installed successfully.\n' "$resolved_version"
+printf 'Electivus Codex CLI %s installed successfully.\n' "$resolved_version"
 maybe_launch_codex_now
