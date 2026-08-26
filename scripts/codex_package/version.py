@@ -1,5 +1,6 @@
 """Version discovery for Codex packages."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import total_ordering
 import os
@@ -76,7 +77,7 @@ def _prerelease_is_less_than(left: tuple[str, ...], right: tuple[str, ...]) -> b
 
 
 def _parse_semver(version: str) -> SemVer | None:
-    match = SEMVER_PATTERN.match(version)
+    match = SEMVER_PATTERN.fullmatch(version)
     if match is None:
         return None
 
@@ -91,7 +92,12 @@ def _parse_semver(version: str) -> SemVer | None:
 
 
 def validate_upstream_build_version(version: str, source: str) -> str:
-    if _parse_semver(version) is None or version == "0.0.0":
+    if (
+        "\r" in version
+        or "\n" in version
+        or _parse_semver(version) is None
+        or version == "0.0.0"
+    ):
         raise RuntimeError(
             f"Invalid upstream build version from {source}: {version!r}. "
             "Expected a bare SemVer other than 0.0.0 (for example, "
@@ -145,7 +151,11 @@ def _run_git(arguments: list[str], error_message: str) -> str:
     return result.stdout
 
 
-def resolve_upstream_build_version(explicit_version: str | None = None) -> str:
+def resolve_upstream_build_version(
+    explicit_version: str | None = None,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> str:
     current_workspace_version = read_workspace_version()
     if current_workspace_version != "0.0.0":
         return current_workspace_version
@@ -153,7 +163,8 @@ def resolve_upstream_build_version(explicit_version: str | None = None) -> str:
     if explicit_version is not None:
         return validate_upstream_build_version(explicit_version, "--upstream-version")
 
-    environment_version = os.environ.get(UPSTREAM_VERSION_ENV_VAR)
+    resolved_environment = os.environ if environment is None else environment
+    environment_version = resolved_environment.get(UPSTREAM_VERSION_ENV_VAR)
     if environment_version is not None:
         return validate_upstream_build_version(
             environment_version,

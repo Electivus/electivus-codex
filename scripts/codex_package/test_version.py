@@ -15,16 +15,6 @@ from codex_package import version
 
 
 class VersionTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self._environment_version = os.environ.pop(
-            version.UPSTREAM_VERSION_ENV_VAR,
-            None,
-        )
-
-    def tearDown(self) -> None:
-        if self._environment_version is not None:
-            os.environ[version.UPSTREAM_VERSION_ENV_VAR] = self._environment_version
-
     def test_replace_workspace_version_updates_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             manifest = Path(temp_dir) / "Cargo.toml"
@@ -52,15 +42,12 @@ class VersionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = create_repo(Path(temp_dir), initial_version="1.2.3")
 
-            with (
-                patch.object(version, "REPO_ROOT", repo),
-                patch.dict(
-                    os.environ,
-                    {version.UPSTREAM_VERSION_ENV_VAR: "invalid"},
-                ),
-            ):
+            with patch.object(version, "REPO_ROOT", repo):
                 self.assertEqual(
-                    version.resolve_upstream_build_version("also-invalid"),
+                    version.resolve_upstream_build_version(
+                        "also-invalid",
+                        environment={version.UPSTREAM_VERSION_ENV_VAR: "invalid"},
+                    ),
                     "1.2.3",
                 )
 
@@ -85,7 +72,7 @@ class VersionTest(unittest.TestCase):
 
             with patch.object(version, "REPO_ROOT", repo):
                 self.assertEqual(
-                    version.resolve_upstream_build_version(),
+                    version.resolve_upstream_build_version(environment={}),
                     "0.148.0-alpha.12",
                 )
 
@@ -102,7 +89,10 @@ class VersionTest(unittest.TestCase):
             commit_all(repo, "Resume development", day=4)
 
             with patch.object(version, "REPO_ROOT", repo):
-                self.assertEqual(version.resolve_upstream_build_version(), "2.3.4")
+                self.assertEqual(
+                    version.resolve_upstream_build_version(environment={}),
+                    "2.3.4",
+                )
 
     def test_semver_precedence_includes_stable_and_numeric_prereleases(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -122,7 +112,7 @@ class VersionTest(unittest.TestCase):
 
             with patch.object(version, "REPO_ROOT", repo):
                 self.assertEqual(
-                    version.resolve_upstream_build_version(),
+                    version.resolve_upstream_build_version(environment={}),
                     "1.1.0-alpha.1",
                 )
 
@@ -140,21 +130,18 @@ class VersionTest(unittest.TestCase):
 
             with patch.object(version, "REPO_ROOT", repo):
                 with self.assertRaisesRegex(RuntimeError, "shallow or synthetic"):
-                    version.resolve_upstream_build_version()
+                    version.resolve_upstream_build_version(environment={})
 
     def test_explicit_override_precedes_environment_override(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = create_repo(Path(temp_dir), initial_version="0.0.0")
 
-            with (
-                patch.object(version, "REPO_ROOT", repo),
-                patch.dict(
-                    os.environ,
-                    {version.UPSTREAM_VERSION_ENV_VAR: "1.2.3"},
-                ),
-            ):
+            with patch.object(version, "REPO_ROOT", repo):
                 self.assertEqual(
-                    version.resolve_upstream_build_version("2.0.0-beta.1"),
+                    version.resolve_upstream_build_version(
+                        "2.0.0-beta.1",
+                        environment={version.UPSTREAM_VERSION_ENV_VAR: "1.2.3"},
+                    ),
                     "2.0.0-beta.1",
                 )
 
@@ -162,15 +149,11 @@ class VersionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = create_repo(Path(temp_dir), initial_version="0.0.0")
 
-            with (
-                patch.object(version, "REPO_ROOT", repo),
-                patch.dict(
-                    os.environ,
-                    {version.UPSTREAM_VERSION_ENV_VAR: "3.4.5+ci.7"},
-                ),
-            ):
+            with patch.object(version, "REPO_ROOT", repo):
                 self.assertEqual(
-                    version.resolve_upstream_build_version(),
+                    version.resolve_upstream_build_version(
+                        environment={version.UPSTREAM_VERSION_ENV_VAR: "3.4.5+ci.7"}
+                    ),
                     "3.4.5+ci.7",
                 )
 
@@ -189,7 +172,35 @@ class VersionTest(unittest.TestCase):
                 ):
                     with self.subTest(version=invalid_version):
                         with self.assertRaisesRegex(RuntimeError, "bare SemVer"):
-                            version.resolve_upstream_build_version(invalid_version)
+                            version.resolve_upstream_build_version(
+                                invalid_version,
+                                environment={},
+                            )
+
+    def test_line_breaks_in_overrides_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = create_repo(Path(temp_dir), initial_version="0.0.0")
+
+            with patch.object(version, "REPO_ROOT", repo):
+                for invalid_version in (
+                    "1.2.3\n",
+                    "1.2.3\r",
+                    "1.2.3\r\n",
+                    "1.2.3\nignored",
+                ):
+                    with self.subTest(source="explicit", version=invalid_version):
+                        with self.assertRaisesRegex(RuntimeError, "bare SemVer"):
+                            version.resolve_upstream_build_version(
+                                invalid_version,
+                                environment={},
+                            )
+                    with self.subTest(source="environment", version=invalid_version):
+                        with self.assertRaisesRegex(RuntimeError, "bare SemVer"):
+                            version.resolve_upstream_build_version(
+                                environment={
+                                    version.UPSTREAM_VERSION_ENV_VAR: invalid_version
+                                }
+                            )
 
     def test_no_provable_baseline_explains_explicit_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -209,7 +220,7 @@ class VersionTest(unittest.TestCase):
                     r"History was not fetched.*--upstream-version <SEMVER>.*"
                     + version.UPSTREAM_VERSION_ENV_VAR,
                 ):
-                    version.resolve_upstream_build_version()
+                    version.resolve_upstream_build_version(environment={})
 
 
 def create_repo(root: Path, *, initial_version: str) -> Path:
