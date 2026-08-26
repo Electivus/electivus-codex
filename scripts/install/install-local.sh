@@ -25,6 +25,10 @@ tmp_dir=""
 python_bin=""
 cargo_toml_backup=""
 cargo_lock_backup=""
+cargo_toml_owned=""
+cargo_lock_owned=""
+cargo_lock_owned_missing=""
+cargo_option=""
 version_state_dir=""
 version_lock_file=""
 version_lock_path=""
@@ -32,6 +36,15 @@ version_lock_kind=""
 version_lock_owner_file=""
 version_transaction_dir=""
 version_transaction_owned=false
+install_lockf_pid=""
+install_lockf_ready=""
+install_lockf_control=""
+version_lockf_pid=""
+version_lockf_ready=""
+version_lockf_control=""
+active_child_pid=""
+active_child_role=""
+activation_pending=false
 active_reclaim_marker=""
 active_reclaim_guard=""
 use_upstream_version=false
@@ -197,6 +210,32 @@ restore_cargo_manifest_files() {
     return 0
   fi
 
+  if [ ! -f "$cargo_toml_owned" ] ||
+    ! cmp -s "$cargo_toml_owned" "$CODEX_RS_DIR/Cargo.toml"; then
+    echo "Concurrent workspace edit detected in Cargo.toml; preserving the current bytes." >&2
+    restore_failed=1
+  fi
+  if [ -f "$cargo_lock_owned" ]; then
+    if ! cmp -s "$cargo_lock_owned" "$CODEX_RS_DIR/Cargo.lock"; then
+      echo "Concurrent workspace edit detected in Cargo.lock; preserving the current bytes." >&2
+      restore_failed=1
+    fi
+  elif [ -f "$cargo_lock_owned_missing" ]; then
+    if [ -e "$CODEX_RS_DIR/Cargo.lock" ] || [ -L "$CODEX_RS_DIR/Cargo.lock" ]; then
+      echo "Concurrent workspace edit detected in Cargo.lock; preserving the current bytes." >&2
+      restore_failed=1
+    fi
+  else
+    echo "The installer-owned Cargo.lock state is missing; refusing automatic restoration." >&2
+    restore_failed=1
+  fi
+
+  if [ "$restore_failed" -ne 0 ]; then
+    echo "Failed to restore and verify the Cargo workspace byte for byte." >&2
+    print_version_transaction_recovery "$version_transaction_dir"
+    return 1
+  fi
+
   if ! cp "$cargo_toml_backup" "$CODEX_RS_DIR/Cargo.toml"; then
     restore_failed=1
   elif ! cmp -s "$cargo_toml_backup" "$CODEX_RS_DIR/Cargo.toml"; then
@@ -226,6 +265,9 @@ restore_cargo_manifest_files() {
   if [ "$restore_failed" -eq 0 ]; then
     cargo_toml_backup=""
     cargo_lock_backup=""
+    cargo_toml_owned=""
+    cargo_lock_owned=""
+    cargo_lock_owned_missing=""
     version_transaction_dir=""
     version_transaction_owned=false
   else
@@ -234,6 +276,61 @@ restore_cargo_manifest_files() {
   fi
 
   return "$restore_failed"
+}
+
+record_installer_owned_manifest_files() {
+  if [ "$version_transaction_owned" != true ]; then
+    return 0
+  fi
+
+  cargo_toml_owned="$version_transaction_dir/Cargo.toml.installer"
+  cargo_lock_owned="$version_transaction_dir/Cargo.lock.installer"
+  cargo_lock_owned_missing="$version_transaction_dir/Cargo.lock.installer-missing"
+  cp "$CODEX_RS_DIR/Cargo.toml" "$cargo_toml_owned" || return 1
+  rm -f "$cargo_lock_owned" "$cargo_lock_owned_missing"
+  if [ -f "$CODEX_RS_DIR/Cargo.lock" ]; then
+    cp "$CODEX_RS_DIR/Cargo.lock" "$cargo_lock_owned" || return 1
+  else
+    : >"$cargo_lock_owned_missing" || return 1
+  fi
+}
+
+verify_builder_owned_manifest_files() {
+  if [ "$version_transaction_owned" != true ]; then
+    return 0
+  fi
+  if [ ! -f "$cargo_toml_owned" ] ||
+    ! cmp -s "$cargo_toml_owned" "$CODEX_RS_DIR/Cargo.toml"; then
+    echo "Concurrent workspace edit detected in Cargo.toml; refusing automatic restoration." >&2
+    return 1
+  fi
+  if [ -f "$cargo_lock_owned" ]; then
+    if ! cmp -s "$cargo_lock_owned" "$CODEX_RS_DIR/Cargo.lock"; then
+      echo "Concurrent workspace edit detected in Cargo.lock; refusing automatic restoration." >&2
+      return 1
+    fi
+  elif [ -f "$cargo_lock_owned_missing" ]; then
+    if [ -e "$CODEX_RS_DIR/Cargo.lock" ] || [ -L "$CODEX_RS_DIR/Cargo.lock" ]; then
+      echo "Concurrent workspace edit detected in Cargo.lock; refusing automatic restoration." >&2
+      return 1
+    fi
+  else
+    echo "The installer-owned Cargo.lock state is missing; refusing automatic restoration." >&2
+    return 1
+  fi
+}
+
+resolve_installer_owned_lockfile() {
+  cargo metadata --format-version 1 --no-deps >/dev/null &
+  active_child_pid=$!
+  active_child_role="lockfile"
+  lockfile_status=0
+  wait_for_active_child || lockfile_status=$?
+  active_child_role=""
+  if [ "$lockfile_status" -ne 0 ]; then
+    return "$lockfile_status"
+  fi
+  record_installer_owned_manifest_files
 }
 
 process_start_fingerprint() {
@@ -626,6 +723,35 @@ acquire_fallback_lock() {
   done
 }
 
+start_lockf_holder() {
+  holder_lock_file="$1"
+  holder_ready_file="$2"
+  holder_control_fifo="$3"
+  lockf_holder_pid=""
+
+  require_command mkfifo
+  rm -f "$holder_ready_file" "$holder_control_fifo"
+  mkfifo "$holder_control_fifo"
+  # shellcheck disable=SC2016 # $1 and $2 belong to the lockf-held child shell.
+  lockf -k "$holder_lock_file" sh -c '
+    : >"$1"
+    cat "$2" >/dev/null
+  ' sh "$holder_ready_file" "$holder_control_fifo" &
+  lockf_holder_pid=$!
+
+  while [ ! -e "$holder_ready_file" ]; do
+    if ! kill -0 "$lockf_holder_pid" 2>/dev/null; then
+      lockf_status=0
+      wait "$lockf_holder_pid" || lockf_status=$?
+      rm -f "$holder_control_fifo"
+      echo "lockf failed to acquire $holder_lock_file (exit $lockf_status)." >&2
+      lockf_holder_pid=""
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+
 acquire_version_lock() {
   version_state_dir="$(
     git -C "$REPO_ROOT" rev-parse \
@@ -643,10 +769,21 @@ acquire_version_lock() {
     return
   fi
 
+  if command -v lockf >/dev/null 2>&1; then
+    version_lockf_ready="$version_state_dir/version.lockf.ready.$$"
+    version_lockf_control="$version_state_dir/version.lockf.control.$$"
+    start_lockf_holder "$version_lock_file" "$version_lockf_ready" "$version_lockf_control"
+    version_lockf_pid="$lockf_holder_pid"
+    lockf_holder_pid=""
+    exec 6>"$version_lockf_control"
+    version_lock_kind="lockf"
+    return
+  fi
+
   version_lock_owner_file="$(mktemp "$version_state_dir/version.lock.owner.XXXXXX")"
   owner_fingerprint="$(process_start_fingerprint "$$" || true)"
   if [ -z "$owner_fingerprint" ]; then
-    echo "Cannot safely create the local-version fallback lock: this platform cannot prove process identity without Linux /proc. Install flock or use an environment with a provable process start identity, then retry." >&2
+    echo "Cannot safely create the local-version fallback lock: this platform cannot prove process identity without Linux /proc. Install flock, use stock macOS lockf, or use an environment with a provable process start identity, then retry." >&2
     rm -f "$version_lock_owner_file" 2>/dev/null || true
     version_lock_owner_file=""
     return 1
@@ -671,6 +808,13 @@ release_version_lock() {
   if [ "$version_lock_kind" = "flock" ]; then
     exec 8>&- 2>/dev/null || true
   fi
+  if [ "$version_lock_kind" = "lockf" ]; then
+    exec 6>&- 2>/dev/null || true
+    if [ -n "$version_lockf_pid" ]; then
+      wait "$version_lockf_pid" 2>/dev/null || true
+    fi
+    rm -f "$version_lockf_ready" "$version_lockf_control" 2>/dev/null || true
+  fi
   if [ -n "$version_lock_owner_file" ]; then
     if [ -f "$version_lock_path" ] && cmp -s "$version_lock_path" "$version_lock_owner_file"; then
       rm -f "$version_lock_path" 2>/dev/null || true
@@ -687,6 +831,9 @@ release_version_lock() {
   fi
   version_lock_kind=""
   version_lock_owner_file=""
+  version_lockf_pid=""
+  version_lockf_ready=""
+  version_lockf_control=""
 }
 
 begin_version_transaction() {
@@ -726,6 +873,9 @@ begin_version_transaction() {
   else
     cargo_lock_backup="$version_transaction_dir/Cargo.lock.missing"
   fi
+  cargo_toml_owned="$version_transaction_dir/Cargo.toml.installer"
+  cargo_lock_owned="$version_transaction_dir/Cargo.lock.installer"
+  cargo_lock_owned_missing="$version_transaction_dir/Cargo.lock.installer-missing"
   version_transaction_owned=true
 }
 
@@ -754,6 +904,8 @@ prepare_upstream_build_version() {
   step "Using upstream Release-baseline version $upstream_build_version for local build"
   begin_version_transaction
   set_workspace_version "$upstream_build_version"
+  record_installer_owned_manifest_files
+  resolve_installer_owned_lockfile
 }
 
 is_windows_uname() {
@@ -925,10 +1077,21 @@ acquire_install_lock() {
     return
   fi
 
+  if command -v lockf >/dev/null 2>&1; then
+    install_lockf_ready="$STANDALONE_ROOT/install.lockf.ready"
+    install_lockf_control="$STANDALONE_ROOT/install.lockf.control.$$"
+    start_lockf_holder "$LOCK_FILE" "$install_lockf_ready" "$install_lockf_control"
+    install_lockf_pid="$lockf_holder_pid"
+    lockf_holder_pid=""
+    exec 7>"$install_lockf_control"
+    lock_kind="lockf"
+    return
+  fi
+
   lock_owner_file="$(mktemp "$STANDALONE_ROOT/install.lock.owner.XXXXXX")"
   owner_fingerprint="$(process_start_fingerprint "$$" || true)"
   if [ -z "$owner_fingerprint" ]; then
-    echo "Cannot safely create the installer fallback lock: this platform cannot prove process identity without Linux /proc. Install flock or use an environment with a provable process start identity, then retry." >&2
+    echo "Cannot safely create the installer fallback lock: this platform cannot prove process identity without Linux /proc. Install flock, use stock macOS lockf, or use an environment with a provable process start identity, then retry." >&2
     rm -f "$lock_owner_file" 2>/dev/null || true
     lock_owner_file=""
     return 1
@@ -954,6 +1117,13 @@ release_install_lock() {
   if [ "$lock_kind" = "flock" ]; then
     exec 9>&- 2>/dev/null || true
   fi
+  if [ "$lock_kind" = "lockf" ]; then
+    exec 7>&- 2>/dev/null || true
+    if [ -n "$install_lockf_pid" ]; then
+      wait "$install_lockf_pid" 2>/dev/null || true
+    fi
+    rm -f "$install_lockf_ready" "$install_lockf_control" 2>/dev/null || true
+  fi
   if [ -n "$lock_owner_file" ]; then
     if [ -f "$LOCK_PATH" ] && cmp -s "$LOCK_PATH" "$lock_owner_file"; then
       rm -f "$LOCK_PATH" 2>/dev/null || true
@@ -970,6 +1140,9 @@ release_install_lock() {
   fi
   lock_kind=""
   lock_owner_file=""
+  install_lockf_pid=""
+  install_lockf_ready=""
+  install_lockf_control=""
 }
 
 cleanup_stale_install_artifacts() {
@@ -1051,6 +1224,48 @@ generate_release_name() {
   printf "%s-%s-%s\n" "$release_prefix" "$timestamp" "$$"
 }
 
+wait_for_active_child() {
+  child_status=0
+  wait "$active_child_pid" || child_status=$?
+  active_child_pid=""
+  return "$child_status"
+}
+
+terminate_active_child() {
+  if [ -n "$active_child_pid" ]; then
+    kill -KILL "$active_child_pid" 2>/dev/null || true
+    wait "$active_child_pid" 2>/dev/null || true
+  fi
+  active_child_pid=""
+  active_child_role=""
+}
+
+run_package_builder() {
+  package_dir="$1"
+  target="$2"
+  CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false
+  export CARGO_PROFILE_DEV_DEBUG_ASSERTIONS
+
+  if [ -n "${CODEX_LOCAL_RG:-}" ]; then
+    exec "$python_bin" "$REPO_ROOT/scripts/build_codex_package.py" \
+      --target "$target" \
+      --variant codex \
+      ${cargo_option:+"$cargo_option"} \
+      --cargo-profile dev \
+      --package-dir "$package_dir" \
+      --rg-bin "$CODEX_LOCAL_RG" \
+      --force
+  else
+    exec "$python_bin" "$REPO_ROOT/scripts/build_codex_package.py" \
+      --target "$target" \
+      --variant codex \
+      ${cargo_option:+"$cargo_option"} \
+      --cargo-profile dev \
+      --package-dir "$package_dir" \
+      --force
+  fi
+}
+
 build_local_package() {
   package_dir="$1"
   target="$2"
@@ -1064,23 +1279,33 @@ build_local_package() {
       echo "CODEX_LOCAL_RG must point to an executable rg." >&2
       return 1
     fi
+  fi
 
-    CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false \
-      "$python_bin" "$REPO_ROOT/scripts/build_codex_package.py" \
-      --target "$target" \
-      --variant codex \
-      --cargo-profile dev \
-      --package-dir "$package_dir" \
-      --rg-bin "$CODEX_LOCAL_RG" \
-      --force
-  else
-    CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false \
-      "$python_bin" "$REPO_ROOT/scripts/build_codex_package.py" \
-      --target "$target" \
-      --variant codex \
-      --cargo-profile dev \
-      --package-dir "$package_dir" \
-      --force
+  cargo_option=""
+  if [ "$version_transaction_owned" = true ]; then
+    CODEX_LOCAL_REAL_CARGO="$(command -v cargo)"
+    export CODEX_LOCAL_REAL_CARGO
+    cargo_wrapper="$tmp_dir/cargo-locked"
+    cat >"$cargo_wrapper" <<'EOF'
+#!/bin/sh
+exec "$CODEX_LOCAL_REAL_CARGO" "$@" --locked
+EOF
+    chmod +x "$cargo_wrapper"
+    cargo_option="--cargo=$cargo_wrapper"
+  fi
+
+  run_package_builder "$package_dir" "$target" &
+  active_child_pid=$!
+  active_child_role="builder"
+  builder_status=0
+  wait_for_active_child || builder_status=$?
+  if ! verify_builder_owned_manifest_files; then
+    active_child_role=""
+    return 1
+  fi
+  active_child_role=""
+  if [ "$builder_status" -ne 0 ]; then
+    return "$builder_status"
   fi
 
   ln -sf "bin/codex" "$package_dir/codex"
@@ -1152,19 +1377,20 @@ update_visible_command() {
 }
 
 verify_visible_command() {
-  "$BIN_PATH" --version >/dev/null
+  "$BIN_PATH" --version >/dev/null &
+  active_child_pid=$!
+  active_child_role="verifier"
+  verifier_status=0
+  wait_for_active_child || verifier_status=$?
+  active_child_role=""
+  return "$verifier_status"
 }
 
-activate_release() {
-  release_dir="$1"
-  save_activation_path "$CURRENT_LINK" current
-  save_activation_path "$BIN_PATH" visible-codex
-
-  if update_current_link "$release_dir" &&
-    update_visible_command &&
-    verify_visible_command; then
+rollback_pending_activation() {
+  if [ "$activation_pending" != true ]; then
     return 0
   fi
+  activation_pending=false
 
   warn "Activation failed; restoring the previous runnable installation."
   rollback_failed=0
@@ -1172,7 +1398,24 @@ activate_release() {
   restore_activation_path "$BIN_PATH" visible-codex || rollback_failed=1
   if [ "$rollback_failed" -ne 0 ]; then
     warn "Failed to restore every prior activation path; inspect $CURRENT_LINK and $BIN_PATH manually."
+    return 1
   fi
+}
+
+activate_release() {
+  release_dir="$1"
+  save_activation_path "$CURRENT_LINK" current
+  save_activation_path "$BIN_PATH" visible-codex
+  activation_pending=true
+
+  if update_current_link "$release_dir" &&
+    update_visible_command &&
+    verify_visible_command; then
+    activation_pending=false
+    return 0
+  fi
+
+  rollback_pending_activation || true
   return 1
 }
 
@@ -1247,9 +1490,31 @@ release_name="$(generate_release_name "$release_prefix")"
 release_dir="$RELEASES_DIR/$release_name"
 
 tmp_dir="$(mktemp -d)"
+handle_signal() {
+  signal_status="$1"
+  trap - INT TERM HUP
+  signal_child_role="$active_child_role"
+  terminate_active_child
+  case "$signal_child_role" in
+    builder) verify_builder_owned_manifest_files || true ;;
+    lockfile) record_installer_owned_manifest_files || true ;;
+  esac
+  rollback_pending_activation || true
+  exit "$signal_status"
+}
+
 cleanup() {
   cleanup_status=$?
   trap - EXIT INT TERM HUP
+  cleanup_child_role="$active_child_role"
+  terminate_active_child
+  case "$cleanup_child_role" in
+    builder) verify_builder_owned_manifest_files || true ;;
+    lockfile) record_installer_owned_manifest_files || true ;;
+  esac
+  if ! rollback_pending_activation; then
+    cleanup_status=1
+  fi
   if ! restore_cargo_manifest_files; then
     cleanup_status=1
   fi
@@ -1261,9 +1526,9 @@ cleanup() {
   exit "$cleanup_status"
 }
 trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
+trap 'handle_signal 129' HUP
 
 acquire_install_lock
 cleanup_stale_install_artifacts
