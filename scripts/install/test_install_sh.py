@@ -166,7 +166,9 @@ class InstallShTest(unittest.TestCase):
                 selector="1.4.4",
                 exact=release_metadata("1.4.4", digests),
                 channel="pre-release",
+                force_fallback_lock=True,
             )
+            (Path(invocation.env["PATH"]) / "python3").unlink()
             piped_installer = (
                 INSTALL_SCRIPT.read_text(encoding="utf-8")
                 + "\n# Bytes modified while transporting the bootstrap over stdin.\n"
@@ -174,7 +176,7 @@ class InstallShTest(unittest.TestCase):
 
             result = subprocess.run(
                 [
-                    "/bin/sh",
+                    "sh",
                     "-s",
                     "--",
                     "--release",
@@ -185,6 +187,7 @@ class InstallShTest(unittest.TestCase):
                 capture_output=True,
                 check=False,
                 env=invocation.env,
+                executable="/bin/sh",
                 input=piped_installer,
                 text=True,
             )
@@ -192,7 +195,7 @@ class InstallShTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             receipt = read_receipt(root, "1.4.4")
             self.assertEqual(receipt["installer_digest"], digests["install.sh"])
-            self.assertEqual(receipt["installer_protocol"], "direct")
+            self.assertEqual(receipt["installer_protocol"], "installer-v1")
             self.assertEqual(receipt["update_channel"], "pre-release")
             self.assertEqual(
                 read_requests(invocation.request_log).count(
@@ -201,38 +204,24 @@ class InstallShTest(unittest.TestCase):
                 1,
             )
 
-    def test_file_bootstrap_delegates_to_selected_release_installer(self) -> None:
+    def test_direct_file_installer_does_not_require_python_or_a_digest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             digests = create_release_assets(root, "1.4.5")
-            installer = root / "assets/install.sh"
-            installer.write_bytes(
-                installer.read_bytes() + b"# different release installer\n"
-            )
-            digests["install.sh"] = sha256(installer)
-            installer_manifest = root / "assets/installer_SHA256SUMS"
-            installer_manifest.write_text(
-                f"{digests['install.sh']}  install.sh\n"
-                f"{digests['install.ps1']}  install.ps1\n",
-                encoding="utf-8",
-            )
-            digests["installer_SHA256SUMS"] = sha256(installer_manifest)
-
-            result, requests = run_installer(
+            invocation = prepare_installer(
                 root,
                 selector="1.4.5",
                 exact=release_metadata("1.4.5", digests),
+                force_fallback_lock=True,
             )
+            (Path(invocation.env["PATH"]) / "python3").unlink()
+
+            result = run_prepared_installer(invocation)
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                read_receipt(root, "1.4.5")["installer_digest"],
-                digests["install.sh"],
-            )
-            self.assertEqual(
-                requests.count(asset_url("1.4.5", "install.sh")),
-                1,
-            )
+            receipt = read_receipt(root, "1.4.5")
+            self.assertEqual(receipt["installer_digest"], digests["install.sh"])
+            self.assertEqual(receipt["installer_protocol"], "direct")
 
     def test_stdin_bootstrap_rejects_tampered_release_installer_transport(
         self,
@@ -248,10 +237,11 @@ class InstallShTest(unittest.TestCase):
             )
 
             result = subprocess.run(
-                ["/bin/sh", "-s", "--", "--release", "1.4.6"],
+                ["sh", "-s", "--", "--release", "1.4.6"],
                 capture_output=True,
                 check=False,
                 env=invocation.env,
+                executable="/bin/sh",
                 input=INSTALL_SCRIPT.read_text(encoding="utf-8"),
                 text=True,
             )
@@ -265,6 +255,78 @@ class InstallShTest(unittest.TestCase):
                 1,
             )
             self.assertFalse(release_dir(root, "1.4.6").exists())
+
+    def test_stdin_wrapper_waits_for_slow_delegate_cleanup_on_term(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            version = "1.4.7"
+            digests = create_release_assets(root, version)
+            delegated_tmp = root / "delegated.tmp"
+            delegate_ready = root / "delegate.ready"
+            installer = root / "assets/install.sh"
+            installer.write_text(
+                textwrap.dedent(
+                    f"""\
+                    #!/bin/sh
+                    set -eu
+                    : >'{delegated_tmp}'
+                    : >'{delegate_ready}'
+                    cleanup() {{
+                      trap - TERM
+                      sleep 2.2
+                      rm -f '{delegated_tmp}'
+                      exit 143
+                    }}
+                    trap cleanup TERM
+                    while :; do sleep 0.1; done
+                    """
+                ),
+                encoding="utf-8",
+            )
+            digests["install.sh"] = sha256(installer)
+            installer_manifest = root / "assets/installer_SHA256SUMS"
+            installer_manifest.write_text(
+                f"{digests['install.sh']}  install.sh\n"
+                f"{digests['install.ps1']}  install.ps1\n",
+                encoding="utf-8",
+            )
+            digests["installer_SHA256SUMS"] = sha256(installer_manifest)
+            invocation = prepare_installer(
+                root,
+                selector=version,
+                exact=release_metadata(version, digests),
+            )
+            invocation.env["TMPDIR"] = str(root)
+            process = subprocess.Popen(
+                ["sh", "-s", "--", "--release", version],
+                env=invocation.env,
+                executable="/bin/sh",
+                start_new_session=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert process.stdin is not None
+                process.stdin.write(INSTALL_SCRIPT.read_text(encoding="utf-8"))
+                process.stdin.close()
+                process.stdin = None
+                wait_for_path(delegate_ready)
+
+                started = time.monotonic()
+                os.kill(process.pid, signal.SIGTERM)
+                stdout, stderr = process.communicate(timeout=5)
+                elapsed = time.monotonic() - started
+
+                self.assertEqual(process.returncode, 143, stderr + stdout)
+                self.assertGreaterEqual(elapsed, 2)
+                self.assertFalse(delegated_tmp.exists())
+                self.assertEqual(list(root.glob("tmp.*")), [])
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=2)
 
     def test_matching_managed_installation_rejects_full_semver_downgrades(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -290,7 +352,7 @@ class InstallShTest(unittest.TestCase):
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(len(requests), 4)
+            self.assertEqual(len(requests), 1)
             self.assertIn("Refusing to downgrade", result.stderr)
             current = root / "codex-home/packages/standalone/current"
             self.assertEqual(current.resolve(), release_dir(root, current_version))
@@ -784,9 +846,6 @@ class InstallShTest(unittest.TestCase):
             self.assertEqual(
                 requests,
                 [
-                    exact_url("7.1.2"),
-                    asset_url("7.1.2", "installer_SHA256SUMS"),
-                    asset_url("7.1.2", "install.sh"),
                     exact_url("7.1.2"),
                     asset_url("7.1.2", "codex-package_SHA256SUMS"),
                     asset_url("7.1.2", "installer_SHA256SUMS"),
@@ -1637,7 +1696,7 @@ class InstallShTest(unittest.TestCase):
                 root, selector="1.11.0", exact=exact
             )
             self.assertEqual(second.returncode, 0, second.stderr)
-            self.assertEqual(len(second_requests), 7)
+            self.assertEqual(len(second_requests), 4)
             self.assertIn("Downloading Electivus checksum manifests", second.stdout)
             self.assertIn("cannot be authenticated", second.stderr)
 
@@ -1649,7 +1708,7 @@ class InstallShTest(unittest.TestCase):
 
             third, third_requests = run_installer(root, selector="1.11.0", exact=exact)
             self.assertEqual(third.returncode, 0, third.stderr)
-            self.assertEqual(len(third_requests), 7)
+            self.assertEqual(len(third_requests), 4)
             self.assertIn("provenance-mismatched", third.stderr)
             self.assertEqual(
                 read_receipt(root, "1.11.0")["package_digest"],
@@ -1676,7 +1735,7 @@ class InstallShTest(unittest.TestCase):
             result, requests = run_installer(root, selector=version, exact=exact)
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(len(requests), 7)
+            self.assertEqual(len(requests), 4)
             self.assertFalse(tamper_marker.exists())
             self.assertNotIn(
                 str(tamper_marker),
