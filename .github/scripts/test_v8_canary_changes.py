@@ -19,9 +19,6 @@ from v8_canary_changes import windows_source_required
 class V8CanaryChangesTest(unittest.TestCase):
     def test_exact_installer_and_version_paths_are_irrelevant(self) -> None:
         expected_paths = {
-            ".github/scripts/check_installer_v1_topology.py",
-            ".github/scripts/test_check_installer_v1_topology.py",
-            ".github/workflows/installer-v1-release.yml",
             "scripts/codex_package/test_version.py",
             "scripts/codex_package/version.py",
             "scripts/install/install-local.sh",

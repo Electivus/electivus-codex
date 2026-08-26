@@ -53,12 +53,9 @@ KNOWN_IRRELEVANT_PATH_PATTERNS = {
     "codex-rs/**",
     "docs/**",
 }
-# Keep installer exceptions literal. Package assembly also owns V8 packaging,
+# Keep Unix installer exceptions literal. Package assembly also owns V8 packaging,
 # so a directory-level pattern here would weaken the fail-closed boundary.
 EXACT_V8_IRRELEVANT_PATHS = {
-    ".github/scripts/check_installer_v1_topology.py",
-    ".github/scripts/test_check_installer_v1_topology.py",
-    ".github/workflows/installer-v1-release.yml",
     "scripts/codex_package/test_version.py",
     "scripts/codex_package/version.py",
     "scripts/install/install-local.sh",
