@@ -1370,6 +1370,66 @@ class InstallShTest(unittest.TestCase):
                 [],
             )
 
+    def test_failed_replacement_removal_preserves_backup_and_finishes_cleanup(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            version = "1.11.4"
+            initial_digests = create_release_assets(root, version)
+            initial, _requests = run_installer(
+                root,
+                selector=version,
+                exact=release_metadata(version, initial_digests),
+            )
+            self.assertEqual(initial.returncode, 0, initial.stderr)
+            installed_release = release_dir(root, version)
+            receipt_path = installed_release / "installation-receipt.json"
+            receipt_path.write_bytes(b'{"publisher":"incomplete"}\n')
+            old_codex_bytes = (installed_release / "bin/codex").read_bytes()
+            old_receipt_bytes = receipt_path.read_bytes()
+            failing_digests = create_release_assets(
+                root, version, fail_during_activation=True
+            )
+            invocation = prepare_installer(
+                root,
+                selector=version,
+                exact=release_metadata(version, failing_digests),
+                force_fallback_lock=True,
+            )
+            invocation.env["TMPDIR"] = str(root)
+            install_rm_failure(invocation.env, failed_path=installed_release)
+
+            result = run_prepared_installer(invocation)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn(
+                f"Could not remove the failed replacement at {installed_release}",
+                result.stderr,
+            )
+            self.assertNotIn("restoring the previous installed bytes", result.stderr)
+            releases = installed_release.parents[1]
+            backups = list(releases.glob(f".rollback.{version}.{TARGET}.*"))
+            self.assertEqual(len(backups), 1)
+            self.assertIn(
+                f"The previous release remains preserved at {backups[0]}; "
+                "manual recovery is required.",
+                result.stderr,
+            )
+            self.assertEqual((backups[0] / "bin/codex").read_bytes(), old_codex_bytes)
+            self.assertEqual(
+                (backups[0] / "installation-receipt.json").read_bytes(),
+                old_receipt_bytes,
+            )
+            self.assertEqual(list(installed_release.glob(".rollback.*")), [])
+            standalone = root / "codex-home/packages/standalone"
+            rm_log = (root / "rm-targets.log").read_text(encoding="utf-8")
+            self.assertIn(str(installed_release), rm_log)
+            self.assertIn(str(standalone / "install.lock.d"), rm_log)
+            self.assertFalse((standalone / "install.lock.d").exists())
+            self.assertEqual(list(standalone.glob("install.lock.owner.*")), [])
+            self.assertEqual(list(root.glob("tmp.*")), [])
+
     def test_signals_during_same_version_reinstall_restore_exact_active_release(
         self,
     ) -> None:

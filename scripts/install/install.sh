@@ -2174,18 +2174,27 @@ rollback_release_replacement() {
   [ "$release_replacement_pending" = true ] || return 0
 
   rollback_release_status=0
-  warn "Release replacement failed; restoring the previous installed bytes."
   if [ "$replaced_release_existed" = true ]; then
     if [ -n "$replaced_release_backup" ] &&
       { [ -e "$replaced_release_backup" ] || [ -L "$replaced_release_backup" ]; }; then
       if ! rm -rf "$replaced_release_dir"; then
         warn "Could not remove the failed replacement at $replaced_release_dir."
+        warn "The previous release remains preserved at $replaced_release_backup; manual recovery is required."
         rollback_release_status=1
+      else
+        warn "Release replacement failed; restoring the previous installed bytes."
+        if ! mv "$replaced_release_backup" "$replaced_release_dir"; then
+          warn "Could not restore the previous release from $replaced_release_backup."
+          rollback_release_status=1
+        fi
       fi
-      if ! mv "$replaced_release_backup" "$replaced_release_dir"; then
+    else
+      if [ -n "$replaced_release_backup" ]; then
         warn "Could not restore the previous release from $replaced_release_backup."
-        rollback_release_status=1
+      else
+        warn "Could not restore the previous release because its backup path was not recorded."
       fi
+      rollback_release_status=1
     fi
   elif [ -n "$replaced_release_dir" ]; then
     if ! rm -rf "$replaced_release_dir"; then
