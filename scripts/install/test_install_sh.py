@@ -1199,6 +1199,103 @@ class InstallShTest(unittest.TestCase):
                             os.killpg(process.pid, signal.SIGKILL)
                             process.communicate(timeout=2)
 
+    def test_legacy_metadata_path_swap_cannot_reclaim_live_fallback_lock(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_release_assets(root, "7.1.20")
+            invocation = prepare_installer(
+                root,
+                selector="7.1.20",
+                exact=release_metadata("7.1.20", digests),
+                force_fallback_lock=True,
+            )
+            standalone_root = root / "codex-home/packages/standalone"
+            lock_path = standalone_root / "install.lock.d"
+            lock_path.mkdir(parents=True)
+            live_pid_path = lock_path / "pid"
+            live_pid_contents = f"{os.getpid()}\n"
+            live_pid_path.write_text(live_pid_contents, encoding="utf-8")
+            (lock_path / "started_at").write_text(
+                f"{int(time.time())}\n", encoding="utf-8"
+            )
+            boot_id = (
+                Path("/proc/sys/kernel/random/boot_id")
+                .read_text(encoding="utf-8")
+                .strip()
+            )
+            process_stat = Path(f"/proc/{os.getpid()}/stat").read_text(encoding="utf-8")
+            start_ticks = process_stat.rsplit(") ", maxsplit=1)[1].split()[19]
+            (lock_path / "fingerprint").write_text(
+                f"linux-proc:{boot_id}:{start_ticks}\n", encoding="utf-8"
+            )
+            replacement = root / "stale-pid"
+            replacement.write_text("2147483647\n", encoding="utf-8")
+            saved_path = root / "live-pid"
+            real_mv = shutil.which("mv")
+            real_ln = shutil.which("ln")
+            real_rm = shutil.which("rm")
+            assert real_mv is not None
+            assert real_ln is not None
+            assert real_rm is not None
+            invocation.env.update(
+                {
+                    "CODEX_TEST_SWAP_METADATA_PATH": str(live_pid_path),
+                    "CODEX_TEST_SWAP_METADATA_PARENT": str(lock_path),
+                    "CODEX_TEST_SWAP_METADATA_REPLACEMENT": str(replacement),
+                    "CODEX_TEST_SWAP_METADATA_SAVED": str(saved_path),
+                }
+            )
+            for command in ("cat", "python3"):
+                real_command = shutil.which(command)
+                assert real_command is not None
+                command_path = Path(invocation.env["PATH"]) / command
+                command_path.unlink(missing_ok=True)
+                write_executable(
+                    command_path,
+                    textwrap.dedent(
+                        f"""\
+                        #!/bin/sh
+                        should_swap=false
+                        if [ "{command}" = cat ] &&
+                          [ "$1" = "$CODEX_TEST_SWAP_METADATA_PATH" ]; then
+                          should_swap=true
+                        elif [ "{command}" = python3 ]; then
+                          last=""
+                          for argument in "$@"; do last="$argument"; done
+                          if [ "$last" = "$CODEX_TEST_SWAP_METADATA_PARENT" ]; then
+                            should_swap=true
+                          fi
+                        fi
+                        if [ "$should_swap" = true ]; then
+                          "{real_mv}" "$CODEX_TEST_SWAP_METADATA_PATH" \
+                            "$CODEX_TEST_SWAP_METADATA_SAVED"
+                          "{real_ln}" -s "$CODEX_TEST_SWAP_METADATA_REPLACEMENT" \
+                            "$CODEX_TEST_SWAP_METADATA_PATH"
+                          status=0
+                          "{real_command}" "$@" || status=$?
+                          "{real_rm}" -f "$CODEX_TEST_SWAP_METADATA_PATH"
+                          "{real_mv}" "$CODEX_TEST_SWAP_METADATA_SAVED" \
+                            "$CODEX_TEST_SWAP_METADATA_PATH"
+                          exit "$status"
+                        fi
+                        exec "{real_command}" "$@"
+                        """
+                    ),
+                )
+
+            result = run_prepared_installer(invocation)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn(str(live_pid_path), result.stderr)
+            self.assertIn("manual recovery", result.stderr)
+            self.assertTrue(lock_path.is_dir())
+            self.assertEqual(
+                live_pid_path.read_text(encoding="utf-8"), live_pid_contents
+            )
+            self.assertFalse((standalone_root / "current").exists())
+
     def test_dead_fallback_lock_is_reclaimed_without_an_age_wait(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2105,6 +2202,7 @@ def prepare_installer(
             "mktemp",
             "mv",
             "od",
+            "python3",
             "readlink",
             "rm",
             "sed",

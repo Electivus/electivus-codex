@@ -1465,6 +1465,103 @@ valid_process_fingerprint() {
   bounded_positive_decimal "$fingerprint_ticks" 18446744073709551615
 }
 
+read_legacy_lock_metadata() {
+  metadata_lock="$1"
+  metadata_python="$(command -v python3 2>/dev/null || true)"
+  if [ -z "$metadata_python" ]; then
+    printf 'lock\n'
+    return 1
+  fi
+  "$metadata_python" - "$metadata_lock" <<'PY'
+import os
+import stat
+import sys
+
+
+lock_path = sys.argv[1]
+no_follow = getattr(os, "O_NOFOLLOW", None)
+directory = getattr(os, "O_DIRECTORY", None)
+
+
+def fail(field):
+    print(field)
+    raise SystemExit(1)
+
+
+def identity(file_stat):
+    return file_stat.st_dev, file_stat.st_ino, stat.S_IFMT(file_stat.st_mode)
+
+
+if no_follow is None or directory is None:
+    fail("lock")
+flags = os.O_RDONLY | os.O_NONBLOCK | no_follow | getattr(os, "O_CLOEXEC", 0)
+
+try:
+    lock_descriptor = os.open(lock_path, flags | directory)
+    lock_stat = os.fstat(lock_descriptor)
+    if not stat.S_ISDIR(lock_stat.st_mode):
+        fail("lock")
+    values = []
+    opened_identities = {}
+    for field, optional in (("pid", False), ("started_at", False), ("fingerprint", True)):
+        try:
+            descriptor = os.open(field, flags, dir_fd=lock_descriptor)
+        except FileNotFoundError:
+            if not optional:
+                fail(field)
+            values.append("")
+            opened_identities[field] = None
+            continue
+        except OSError:
+            fail(field)
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                fail(field)
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                contents = stream.read(4097)
+            after = os.fstat(descriptor)
+            if len(contents) > 4096 or identity(before) != identity(after):
+                fail(field)
+            opened_identities[field] = identity(after)
+            raw_value = contents.rstrip(b"\n")
+            if b"\x00" in raw_value or b"\n" in raw_value:
+                fail(field)
+            try:
+                values.append(raw_value.decode("ascii"))
+            except UnicodeDecodeError:
+                fail(field)
+        finally:
+            os.close(descriptor)
+
+    for field, opened_identity in opened_identities.items():
+        try:
+            path_stat = os.stat(
+                field, dir_fd=lock_descriptor, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            if opened_identity is not None:
+                fail(field)
+        except OSError:
+            fail(field)
+        else:
+            if opened_identity is None or identity(path_stat) != opened_identity:
+                fail(field)
+    try:
+        current_lock_stat = os.stat(lock_path, follow_symlinks=False)
+    except OSError:
+        fail("lock")
+    if identity(current_lock_stat) != identity(lock_stat):
+        fail("lock")
+    print("\n".join(values))
+except OSError:
+    fail("lock")
+finally:
+    if "lock_descriptor" in locals():
+        os.close(lock_descriptor)
+PY
+}
+
 report_unverifiable_lock() {
   unverifiable_lock="$1"
   unverifiable_description="$2"
@@ -1482,33 +1579,19 @@ fallback_lock_is_stale() {
     stale_pid_path="$stale_lock/pid"
     stale_started_at_path="$stale_lock/started_at"
     stale_fingerprint_path="$stale_lock/fingerprint"
-    if [ -L "$stale_pid_path" ] || [ ! -f "$stale_pid_path" ]; then
-      fallback_lock_issue="its legacy PID metadata at $stale_pid_path is not a regular non-symbolic-link file."
+    if ! stale_metadata="$(read_legacy_lock_metadata "$stale_lock" 2>/dev/null)"; then
+      case "$stale_metadata" in
+        pid) stale_metadata_path="$stale_pid_path" ;;
+        started_at) stale_metadata_path="$stale_started_at_path" ;;
+        fingerprint) stale_metadata_path="$stale_fingerprint_path" ;;
+        *) stale_metadata_path="$stale_lock" ;;
+      esac
+      fallback_lock_issue="its legacy metadata at $stale_metadata_path is not a stable regular non-symbolic-link file."
       return 2
     fi
-    if [ -L "$stale_started_at_path" ] || [ ! -f "$stale_started_at_path" ]; then
-      fallback_lock_issue="its legacy started_at metadata at $stale_started_at_path is not a regular non-symbolic-link file."
-      return 2
-    fi
-    if { [ -e "$stale_fingerprint_path" ] || [ -L "$stale_fingerprint_path" ]; } &&
-      { [ -L "$stale_fingerprint_path" ] || [ ! -f "$stale_fingerprint_path" ]; }; then
-      fallback_lock_issue="its legacy fingerprint metadata at $stale_fingerprint_path is not a regular non-symbolic-link file."
-      return 2
-    fi
-    if ! stale_pid="$(cat "$stale_pid_path" 2>/dev/null)"; then
-      fallback_lock_issue="its legacy PID metadata at $stale_pid_path could not be read."
-      return 2
-    fi
-    if ! stale_started_at="$(cat "$stale_started_at_path" 2>/dev/null)"; then
-      fallback_lock_issue="its legacy started_at metadata at $stale_started_at_path could not be read."
-      return 2
-    fi
-    if [ -f "$stale_fingerprint_path" ]; then
-      if ! stale_fingerprint="$(cat "$stale_fingerprint_path" 2>/dev/null)"; then
-        fallback_lock_issue="its legacy fingerprint metadata at $stale_fingerprint_path could not be read."
-        return 2
-      fi
-    fi
+    stale_pid="$(printf '%s\n' "$stale_metadata" | sed -n '1p')"
+    stale_started_at="$(printf '%s\n' "$stale_metadata" | sed -n '2p')"
+    stale_fingerprint="$(printf '%s\n' "$stale_metadata" | sed -n '3p')"
   elif [ -f "$stale_lock" ]; then
     stale_pid="$(sed -n '1p' "$stale_lock" 2>/dev/null || true)"
     stale_started_at="$(sed -n '2p' "$stale_lock" 2>/dev/null || true)"
