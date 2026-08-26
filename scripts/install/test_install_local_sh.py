@@ -1010,6 +1010,8 @@ class InstallLocalShTest(unittest.TestCase):
             first_root.mkdir()
             second_root.mkdir()
             continue_path = root / "continue"
+            link_race_ready = root / "link-race.ready"
+            link_race_continue = root / "link-race.continue"
             first_env = installer_env(
                 first_root,
                 repo,
@@ -1017,7 +1019,17 @@ class InstallLocalShTest(unittest.TestCase):
                 extra_env={"CODEX_TEST_CONTINUE": str(continue_path)},
                 force_fallback_locks=True,
             )
-            second_env = installer_env(second_root, repo, force_fallback_locks=True)
+            second_env = installer_env(
+                second_root,
+                repo,
+                extra_env={
+                    "CODEX_TEST_LINK_RACE_CONTINUE": str(link_race_continue),
+                    "CODEX_TEST_LINK_RACE_READY": str(link_race_ready),
+                    "CODEX_TEST_LINK_RACE_TARGET": str(version_lock_path(repo)),
+                },
+                force_fallback_locks=True,
+            )
+            install_link_hook(second_env, root / "link-hook")
             command = [
                 "sh",
                 str(repo / "scripts/install/install-local.sh"),
@@ -1066,7 +1078,10 @@ class InstallLocalShTest(unittest.TestCase):
                     second_install_lock.read_text().splitlines()[0].isdigit()
                 )
                 self.assertFalse((second_root / "build.json").exists())
+                wait_for_path(link_race_ready)
                 continue_path.touch()
+                wait_for_path_to_disappear(shared_version_lock)
+                link_race_continue.touch()
                 first_stdout, first_stderr = first.communicate(timeout=10)
                 second_stdout, second_stderr = second.communicate(timeout=10)
                 self.assertEqual(first.returncode, 0, first_stderr + first_stdout)
@@ -1569,12 +1584,9 @@ class InstallLocalShTest(unittest.TestCase):
             root = Path(temp_dir)
             repo = create_repo(root)
             env = installer_env(root, repo, force_fallback_locks=True)
-            fake_ln = Path(env["PATH"]) / "ln"
-            fake_ln.unlink()
-            write_executable(
-                fake_ln,
-                "#!/bin/sh\nprintf '%s\\n' 'simulated hard-link failure' >&2\nexit 95\n",
-            )
+            lock_path = root / "codex-home/packages/standalone/install.lock.d"
+            env["CODEX_TEST_LINK_ERROR_TARGET"] = str(lock_path)
+            install_link_hook(env, root / "link-hook")
             process = subprocess.Popen(
                 ["sh", str(repo / "scripts/install/install-local.sh")],
                 cwd=repo,
@@ -2072,6 +2084,14 @@ def wait_for_path(path: Path) -> None:
         time.sleep(0.01)
 
 
+def wait_for_path_to_disappear(path: Path) -> None:
+    deadline = time.monotonic() + 5
+    while path.exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for {path} to disappear")
+        time.sleep(0.01)
+
+
 def wait_for_any_path(paths: list[Path]) -> None:
     deadline = time.monotonic() + 5
     while not any(path.exists() for path in paths):
@@ -2110,6 +2130,49 @@ def install_reclaim_guard_barrier(env: dict[str, str]) -> None:
             exec /usr/bin/ln "$@"
             """
         ),
+    )
+
+
+def install_link_hook(env: dict[str, str], hook_dir: Path) -> None:
+    hook_dir.mkdir()
+    (hook_dir / "sitecustomize.py").write_text(
+        textwrap.dedent(
+            """\
+            import errno
+            import os
+            from pathlib import Path
+            import time
+
+
+            real_link = os.link
+
+
+            def controlled_link(source, destination, *args, **kwargs):
+                destination_path = os.fsdecode(destination)
+                if destination_path == os.environ.get("CODEX_TEST_LINK_ERROR_TARGET"):
+                    raise OSError(errno.EPERM, "simulated hard-link failure")
+                try:
+                    return real_link(source, destination, *args, **kwargs)
+                except FileExistsError:
+                    if destination_path == os.environ.get("CODEX_TEST_LINK_RACE_TARGET"):
+                        Path(os.environ["CODEX_TEST_LINK_RACE_READY"]).touch()
+                        while not Path(
+                            os.environ["CODEX_TEST_LINK_RACE_CONTINUE"]
+                        ).exists():
+                            time.sleep(0.01)
+                    raise
+
+
+            os.link = controlled_link
+            """
+        ),
+        encoding="utf-8",
+    )
+    existing_python_path = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        f"{hook_dir}{os.pathsep}{existing_python_path}"
+        if existing_python_path
+        else str(hook_dir)
     )
 
 

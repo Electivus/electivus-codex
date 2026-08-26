@@ -381,6 +381,23 @@ process_start_fingerprint() {
   return 1
 }
 
+try_create_hard_link() {
+  # Return 1 only when the destination existed at the instant of link(2).
+  # Every other failure remains a fail-closed claim error.
+  "$python_bin" - "$1" "$2" <<'PY'
+import os
+import sys
+
+
+try:
+    os.link(sys.argv[1], sys.argv[2], follow_symlinks=False)
+except FileExistsError:
+    raise SystemExit(1)
+except OSError:
+    raise SystemExit(2)
+PY
+}
+
 report_unverifiable_lock() {
   unverifiable_lock="$1"
   unverifiable_description="$2"
@@ -482,28 +499,21 @@ try_claim_fallback_lock() {
   try_lock="$2"
   fallback_lock_issue=""
 
-  if ln "$try_owner" "$try_lock" 2>/dev/null; then
-    if [ -f "$try_lock" ] && cmp -s "$try_lock" "$try_owner"; then
-      return 0
-    fi
-
-    # POSIX ln treats an existing directory as a destination directory.
-    # Remove the hard link it created there and report real contention.
-    try_nested_lock="$try_lock/$(basename "$try_owner")"
-    if [ -e "$try_nested_lock" ] || [ -L "$try_nested_lock" ]; then
-      if ! rm -f "$try_nested_lock" 2>/dev/null; then
-        fallback_lock_issue="the hard-link claim landed inside a legacy lock directory and could not be removed."
-        return 2
+  hard_link_status=0
+  try_create_hard_link "$try_owner" "$try_lock" || hard_link_status=$?
+  case "$hard_link_status" in
+    0)
+      if [ -f "$try_lock" ] && cmp -s "$try_lock" "$try_owner"; then
+        return 0
       fi
-    fi
-    return 1
-  fi
-
-  if [ -e "$try_lock" ] || [ -L "$try_lock" ]; then
-    return 1
-  fi
-  fallback_lock_issue="the hard-link operation failed even though no competing lock exists."
-  return 2
+      return 1
+      ;;
+    1) return 1 ;;
+    *)
+      fallback_lock_issue="the hard-link operation failed for a reason other than an existing competing lock."
+      return 2
+      ;;
+  esac
 }
 
 cleanup_stale_reclaim_markers() {
