@@ -6,6 +6,10 @@ RELEASE="${CODEX_RELEASE:-stable}"
 UPDATE_CHANNEL="${CODEX_UPDATE_CHANNEL:-}"
 INSTALLER_PROTOCOL="${CODEX_INSTALLER_PROTOCOL:-direct}"
 INSTALLER_DIGEST="${CODEX_INSTALLER_DIGEST:-}"
+INSTALLER_STDIN_MODE=false
+case "$-" in
+  *s*) INSTALLER_STDIN_MODE=true ;;
+esac
 NON_INTERACTIVE="${CODEX_NON_INTERACTIVE:-false}"
 PUBLISHER="Electivus"
 REPOSITORY="Electivus/electivus-codex"
@@ -226,7 +230,11 @@ stop_active_verification() {
 stop_active_delegate() {
   signal_name="$1"
   [ -n "$delegate_pid" ] || return 0
-  kill -s "$signal_name" "$delegate_pid" 2>/dev/null || true
+  case "$signal_name" in
+    INT) delegate_signal=TERM ;;
+    *) delegate_signal="$signal_name" ;;
+  esac
+  kill -s "$delegate_signal" "$delegate_pid" 2>/dev/null || true
   wait "$delegate_pid" 2>/dev/null || true
   delegate_pid=""
 }
@@ -2724,8 +2732,7 @@ resolve_release
 release_dir="$RELEASES_DIR/$resolved_version/$vendor_target"
 package_metadata_digest="$(release_asset_digest "$package_asset")"
 installer_metadata_digest="$(release_asset_digest "$installer_asset")"
-if [ "$INSTALLER_PROTOCOL" = "direct" ] &&
-  { [ ! -f "$0" ] || [ ! -r "$0" ]; }; then
+if [ "$INSTALLER_PROTOCOL" = "direct" ] && [ "$INSTALLER_STDIN_MODE" = true ]; then
   download_verified_release_installer
   delegate_status=0
   delegate_to_release_installer || delegate_status=$?

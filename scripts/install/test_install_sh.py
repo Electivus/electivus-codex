@@ -169,6 +169,7 @@ class InstallShTest(unittest.TestCase):
                 force_fallback_lock=True,
             )
             (Path(invocation.env["PATH"]) / "python3").unlink()
+            (root / "sh").write_text("not the executing script\n", encoding="utf-8")
             piped_installer = (
                 INSTALL_SCRIPT.read_text(encoding="utf-8")
                 + "\n# Bytes modified while transporting the bootstrap over stdin.\n"
@@ -186,6 +187,7 @@ class InstallShTest(unittest.TestCase):
                 ],
                 capture_output=True,
                 check=False,
+                cwd=root,
                 env=invocation.env,
                 executable="/bin/sh",
                 input=piped_installer,
@@ -216,7 +218,14 @@ class InstallShTest(unittest.TestCase):
             )
             (Path(invocation.env["PATH"]) / "python3").unlink()
 
-            result = run_prepared_installer(invocation)
+            result = subprocess.run(
+                ["/bin/sh", "install.sh", *invocation.args[2:]],
+                capture_output=True,
+                check=False,
+                cwd=root / "assets",
+                env=invocation.env,
+                text=True,
+            )
 
             self.assertEqual(result.returncode, 0, result.stderr)
             receipt = read_receipt(root, "1.4.5")
@@ -256,10 +265,15 @@ class InstallShTest(unittest.TestCase):
             )
             self.assertFalse(release_dir(root, "1.4.6").exists())
 
-    def test_stdin_wrapper_waits_for_slow_delegate_cleanup_on_term(self) -> None:
+    def _assert_stdin_wrapper_waits_for_slow_delegate_cleanup(
+        self,
+        *,
+        sent_signal: signal.Signals,
+        expected_status: int,
+        version: str,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            version = "1.4.7"
             digests = create_release_assets(root, version)
             delegated_tmp = root / "delegated.tmp"
             delegate_ready = root / "delegate.ready"
@@ -272,12 +286,15 @@ class InstallShTest(unittest.TestCase):
                     : >'{delegated_tmp}'
                     : >'{delegate_ready}'
                     cleanup() {{
-                      trap - TERM
+                      status="$1"
+                      trap - HUP INT TERM
                       sleep 2.2
                       rm -f '{delegated_tmp}'
-                      exit 143
+                      exit "$status"
                     }}
-                    trap cleanup TERM
+                    trap 'cleanup 129' HUP
+                    trap 'cleanup 130' INT
+                    trap 'cleanup 143' TERM
                     while :; do sleep 0.1; done
                     """
                 ),
@@ -315,11 +332,11 @@ class InstallShTest(unittest.TestCase):
                 wait_for_path(delegate_ready)
 
                 started = time.monotonic()
-                os.kill(process.pid, signal.SIGTERM)
+                os.kill(process.pid, sent_signal)
                 stdout, stderr = process.communicate(timeout=5)
                 elapsed = time.monotonic() - started
 
-                self.assertEqual(process.returncode, 143, stderr + stdout)
+                self.assertEqual(process.returncode, expected_status, stderr + stdout)
                 self.assertGreaterEqual(elapsed, 2)
                 self.assertFalse(delegated_tmp.exists())
                 self.assertEqual(list(root.glob("tmp.*")), [])
@@ -327,6 +344,20 @@ class InstallShTest(unittest.TestCase):
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGKILL)
                     process.communicate(timeout=2)
+
+    def test_stdin_wrapper_waits_for_slow_delegate_cleanup_on_term(self) -> None:
+        self._assert_stdin_wrapper_waits_for_slow_delegate_cleanup(
+            sent_signal=signal.SIGTERM,
+            expected_status=143,
+            version="1.4.7",
+        )
+
+    def test_stdin_wrapper_maps_int_to_delegate_cleanup_and_returns_130(self) -> None:
+        self._assert_stdin_wrapper_waits_for_slow_delegate_cleanup(
+            sent_signal=signal.SIGINT,
+            expected_status=130,
+            version="1.4.8",
+        )
 
     def test_matching_managed_installation_rejects_full_semver_downgrades(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
