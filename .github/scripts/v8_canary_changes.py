@@ -53,6 +53,18 @@ KNOWN_IRRELEVANT_PATH_PATTERNS = {
     "codex-rs/**",
     "docs/**",
 }
+# Keep Unix installer exceptions literal. Package assembly also owns V8 packaging,
+# so a directory-level pattern here would weaken the fail-closed boundary.
+EXACT_V8_IRRELEVANT_PATHS = {
+    "scripts/codex_package/test_version.py",
+    "scripts/codex_package/version.py",
+    "scripts/install/install-local.sh",
+    "scripts/install/install.sh",
+    "scripts/install/installer-v1.sh",
+    "scripts/install/test_install_local_sh.py",
+    "scripts/install/test_install_sh.py",
+    "scripts/install/test_installer_v1_sh.py",
+}
 # Windows source builds are a narrower, more expensive subset of the canary.
 # A V8 version change also requires them even when no path below changed.
 WINDOWS_SOURCE_BUILD_PATHS = {
@@ -121,9 +133,9 @@ def classify_changed_files(
     unknown = sorted(
         path
         for path in changed_files
-        if not any(
-            fnmatchcase(path, pattern)
-            for pattern in KNOWN_IRRELEVANT_PATH_PATTERNS
+        if path not in EXACT_V8_IRRELEVANT_PATHS
+        and not any(
+            fnmatchcase(path, pattern) for pattern in KNOWN_IRRELEVANT_PATH_PATTERNS
         )
     )
     if unknown:

@@ -43,7 +43,13 @@ class VersionTest(unittest.TestCase):
             repo = create_repo(Path(temp_dir), initial_version="1.2.3")
 
             with patch.object(version, "REPO_ROOT", repo):
-                self.assertEqual(version.resolve_upstream_build_version(), "1.2.3")
+                self.assertEqual(
+                    version.resolve_upstream_build_version(
+                        "also-invalid",
+                        environment={version.UPSTREAM_VERSION_ENV_VAR: "invalid"},
+                    ),
+                    "1.2.3",
+                )
 
     def test_resolve_upstream_build_version_uses_highest_release_in_ancestry(
         self,
@@ -52,10 +58,10 @@ class VersionTest(unittest.TestCase):
             repo = create_repo(Path(temp_dir), initial_version="0.0.0")
             cargo_toml = repo / "codex-rs" / "Cargo.toml"
 
-            write_workspace_version(cargo_toml, "0.148.0-alpha.9")
-            commit_all(repo, "Release 0.148.0-alpha.9", day=2)
             write_workspace_version(cargo_toml, "0.148.0-alpha.12")
-            commit_all(repo, "Release 0.148.0-alpha.12", day=3)
+            commit_all(repo, "Release 0.148.0-alpha.12", day=2)
+            write_workspace_version(cargo_toml, "0.148.0-alpha.9")
+            commit_all(repo, "Release 0.148.0-alpha.9", day=3)
             write_workspace_version(cargo_toml, "0.0.0")
             commit_all(repo, "Resume development", day=4)
 
@@ -66,9 +72,155 @@ class VersionTest(unittest.TestCase):
 
             with patch.object(version, "REPO_ROOT", repo):
                 self.assertEqual(
-                    version.resolve_upstream_build_version(),
+                    version.resolve_upstream_build_version(environment={}),
                     "0.148.0-alpha.12",
                 )
+
+    def test_release_commit_need_not_change_workspace_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = create_repo(Path(temp_dir), initial_version="0.0.0")
+            cargo_toml = repo / "codex-rs" / "Cargo.toml"
+
+            write_workspace_version(cargo_toml, "2.3.4")
+            commit_all(repo, "Prepare release", day=2)
+            (repo / "release-notes.txt").write_text("ready\n", encoding="utf-8")
+            commit_all(repo, "Release 2.3.4", day=3)
+            write_workspace_version(cargo_toml, "0.0.0")
+            commit_all(repo, "Resume development", day=4)
+
+            with patch.object(version, "REPO_ROOT", repo):
+                self.assertEqual(
+                    version.resolve_upstream_build_version(environment={}),
+                    "2.3.4",
+                )
+
+    def test_semver_precedence_includes_stable_and_numeric_prereleases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = create_repo(Path(temp_dir), initial_version="0.0.0")
+            cargo_toml = repo / "codex-rs" / "Cargo.toml"
+            releases = (
+                "1.0.0-alpha.9",
+                "1.0.0-alpha.12",
+                "1.0.0",
+                "1.1.0-alpha.1",
+            )
+            for day, release in enumerate(releases, start=2):
+                write_workspace_version(cargo_toml, release)
+                commit_all(repo, f"Release {release}", day=day)
+            write_workspace_version(cargo_toml, "0.0.0")
+            commit_all(repo, "Resume development", day=7)
+
+            with patch.object(version, "REPO_ROOT", repo):
+                self.assertEqual(
+                    version.resolve_upstream_build_version(environment={}),
+                    "1.1.0-alpha.1",
+                )
+
+    def test_malformed_release_candidates_are_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = create_repo(Path(temp_dir), initial_version="0.0.0")
+            cargo_toml = repo / "codex-rs" / "Cargo.toml"
+
+            write_workspace_version(cargo_toml, "1.2.3")
+            commit_all(repo, "Release v1.2.3", day=2)
+            commit_all(repo, "Release 9.9.9", day=3)
+            commit_all(repo, "release 1.2.3", day=4)
+            write_workspace_version(cargo_toml, "0.0.0")
+            commit_all(repo, "Resume development", day=5)
+
+            with patch.object(version, "REPO_ROOT", repo):
+                with self.assertRaisesRegex(RuntimeError, "shallow or synthetic"):
+                    version.resolve_upstream_build_version(environment={})
+
+    def test_explicit_override_precedes_environment_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = create_repo(Path(temp_dir), initial_version="0.0.0")
+
+            with patch.object(version, "REPO_ROOT", repo):
+                self.assertEqual(
+                    version.resolve_upstream_build_version(
+                        "2.0.0-beta.1",
+                        environment={version.UPSTREAM_VERSION_ENV_VAR: "1.2.3"},
+                    ),
+                    "2.0.0-beta.1",
+                )
+
+    def test_environment_override_precedes_ancestral_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = create_repo(Path(temp_dir), initial_version="0.0.0")
+
+            with patch.object(version, "REPO_ROOT", repo):
+                self.assertEqual(
+                    version.resolve_upstream_build_version(
+                        environment={version.UPSTREAM_VERSION_ENV_VAR: "3.4.5+ci.7"}
+                    ),
+                    "3.4.5+ci.7",
+                )
+
+    def test_invalid_overrides_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = create_repo(Path(temp_dir), initial_version="0.0.0")
+
+            with patch.object(version, "REPO_ROOT", repo):
+                for invalid_version in (
+                    "",
+                    "0.0.0",
+                    "v1.2.3",
+                    "rust-v1.2.3",
+                    "1.2",
+                    "1.2.3-01",
+                ):
+                    with self.subTest(version=invalid_version):
+                        with self.assertRaisesRegex(RuntimeError, "bare SemVer"):
+                            version.resolve_upstream_build_version(
+                                invalid_version,
+                                environment={},
+                            )
+
+    def test_line_breaks_in_overrides_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = create_repo(Path(temp_dir), initial_version="0.0.0")
+
+            with patch.object(version, "REPO_ROOT", repo):
+                for invalid_version in (
+                    "1.2.3\n",
+                    "1.2.3\r",
+                    "1.2.3\r\n",
+                    "1.2.3\nignored",
+                ):
+                    with self.subTest(source="explicit", version=invalid_version):
+                        with self.assertRaisesRegex(RuntimeError, "bare SemVer"):
+                            version.resolve_upstream_build_version(
+                                invalid_version,
+                                environment={},
+                            )
+                    with self.subTest(source="environment", version=invalid_version):
+                        with self.assertRaisesRegex(RuntimeError, "bare SemVer"):
+                            version.resolve_upstream_build_version(
+                                environment={
+                                    version.UPSTREAM_VERSION_ENV_VAR: invalid_version
+                                }
+                            )
+
+    def test_no_provable_baseline_explains_explicit_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_repo = create_repo(root, initial_version="0.0.0")
+            cargo_toml = source_repo / "codex-rs" / "Cargo.toml"
+            write_workspace_version(cargo_toml, "1.2.3")
+            commit_all(source_repo, "Release 1.2.3", day=2)
+            write_workspace_version(cargo_toml, "0.0.0")
+            commit_all(source_repo, "Resume development", day=3)
+            repo = root / "shallow"
+            git(root, "clone", "--depth", "1", f"file://{source_repo}", str(repo))
+
+            with patch.object(version, "REPO_ROOT", repo):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    r"History was not fetched.*--upstream-version <SEMVER>.*"
+                    + version.UPSTREAM_VERSION_ENV_VAR,
+                ):
+                    version.resolve_upstream_build_version(environment={})
 
 
 def create_repo(root: Path, *, initial_version: str) -> Path:
@@ -104,6 +256,7 @@ def commit_all(repo: Path, message: str, *, day: int) -> None:
     git(
         repo,
         "commit",
+        "--allow-empty",
         "--message",
         message,
         extra_env={"GIT_AUTHOR_DATE": timestamp, "GIT_COMMITTER_DATE": timestamp},
