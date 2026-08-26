@@ -157,7 +157,51 @@ class InstallShTest(unittest.TestCase):
                 "requires the exact verified installer digest", missing_digest.stderr
             )
 
-    def test_direct_installer_binds_the_receipt_to_its_executing_bytes(self) -> None:
+    def test_stdin_bootstrap_delegates_to_verified_release_installer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_release_assets(root, "1.4.4")
+            invocation = prepare_installer(
+                root,
+                selector="1.4.4",
+                exact=release_metadata("1.4.4", digests),
+                channel="pre-release",
+            )
+            piped_installer = (
+                INSTALL_SCRIPT.read_text(encoding="utf-8")
+                + "\n# Bytes modified while transporting the bootstrap over stdin.\n"
+            )
+
+            result = subprocess.run(
+                [
+                    "/bin/sh",
+                    "-s",
+                    "--",
+                    "--release",
+                    "1.4.4",
+                    "--channel",
+                    "pre-release",
+                ],
+                capture_output=True,
+                check=False,
+                env=invocation.env,
+                input=piped_installer,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            receipt = read_receipt(root, "1.4.4")
+            self.assertEqual(receipt["installer_digest"], digests["install.sh"])
+            self.assertEqual(receipt["installer_protocol"], "direct")
+            self.assertEqual(receipt["update_channel"], "pre-release")
+            self.assertEqual(
+                read_requests(invocation.request_log).count(
+                    asset_url("1.4.4", "install.sh")
+                ),
+                1,
+            )
+
+    def test_file_bootstrap_delegates_to_selected_release_installer(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             digests = create_release_assets(root, "1.4.5")
@@ -180,9 +224,47 @@ class InstallShTest(unittest.TestCase):
                 exact=release_metadata("1.4.5", digests),
             )
 
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                read_receipt(root, "1.4.5")["installer_digest"],
+                digests["install.sh"],
+            )
+            self.assertEqual(
+                requests.count(asset_url("1.4.5", "install.sh")),
+                1,
+            )
+
+    def test_stdin_bootstrap_rejects_tampered_release_installer_transport(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_release_assets(root, "1.4.6")
+            (root / "assets/install.sh").write_bytes(b"#!/bin/sh\nexit 0\n")
+            invocation = prepare_installer(
+                root,
+                selector="1.4.6",
+                exact=release_metadata("1.4.6", digests),
+            )
+
+            result = subprocess.run(
+                ["/bin/sh", "-s", "--", "--release", "1.4.6"],
+                capture_output=True,
+                check=False,
+                env=invocation.env,
+                input=INSTALL_SCRIPT.read_text(encoding="utf-8"),
+                text=True,
+            )
+
             self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(len(requests), 1)
-            self.assertIn("executing install.sh digest", result.stderr)
+            self.assertIn("checksum did not match", result.stderr)
+            self.assertEqual(
+                read_requests(invocation.request_log).count(
+                    asset_url("1.4.6", "install.sh")
+                ),
+                1,
+            )
+            self.assertFalse(release_dir(root, "1.4.6").exists())
 
     def test_matching_managed_installation_rejects_full_semver_downgrades(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -208,7 +290,7 @@ class InstallShTest(unittest.TestCase):
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(len(requests), 1)
+            self.assertEqual(len(requests), 4)
             self.assertIn("Refusing to downgrade", result.stderr)
             current = root / "codex-home/packages/standalone/current"
             self.assertEqual(current.resolve(), release_dir(root, current_version))
@@ -702,6 +784,9 @@ class InstallShTest(unittest.TestCase):
             self.assertEqual(
                 requests,
                 [
+                    exact_url("7.1.2"),
+                    asset_url("7.1.2", "installer_SHA256SUMS"),
+                    asset_url("7.1.2", "install.sh"),
                     exact_url("7.1.2"),
                     asset_url("7.1.2", "codex-package_SHA256SUMS"),
                     asset_url("7.1.2", "installer_SHA256SUMS"),
@@ -1552,7 +1637,7 @@ class InstallShTest(unittest.TestCase):
                 root, selector="1.11.0", exact=exact
             )
             self.assertEqual(second.returncode, 0, second.stderr)
-            self.assertEqual(len(second_requests), 4)
+            self.assertEqual(len(second_requests), 7)
             self.assertIn("Downloading Electivus checksum manifests", second.stdout)
             self.assertIn("cannot be authenticated", second.stderr)
 
@@ -1564,7 +1649,7 @@ class InstallShTest(unittest.TestCase):
 
             third, third_requests = run_installer(root, selector="1.11.0", exact=exact)
             self.assertEqual(third.returncode, 0, third.stderr)
-            self.assertEqual(len(third_requests), 4)
+            self.assertEqual(len(third_requests), 7)
             self.assertIn("provenance-mismatched", third.stderr)
             self.assertEqual(
                 read_receipt(root, "1.11.0")["package_digest"],
@@ -1591,7 +1676,7 @@ class InstallShTest(unittest.TestCase):
             result, requests = run_installer(root, selector=version, exact=exact)
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(len(requests), 4)
+            self.assertEqual(len(requests), 7)
             self.assertFalse(tamper_marker.exists())
             self.assertNotIn(
                 str(tamper_marker),
@@ -2103,12 +2188,14 @@ def prepare_installer(
     metadata_dir = root / "metadata"
     metadata_dir.mkdir(exist_ok=True)
     exact_path = metadata_dir / "exact.json"
+    exact_provided = exact is not None
     if isinstance(exact, bytes):
         exact_path.write_bytes(exact)
     else:
         exact_document = exact if isinstance(exact, str) else json.dumps(exact or {})
         exact_path.write_text(exact_document, encoding="utf-8")
     pages = inventory_pages if inventory_pages is not None else [inventory or []]
+    inventory_by_tag: dict[str, dict[str, object]] = {}
     for page_number, page_document in enumerate(pages, start=1):
         page_path = metadata_dir / f"page-{page_number}.json"
         if isinstance(page_document, bytes):
@@ -2120,6 +2207,28 @@ def prepare_installer(
                 else json.dumps(page_document),
                 encoding="utf-8",
             )
+        if isinstance(page_document, list):
+            for release in page_document:
+                if isinstance(release, dict) and isinstance(
+                    release.get("tag_name"), str
+                ):
+                    inventory_by_tag[release["tag_name"]] = release
+    (metadata_dir / "inventory-by-tag.json").write_text(
+        json.dumps(inventory_by_tag), encoding="utf-8"
+    )
+    (metadata_dir / "lookup-exact.py").write_text(
+        textwrap.dedent(
+            """\
+            import json
+            from pathlib import Path
+            import sys
+
+            releases = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+            print(json.dumps(releases.get(sys.argv[2], {})))
+            """
+        ),
+        encoding="utf-8",
+    )
     request_log = root / "requests.log"
     fake_curl = fake_bin / "curl"
     curl_script = textwrap.dedent(
@@ -2150,8 +2259,11 @@ def prepare_installer(
                   exit 0
                 elif [ "$CODEX_TEST_METADATA_MODE" = "oversized" ]; then
                   dd if=/dev/zero bs=1048577 count=1 2>/dev/null | tr '\\000' x
-                else
+                elif [ "$CODEX_TEST_EXACT_PROVIDED" = "1" ]; then
                   cat "$CODEX_TEST_METADATA_DIR/exact.json"
+                else
+                  python3 "$CODEX_TEST_METADATA_DIR/lookup-exact.py" \
+                    "$CODEX_TEST_METADATA_DIR/inventory-by-tag.json" "${url##*/}"
                 fi
                 ;;
               'https://api.github.com/repos/Electivus/electivus-codex/releases?per_page=100&page='*)
@@ -2257,8 +2369,12 @@ def prepare_installer(
                       done
                     elif [ "$CODEX_TEST_METADATA_MODE" = "oversized" ]; then
                       dd if=/dev/zero bs=1048577 count=1 2>/dev/null | tr '\\000' x >"$output"
-                    else
+                    elif [ "$CODEX_TEST_EXACT_PROVIDED" = "1" ]; then
                       cp "$CODEX_TEST_METADATA_DIR/exact.json" "$output"
+                    else
+                      python3 "$CODEX_TEST_METADATA_DIR/lookup-exact.py" \
+                        "$CODEX_TEST_METADATA_DIR/inventory-by-tag.json" "${url##*/}" \
+                        >"$output"
                     fi
                     ;;
                   'https://api.github.com/repos/Electivus/electivus-codex/releases?per_page=100&page='*)
@@ -2301,6 +2417,7 @@ def prepare_installer(
             "CODEX_TEST_REQUEST_LOG": str(request_log),
             "CODEX_TEST_ROOT": str(root),
             "CODEX_TEST_DOWNLOAD_CONTINUE": str(root / "allow-download"),
+            "CODEX_TEST_EXACT_PROVIDED": "1" if exact_provided else "0",
             "HOME": str(home),
             "PATH": str(fake_bin)
             if transport == "wget" or force_fallback_lock

@@ -37,6 +37,10 @@ download_pid=""
 download_reader_pid=""
 verification_pid=""
 active_download_pipe=""
+delegate_pid=""
+delegate_starting=false
+pending_signal_status=""
+pending_signal_name=""
 cleanup_done=false
 active_reclaim_marker=""
 active_reclaim_guard=""
@@ -217,6 +221,19 @@ stop_active_verification() {
   kill -KILL "$verification_pid" 2>/dev/null || true
   wait "$verification_pid" 2>/dev/null || true
   verification_pid=""
+}
+
+stop_active_delegate() {
+  signal_name="$1"
+  [ -n "$delegate_pid" ] || return 0
+  case "$signal_name" in
+    INT) supervisor_signal=USR1 ;;
+    HUP | TERM) supervisor_signal="$signal_name" ;;
+    *) supervisor_signal=TERM ;;
+  esac
+  kill -s "$supervisor_signal" "$delegate_pid" 2>/dev/null || true
+  wait "$delegate_pid" 2>/dev/null || true
+  delegate_pid=""
 }
 
 download_file() {
@@ -1228,29 +1245,19 @@ bind_installer_provenance() {
   fi
   executing_installer_digest="$(file_sha256 "$0")"
 
-  case "$INSTALLER_PROTOCOL" in
-    direct)
-      if [ -n "$INSTALLER_DIGEST" ]; then
-        echo "A verified installer digest requires an immutable installer-vN protocol." >&2
-        return 1
-      fi
-      ;;
-    *)
-      if [ -z "$INSTALLER_DIGEST" ]; then
-        echo "Installer protocol $INSTALLER_PROTOCOL requires the exact verified installer digest from its bootstrap." >&2
-        return 1
-      fi
-      printf '%s\n' "$INSTALLER_DIGEST" | grep -Eq '^[0-9a-fA-F]{64}$' || {
-        echo "Invalid verified installer digest: expected 64 hexadecimal SHA-256 characters." >&2
-        return 1
-      }
-      INSTALLER_DIGEST="$(printf '%s\n' "$INSTALLER_DIGEST" | tr 'A-F' 'a-f')"
-      if [ "$INSTALLER_DIGEST" != "$metadata_installer_digest" ]; then
-        echo "Verified installer digest disagrees with the selected Electivus release metadata." >&2
-        return 1
-      fi
-      ;;
-  esac
+  if [ -z "$INSTALLER_DIGEST" ]; then
+    echo "Installer protocol $INSTALLER_PROTOCOL requires the exact verified installer digest from its bootstrap." >&2
+    return 1
+  fi
+  printf '%s\n' "$INSTALLER_DIGEST" | grep -Eq '^[0-9a-fA-F]{64}$' || {
+    echo "Invalid verified installer digest: expected 64 hexadecimal SHA-256 characters." >&2
+    return 1
+  }
+  INSTALLER_DIGEST="$(printf '%s\n' "$INSTALLER_DIGEST" | tr 'A-F' 'a-f')"
+  if [ "$INSTALLER_DIGEST" != "$metadata_installer_digest" ]; then
+    echo "Verified installer digest disagrees with the selected Electivus release metadata." >&2
+    return 1
+  fi
 
   if [ "$executing_installer_digest" != "$metadata_installer_digest" ]; then
     echo "The executing install.sh digest does not match the selected Electivus release metadata." >&2
@@ -1261,6 +1268,114 @@ bind_installer_provenance() {
     return 1
   fi
   resolved_installer_digest="$executing_installer_digest"
+}
+
+download_verified_release_installer() {
+  verified_installer_path="$tmp_dir/install.sh"
+  bootstrap_manifest_path="$tmp_dir/installer_SHA256SUMS"
+  bootstrap_manifest_digest="$(release_asset_digest "$installer_checksum_asset")"
+
+  step "Downloading verified Electivus release installer"
+  download_file \
+    "$installer_checksum_url" \
+    "$bootstrap_manifest_path" \
+    "$MANIFEST_MAX_BYTES"
+  verify_archive_digest "$bootstrap_manifest_path" "$bootstrap_manifest_digest"
+  verify_manifest_assets "$bootstrap_manifest_path" install.sh install.ps1
+  download_file \
+    "$(release_url_for_asset "$installer_asset" "$release_tag")" \
+    "$verified_installer_path" \
+    "$INSTALLER_MAX_BYTES"
+  verify_archive_digest "$verified_installer_path" "$installer_metadata_digest"
+}
+
+delegate_to_release_installer() {
+  require_command python3
+  delegate_starting=true
+  CODEX_RELEASE="$resolved_version" \
+    CODEX_UPDATE_CHANNEL="$resolved_channel" \
+    CODEX_INSTALLER_PROTOCOL="$INSTALLER_PROTOCOL" \
+    CODEX_INSTALLER_DIGEST="$installer_metadata_digest" \
+    python3 - "$verified_installer_path" \
+    --release "$resolved_version" \
+    --channel "$resolved_channel" \
+    --installer-protocol "$INSTALLER_PROTOCOL" \
+    --installer-digest "$installer_metadata_digest" 3<&0 <<'PY' &
+import os
+import signal
+import subprocess
+import sys
+
+installer_path, *arguments = sys.argv[1:]
+child = None
+signal_status = None
+forwarded_signals = {
+    signal.SIGHUP: signal.SIGHUP,
+    signal.SIGINT: signal.SIGINT,
+    signal.SIGUSR1: signal.SIGINT,
+    signal.SIGTERM: signal.SIGTERM,
+}
+
+
+def force_child_exit(_received_signal, _frame):
+    if child is not None:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def stop_child(received_signal, _frame):
+    global signal_status
+    forwarded_signal = forwarded_signals[received_signal]
+    if signal_status is None:
+        signal_status = 128 + forwarded_signal
+    if child is None:
+        raise SystemExit(signal_status)
+    try:
+        os.killpg(child.pid, forwarded_signal)
+    except ProcessLookupError:
+        pass
+    signal.alarm(1)
+
+
+signal.signal(signal.SIGALRM, force_child_exit)
+for received_signal in forwarded_signals:
+    signal.signal(received_signal, stop_child)
+
+blocked_signals = set(forwarded_signals)
+signal.pthread_sigmask(signal.SIG_BLOCK, blocked_signals)
+try:
+    child = subprocess.Popen(
+        ["/bin/sh", installer_path, *arguments],
+        stdin=3,
+        start_new_session=True,
+    )
+finally:
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, blocked_signals)
+
+returncode = child.wait()
+signal.alarm(0)
+if signal_status is not None:
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    raise SystemExit(signal_status)
+if returncode < 0:
+    returncode = 128 - returncode
+raise SystemExit(returncode)
+PY
+  delegate_pid=$!
+  delegate_starting=false
+  if [ -n "$pending_signal_name" ]; then
+    handle_signal "$pending_signal_status" "$pending_signal_name"
+  fi
+
+  delegate_status=0
+  wait "$delegate_pid" || delegate_status=$?
+  delegate_pid=""
+  return "$delegate_status"
 }
 
 receipt_matches() {
@@ -2588,8 +2703,12 @@ tmp_dir="$(mktemp -d)"
 cleanup() {
   [ "$cleanup_done" = false ] || return
   cleanup_done=true
-  trap - EXIT HUP INT TERM
+  trap '' EXIT HUP INT TERM
   cleanup_status=0
+  if ! stop_active_delegate TERM; then
+    warn "Could not stop the verified release installer."
+    cleanup_status=1
+  fi
   if ! stop_active_download; then
     warn "Could not stop every active installer download process."
     cleanup_status=1
@@ -2624,10 +2743,21 @@ cleanup() {
   if [ "$cleanup_status" -ne 0 ]; then
     warn "Installer cleanup encountered one or more failures; review the preceding paths for manual recovery."
   fi
+  trap - EXIT HUP INT TERM
   return "$cleanup_status"
 }
 handle_signal() {
   signal_status="$1"
+  signal_name="$2"
+  if [ "$delegate_starting" = true ]; then
+    if [ -z "$pending_signal_name" ]; then
+      pending_signal_status="$signal_status"
+      pending_signal_name="$signal_name"
+    fi
+    return
+  fi
+  trap '' HUP INT TERM
+  stop_active_delegate "$signal_name"
   cleanup || true
   exit "$signal_status"
 }
@@ -2642,15 +2772,21 @@ handle_exit() {
   exit "$cleanup_status"
 }
 trap handle_exit EXIT
-trap 'handle_signal 129' HUP
-trap 'handle_signal 130' INT
-trap 'handle_signal 143' TERM
+trap 'handle_signal 129 HUP' HUP
+trap 'handle_signal 130 INT' INT
+trap 'handle_signal 143 TERM' TERM
 
 load_current_managed_receipt
 resolve_release
 release_dir="$RELEASES_DIR/$resolved_version/$vendor_target"
 package_metadata_digest="$(release_asset_digest "$package_asset")"
 installer_metadata_digest="$(release_asset_digest "$installer_asset")"
+if [ "$INSTALLER_PROTOCOL" = "direct" ] && [ -z "$INSTALLER_DIGEST" ]; then
+  download_verified_release_installer
+  delegate_status=0
+  delegate_to_release_installer || delegate_status=$?
+  exit "$delegate_status"
+fi
 bind_installer_provenance "$installer_metadata_digest"
 refuse_managed_downgrade
 expected_receipt="$tmp_dir/installation-receipt.json"
