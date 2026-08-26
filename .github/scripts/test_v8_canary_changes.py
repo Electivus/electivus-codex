@@ -24,17 +24,11 @@ class V8CanaryChangesTest(unittest.TestCase):
             ".github/workflows/installer-v1-release.yml",
             "scripts/codex_package/test_version.py",
             "scripts/codex_package/version.py",
-            "scripts/install/install-local.ps1",
             "scripts/install/install-local.sh",
-            "scripts/install/install.ps1",
             "scripts/install/install.sh",
-            "scripts/install/installer-v1.ps1",
             "scripts/install/installer-v1.sh",
-            "scripts/install/test_install_local_ps1.py",
             "scripts/install/test_install_local_sh.py",
-            "scripts/install/test_install_ps1.py",
             "scripts/install/test_install_sh.py",
-            "scripts/install/test_installer_v1_ps1.py",
             "scripts/install/test_installer_v1_sh.py",
         }
         self.assertEqual(expected_paths, EXACT_V8_IRRELEVANT_PATHS)
