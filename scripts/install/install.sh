@@ -1438,6 +1438,33 @@ process_start_fingerprint() {
   return 1
 }
 
+bounded_positive_decimal() {
+  decimal_value="$1"
+  decimal_bound="$2"
+  printf '%s\n' "$decimal_value" | LC_ALL=C awk -v bound="$decimal_bound" '
+    NR == 1 { value = $0 }
+    END {
+      if (NR != 1 || value !~ /^[1-9][0-9]*$/) exit 1
+      if (length(value) < length(bound)) exit 0
+      if (length(value) > length(bound)) exit 1
+      exit ("x" value) <= ("x" bound) ? 0 : 1
+    }
+  '
+}
+
+valid_process_fingerprint() {
+  checked_fingerprint="$1"
+  printf '%s\n' "$checked_fingerprint" | LC_ALL=C awk '
+    NR == 1 { value = $0 }
+    END {
+      if (NR != 1) exit 1
+      exit value ~ /^linux-proc:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[1-9][0-9]*$/ ? 0 : 1
+    }
+  ' || return 1
+  fingerprint_ticks="${checked_fingerprint##*:}"
+  bounded_positive_decimal "$fingerprint_ticks" 18446744073709551615
+}
+
 report_unverifiable_lock() {
   unverifiable_lock="$1"
   unverifiable_description="$2"
@@ -1448,34 +1475,38 @@ fallback_lock_is_stale() {
   stale_lock="$1"
   fallback_lock_issue=""
   stale_fingerprint=""
-  if [ -d "$stale_lock" ]; then
+  if [ -L "$stale_lock" ]; then
+    fallback_lock_issue="it is a symbolic link, which the fallback lock protocol never follows."
+    return 2
+  elif [ -d "$stale_lock" ]; then
     stale_pid="$(cat "$stale_lock/pid" 2>/dev/null || true)"
     stale_started_at="$(cat "$stale_lock/started_at" 2>/dev/null || true)"
     stale_fingerprint="$(cat "$stale_lock/fingerprint" 2>/dev/null || true)"
   elif [ -f "$stale_lock" ]; then
     stale_pid="$(sed -n '1p' "$stale_lock" 2>/dev/null || true)"
     stale_started_at="$(sed -n '2p' "$stale_lock" 2>/dev/null || true)"
-    stale_fingerprint="$(sed -n 's/^fingerprint=//p' "$stale_lock" 2>/dev/null | head -n 1)"
+    stale_fingerprint="$(sed -n 's/^fingerprint=//p' "$stale_lock" 2>/dev/null)"
   elif [ -e "$stale_lock" ] || [ -L "$stale_lock" ]; then
     fallback_lock_issue="it is not a regular file or legacy lock directory."
     return 2
   else
     return 1
   fi
-  case "$stale_pid" in
-    '' | *[!0-9]*)
-      fallback_lock_issue="its owner PID is missing or malformed."
-      return 2
-      ;;
-  esac
-  case "$stale_started_at" in
-    '' | *[!0-9]*)
-      fallback_lock_issue="its started_at metadata is missing or malformed."
-      return 2
-      ;;
-  esac
+  if ! bounded_positive_decimal "$stale_pid" 2147483647; then
+    fallback_lock_issue="its owner PID is missing, malformed, zero, or outside the supported range."
+    return 2
+  fi
+  if ! bounded_positive_decimal "$stale_started_at" 253402300799; then
+    fallback_lock_issue="its started_at metadata is missing, malformed, zero, or outside the supported range."
+    return 2
+  fi
+  if [ -n "$stale_fingerprint" ] && ! valid_process_fingerprint "$stale_fingerprint"; then
+    fallback_lock_issue="its process-start fingerprint is malformed or outside the supported numeric range."
+    return 2
+  fi
   stale_now="$(date +%s 2>/dev/null || printf '0')"
-  if [ "$stale_now" -eq 0 ] || [ "$stale_started_at" -gt "$stale_now" ]; then
+  if ! bounded_positive_decimal "$stale_now" 253402300799 ||
+    ! bounded_positive_decimal "$stale_started_at" "$stale_now"; then
     fallback_lock_issue="its started_at metadata cannot describe the recorded owner."
     return 2
   fi
@@ -1507,21 +1538,15 @@ try_claim_fallback_lock() {
 
   try_attempt=1
   while [ "$try_attempt" -le 2 ]; do
-    if ln "$try_owner" "$try_lock" 2>/dev/null; then
+    if [ -L "$try_lock" ]; then
+      return 1
+    fi
+    if ln -T "$try_owner" "$try_lock" 2>/dev/null; then
       if [ -f "$try_lock" ] && cmp -s "$try_lock" "$try_owner"; then
         return 0
       fi
-
-      # POSIX ln treats an existing directory as a destination directory.
-      # Remove the probe it created there and wait for that legacy lock.
-      try_nested_lock="$try_lock/$(basename "$try_owner")"
-      if [ -f "$try_nested_lock" ]; then
-        if ! rm -f "$try_nested_lock" 2>/dev/null; then
-          fallback_claim_issue="the hard-link probe inside the legacy lock directory could not be removed."
-          return 2
-        fi
-        return 1
-      fi
+      fallback_claim_issue="hard-link creation reported success without creating the expected owned lock."
+      return 2
     fi
 
     if [ -e "$try_lock" ] || [ -L "$try_lock" ]; then
@@ -1542,10 +1567,13 @@ report_lock_claim_error() {
 cleanup_stale_reclaim_markers() {
   cleanup_lock="$1"
   for cleanup_marker in "$cleanup_lock".reclaim.*; do
-    [ -f "$cleanup_marker" ] || continue
+    { [ -e "$cleanup_marker" ] || [ -L "$cleanup_marker" ]; } || continue
     [ "$cleanup_marker" = "$cleanup_lock.reclaim.guard" ] && continue
     if fallback_lock_is_stale "$cleanup_marker"; then
-      rm -f "$cleanup_marker" 2>/dev/null || true
+      if ! rm -f "$cleanup_marker" 2>/dev/null; then
+        echo "Could not remove stale reclaim marker at $cleanup_marker; refusing to proceed while its barrier remains." >&2
+        return 1
+      fi
     elif [ -n "$fallback_lock_issue" ]; then
       cleanup_reclaim_issue_path="$cleanup_marker"
       return 1
@@ -1556,7 +1584,7 @@ cleanup_stale_reclaim_markers() {
 reclaim_barrier_exists() {
   barrier_candidate_lock="$1"
   for barrier_candidate in "$barrier_candidate_lock".reclaim.*; do
-    [ -f "$barrier_candidate" ] && return 0
+    { [ -e "$barrier_candidate" ] || [ -L "$barrier_candidate" ]; } && return 0
   done
   return 1
 }
@@ -1586,7 +1614,10 @@ wait_for_reclaim_barrier() {
 
 publish_reclaim_marker() {
   publish_lock="$1"
-  publish_prepare="$(mktemp "$publish_lock.reclaim-prepare.XXXXXX")"
+  if ! publish_prepare="$(mktemp "$publish_lock.reclaim-prepare.XXXXXX")"; then
+    echo "Could not prepare a reclaim marker beside $publish_lock." >&2
+    return 1
+  fi
   publish_suffix="${publish_prepare##*.}"
   published_marker="$publish_lock.reclaim.$publish_suffix"
   {
@@ -1598,7 +1629,17 @@ publish_reclaim_marker() {
       printf 'fingerprint=%s\n' "$publish_fingerprint"
     fi
   } >"$publish_prepare"
-  mv "$publish_prepare" "$published_marker"
+  if ! mv "$publish_prepare" "$published_marker"; then
+    echo "Could not publish reclaim marker $published_marker." >&2
+    if ! rm -f "$publish_prepare" 2>/dev/null; then
+      echo "Could not remove unpublished reclaim marker preparation $publish_prepare." >&2
+    fi
+    return 1
+  fi
+  if [ ! -f "$published_marker" ] || [ -L "$published_marker" ]; then
+    echo "Reclaim marker publication did not create the expected regular file at $published_marker." >&2
+    return 1
+  fi
   printf '%s\n' "$published_marker"
 }
 
@@ -1607,7 +1648,7 @@ acquire_reclaim_guard() {
   guard_marker="$2"
   reclaim_guard="$guard_lock.reclaim.guard"
   active_reclaim_guard="$reclaim_guard"
-  while ! ln "$guard_marker" "$reclaim_guard" 2>/dev/null; do
+  while ! ln -T "$guard_marker" "$reclaim_guard" 2>/dev/null; do
     if fallback_lock_is_stale "$reclaim_guard"; then
       echo "Stale reclaim guard at $reclaim_guard requires manual removal; refusing an unsafe automatic takeover." >&2
       return 1
@@ -1617,7 +1658,7 @@ acquire_reclaim_guard() {
     elif [ ! -f "$reclaim_guard" ]; then
       # The previous owner may have released the guard between ln failing and
       # this check. Retry once to separate that race from a hard-link error.
-      if ln "$guard_marker" "$reclaim_guard" 2>/dev/null; then
+      if ln -T "$guard_marker" "$reclaim_guard" 2>/dev/null; then
         break
       fi
       if [ ! -f "$reclaim_guard" ]; then
@@ -1643,23 +1684,36 @@ remove_reclaim_guard_if_owned() {
     [ -f "$owned_guard" ] &&
     [ -f "$owned_marker" ] &&
     cmp -s "$owned_guard" "$owned_marker"; then
-    rm -f "$owned_guard" 2>/dev/null || true
+    if ! rm -f "$owned_guard" 2>/dev/null; then
+      return 1
+    fi
+    if [ -f "$owned_guard" ] && cmp -s "$owned_guard" "$owned_marker"; then
+      return 1
+    fi
   fi
 }
 
 release_reclaim_guard() {
   guard_marker="$1"
-  remove_reclaim_guard_if_owned "$active_reclaim_guard" "$guard_marker"
+  if ! remove_reclaim_guard_if_owned "$active_reclaim_guard" "$guard_marker"; then
+    fallback_claim_issue="the owned reclaim guard could not be removed."
+    report_lock_claim_error "$active_reclaim_guard" "reclaim guard"
+    return 1
+  fi
   active_reclaim_guard=""
 }
 
 reclaim_fallback_lock() {
   reclaim_lock="$1"
   reclaim_owner_prefix="$2"
-  active_reclaim_marker="$(publish_reclaim_marker "$reclaim_lock")" || return 1
+  if ! active_reclaim_marker="$(publish_reclaim_marker "$reclaim_lock")"; then
+    return 1
+  fi
   reclaim_suffix="${active_reclaim_marker##*.}"
   if ! acquire_reclaim_guard "$reclaim_lock" "$active_reclaim_marker"; then
-    rm -f "$active_reclaim_marker" 2>/dev/null || true
+    if ! rm -f "$active_reclaim_marker" 2>/dev/null; then
+      echo "Could not remove unclaimed reclaim marker $active_reclaim_marker." >&2
+    fi
     active_reclaim_marker=""
     active_reclaim_guard=""
     return 1
@@ -1673,13 +1727,13 @@ reclaim_fallback_lock() {
       elif [ -d "$reclaim_lock" ]; then
         fallback_claim_issue="the stale legacy lock directory could not be moved for safe reclamation."
         report_lock_claim_error "$reclaim_lock" "stale lock"
-        release_reclaim_guard "$active_reclaim_marker"
+        release_reclaim_guard "$active_reclaim_marker" || true
         return 1
       fi
     fi
   elif [ -f "$reclaim_lock" ]; then
     reclaimed_lock="$reclaim_lock.snapshot.$reclaim_suffix"
-    if ln "$reclaim_lock" "$reclaimed_lock" 2>/dev/null; then
+    if ln -T "$reclaim_lock" "$reclaimed_lock" 2>/dev/null; then
       if fallback_lock_is_stale "$reclaimed_lock"; then
         reclaimed_owner="$(sed -n '3p' "$reclaimed_lock" 2>/dev/null || true)"
         rm -f "$reclaim_lock" 2>/dev/null || true
@@ -1691,12 +1745,17 @@ reclaim_fallback_lock() {
     elif [ -f "$reclaim_lock" ]; then
       fallback_claim_issue="the stale lock could not be hard-linked for safe reclamation."
       report_lock_claim_error "$reclaim_lock" "stale lock"
-      release_reclaim_guard "$active_reclaim_marker"
+      release_reclaim_guard "$active_reclaim_marker" || true
       return 1
     fi
   fi
-  release_reclaim_guard "$active_reclaim_marker"
-  rm -f "$active_reclaim_marker" 2>/dev/null || true
+  if ! release_reclaim_guard "$active_reclaim_marker"; then
+    return 1
+  fi
+  if ! rm -f "$active_reclaim_marker" 2>/dev/null; then
+    echo "Could not remove completed reclaim marker $active_reclaim_marker." >&2
+    return 1
+  fi
   active_reclaim_marker=""
 }
 
@@ -1772,25 +1831,42 @@ acquire_install_lock() {
 }
 
 release_install_lock() {
+  release_lock_status=0
   if [ "$lock_kind" = "flock" ] || [ "$lock_kind" = "lockf" ]; then
-    exec 9>&- 2>/dev/null || true
+    if ! exec 9>&- 2>/dev/null; then
+      warn "Could not close the installer lock descriptor."
+      release_lock_status=1
+    fi
   fi
   if [ -n "$lock_owner_file" ]; then
     if [ -f "$LOCK_PATH" ] && cmp -s "$LOCK_PATH" "$lock_owner_file"; then
-      rm -f "$LOCK_PATH" 2>/dev/null || true
+      if ! rm -f "$LOCK_PATH" 2>/dev/null; then
+        warn "Could not remove owned installer lock $LOCK_PATH."
+        release_lock_status=1
+      fi
     fi
-    rm -f "$lock_owner_file" 2>/dev/null || true
+    if ! rm -f "$lock_owner_file" 2>/dev/null; then
+      warn "Could not remove installer lock owner metadata $lock_owner_file."
+      release_lock_status=1
+    fi
   fi
   if [ -n "$active_reclaim_guard" ]; then
-    remove_reclaim_guard_if_owned "$active_reclaim_guard" "$active_reclaim_marker"
+    if ! remove_reclaim_guard_if_owned "$active_reclaim_guard" "$active_reclaim_marker"; then
+      warn "Could not remove owned reclaim guard $active_reclaim_guard."
+      release_lock_status=1
+    fi
     active_reclaim_guard=""
   fi
   if [ -n "$active_reclaim_marker" ]; then
-    rm -f "$active_reclaim_marker" 2>/dev/null || true
+    if ! rm -f "$active_reclaim_marker" 2>/dev/null; then
+      warn "Could not remove owned reclaim marker $active_reclaim_marker."
+      release_lock_status=1
+    fi
     active_reclaim_marker=""
   fi
   lock_kind=""
   lock_owner_file=""
+  return "$release_lock_status"
 }
 
 cleanup_stale_install_artifacts() {
@@ -2097,20 +2173,31 @@ release_dir_is_complete() {
 rollback_release_replacement() {
   [ "$release_replacement_pending" = true ] || return 0
 
+  rollback_release_status=0
   warn "Release replacement failed; restoring the previous installed bytes."
   if [ "$replaced_release_existed" = true ]; then
     if [ -n "$replaced_release_backup" ] &&
       { [ -e "$replaced_release_backup" ] || [ -L "$replaced_release_backup" ]; }; then
-      rm -rf "$replaced_release_dir"
-      mv "$replaced_release_backup" "$replaced_release_dir"
+      if ! rm -rf "$replaced_release_dir"; then
+        warn "Could not remove the failed replacement at $replaced_release_dir."
+        rollback_release_status=1
+      fi
+      if ! mv "$replaced_release_backup" "$replaced_release_dir"; then
+        warn "Could not restore the previous release from $replaced_release_backup."
+        rollback_release_status=1
+      fi
     fi
   elif [ -n "$replaced_release_dir" ]; then
-    rm -rf "$replaced_release_dir"
+    if ! rm -rf "$replaced_release_dir"; then
+      warn "Could not remove the failed new release at $replaced_release_dir."
+      rollback_release_status=1
+    fi
   fi
   release_replacement_pending=false
   replaced_release_dir=""
   replaced_release_backup=""
   replaced_release_existed=false
+  return "$rollback_release_status"
 }
 
 commit_release_replacement() {
@@ -2145,12 +2232,19 @@ save_activation_path() {
 restore_activation_path() {
   restored_path="$1"
   restored_name="$2"
-  restored_type="$(cat "$tmp_dir/$restored_name.type")"
+  if ! restored_type="$(cat "$tmp_dir/$restored_name.type")"; then
+    return 1
+  fi
 
-  rm -f "$restored_path"
+  if ! rm -f "$restored_path"; then
+    return 1
+  fi
   case "$restored_type" in
     link)
-      ln -s "$(cat "$tmp_dir/$restored_name.value")" "$restored_path"
+      if ! restored_value="$(cat "$tmp_dir/$restored_name.value")"; then
+        return 1
+      fi
+      ln -s "$restored_value" "$restored_path"
       ;;
     file)
       cp -p "$tmp_dir/$restored_name.value" "$restored_path"
@@ -2162,11 +2256,25 @@ restore_activation_path() {
 rollback_activation() {
   [ "$activation_rollback_pending" = true ] || return 0
 
+  rollback_activation_status=0
   warn "Activation failed; restoring the previous runnable installation."
-  restore_activation_path "$CURRENT_LINK" current
-  restore_activation_path "$BIN_PATH" visible-codex
-  restore_activation_path "$CODE_MODE_HOST_BIN_PATH" visible-code-mode-host
+  if ! restore_activation_path "$CURRENT_LINK" current; then
+    warn "Could not restore the previous current release link at $CURRENT_LINK."
+    rollback_activation_status=1
+  fi
+  if ! restore_activation_path "$BIN_PATH" visible-codex; then
+    warn "Could not restore the previous visible Codex command at $BIN_PATH."
+    rollback_activation_status=1
+  fi
+  if ! restore_activation_path "$CODE_MODE_HOST_BIN_PATH" visible-code-mode-host; then
+    warn "Could not restore the previous code-mode host command at $CODE_MODE_HOST_BIN_PATH."
+    rollback_activation_status=1
+  fi
   activation_rollback_pending=false
+  if [ "$rollback_activation_status" -ne 0 ]; then
+    warn "Activation rollback encountered one or more failures; cleanup will continue with the remaining installer state."
+  fi
+  return "$rollback_activation_status"
 }
 
 activate_release() {
@@ -2282,25 +2390,59 @@ cleanup() {
   [ "$cleanup_done" = false ] || return
   cleanup_done=true
   trap - EXIT HUP INT TERM
-  stop_active_download
-  stop_active_verification
-  rollback_activation
-  rollback_release_replacement
+  cleanup_status=0
+  if ! stop_active_download; then
+    warn "Could not stop every active installer download process."
+    cleanup_status=1
+  fi
+  if ! stop_active_verification; then
+    warn "Could not stop every active installer verification process."
+    cleanup_status=1
+  fi
+  if ! rollback_activation; then
+    cleanup_status=1
+  fi
+  if ! rollback_release_replacement; then
+    cleanup_status=1
+  fi
   if [ -n "$active_stage_release" ]; then
-    rm -rf "$active_stage_release"
+    if ! rm -rf "$active_stage_release"; then
+      warn "Could not remove staged release $active_stage_release."
+      cleanup_status=1
+    fi
     active_stage_release=""
   fi
-  release_install_lock
-  if [ -n "$tmp_dir" ]; then
-    rm -rf "$tmp_dir"
+  if ! release_install_lock; then
+    cleanup_status=1
   fi
+  if [ -n "$tmp_dir" ]; then
+    if ! rm -rf "$tmp_dir"; then
+      warn "Could not remove installer temporary directory $tmp_dir."
+      cleanup_status=1
+    fi
+    tmp_dir=""
+  fi
+  if [ "$cleanup_status" -ne 0 ]; then
+    warn "Installer cleanup encountered one or more failures; review the preceding paths for manual recovery."
+  fi
+  return "$cleanup_status"
 }
 handle_signal() {
   signal_status="$1"
-  cleanup
+  cleanup || true
   exit "$signal_status"
 }
-trap cleanup EXIT
+handle_exit() {
+  exit_status="$?"
+  cleanup_status=0
+  cleanup || cleanup_status=$?
+  trap - EXIT
+  if [ "$exit_status" -ne 0 ]; then
+    exit "$exit_status"
+  fi
+  exit "$cleanup_status"
+}
+trap handle_exit EXIT
 trap 'handle_signal 129' HUP
 trap 'handle_signal 130' INT
 trap 'handle_signal 143' TERM
