@@ -506,6 +506,11 @@ parse_release_metadata() {
             }
             escaped = 0
           } else if (char == "\\") {
+            # Fail closed instead of comparing raw and decoded spellings of
+            # object keys, which could otherwise hide a semantic duplicate.
+            if (string_role == "key") {
+              invalid = 1
+            }
             token = token char
             escaped = 1
           } else if (char == "\"") {
@@ -822,6 +827,20 @@ consider_release() {
   fi
 
   release_assets_are_complete "$c_assets" || return 0
+
+  if [ -n "$seen_release_tags" ]; then
+    while IFS= read -r seen_release_tag; do
+      if [ "$seen_release_tag" = "$c_tag" ]; then
+        echo "Electivus release inventory contains duplicate release record $c_tag." >&2
+        return 1
+      fi
+    done <<EOF
+$seen_release_tags
+EOF
+  fi
+  seen_release_tags="${seen_release_tags}${seen_release_tags:+
+}$c_tag"
+
   case "$requested_kind" in
     exact)
       [ "$c_version" = "$requested_version" ] || return 0
@@ -979,6 +998,7 @@ resolve_release() {
   selected_tag=""
   selected_channel=""
   selected_release_metadata=""
+  seen_release_tags=""
 
   if [ "$requested_kind" = "exact" ]; then
     requested_tag="$TAG_PREFIX$requested_version"

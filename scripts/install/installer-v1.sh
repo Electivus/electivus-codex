@@ -420,6 +420,7 @@ try:
         ]
     else:
         documents = []
+        seen_inventory_releases = set()
         for path in sorted(metadata_path.glob("page-*.json")):
             page = json.loads(
                 path.read_text(encoding="utf-8"),
@@ -427,6 +428,18 @@ try:
             )
             if not isinstance(page, list):
                 raise ValueError("inventory root is not an array")
+            page_release_fingerprints = {
+                json.dumps(
+                    release,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                for release in page
+            }
+            if seen_inventory_releases.intersection(page_release_fingerprints):
+                raise ValueError("duplicate release record across inventory pages")
+            seen_inventory_releases.update(page_release_fingerprints)
             documents.extend(page)
 except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
     print(f"Could not parse bounded Electivus release metadata: {error}", file=sys.stderr)

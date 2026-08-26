@@ -454,6 +454,37 @@ class InstallShTest(unittest.TestCase):
                 self.assertEqual(requests, [exact_url("1.6.1")])
                 self.assertIn("Could not parse", result.stderr)
 
+    def test_semantically_duplicate_escaped_keys_fail_closed_on_both_routes(
+        self,
+    ) -> None:
+        for route in ("exact", "inventory"):
+            with (
+                self.subTest(route=route),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                digests = create_release_assets(root, "1.6.3")
+                serialized = json.dumps(
+                    release_metadata("1.6.3", digests), separators=(",", ":")
+                )
+                duplicate = '{"tag\\u005fname":"electivus-v999.0.0",' + serialized[1:]
+                options: dict[str, object]
+                if route == "exact":
+                    options = {"selector": "1.6.3", "exact": duplicate}
+                    expected_requests = [exact_url("1.6.3")]
+                else:
+                    options = {
+                        "selector": None,
+                        "inventory_pages": [f"[{duplicate}]"],
+                    }
+                    expected_requests = [inventory_url(1)]
+
+                result, requests = run_installer(root, **options)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(requests, expected_requests)
+                self.assertIn("Could not parse", result.stderr)
+
     def test_release_version_and_inventory_pagination_bounds_fail_closed(self) -> None:
         cases = (
             ("version", "1.2.3+" + "a" * 123, None, "128-byte"),
@@ -497,6 +528,19 @@ class InstallShTest(unittest.TestCase):
             ]
             self.assertEqual(metadata_requests, [inventory_url(1), inventory_url(2)])
             self.assertIn("Resolved version: 7.0.0", result.stdout)
+
+    def test_duplicate_release_across_inventory_pages_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_release_assets(root, "7.0.1")
+            metadata = release_metadata("7.0.1", digests)
+            pages = [[metadata, *([{}] * 99)], [metadata]]
+
+            result, requests = run_installer(root, selector=None, inventory_pages=pages)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(requests, [inventory_url(1), inventory_url(2)])
+            self.assertIn("duplicate release", result.stderr)
 
     def test_asset_state_size_count_and_name_bounds_fail_closed(self) -> None:
         cases = ("state", "zero-size", "oversized-package", "too-many", "long-name")
@@ -1488,9 +1532,16 @@ def prepare_installer(
         exact_path.write_text(exact_document, encoding="utf-8")
     pages = inventory_pages if inventory_pages is not None else [inventory or []]
     for page_number, page_document in enumerate(pages, start=1):
-        (metadata_dir / f"page-{page_number}.json").write_text(
-            json.dumps(page_document), encoding="utf-8"
-        )
+        page_path = metadata_dir / f"page-{page_number}.json"
+        if isinstance(page_document, bytes):
+            page_path.write_bytes(page_document)
+        else:
+            page_path.write_text(
+                page_document
+                if isinstance(page_document, str)
+                else json.dumps(page_document),
+                encoding="utf-8",
+            )
     request_log = root / "requests.log"
     fake_curl = fake_bin / "curl"
     curl_script = textwrap.dedent(

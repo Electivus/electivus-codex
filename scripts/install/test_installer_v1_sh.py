@@ -492,6 +492,22 @@ class InstallerV1ShTest(unittest.TestCase):
             self.assertIn("does not support macOS", result.stderr)
             self.assertEqual(requests, [])
 
+    def test_duplicate_release_across_inventory_pages_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_assets(root)
+            metadata = release("7.1.1", digests)
+            pages = [[metadata, *([{}] * 99)], [metadata]]
+
+            result, requests = run_bootstrap(root, inventory_pages=pages)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(requests, [inventory_url(1), inventory_url(2)])
+            self.assertIn(
+                "duplicate release record across inventory pages", result.stderr
+            )
+            self.assertFalse((root / "delegation.json").exists())
+
     def test_release_version_byte_bound_is_enforced_before_network(self) -> None:
         maximum_version = "1.2.3+" + "a" * 122
         self.assertEqual(len(maximum_version.encode()), 128)
@@ -637,6 +653,7 @@ def prepare_bootstrap(
     *,
     arguments: list[str] | None = None,
     inventory: list[dict[str, object]] | str | None = None,
+    inventory_pages: list[object] | None = None,
     exact: object | None = None,
     mode: str = "",
     operating_system: str = "Linux",
@@ -653,6 +670,13 @@ def prepare_bootstrap(
         inventory if isinstance(inventory, str) else json.dumps(inventory or []),
         encoding="utf-8",
     )
+    if inventory_pages is not None:
+        (metadata_dir / "pages.enabled").touch()
+        for page_number, page in enumerate(inventory_pages, start=1):
+            (metadata_dir / f"page-{page_number}.json").write_text(
+                page if isinstance(page, str) else json.dumps(page),
+                encoding="utf-8",
+            )
     request_log = root / "requests.log"
     write_executable(
         fake_bin / "curl",
@@ -689,7 +713,16 @@ def prepare_bootstrap(
                 fi
                 ;;
               'https://api.github.com/repos/Electivus/electivus-codex/releases?per_page=100&page='*)
-                cat "$CODEX_TEST_METADATA_DIR/inventory.json"
+                page="${url##*page=}"
+                if [ -f "$CODEX_TEST_METADATA_DIR/pages.enabled" ]; then
+                  if [ -f "$CODEX_TEST_METADATA_DIR/page-$page.json" ]; then
+                    cat "$CODEX_TEST_METADATA_DIR/page-$page.json"
+                  else
+                    printf '[]\n'
+                  fi
+                else
+                  cat "$CODEX_TEST_METADATA_DIR/inventory.json"
+                fi
                 ;;
               https://github.com/Electivus/electivus-codex/releases/download/*)
                 cat "$CODEX_TEST_ASSETS/${url##*/}"
