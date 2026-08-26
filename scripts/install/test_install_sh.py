@@ -377,6 +377,23 @@ class InstallShTest(unittest.TestCase):
                 self.assertEqual(len(requests), 1)
                 self.assertIn("not published, valid, and complete", result.stderr)
 
+    def test_release_selector_rejects_cr_and_lf_before_network_access(self) -> None:
+        for selector in (
+            "1.6.0\n",
+            "1.6.0\r",
+            "1.6.0\r\n",
+            "electivus-v1.6.0\ntrailing",
+        ):
+            with (
+                self.subTest(selector=repr(selector)),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                result, requests = run_installer(Path(temp_dir), selector=selector)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(requests, [])
+                self.assertIn("must not contain CR or LF", result.stderr)
+
     def test_malformed_and_oversized_metadata_fail_closed(self) -> None:
         for mode, exact in (("", '{"tag_name":'), ("oversized", None)):
             with (
@@ -393,6 +410,27 @@ class InstallShTest(unittest.TestCase):
                     self.assertIn("1048576-byte safety limit", result.stderr)
                 else:
                     self.assertIn("Could not parse", result.stderr)
+
+    def test_metadata_with_nul_in_tag_is_rejected_before_semantic_parsing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_release_assets(root, "1.6.2")
+            document = json.dumps(release_metadata("1.6.2", digests)).encode()
+            document = document.replace(
+                b"electivus-v1.6.2", b"electivus-v1.6.2\x00ignored"
+            )
+
+            result, requests = run_installer(
+                root,
+                selector="1.6.2",
+                exact=document,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(requests, [exact_url("1.6.2")])
+            self.assertIn("forbidden NUL byte", result.stderr)
 
     def test_structurally_malformed_metadata_fails_closed(self) -> None:
         malformed_documents = (
@@ -1069,7 +1107,9 @@ class InstallShTest(unittest.TestCase):
             )
             self.assertIn("will not fall back to OpenAI", result.stderr)
 
-    def test_namespaced_cache_requires_an_exact_receipt_match(self) -> None:
+    def test_namespaced_cache_is_safely_reinstalled_and_requires_exact_receipt(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             digests = create_release_assets(root, "1.11.0")
@@ -1094,8 +1134,9 @@ class InstallShTest(unittest.TestCase):
                 root, selector="1.11.0", exact=exact
             )
             self.assertEqual(second.returncode, 0, second.stderr)
-            self.assertEqual(len(second_requests), 1)
-            self.assertNotIn("Downloading Electivus checksum manifests", second.stdout)
+            self.assertEqual(len(second_requests), 4)
+            self.assertIn("Downloading Electivus checksum manifests", second.stdout)
+            self.assertIn("cannot be authenticated", second.stderr)
 
             receipt_path = release_dir(root, "1.11.0") / "installation-receipt.json"
             receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -1111,6 +1152,171 @@ class InstallShTest(unittest.TestCase):
                 read_receipt(root, "1.11.0")["package_digest"],
                 digests[f"codex-package-{TARGET}.tar.gz"],
             )
+
+    def test_tampered_cached_executable_is_not_run_before_safe_reinstall(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            version = "1.11.1"
+            digests = create_release_assets(root, version)
+            exact = release_metadata(version, digests)
+            installed, _requests = run_installer(root, selector=version, exact=exact)
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            tamper_marker = root / "tampered-executable-ran"
+            write_executable(
+                release_dir(root, version) / "bin" / "codex",
+                f"#!/bin/sh\n: >'{tamper_marker}'\nprintf 'codex-cli {version}\\n'\n",
+            )
+            clear_requests(root)
+
+            result, requests = run_installer(root, selector=version, exact=exact)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(requests), 4)
+            self.assertFalse(tamper_marker.exists())
+            self.assertNotIn(
+                str(tamper_marker),
+                (release_dir(root, version) / "bin" / "codex").read_text(
+                    encoding="utf-8"
+                ),
+            )
+
+    def test_failed_same_version_reinstall_restores_exact_active_release(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            version = "1.11.2"
+            initial_digests = create_release_assets(root, version)
+            initial, _requests = run_installer(
+                root,
+                selector=version,
+                exact=release_metadata(version, initial_digests),
+            )
+            self.assertEqual(initial.returncode, 0, initial.stderr)
+            installed_release = release_dir(root, version)
+            current = root / "codex-home/packages/standalone/current"
+            visible = root / "install-bin/codex"
+            receipt_path = installed_release / "installation-receipt.json"
+            receipt_path.write_bytes(b'{"publisher":"incomplete"}\n')
+            old_codex_bytes = (installed_release / "bin/codex").read_bytes()
+            old_receipt_bytes = receipt_path.read_bytes()
+            old_current_target = os.readlink(current)
+            old_visible_target = os.readlink(visible)
+            failing_digests = create_release_assets(
+                root, version, fail_during_activation=True
+            )
+            clear_requests(root)
+
+            result, _requests = run_installer(
+                root,
+                selector=version,
+                exact=release_metadata(version, failing_digests),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("restoring the previous installed bytes", result.stderr)
+            self.assertEqual(
+                (installed_release / "bin/codex").read_bytes(), old_codex_bytes
+            )
+            self.assertEqual(receipt_path.read_bytes(), old_receipt_bytes)
+            self.assertEqual(os.readlink(current), old_current_target)
+            self.assertEqual(os.readlink(visible), old_visible_target)
+            self.assertEqual(
+                subprocess.run(
+                    [visible, "--version"], capture_output=True, text=True, check=True
+                ).stdout,
+                f"codex-cli {version}\n",
+            )
+            self.assertEqual(
+                list(
+                    (
+                        root
+                        / "codex-home/packages/standalone/releases/Electivus/electivus-codex"
+                    ).glob(".rollback.*")
+                ),
+                [],
+            )
+
+    def test_signals_during_same_version_reinstall_restore_exact_active_release(
+        self,
+    ) -> None:
+        for sent_signal in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+            with (
+                self.subTest(signal=sent_signal),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                version = "1.11.3"
+                initial_digests = create_release_assets(root, version)
+                initial, _requests = run_installer(
+                    root,
+                    selector=version,
+                    exact=release_metadata(version, initial_digests),
+                )
+                self.assertEqual(initial.returncode, 0, initial.stderr)
+                installed_release = release_dir(root, version)
+                current = root / "codex-home/packages/standalone/current"
+                visible = root / "install-bin/codex"
+                receipt_path = installed_release / "installation-receipt.json"
+                receipt_path.write_bytes(b'{"publisher":"incomplete"}\n')
+                old_codex_bytes = (installed_release / "bin/codex").read_bytes()
+                old_receipt_bytes = receipt_path.read_bytes()
+                old_current_target = os.readlink(current)
+                old_visible_target = os.readlink(visible)
+                activation_gate = root / "activation.gate"
+                os.mkfifo(activation_gate)
+                blocking_digests = create_release_assets(
+                    root, version, block_during_activation=True
+                )
+                invocation = prepare_installer(
+                    root,
+                    selector=version,
+                    exact=release_metadata(version, blocking_digests),
+                )
+                invocation.env["CODEX_TEST_ACTIVATION_GATE"] = str(activation_gate)
+                process = subprocess.Popen(
+                    invocation.args,
+                    env=invocation.env,
+                    start_new_session=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    wait_for_path(root / "activation.ready")
+                    verification_pid = int(
+                        (root / "activation.pid").read_text(encoding="utf-8")
+                    )
+                    os.kill(process.pid, sent_signal)
+                    stdout, stderr = communicate_bounded(process)
+
+                    self.assertEqual(
+                        process.returncode, 128 + sent_signal, stderr + stdout
+                    )
+                    self.assertIn("restoring the previous installed bytes", stderr)
+                    self.assertEqual(
+                        (installed_release / "bin/codex").read_bytes(), old_codex_bytes
+                    )
+                    self.assertEqual(receipt_path.read_bytes(), old_receipt_bytes)
+                    self.assertEqual(os.readlink(current), old_current_target)
+                    self.assertEqual(os.readlink(visible), old_visible_target)
+                    self.assertEqual(
+                        subprocess.run(
+                            [visible, "--version"],
+                            capture_output=True,
+                            text=True,
+                            check=True,
+                        ).stdout,
+                        f"codex-cli {version}\n",
+                    )
+                    wait_for_process_exit(verification_pid)
+                    wait_for_process_group_exit(process.pid)
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate(timeout=2)
 
     def test_activation_failure_restores_previous_current_and_visible_links(
         self,
@@ -1261,7 +1467,7 @@ def prepare_installer(
     selector: str | None = "stable",
     inventory: list[dict[str, object]] | None = None,
     inventory_pages: list[object] | None = None,
-    exact: dict[str, object] | str | None = None,
+    exact: dict[str, object] | str | bytes | None = None,
     channel: str = "",
     protocol: str = "",
     installer_digest: str = "",
@@ -1274,8 +1480,12 @@ def prepare_installer(
     fake_bin.mkdir(parents=True, exist_ok=True)
     metadata_dir = root / "metadata"
     metadata_dir.mkdir(exist_ok=True)
-    exact_document = exact if isinstance(exact, str) else json.dumps(exact or {})
-    (metadata_dir / "exact.json").write_text(exact_document, encoding="utf-8")
+    exact_path = metadata_dir / "exact.json"
+    if isinstance(exact, bytes):
+        exact_path.write_bytes(exact)
+    else:
+        exact_document = exact if isinstance(exact, str) else json.dumps(exact or {})
+        exact_path.write_text(exact_document, encoding="utf-8")
     pages = inventory_pages if inventory_pages is not None else [inventory or []]
     for page_number, page_document in enumerate(pages, start=1):
         (metadata_dir / f"page-{page_number}.json").write_text(
@@ -1506,9 +1716,9 @@ def create_release_assets(
         counter = root / "candidate-invocations"
         activation_behavior = ""
         if fail_during_activation:
-            activation_behavior = 'if [ "$count" -ge 2 ]; then exit 1; fi'
+            activation_behavior = 'if [ "$count" -ge 3 ]; then exit 1; fi'
         else:
-            activation_behavior = f"""if [ "$count" -ge 2 ]; then
+            activation_behavior = f"""if [ "$count" -ge 3 ]; then
   printf '%s\\n' "$$" >'{root / "activation.pid"}'
   : >'{root / "activation.ready"}'
   IFS= read -r _continue <"$CODEX_TEST_ACTIVATION_GATE"

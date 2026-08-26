@@ -41,6 +41,11 @@ cleanup_done=false
 active_reclaim_marker=""
 active_reclaim_guard=""
 activation_rollback_pending=false
+active_stage_release=""
+release_replacement_pending=false
+replaced_release_dir=""
+replaced_release_backup=""
+replaced_release_existed=false
 
 step() {
   printf '==> %s\n' "$1"
@@ -52,6 +57,20 @@ warn() {
 
 validate_version() {
   version="$1"
+  if printf '%s' "$version" | LC_ALL=C od -An -v -tu1 | LC_ALL=C awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i + 0 == 10 || $i + 0 == 13) {
+          found = 1
+          exit
+        }
+      }
+    }
+    END { exit found ? 0 : 1 }
+  '; then
+    echo "Invalid Electivus release version: values must not contain CR or LF bytes." >&2
+    return 1
+  fi
   version_bytes="$(printf '%s' "$version" | LC_ALL=C wc -c | tr -d ' ')"
   if [ "$version_bytes" -gt 128 ]; then
     echo "Invalid Electivus release version: values must not exceed the 128-byte safety limit." >&2
@@ -258,6 +277,32 @@ download_text() {
   url="$1"
   output="$2"
   download_file "$url" "$output" "$METADATA_MAX_BYTES"
+}
+
+metadata_file_contains_nul() {
+  metadata_path="$1"
+
+  LC_ALL=C od -An -v -tu1 "$metadata_path" | LC_ALL=C awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i + 0 == 0) {
+          found = 1
+          exit
+        }
+      }
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+reject_nul_metadata() {
+  metadata_path="$1"
+  description="$2"
+
+  if metadata_file_contains_nul "$metadata_path"; then
+    echo "$description contains a forbidden NUL byte." >&2
+    return 1
+  fi
 }
 
 parse_release_metadata() {
@@ -943,6 +988,7 @@ resolve_release() {
       echo "Could not fetch published Electivus release metadata for $requested_tag." >&2
       return 1
     fi
+    reject_nul_metadata "$metadata_path" "$requested_tag metadata" || return 1
     release_json="$(cat "$metadata_path")"
     records="$(parse_release_document "$release_json" "$requested_tag" '{')" || return 1
     select_release_from_records "$records" || return 1
@@ -958,6 +1004,7 @@ resolve_release() {
         echo "Could not fetch bounded Electivus release inventory page $page." >&2
         return 1
       fi
+      reject_nul_metadata "$metadata_path" "Electivus release inventory page $page" || return 1
       release_json="$(cat "$metadata_path")"
       page_records="$(parse_release_document "$release_json" "Electivus release inventory page $page" '[')" || return 1
       page_count="$(printf '%s\n' "$page_records" | awk -F '|' '$1 == "release" { count++ } END { print count + 0 }')"
@@ -1141,9 +1188,6 @@ load_current_managed_receipt() {
   if version_is_prerelease "$receipt_version"; then
     [ "$receipt_channel" = "pre-release" ] || return 0
   fi
-  receipt_binary_version="$(current_installed_version)"
-  [ "$receipt_binary_version" = "$receipt_version" ] || return 0
-
   installed_managed_version="$receipt_version"
   installed_managed_channel="$receipt_channel"
 }
@@ -1200,11 +1244,11 @@ bind_installer_provenance() {
 }
 
 receipt_matches() {
-  release_dir="$1"
-  expected_receipt="$2"
+  receipt_release_dir="$1"
+  receipt_expected_path="$2"
 
-  [ -f "$release_dir/installation-receipt.json" ] &&
-    cmp -s "$release_dir/installation-receipt.json" "$expected_receipt"
+  [ -f "$receipt_release_dir/installation-receipt.json" ] &&
+    cmp -s "$receipt_release_dir/installation-receipt.json" "$receipt_expected_path"
 }
 
 file_sha256() {
@@ -1926,15 +1970,20 @@ handle_conflicting_install() {
 }
 
 install_package_release() {
-  release_dir="$1"
-  archive_path="$2"
-  receipt_path="$3"
-  stage_release="$RELEASES_DIR/.staging.$(basename "$release_dir").$$"
+  install_release_dir="$1"
+  install_archive_path="$2"
+  install_receipt_path="$3"
+  install_expected_version="$4"
+  install_expected_target="$5"
+  install_layout="$6"
+  stage_release="$RELEASES_DIR/.staging.$(basename "$install_release_dir").$$"
+  backup_release="$RELEASES_DIR/.rollback.$install_expected_version.$install_expected_target.$$"
 
-  mkdir -p "$RELEASES_DIR" "$(dirname "$release_dir")"
+  mkdir -p "$RELEASES_DIR" "$(dirname "$install_release_dir")"
   rm -rf "$stage_release"
   mkdir -p "$stage_release"
-  tar -xzf "$archive_path" -C "$stage_release"
+  active_stage_release="$stage_release"
+  tar -xzf "$install_archive_path" -C "$stage_release"
   chmod 0755 \
     "$stage_release/bin/codex" \
     "$stage_release/bin/codex-code-mode-host" \
@@ -1943,12 +1992,67 @@ install_package_release() {
     chmod 0755 "$stage_release/codex-resources/bwrap"
   fi
   ln -sf "bin/codex" "$stage_release/codex"
-  cp "$receipt_path" "$stage_release/installation-receipt.json"
+  cp "$install_receipt_path" "$stage_release/installation-receipt.json"
 
-  if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
-    rm -rf "$release_dir"
+  if ! release_contents_are_complete \
+    "$stage_release" \
+    "$install_expected_version" \
+    "$install_expected_target" \
+    "$install_layout" \
+    "$install_receipt_path"; then
+    echo "Downloaded Electivus Codex package did not verify as release $install_expected_version." >&2
+    return 1
   fi
-  mv "$stage_release" "$release_dir"
+
+  replaced_release_dir="$install_release_dir"
+  replaced_release_backup="$backup_release"
+  replaced_release_existed=false
+  release_replacement_pending=true
+  rm -rf "$backup_release"
+  if [ -e "$install_release_dir" ] || [ -L "$install_release_dir" ]; then
+    replaced_release_existed=true
+    mv "$install_release_dir" "$backup_release"
+  fi
+  if ! mv "$stage_release" "$install_release_dir"; then
+    rollback_release_replacement
+    return 1
+  fi
+  active_stage_release=""
+}
+
+release_contents_are_complete() {
+  checked_release_dir="$1"
+  checked_expected_version="$2"
+  checked_expected_target="$3"
+  checked_layout="$4"
+  checked_expected_receipt="$5"
+
+  [ -d "$checked_release_dir" ] || return 1
+
+  case "$checked_layout" in
+    package)
+      [ -f "$checked_release_dir/codex-package.json" ] &&
+        [ -x "$checked_release_dir/bin/codex" ] &&
+        [ -x "$checked_release_dir/bin/codex-code-mode-host" ] &&
+        [ -x "$checked_release_dir/codex" ] &&
+        [ -x "$checked_release_dir/codex-path/rg" ] ||
+        return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  case "$checked_layout:$checked_expected_target" in
+    package:*linux*)
+      [ -x "$checked_release_dir/codex-resources/bwrap" ] || return 1
+      ;;
+  esac
+
+  receipt_matches "$checked_release_dir" "$checked_expected_receipt" || return 1
+
+  installed_version="$(version_from_binary "$checked_release_dir/bin/codex" || version_from_binary "$checked_release_dir/codex" || true)"
+  [ "$installed_version" = "$checked_expected_version" ]
 }
 
 release_dir_is_complete() {
@@ -1958,35 +2062,47 @@ release_dir_is_complete() {
   layout="$4"
   expected_receipt="$5"
 
-  [ -d "$release_dir" ] &&
-    [ "$(basename "$release_dir")" = "$expected_target" ] &&
+  [ "$(basename "$release_dir")" = "$expected_target" ] &&
     [ "$(basename "$(dirname "$release_dir")")" = "$expected_version" ] ||
     return 1
 
-  case "$layout" in
-    package)
-      [ -f "$release_dir/codex-package.json" ] &&
-        [ -x "$release_dir/bin/codex" ] &&
-        [ -x "$release_dir/bin/codex-code-mode-host" ] &&
-        [ -x "$release_dir/codex" ] &&
-        [ -x "$release_dir/codex-path/rg" ] ||
-        return 1
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  release_contents_are_complete \
+    "$release_dir" \
+    "$expected_version" \
+    "$expected_target" \
+    "$layout" \
+    "$expected_receipt"
+}
 
-  case "$layout:$expected_target" in
-    package:*linux*)
-      [ -x "$release_dir/codex-resources/bwrap" ] || return 1
-      ;;
-  esac
+rollback_release_replacement() {
+  [ "$release_replacement_pending" = true ] || return 0
 
-  receipt_matches "$release_dir" "$expected_receipt" || return 1
+  warn "Release replacement failed; restoring the previous installed bytes."
+  if [ "$replaced_release_existed" = true ]; then
+    if [ -n "$replaced_release_backup" ] &&
+      { [ -e "$replaced_release_backup" ] || [ -L "$replaced_release_backup" ]; }; then
+      rm -rf "$replaced_release_dir"
+      mv "$replaced_release_backup" "$replaced_release_dir"
+    fi
+  elif [ -n "$replaced_release_dir" ]; then
+    rm -rf "$replaced_release_dir"
+  fi
+  release_replacement_pending=false
+  replaced_release_dir=""
+  replaced_release_backup=""
+  replaced_release_existed=false
+}
 
-  installed_version="$(version_from_binary "$release_dir/bin/codex" || version_from_binary "$release_dir/codex" || true)"
-  [ "$installed_version" = "$expected_version" ]
+commit_release_replacement() {
+  [ "$release_replacement_pending" = true ] || return 0
+
+  if [ "$replaced_release_existed" = true ]; then
+    rm -rf "$replaced_release_backup"
+  fi
+  release_replacement_pending=false
+  replaced_release_dir=""
+  replaced_release_backup=""
+  replaced_release_existed=false
 }
 
 save_activation_path() {
@@ -2149,6 +2265,11 @@ cleanup() {
   stop_active_download
   stop_active_verification
   rollback_activation
+  rollback_release_replacement
+  if [ -n "$active_stage_release" ]; then
+    rm -rf "$active_stage_release"
+    active_stage_release=""
+  fi
   release_install_lock
   if [ -n "$tmp_dir" ]; then
     rm -rf "$tmp_dir"
@@ -2176,7 +2297,7 @@ write_installation_receipt \
   "$expected_receipt" \
   "$package_metadata_digest" \
   "$resolved_installer_digest"
-current_version="$(current_installed_version)"
+current_version="$installed_managed_version"
 
 if [ -n "$current_version" ] && [ "$current_version" != "$resolved_version" ]; then
   step "Updating Codex CLI from $current_version to $resolved_version"
@@ -2194,39 +2315,47 @@ detect_conflicting_install
 acquire_install_lock
 cleanup_stale_install_artifacts
 
-if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target" "$install_layout" "$expected_receipt"; then
-  if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
+if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
+  if receipt_matches "$release_dir" "$expected_receipt"; then
+    warn "The installed release cannot be authenticated from its archive receipt alone; safely reinstalling."
+  else
     warn "Found incomplete or provenance-mismatched Electivus release at $release_dir; reinstalling."
   fi
-
-  archive_path="$tmp_dir/$asset"
-  checksum_path="$tmp_dir/$checksum_asset"
-  installer_checksum_path="$tmp_dir/$installer_checksum_asset"
-
-  step "Downloading Electivus checksum manifests"
-  checksum_digest="$(release_asset_digest "$checksum_asset")"
-  download_file "$checksum_url" "$checksum_path" "$MANIFEST_MAX_BYTES"
-  verify_archive_digest "$checksum_path" "$checksum_digest"
-  verify_manifest_assets \
-    "$checksum_path" \
-    codex-package-aarch64-pc-windows-msvc.tar.gz \
-    codex-package-aarch64-unknown-linux-musl.tar.gz \
-    codex-package-x86_64-pc-windows-msvc.tar.gz \
-    codex-package-x86_64-unknown-linux-musl.tar.gz
-
-  installer_checksum_digest="$(release_asset_digest "$installer_checksum_asset")"
-  download_file "$installer_checksum_url" "$installer_checksum_path" "$MANIFEST_MAX_BYTES"
-  verify_archive_digest "$installer_checksum_path" "$installer_checksum_digest"
-  verify_manifest_assets "$installer_checksum_path" install.sh install.ps1
-
-  expected_digest="$(package_archive_digest "$asset" "$checksum_path")"
-  step "Downloading Electivus Codex CLI"
-  download_file "$download_url" "$archive_path" "$PACKAGE_MAX_BYTES"
-  verify_archive_digest "$archive_path" "$expected_digest"
-
-  step "Installing Electivus standalone package to $release_dir"
-  install_package_release "$release_dir" "$archive_path" "$expected_receipt"
 fi
+
+archive_path="$tmp_dir/$asset"
+checksum_path="$tmp_dir/$checksum_asset"
+installer_checksum_path="$tmp_dir/$installer_checksum_asset"
+
+step "Downloading Electivus checksum manifests"
+checksum_digest="$(release_asset_digest "$checksum_asset")"
+download_file "$checksum_url" "$checksum_path" "$MANIFEST_MAX_BYTES"
+verify_archive_digest "$checksum_path" "$checksum_digest"
+verify_manifest_assets \
+  "$checksum_path" \
+  codex-package-aarch64-pc-windows-msvc.tar.gz \
+  codex-package-aarch64-unknown-linux-musl.tar.gz \
+  codex-package-x86_64-pc-windows-msvc.tar.gz \
+  codex-package-x86_64-unknown-linux-musl.tar.gz
+
+installer_checksum_digest="$(release_asset_digest "$installer_checksum_asset")"
+download_file "$installer_checksum_url" "$installer_checksum_path" "$MANIFEST_MAX_BYTES"
+verify_archive_digest "$installer_checksum_path" "$installer_checksum_digest"
+verify_manifest_assets "$installer_checksum_path" install.sh install.ps1
+
+expected_digest="$(package_archive_digest "$asset" "$checksum_path")"
+step "Downloading Electivus Codex CLI"
+download_file "$download_url" "$archive_path" "$PACKAGE_MAX_BYTES"
+verify_archive_digest "$archive_path" "$expected_digest"
+
+step "Installing Electivus standalone package to $release_dir"
+install_package_release \
+  "$release_dir" \
+  "$archive_path" \
+  "$expected_receipt" \
+  "$resolved_version" \
+  "$vendor_target" \
+  "$install_layout"
 if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target" "$install_layout" "$expected_receipt"; then
   echo "Installed Electivus Codex command or receipt did not match expected release $resolved_version." >&2
   exit 1
@@ -2234,6 +2363,7 @@ fi
 load_current_managed_receipt
 refuse_managed_downgrade
 activate_release "$release_dir"
+commit_release_replacement
 add_to_path
 release_install_lock
 handle_conflicting_install
