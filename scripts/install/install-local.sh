@@ -10,6 +10,8 @@ RELEASES_DIR="$STANDALONE_ROOT/releases"
 CURRENT_LINK="$STANDALONE_ROOT/current"
 LOCK_FILE="$STANDALONE_ROOT/install.lock"
 LOCK_PATH="$STANDALONE_ROOT/install.lock.d"
+RELEASE_RECEIPT_KEY="$STANDALONE_ROOT/local-install-receipt.key"
+RELEASE_RECEIPT_NAME=".codex-local-install-receipt.json"
 LOCK_STALE_AFTER_SECS=600
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd)
@@ -40,9 +42,11 @@ versioned_codex_rs_dir=""
 versioned_manifest=""
 upstream_build_version=""
 install_lockf_pid=""
+install_lockf_attempt_dir=""
 install_lockf_ready=""
 install_lockf_control=""
 version_lockf_pid=""
+version_lockf_attempt_dir=""
 version_lockf_ready=""
 version_lockf_control=""
 active_child_pid=""
@@ -51,6 +55,8 @@ active_child_ready=""
 child_sequence=0
 supervisor_script=""
 activation_pending=false
+activation_current_updated=false
+activation_visible_updated=false
 active_reclaim_marker=""
 active_reclaim_guard=""
 use_upstream_version=false
@@ -753,7 +759,6 @@ start_lockf_holder() {
   lockf_holder_pid=""
 
   require_command mkfifo
-  rm -f "$holder_ready_file" "$holder_control_fifo"
   mkfifo "$holder_control_fifo"
   # shellcheck disable=SC2016 # $1 and $2 belong to the lockf-held child shell.
   start_supervised_child lockf-holder lockf -k "$holder_lock_file" sh -c '
@@ -766,7 +771,7 @@ start_lockf_holder() {
     if ! kill -0 "$lockf_holder_pid" 2>/dev/null; then
       lockf_status=0
       wait "$lockf_holder_pid" || lockf_status=$?
-      rm -f "$holder_control_fifo"
+      rm -f "$holder_ready_file" "$holder_control_fifo"
       echo "lockf failed to acquire $holder_lock_file (exit $lockf_status)." >&2
       lockf_holder_pid=""
       active_child_pid=""
@@ -777,10 +782,6 @@ start_lockf_holder() {
     fi
     sleep 0.1
   done
-  rm -f "$active_child_ready" 2>/dev/null || true
-  active_child_pid=""
-  active_child_role=""
-  active_child_ready=""
 }
 
 acquire_version_lock() {
@@ -801,13 +802,20 @@ acquire_version_lock() {
   fi
 
   if command -v lockf >/dev/null 2>&1; then
-    version_lockf_ready="$version_state_dir/version.lockf.ready.$$"
-    version_lockf_control="$version_state_dir/version.lockf.control.$$"
+    version_lockf_attempt_dir="$(
+      mktemp -d "$version_state_dir/version.lockf-attempt.$$.XXXXXX"
+    )"
+    version_lockf_ready="$version_lockf_attempt_dir/ready"
+    version_lockf_control="$version_lockf_attempt_dir/control"
     start_lockf_holder "$version_lock_file" "$version_lockf_ready" "$version_lockf_control"
-    version_lockf_pid="$lockf_holder_pid"
+    version_lockf_pid="$active_child_pid"
     lockf_holder_pid=""
-    exec 6>"$version_lockf_control"
     version_lock_kind="lockf"
+    exec 6<>"$version_lockf_control"
+    rm -f "$active_child_ready" 2>/dev/null || true
+    active_child_pid=""
+    active_child_role=""
+    active_child_ready=""
     return
   fi
 
@@ -842,10 +850,14 @@ release_version_lock() {
   if [ "$version_lock_kind" = "lockf" ]; then
     exec 6>&- 2>/dev/null || true
     if [ -n "$version_lockf_pid" ]; then
+      kill -TERM "$version_lockf_pid" 2>/dev/null || true
       wait "$version_lockf_pid" 2>/dev/null || true
     fi
   fi
   rm -f "$version_lockf_ready" "$version_lockf_control" 2>/dev/null || true
+  if [ -n "$version_lockf_attempt_dir" ]; then
+    rm -rf "$version_lockf_attempt_dir" 2>/dev/null || true
+  fi
   if [ -n "$version_lock_owner_file" ]; then
     if [ -f "$version_lock_path" ] && cmp -s "$version_lock_path" "$version_lock_owner_file"; then
       rm -f "$version_lock_path" 2>/dev/null || true
@@ -863,6 +875,7 @@ release_version_lock() {
   version_lock_kind=""
   version_lock_owner_file=""
   version_lockf_pid=""
+  version_lockf_attempt_dir=""
   version_lockf_ready=""
   version_lockf_control=""
 }
@@ -1109,13 +1122,20 @@ acquire_install_lock() {
   fi
 
   if command -v lockf >/dev/null 2>&1; then
-    install_lockf_ready="$STANDALONE_ROOT/install.lockf.ready"
-    install_lockf_control="$STANDALONE_ROOT/install.lockf.control.$$"
+    install_lockf_attempt_dir="$(
+      mktemp -d "$STANDALONE_ROOT/install.lockf-attempt.$$.XXXXXX"
+    )"
+    install_lockf_ready="$install_lockf_attempt_dir/ready"
+    install_lockf_control="$install_lockf_attempt_dir/control"
     start_lockf_holder "$LOCK_FILE" "$install_lockf_ready" "$install_lockf_control"
-    install_lockf_pid="$lockf_holder_pid"
+    install_lockf_pid="$active_child_pid"
     lockf_holder_pid=""
-    exec 7>"$install_lockf_control"
     lock_kind="lockf"
+    exec 7<>"$install_lockf_control"
+    rm -f "$active_child_ready" 2>/dev/null || true
+    active_child_pid=""
+    active_child_role=""
+    active_child_ready=""
     return
   fi
 
@@ -1151,10 +1171,14 @@ release_install_lock() {
   if [ "$lock_kind" = "lockf" ]; then
     exec 7>&- 2>/dev/null || true
     if [ -n "$install_lockf_pid" ]; then
+      kill -TERM "$install_lockf_pid" 2>/dev/null || true
       wait "$install_lockf_pid" 2>/dev/null || true
     fi
   fi
   rm -f "$install_lockf_ready" "$install_lockf_control" 2>/dev/null || true
+  if [ -n "$install_lockf_attempt_dir" ]; then
+    rm -rf "$install_lockf_attempt_dir" 2>/dev/null || true
+  fi
   if [ -n "$lock_owner_file" ]; then
     if [ -f "$LOCK_PATH" ] && cmp -s "$LOCK_PATH" "$lock_owner_file"; then
       rm -f "$LOCK_PATH" 2>/dev/null || true
@@ -1172,6 +1196,7 @@ release_install_lock() {
   lock_kind=""
   lock_owner_file=""
   install_lockf_pid=""
+  install_lockf_attempt_dir=""
   install_lockf_ready=""
   install_lockf_control=""
 }
@@ -1193,10 +1218,23 @@ replace_path_with_symlink() {
   link_path="$1"
   link_target="$2"
   tmp_link="$3"
+  installed_identity="$4"
   backup_path="$(dirname "$link_path")/.swap-backup.$(basename "$link_path").$$"
 
   rm -rf "$tmp_link" "$backup_path"
   ln -s "$link_target" "$tmp_link"
+  "$python_bin" - "$tmp_link" "$installed_identity" <<'PY'
+from pathlib import Path
+import sys
+
+
+path_stat = Path(sys.argv[1]).lstat()
+Path(sys.argv[2]).write_text(
+    f"{path_stat.st_dev}:{path_stat.st_ino}:"
+    f"{path_stat.st_mode}\n",
+    encoding="utf-8",
+)
+PY
 
   if mv -Tf "$tmp_link" "$link_path" 2>/dev/null; then
     return 0
@@ -1301,6 +1339,89 @@ child = subprocess.Popen(
 child_group = child.pid
 ready_path.write_text(f"{child.pid}\n", encoding="utf-8")
 
+linux_boot_id = None
+if sys.platform.startswith("linux"):
+    try:
+        linux_boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        linux_boot_id = None
+
+
+def process_table():
+    table = {}
+    if linux_boot_id is not None:
+        for stat_path in Path("/proc").glob("[0-9]*/stat"):
+            try:
+                contents = stat_path.read_text()
+                fields = contents[contents.rfind(")") + 2 :].split()
+                pid = int(stat_path.parent.name)
+                table[pid] = (int(fields[1]), f"{linux_boot_id}:{fields[19]}")
+            except (IndexError, OSError, ValueError):
+                continue
+        return table
+
+    ps_path = "/bin/ps" if Path("/bin/ps").is_file() else "/usr/bin/ps"
+    try:
+        rows = subprocess.check_output(
+            [ps_path, "-axo", "pid=,ppid=,lstart="], text=True
+        ).splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return table
+    for row in rows:
+        try:
+            pid_text, parent_text, started = row.split(maxsplit=2)
+            pid = int(pid_text)
+            parent = int(parent_text)
+        except ValueError:
+            continue
+        if started:
+            table[pid] = (parent, started)
+    return table
+
+
+def descendant_identities(table):
+    children = {}
+    for pid, (parent, _identity) in table.items():
+        children.setdefault(parent, []).append(pid)
+    descendants = {}
+    pending = list(children.get(os.getpid(), []))
+    while pending:
+        pid = pending.pop()
+        entry = table.get(pid)
+        if entry is None or pid in descendants:
+            continue
+        descendants[pid] = entry[1]
+        pending.extend(children.get(pid, []))
+    return descendants
+
+
+tracked_descendants = {}
+
+
+def refresh_descendants():
+    table = process_table()
+    tracked_descendants.update(descendant_identities(table))
+    return table
+
+
+def live_tracked_descendants(table=None):
+    if table is None:
+        table = process_table()
+    return {
+        pid
+        for pid, identity in tracked_descendants.items()
+        if pid in table and table[pid][1] == identity
+    }
+
+
+def signal_tracked_descendants(signum):
+    table = refresh_descendants()
+    for pid in sorted(live_tracked_descendants(table), reverse=True):
+        try:
+            os.kill(pid, signum)
+        except ProcessLookupError:
+            pass
+
 
 def group_exists():
     try:
@@ -1323,12 +1444,17 @@ while child.poll() is None and requested_signal is None:
     time.sleep(0.01)
 
 if requested_signal is not None:
+    signal_tracked_descendants(requested_signal)
     signal_group(requested_signal)
 
 deadline = time.monotonic() + 1.0
-while child.poll() is None and time.monotonic() < deadline:
+while time.monotonic() < deadline:
+    refresh_descendants()
+    if child.poll() is not None and not live_tracked_descendants():
+        break
     time.sleep(0.01)
-if child.poll() is None or group_exists():
+if child.poll() is None or group_exists() or live_tracked_descendants():
+    signal_tracked_descendants(signal.SIGKILL)
     signal_group(signal.SIGKILL)
 child.wait()
 
@@ -1343,14 +1469,16 @@ while time.monotonic() < deadline:
         if waited_pid == 0:
             break
         reaped = True
-    if not group_exists():
+    refresh_descendants()
+    if not group_exists() and not live_tracked_descendants():
         break
     if not reaped:
+        signal_tracked_descendants(signal.SIGKILL)
         time.sleep(0.01)
 
-if group_exists():
+if group_exists() or live_tracked_descendants():
     print(
-        f"failed to terminate supervised process group {child_group}",
+        f"failed to terminate supervised process tree rooted at {child.pid}",
         file=sys.stderr,
     )
     raise SystemExit(125)
@@ -1424,7 +1552,7 @@ start_package_builder() {
     set -- "$@" --cargo "$cargo_option"
   fi
   if [ "$version_transaction_owned" = true ]; then
-    set -- "$@" --version "$upstream_build_version"
+    set -- "$@" --package-version "$upstream_build_version"
   fi
   if [ -n "${CODEX_LOCAL_RG:-}" ]; then
     set -- "$@" --rg-bin "$CODEX_LOCAL_RG"
@@ -1502,6 +1630,95 @@ release_dir_is_complete() {
   esac
 }
 
+ensure_release_receipt_key() {
+  "$python_bin" - "$RELEASE_RECEIPT_KEY" <<'PY'
+import os
+from pathlib import Path
+import secrets
+import stat
+import sys
+
+
+key_path = Path(sys.argv[1])
+try:
+    key_stat = key_path.lstat()
+except FileNotFoundError:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(key_path, flags, 0o600)
+    try:
+        key_material = secrets.token_bytes(32)
+        written = 0
+        while written < len(key_material):
+            written += os.write(descriptor, key_material[written:])
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+else:
+    if not stat.S_ISREG(key_stat.st_mode):
+        raise SystemExit(f"local release receipt key is not a regular file: {key_path}")
+    if key_stat.st_uid != os.getuid() or key_stat.st_mode & 0o077:
+        raise SystemExit(f"local release receipt key has unsafe ownership or permissions: {key_path}")
+
+key = key_path.read_bytes()
+if len(key) != 32:
+    raise SystemExit(f"local release receipt key has an invalid length: {key_path}")
+PY
+}
+
+write_release_receipt() {
+  receipt_release="$1"
+  receipt_release_name="$2"
+  receipt_target="$3"
+
+  "$python_bin" - \
+    "$RELEASE_RECEIPT_KEY" \
+    "$receipt_release" \
+    "$receipt_release_name" \
+    "$receipt_target" \
+    "$RELEASE_RECEIPT_NAME" <<'PY'
+import hashlib
+import hmac
+import json
+import os
+from pathlib import Path
+import sys
+
+
+key_path = Path(sys.argv[1])
+release_dir = Path(sys.argv[2])
+release_name = sys.argv[3]
+target = sys.argv[4]
+receipt_path = release_dir / sys.argv[5]
+if receipt_path.exists() or receipt_path.is_symlink():
+    raise SystemExit(f"package builder unexpectedly supplied a local receipt: {receipt_path}")
+metadata_hash = hashlib.sha256((release_dir / "codex-package.json").read_bytes()).hexdigest()
+payload = {
+    "packageMetadataSha256": metadata_hash,
+    "receiptVersion": 1,
+    "releaseName": release_name,
+    "target": target,
+}
+authenticated = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+receipt = {
+    **payload,
+    "hmacSha256": hmac.new(key_path.read_bytes(), authenticated, hashlib.sha256).hexdigest(),
+}
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+flags |= getattr(os, "O_NOFOLLOW", 0)
+descriptor = os.open(receipt_path, flags, 0o644)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        json.dump(receipt, stream, separators=(",", ":"), sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+except BaseException:
+    receipt_path.unlink(missing_ok=True)
+    raise
+PY
+}
+
 save_activation_path() {
   saved_path="$1"
   saved_name="$2"
@@ -1522,32 +1739,120 @@ save_activation_path() {
 restore_activation_path() {
   restored_path="$1"
   restored_name="$2"
-  restored_type="$(cat "$tmp_dir/$restored_name.type")"
+  "$python_bin" - \
+    "$restored_path" \
+    "$restored_name" \
+    "$tmp_dir/$restored_name.type" \
+    "$tmp_dir/$restored_name.value" \
+    "$tmp_dir/$restored_name.installed-identity" \
+    "$$" <<'PY'
+import errno
+import os
+from pathlib import Path
+import shutil
+import stat
+import sys
 
-  rm -f "$restored_path" || return 1
-  case "$restored_type" in
-    link)
-      ln -s "$(cat "$tmp_dir/$restored_name.value")" "$restored_path" || return 1
-      ;;
-    file)
-      cp -p "$tmp_dir/$restored_name.value" "$restored_path" || return 1
-      ;;
-    absent) ;;
-  esac
+
+path = Path(sys.argv[1])
+label = sys.argv[2]
+saved_type_path = Path(sys.argv[3])
+saved_value_path = Path(sys.argv[4])
+identity_path = Path(sys.argv[5])
+installer_pid = sys.argv[6]
+recovery_dir = path.parent / f".activation-recovery.{path.name}.{installer_pid}"
+
+
+def fail(message: str) -> None:
+    print(message, file=sys.stderr)
+    print(f"Activation recovery material retained at: {recovery_dir}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+try:
+    recovery_dir.mkdir(mode=0o700)
+except FileExistsError:
+    fail(f"Activation recovery path already exists for {label}; refusing to overwrite it.")
+shutil.copy2(saved_type_path, recovery_dir / "previous.type")
+if saved_value_path.exists():
+    shutil.copy2(saved_value_path, recovery_dir / "previous.value")
+shutil.copy2(identity_path, recovery_dir / "installed-identity")
+
+try:
+    current_stat = path.lstat()
+except FileNotFoundError:
+    fail(f"Concurrent activation edit detected at {path}: installer-owned path is absent.")
+
+claimed_path = recovery_dir / "claimed-value"
+os.rename(path, claimed_path)
+claimed_stat = claimed_path.lstat()
+claimed_identity = (
+    f"{claimed_stat.st_dev}:{claimed_stat.st_ino}:"
+    f"{claimed_stat.st_mode}"
+)
+expected_identity = identity_path.read_text(encoding="utf-8").strip()
+
+
+def put_claim_back() -> None:
+    try:
+        if stat.S_ISLNK(claimed_stat.st_mode):
+            os.symlink(os.readlink(claimed_path), path)
+        elif stat.S_ISREG(claimed_stat.st_mode):
+            os.link(claimed_path, path, follow_symlinks=False)
+        else:
+            fail(f"Concurrent activation edit at {path} has an unsupported file type.")
+    except FileExistsError:
+        fail(f"Another activation edit appeared while preserving {path}.")
+    claimed_path.unlink()
+
+
+if claimed_identity != expected_identity:
+    put_claim_back()
+    fail(f"Concurrent activation edit detected at {path}; preserving the current value.")
+
+saved_type = saved_type_path.read_text(encoding="utf-8").strip()
+try:
+    if saved_type == "link":
+        os.symlink(saved_value_path.read_text(encoding="utf-8").rstrip("\n"), path)
+    elif saved_type == "file":
+        previous_copy = recovery_dir / "previous-file"
+        shutil.copy2(saved_value_path, previous_copy)
+        os.link(previous_copy, path)
+        previous_copy.unlink()
+    elif saved_type != "absent":
+        fail(f"Unknown saved activation type for {label}: {saved_type}")
+except FileExistsError:
+    fail(f"Concurrent activation edit detected while restoring {path}; preserving it.")
+except OSError as error:
+    if error.errno == errno.EEXIST:
+        fail(f"Concurrent activation edit detected while restoring {path}; preserving it.")
+    fail(f"Failed to restore {path}: {error}")
+
+claimed_path.unlink()
+shutil.rmtree(recovery_dir)
+PY
 }
 
 update_current_link() {
   release_dir="$1"
   tmp_link="$STANDALONE_ROOT/.current.$$"
 
-  replace_path_with_symlink "$CURRENT_LINK" "$release_dir" "$tmp_link"
+  replace_path_with_symlink \
+    "$CURRENT_LINK" \
+    "$release_dir" \
+    "$tmp_link" \
+    "$tmp_dir/current.installed-identity"
 }
 
 update_visible_command() {
   mkdir -p "$BIN_DIR"
   tmp_link="$BIN_DIR/.codex.$$"
 
-  replace_path_with_symlink "$BIN_PATH" "$CURRENT_LINK/bin/codex" "$tmp_link"
+  replace_path_with_symlink \
+    "$BIN_PATH" \
+    "$CURRENT_LINK/bin/codex" \
+    "$tmp_link" \
+    "$tmp_dir/visible-codex.installed-identity"
 }
 
 verify_visible_command() {
@@ -1565,8 +1870,14 @@ rollback_pending_activation() {
 
   warn "Activation failed; restoring the previous runnable installation."
   rollback_failed=0
-  restore_activation_path "$CURRENT_LINK" current || rollback_failed=1
-  restore_activation_path "$BIN_PATH" visible-codex || rollback_failed=1
+  if [ "$activation_current_updated" = true ]; then
+    restore_activation_path "$CURRENT_LINK" current || rollback_failed=1
+  fi
+  if [ "$activation_visible_updated" = true ]; then
+    restore_activation_path "$BIN_PATH" visible-codex || rollback_failed=1
+  fi
+  activation_current_updated=false
+  activation_visible_updated=false
   if [ "$rollback_failed" -ne 0 ]; then
     warn "Failed to restore every prior activation path; inspect $CURRENT_LINK and $BIN_PATH manually."
     return 1
@@ -1579,10 +1890,20 @@ activate_release() {
   save_activation_path "$BIN_PATH" visible-codex
   activation_pending=true
 
-  if update_current_link "$release_dir" &&
-    update_visible_command &&
-    verify_visible_command; then
+  if ! update_current_link "$release_dir"; then
+    rollback_pending_activation || true
+    return 1
+  fi
+  activation_current_updated=true
+  if ! update_visible_command; then
+    rollback_pending_activation || true
+    return 1
+  fi
+  activation_visible_updated=true
+  if verify_visible_command; then
     activation_pending=false
+    activation_current_updated=false
+    activation_visible_updated=false
     return 0
   fi
 
@@ -1593,20 +1914,40 @@ activate_release() {
 prune_old_releases() {
   active_release="$1"
 
-  "$python_bin" - "$RELEASES_DIR" "$active_release" "$platform_target" <<'PY'
+  "$python_bin" - \
+    "$RELEASES_DIR" \
+    "$active_release" \
+    "$platform_target" \
+    "$RELEASE_RECEIPT_KEY" \
+    "$RELEASE_RECEIPT_NAME" <<'PY'
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import sys
 
 
 releases_dir = Path(sys.argv[1]).resolve()
 active_release = Path(sys.argv[2]).resolve()
 expected_target = sys.argv[3]
+receipt_key_path = Path(sys.argv[4])
+receipt_name = sys.argv[5]
 if active_release.parent != releases_dir or not active_release.is_dir():
     raise SystemExit(f"refusing to prune around invalid active release: {active_release}")
+key_stat = receipt_key_path.lstat()
+if (
+    not stat.S_ISREG(key_stat.st_mode)
+    or key_stat.st_uid != os.getuid()
+    or key_stat.st_mode & 0o077
+):
+    raise SystemExit(f"refusing to prune with unsafe receipt key: {receipt_key_path}")
+receipt_key = receipt_key_path.read_bytes()
+if len(receipt_key) != 32:
+    raise SystemExit(f"refusing to prune with invalid receipt key: {receipt_key_path}")
 
 owned_name = re.compile(
     rf"^local-debug-{re.escape(expected_target)}-(\d{{14}})-([1-9]\d*)$"
@@ -1620,8 +1961,31 @@ def validated_owned_release(path: Path):
     if match is None:
         return None
     try:
-        metadata = json.loads((path / "codex-package.json").read_text("utf-8"))
+        metadata_path = path / "codex-package.json"
+        metadata_bytes = metadata_path.read_bytes()
+        metadata = json.loads(metadata_bytes)
+        receipt_path = path / receipt_name
+        receipt_stat = receipt_path.lstat()
+        if not stat.S_ISREG(receipt_stat.st_mode):
+            return None
+        receipt = json.loads(receipt_path.read_text("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    payload = {
+        "packageMetadataSha256": hashlib.sha256(metadata_bytes).hexdigest(),
+        "receiptVersion": 1,
+        "releaseName": path.name,
+        "target": expected_target,
+    }
+    if set(receipt) != {*payload, "hmacSha256"} or any(
+        receipt.get(key) != value for key, value in payload.items()
+    ):
+        return None
+    authenticated = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    expected_hmac = hmac.new(receipt_key, authenticated, hashlib.sha256).hexdigest()
+    if not isinstance(receipt["hmacSha256"], str) or not hmac.compare_digest(
+        receipt["hmacSha256"], expected_hmac
+    ):
         return None
     expected_metadata = {
         "layoutVersion": 1,
@@ -1741,6 +2105,7 @@ trap 'handle_signal 129' HUP
 
 acquire_install_lock
 cleanup_stale_install_artifacts
+ensure_release_receipt_key
 step "Installing local debug build to $release_dir"
 stage_release="$RELEASES_DIR/.staging.$release_name.$$"
 if [ "$use_upstream_version" = true ]; then
@@ -1756,6 +2121,7 @@ if ! release_dir_is_complete "$stage_release" "$platform_target"; then
   echo "Local release validation failed." >&2
   exit 1
 fi
+write_release_receipt "$stage_release" "$release_name" "$platform_target"
 if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
   rm -rf "$release_dir"
 fi
