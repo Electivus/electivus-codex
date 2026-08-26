@@ -52,11 +52,12 @@ Usage: install-local.sh [--use-upstream-version] [--upstream-version VERSION]
 
   --use-upstream-version   Discover the greatest upstream Release baseline in
                            the current commit's ancestry and use it for the build.
-  --upstream-version VER   Use an explicit bare SemVer Release baseline. This
-                           overrides CODEX_UPSTREAM_VERSION and enables versioning.
+  --upstream-version VER   On Unix, use an explicit bare SemVer Release baseline.
+                           This overrides CODEX_UPSTREAM_VERSION and enables
+                           versioning.
 
-CODEX_UPSTREAM_VERSION supplies a validated override and enables versioning when
-no explicit version argument is present.
+On Unix, CODEX_UPSTREAM_VERSION supplies a validated override and enables
+versioning when no explicit version argument is present.
 
 On Windows Git Bash/MSYS/Cygwin, this delegates to install-local.ps1.
 EOF
@@ -1102,6 +1103,40 @@ release_dir_is_complete() {
   esac
 }
 
+save_activation_path() {
+  saved_path="$1"
+  saved_name="$2"
+  saved_type_path="$tmp_dir/$saved_name.type"
+  saved_value_path="$tmp_dir/$saved_name.value"
+
+  if [ -L "$saved_path" ]; then
+    printf 'link\n' >"$saved_type_path"
+    readlink "$saved_path" >"$saved_value_path"
+  elif [ -f "$saved_path" ]; then
+    printf 'file\n' >"$saved_type_path"
+    cp -p "$saved_path" "$saved_value_path"
+  else
+    printf 'absent\n' >"$saved_type_path"
+  fi
+}
+
+restore_activation_path() {
+  restored_path="$1"
+  restored_name="$2"
+  restored_type="$(cat "$tmp_dir/$restored_name.type")"
+
+  rm -f "$restored_path" || return 1
+  case "$restored_type" in
+    link)
+      ln -s "$(cat "$tmp_dir/$restored_name.value")" "$restored_path" || return 1
+      ;;
+    file)
+      cp -p "$tmp_dir/$restored_name.value" "$restored_path" || return 1
+      ;;
+    absent) ;;
+  esac
+}
+
 update_current_link() {
   release_dir="$1"
   tmp_link="$STANDALONE_ROOT/.current.$$"
@@ -1118,6 +1153,27 @@ update_visible_command() {
 
 verify_visible_command() {
   "$BIN_PATH" --version >/dev/null
+}
+
+activate_release() {
+  release_dir="$1"
+  save_activation_path "$CURRENT_LINK" current
+  save_activation_path "$BIN_PATH" visible-codex
+
+  if update_current_link "$release_dir" &&
+    update_visible_command &&
+    verify_visible_command; then
+    return 0
+  fi
+
+  warn "Activation failed; restoring the previous runnable installation."
+  rollback_failed=0
+  restore_activation_path "$CURRENT_LINK" current || rollback_failed=1
+  restore_activation_path "$BIN_PATH" visible-codex || rollback_failed=1
+  if [ "$rollback_failed" -ne 0 ]; then
+    warn "Failed to restore every prior activation path; inspect $CURRENT_LINK and $BIN_PATH manually."
+  fi
+  return 1
 }
 
 prune_old_releases() {
@@ -1167,6 +1223,16 @@ if [ "${CODEX_UPSTREAM_VERSION+x}" = x ]; then
 fi
 
 if is_windows_uname; then
+  if [ "$upstream_version_override_set" = true ]; then
+    echo "--upstream-version is Unix-only and cannot be delegated to install-local.ps1 on Windows Git Bash/MSYS/Cygwin." >&2
+    echo "Windows support is deferred; see Electivus/electivus-codex issue #167." >&2
+    exit 1
+  fi
+  if [ "${CODEX_UPSTREAM_VERSION+x}" = x ]; then
+    echo "CODEX_UPSTREAM_VERSION is Unix-only and cannot be delegated to install-local.ps1 on Windows Git Bash/MSYS/Cygwin." >&2
+    echo "Windows support is deferred; see Electivus/electivus-codex issue #167." >&2
+    exit 1
+  fi
   run_windows_local_installer "$@"
   exit $?
 fi
@@ -1220,10 +1286,8 @@ if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
   rm -rf "$release_dir"
 fi
 mv "$stage_release" "$release_dir"
-update_current_link "$release_dir"
-update_visible_command
+activate_release "$release_dir"
 add_to_path
-verify_visible_command
 prune_old_releases "$release_dir"
 release_install_lock
 printf 'Activated local release: %s\n' "$release_name"

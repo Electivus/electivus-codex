@@ -128,6 +128,57 @@ class InstallLocalShTest(unittest.TestCase):
             self.assertIn("tag prefixes are not accepted", result.stderr)
             self.assertFalse((invalid_root / "build.json").exists())
 
+    def test_windows_delegation_rejects_unix_only_version_sources(self) -> None:
+        cases = (
+            ("argument", ["--upstream-version", "1.2.3"], {}),
+            ("equals-argument", ["--upstream-version=1.2.3"], {}),
+            ("environment", [], {"CODEX_UPSTREAM_VERSION": "1.2.3"}),
+        )
+        for name, arguments, extra_env in cases:
+            with (
+                self.subTest(name=name),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                repo = create_repo(root)
+                env = installer_env(root, repo, extra_env=extra_env)
+                fake_bin = Path(env["PATH"].split(os.pathsep, 1)[0])
+                delegated = root / "powershell-delegated"
+                write_executable(
+                    fake_bin / "uname",
+                    '#!/bin/sh\ncase "$1" in -s) echo MINGW64_NT-10.0;; '
+                    "-m) echo x86_64;; *) echo MINGW64_NT-10.0;; esac\n",
+                )
+                write_executable(
+                    fake_bin / "pwsh",
+                    '#!/bin/sh\ntouch "$CODEX_TEST_DELEGATED"\nexit 97\n',
+                )
+                env["CODEX_TEST_DELEGATED"] = str(delegated)
+
+                result = subprocess.run(
+                    [
+                        "sh",
+                        str(repo / "scripts/install/install-local.sh"),
+                        *arguments,
+                    ],
+                    cwd=repo,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                source = (
+                    "CODEX_UPSTREAM_VERSION"
+                    if name == "environment"
+                    else "--upstream-version"
+                )
+                self.assertIn(f"{source} is Unix-only", result.stderr)
+                self.assertIn("issue #167", result.stderr)
+                self.assertFalse(delegated.exists())
+                self.assertFalse((root / "build.json").exists())
+
     def test_no_provable_baseline_fails_without_fetching(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -174,11 +225,26 @@ class InstallLocalShTest(unittest.TestCase):
                         ["previous-1", "previous-2", "previous-3"],
                     )
 
-    def test_activation_failure_restores_files_and_does_not_prune(self) -> None:
+    def test_activation_failure_restores_prior_links_command_and_workspace(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             repo = create_repo(root)
             releases_dir = prepare_previous_releases(root)
+            previous_release = releases_dir / "previous-1"
+            (previous_release / "bin").mkdir()
+            write_executable(
+                previous_release / "bin/codex",
+                "#!/bin/sh\nprintf 'previous installation\\n'\n",
+            )
+            current = releases_dir.parent / "current"
+            current.symlink_to(previous_release)
+            visible_command = root / "install-bin/codex"
+            visible_command.parent.mkdir()
+            visible_command.symlink_to(current / "bin/codex")
+            previous_current_target = os.readlink(current)
+            previous_command_target = os.readlink(visible_command)
             cargo_toml = repo / "codex-rs" / "Cargo.toml"
             cargo_lock = repo / "codex-rs" / "Cargo.lock"
             original_files = cargo_toml.read_bytes(), cargo_lock.read_bytes()
@@ -196,6 +262,16 @@ class InstallLocalShTest(unittest.TestCase):
                 (cargo_toml.read_bytes(), cargo_lock.read_bytes()),
                 original_files,
             )
+            self.assertEqual(os.readlink(current), previous_current_target)
+            self.assertEqual(os.readlink(visible_command), previous_command_target)
+            previous_version = subprocess.run(
+                [str(visible_command), "--version"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(previous_version.returncode, 0, previous_version.stderr)
+            self.assertEqual(previous_version.stdout, "previous installation\n")
             self.assertGreaterEqual(len(list(releases_dir.iterdir())), 4)
 
     def test_missing_lockfile_is_restored_as_missing(self) -> None:
