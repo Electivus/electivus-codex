@@ -36,6 +36,9 @@ version_lock_kind=""
 version_lock_owner_file=""
 version_transaction_dir=""
 version_transaction_owned=false
+versioned_codex_rs_dir=""
+versioned_manifest=""
+upstream_build_version=""
 install_lockf_pid=""
 install_lockf_ready=""
 install_lockf_control=""
@@ -44,6 +47,9 @@ version_lockf_ready=""
 version_lockf_control=""
 active_child_pid=""
 active_child_role=""
+active_child_ready=""
+child_sequence=0
+supervisor_script=""
 activation_pending=false
 active_reclaim_marker=""
 active_reclaim_guard=""
@@ -153,7 +159,8 @@ resolve_upstream_build_version() {
 
 set_workspace_version() {
   version="$1"
-  python_with_scripts_path - "$CODEX_RS_DIR/Cargo.toml" "$version" <<'PY'
+  manifest_path="$2"
+  python_with_scripts_path - "$manifest_path" "$version" <<'PY'
 import sys
 from pathlib import Path
 
@@ -236,26 +243,10 @@ restore_cargo_manifest_files() {
     return 1
   fi
 
-  if ! cp "$cargo_toml_backup" "$CODEX_RS_DIR/Cargo.toml"; then
-    restore_failed=1
-  elif ! cmp -s "$cargo_toml_backup" "$CODEX_RS_DIR/Cargo.toml"; then
-    restore_failed=1
-  fi
-
-  if [ -f "$version_transaction_dir/Cargo.lock.original" ]; then
-    if ! cp "$cargo_lock_backup" "$CODEX_RS_DIR/Cargo.lock"; then
-      restore_failed=1
-    elif ! cmp -s "$cargo_lock_backup" "$CODEX_RS_DIR/Cargo.lock"; then
-      restore_failed=1
-    fi
-  else
-    if ! rm -f "$CODEX_RS_DIR/Cargo.lock"; then
-      restore_failed=1
-    elif [ -e "$CODEX_RS_DIR/Cargo.lock" ] || [ -L "$CODEX_RS_DIR/Cargo.lock" ]; then
-      restore_failed=1
-    fi
-  fi
-
+  # Versioned builds use a private shadow workspace. The real workspace is
+  # never rewritten, so successful cleanup only removes our transaction
+  # record. In particular, there is no compare-then-copy window in which a
+  # concurrent user edit could be overwritten after validation.
   if [ "$restore_failed" -eq 0 ]; then
     if ! rm -rf "$version_transaction_dir"; then
       restore_failed=1
@@ -270,6 +261,8 @@ restore_cargo_manifest_files() {
     cargo_lock_owned_missing=""
     version_transaction_dir=""
     version_transaction_owned=false
+    versioned_codex_rs_dir=""
+    versioned_manifest=""
   else
     echo "Failed to restore and verify the Cargo workspace byte for byte." >&2
     print_version_transaction_recovery "$version_transaction_dir"
@@ -286,13 +279,41 @@ record_installer_owned_manifest_files() {
   cargo_toml_owned="$version_transaction_dir/Cargo.toml.installer"
   cargo_lock_owned="$version_transaction_dir/Cargo.lock.installer"
   cargo_lock_owned_missing="$version_transaction_dir/Cargo.lock.installer-missing"
+  if [ -e "$cargo_toml_owned" ] ||
+    [ -e "$cargo_lock_owned" ] ||
+    [ -e "$cargo_lock_owned_missing" ]; then
+    echo "The pre-build installer-owned workspace snapshot already exists; refusing to re-baseline it." >&2
+    return 1
+  fi
   cp "$CODEX_RS_DIR/Cargo.toml" "$cargo_toml_owned" || return 1
-  rm -f "$cargo_lock_owned" "$cargo_lock_owned_missing"
   if [ -f "$CODEX_RS_DIR/Cargo.lock" ]; then
     cp "$CODEX_RS_DIR/Cargo.lock" "$cargo_lock_owned" || return 1
   else
     : >"$cargo_lock_owned_missing" || return 1
   fi
+}
+
+prepare_versioned_workspace() {
+  versioned_codex_rs_dir="$tmp_dir/versioned-codex-rs"
+  versioned_manifest="$versioned_codex_rs_dir/Cargo.toml"
+  "$python_bin" - "$CODEX_RS_DIR" "$versioned_codex_rs_dir" <<'PY'
+from pathlib import Path
+import os
+import shutil
+import sys
+
+source = Path(sys.argv[1])
+shadow = Path(sys.argv[2])
+shadow.mkdir()
+for child in source.iterdir():
+    if child.name in {"Cargo.toml", "Cargo.lock", "target"}:
+        continue
+    os.symlink(child, shadow / child.name, target_is_directory=child.is_dir())
+shutil.copy2(source / "Cargo.toml", shadow / "Cargo.toml")
+if (source / "Cargo.lock").is_file():
+    shutil.copy2(source / "Cargo.lock", shadow / "Cargo.lock")
+PY
+  set_workspace_version "$upstream_build_version" "$versioned_manifest"
 }
 
 verify_builder_owned_manifest_files() {
@@ -321,16 +342,18 @@ verify_builder_owned_manifest_files() {
 }
 
 resolve_installer_owned_lockfile() {
-  cargo metadata --format-version 1 --no-deps >/dev/null &
-  active_child_pid=$!
-  active_child_role="lockfile"
+  start_supervised_child \
+    lockfile \
+    cargo metadata \
+    --manifest-path "$versioned_manifest" \
+    --format-version 1 \
+    --no-deps >/dev/null
   lockfile_status=0
   wait_for_active_child || lockfile_status=$?
-  active_child_role=""
   if [ "$lockfile_status" -ne 0 ]; then
     return "$lockfile_status"
   fi
-  record_installer_owned_manifest_files
+  verify_builder_owned_manifest_files
 }
 
 process_start_fingerprint() {
@@ -733,11 +756,11 @@ start_lockf_holder() {
   rm -f "$holder_ready_file" "$holder_control_fifo"
   mkfifo "$holder_control_fifo"
   # shellcheck disable=SC2016 # $1 and $2 belong to the lockf-held child shell.
-  lockf -k "$holder_lock_file" sh -c '
+  start_supervised_child lockf-holder lockf -k "$holder_lock_file" sh -c '
     : >"$1"
     cat "$2" >/dev/null
-  ' sh "$holder_ready_file" "$holder_control_fifo" &
-  lockf_holder_pid=$!
+  ' sh "$holder_ready_file" "$holder_control_fifo"
+  lockf_holder_pid="$active_child_pid"
 
   while [ ! -e "$holder_ready_file" ]; do
     if ! kill -0 "$lockf_holder_pid" 2>/dev/null; then
@@ -746,10 +769,18 @@ start_lockf_holder() {
       rm -f "$holder_control_fifo"
       echo "lockf failed to acquire $holder_lock_file (exit $lockf_status)." >&2
       lockf_holder_pid=""
+      active_child_pid=""
+      active_child_role=""
+      rm -f "$active_child_ready" 2>/dev/null || true
+      active_child_ready=""
       return 1
     fi
     sleep 0.1
   done
+  rm -f "$active_child_ready" 2>/dev/null || true
+  active_child_pid=""
+  active_child_role=""
+  active_child_ready=""
 }
 
 acquire_version_lock() {
@@ -813,8 +844,8 @@ release_version_lock() {
     if [ -n "$version_lockf_pid" ]; then
       wait "$version_lockf_pid" 2>/dev/null || true
     fi
-    rm -f "$version_lockf_ready" "$version_lockf_control" 2>/dev/null || true
   fi
+  rm -f "$version_lockf_ready" "$version_lockf_control" 2>/dev/null || true
   if [ -n "$version_lock_owner_file" ]; then
     if [ -f "$version_lock_path" ] && cmp -s "$version_lock_path" "$version_lock_owner_file"; then
       rm -f "$version_lock_path" 2>/dev/null || true
@@ -903,8 +934,8 @@ prepare_upstream_build_version() {
 
   step "Using upstream Release-baseline version $upstream_build_version for local build"
   begin_version_transaction
-  set_workspace_version "$upstream_build_version"
   record_installer_owned_manifest_files
+  prepare_versioned_workspace
   resolve_installer_owned_lockfile
 }
 
@@ -1122,8 +1153,8 @@ release_install_lock() {
     if [ -n "$install_lockf_pid" ]; then
       wait "$install_lockf_pid" 2>/dev/null || true
     fi
-    rm -f "$install_lockf_ready" "$install_lockf_control" 2>/dev/null || true
   fi
+  rm -f "$install_lockf_ready" "$install_lockf_control" 2>/dev/null || true
   if [ -n "$lock_owner_file" ]; then
     if [ -f "$LOCK_PATH" ] && cmp -s "$LOCK_PATH" "$lock_owner_file"; then
       rm -f "$LOCK_PATH" 2>/dev/null || true
@@ -1224,46 +1255,182 @@ generate_release_name() {
   printf "%s-%s-%s\n" "$release_prefix" "$timestamp" "$$"
 }
 
+ensure_process_supervisor() {
+  if [ -n "$supervisor_script" ]; then
+    return
+  fi
+  supervisor_script="$tmp_dir/process-supervisor.py"
+  cat >"$supervisor_script" <<'PY'
+import ctypes
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+
+ready_path = Path(sys.argv[1])
+command = sys.argv[2:]
+os.setsid()
+
+# On Linux, adopt and reap builder grandchildren after their direct parent
+# exits. Other Unix platforms still get group-wide termination and a bounded
+# group-exit check.
+if sys.platform.startswith("linux"):
+    try:
+        ctypes.CDLL(None).prctl(36, 1, 0, 0, 0)
+    except (AttributeError, OSError):
+        pass
+
+requested_signal = None
+
+
+def request_stop(signum, _frame):
+    global requested_signal
+    requested_signal = signum
+
+
+for handled_signal in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(handled_signal, request_stop)
+
+child = subprocess.Popen(
+    ["/bin/sh", "-c", 'exec "$@"', "sh", *command],
+    preexec_fn=os.setpgrp,
+)
+child_group = child.pid
+ready_path.write_text(f"{child.pid}\n", encoding="utf-8")
+
+
+def group_exists():
+    try:
+        os.killpg(child_group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def signal_group(signum):
+    try:
+        os.killpg(child_group, signum)
+    except ProcessLookupError:
+        pass
+
+
+while child.poll() is None and requested_signal is None:
+    time.sleep(0.01)
+
+if requested_signal is not None:
+    signal_group(requested_signal)
+
+deadline = time.monotonic() + 1.0
+while child.poll() is None and time.monotonic() < deadline:
+    time.sleep(0.01)
+if child.poll() is None or group_exists():
+    signal_group(signal.SIGKILL)
+child.wait()
+
+deadline = time.monotonic() + 1.0
+while time.monotonic() < deadline:
+    reaped = False
+    while True:
+        try:
+            waited_pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            break
+        if waited_pid == 0:
+            break
+        reaped = True
+    if not group_exists():
+        break
+    if not reaped:
+        time.sleep(0.01)
+
+if group_exists():
+    print(
+        f"failed to terminate supervised process group {child_group}",
+        file=sys.stderr,
+    )
+    raise SystemExit(125)
+if requested_signal is not None:
+    raise SystemExit(128 + requested_signal)
+if child.returncode < 0:
+    raise SystemExit(128 - child.returncode)
+raise SystemExit(child.returncode)
+PY
+}
+
+start_supervised_child() {
+  supervised_role="$1"
+  shift
+  ensure_process_supervisor
+  child_sequence=$((child_sequence + 1))
+  active_child_ready="$tmp_dir/supervised.$child_sequence.ready"
+  rm -f "$active_child_ready"
+  "$python_bin" "$supervisor_script" "$active_child_ready" "$@" &
+  active_child_pid=$!
+  active_child_role="$supervised_role"
+
+  while [ ! -e "$active_child_ready" ]; do
+    if ! kill -0 "$active_child_pid" 2>/dev/null; then
+      supervised_status=0
+      wait "$active_child_pid" || supervised_status=$?
+      active_child_pid=""
+      active_child_role=""
+      rm -f "$active_child_ready" 2>/dev/null || true
+      active_child_ready=""
+      return "$supervised_status"
+    fi
+    sleep 0.01
+  done
+}
+
 wait_for_active_child() {
   child_status=0
   wait "$active_child_pid" || child_status=$?
   active_child_pid=""
+  active_child_role=""
+  rm -f "$active_child_ready" 2>/dev/null || true
+  active_child_ready=""
   return "$child_status"
 }
 
 terminate_active_child() {
   if [ -n "$active_child_pid" ]; then
-    kill -KILL "$active_child_pid" 2>/dev/null || true
+    kill -TERM "$active_child_pid" 2>/dev/null || true
     wait "$active_child_pid" 2>/dev/null || true
   fi
   active_child_pid=""
   active_child_role=""
+  rm -f "$active_child_ready" 2>/dev/null || true
+  active_child_ready=""
 }
 
-run_package_builder() {
+start_package_builder() {
   package_dir="$1"
   target="$2"
   CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false
   export CARGO_PROFILE_DEV_DEBUG_ASSERTIONS
 
-  if [ -n "${CODEX_LOCAL_RG:-}" ]; then
-    exec "$python_bin" "$REPO_ROOT/scripts/build_codex_package.py" \
-      --target "$target" \
-      --variant codex \
-      ${cargo_option:+"$cargo_option"} \
-      --cargo-profile dev \
-      --package-dir "$package_dir" \
-      --rg-bin "$CODEX_LOCAL_RG" \
-      --force
-  else
-    exec "$python_bin" "$REPO_ROOT/scripts/build_codex_package.py" \
-      --target "$target" \
-      --variant codex \
-      ${cargo_option:+"$cargo_option"} \
-      --cargo-profile dev \
-      --package-dir "$package_dir" \
-      --force
+  set -- \
+    "$python_bin" "$REPO_ROOT/scripts/build_codex_package.py" \
+    --target "$target" \
+    --variant codex \
+    --cargo-profile dev \
+    --package-dir "$package_dir"
+  if [ -n "$cargo_option" ]; then
+    set -- "$@" --cargo "$cargo_option"
   fi
+  if [ "$version_transaction_owned" = true ]; then
+    set -- "$@" --version "$upstream_build_version"
+  fi
+  if [ -n "${CODEX_LOCAL_RG:-}" ]; then
+    set -- "$@" --rg-bin "$CODEX_LOCAL_RG"
+  fi
+  set -- "$@" --force
+  start_supervised_child builder "$@"
 }
 
 build_local_package() {
@@ -1282,28 +1449,35 @@ build_local_package() {
   fi
 
   cargo_option=""
+  CODEX_LOCAL_INSTALLER_PID="$$"
+  export CODEX_LOCAL_INSTALLER_PID
   if [ "$version_transaction_owned" = true ]; then
     CODEX_LOCAL_REAL_CARGO="$(command -v cargo)"
     export CODEX_LOCAL_REAL_CARGO
+    CODEX_LOCAL_VERSIONED_MANIFEST="$versioned_manifest"
+    export CODEX_LOCAL_VERSIONED_MANIFEST
+    if [ "${CARGO_TARGET_DIR+x}" != x ]; then
+      CARGO_TARGET_DIR="$CODEX_RS_DIR/target"
+      export CARGO_TARGET_DIR
+    fi
     cargo_wrapper="$tmp_dir/cargo-locked"
     cat >"$cargo_wrapper" <<'EOF'
 #!/bin/sh
-exec "$CODEX_LOCAL_REAL_CARGO" "$@" --locked
+cargo_command="$1"
+shift
+exec "$CODEX_LOCAL_REAL_CARGO" "$cargo_command" \
+  --manifest-path "$CODEX_LOCAL_VERSIONED_MANIFEST" "$@" --locked
 EOF
     chmod +x "$cargo_wrapper"
-    cargo_option="--cargo=$cargo_wrapper"
+    cargo_option="$cargo_wrapper"
   fi
 
-  run_package_builder "$package_dir" "$target" &
-  active_child_pid=$!
-  active_child_role="builder"
+  start_package_builder "$package_dir" "$target"
   builder_status=0
   wait_for_active_child || builder_status=$?
   if ! verify_builder_owned_manifest_files; then
-    active_child_role=""
     return 1
   fi
-  active_child_role=""
   if [ "$builder_status" -ne 0 ]; then
     return "$builder_status"
   fi
@@ -1377,12 +1551,9 @@ update_visible_command() {
 }
 
 verify_visible_command() {
-  "$BIN_PATH" --version >/dev/null &
-  active_child_pid=$!
-  active_child_role="verifier"
+  start_supervised_child verifier "$BIN_PATH" --version >/dev/null
   verifier_status=0
   wait_for_active_child || verifier_status=$?
-  active_child_role=""
   return "$verifier_status"
 }
 
@@ -1422,38 +1593,76 @@ activate_release() {
 prune_old_releases() {
   active_release="$1"
 
-  "$python_bin" - "$RELEASES_DIR" "$active_release" <<'PY'
+  "$python_bin" - "$RELEASES_DIR" "$active_release" "$platform_target" <<'PY'
+import json
+import os
 from pathlib import Path
+import re
 import shutil
 import sys
 
 
 releases_dir = Path(sys.argv[1]).resolve()
 active_release = Path(sys.argv[2]).resolve()
+expected_target = sys.argv[3]
 if active_release.parent != releases_dir or not active_release.is_dir():
     raise SystemExit(f"refusing to prune around invalid active release: {active_release}")
 
+owned_name = re.compile(
+    rf"^local-debug-{re.escape(expected_target)}-(\d{{14}})-([1-9]\d*)$"
+)
+
+
+def validated_owned_release(path: Path):
+    if path.is_symlink() or not path.is_dir():
+        return None
+    match = owned_name.fullmatch(path.name)
+    if match is None:
+        return None
+    try:
+        metadata = json.loads((path / "codex-package.json").read_text("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    expected_metadata = {
+        "layoutVersion": 1,
+        "target": expected_target,
+        "variant": "codex",
+        "entrypoint": "bin/codex",
+        "resourcesDir": "codex-resources",
+        "pathDir": "codex-path",
+    }
+    required = [
+        path / "bin/codex",
+        path / "bin/codex-code-mode-host",
+        path / "codex",
+        path / "codex-path/rg",
+    ]
+    if "linux" in expected_target:
+        required.append(path / "codex-resources/bwrap")
+    if (
+        any(metadata.get(key) != value for key, value in expected_metadata.items())
+        or not isinstance(metadata.get("version"), str)
+        or not metadata["version"]
+        or not all(
+            candidate.is_file() and os.access(candidate, os.X_OK)
+            for candidate in required
+        )
+    ):
+        return None
+    return match.group(1), int(match.group(2))
+
+
 previous_releases = sorted(
     (
-        path
+        (owned, path)
         for path in releases_dir.iterdir()
         if path != active_release
-        and not path.name.startswith(".")
-        and path.is_dir()
-        and not path.is_symlink()
+        and (owned := validated_owned_release(path)) is not None
     ),
-    key=lambda path: (
-        (
-            (1, parts[-2], path.name)
-            if len(parts := path.name.rsplit("-", 2)) == 3
-            and len(parts[-2]) == 14
-            and parts[-2].isdigit()
-            else (0, f"{path.stat().st_mtime_ns:020d}", path.name)
-        )
-    ),
+    key=lambda item: (item[0], item[1].name),
     reverse=True,
 )
-for old_release in previous_releases[2:]:
+for _, old_release in previous_releases[2:]:
     shutil.rmtree(old_release)
     print(f"Removed old standalone release: {old_release.name}")
 PY
@@ -1497,7 +1706,7 @@ handle_signal() {
   terminate_active_child
   case "$signal_child_role" in
     builder) verify_builder_owned_manifest_files || true ;;
-    lockfile) record_installer_owned_manifest_files || true ;;
+    lockfile) verify_builder_owned_manifest_files || true ;;
   esac
   rollback_pending_activation || true
   exit "$signal_status"
@@ -1510,7 +1719,7 @@ cleanup() {
   terminate_active_child
   case "$cleanup_child_role" in
     builder) verify_builder_owned_manifest_files || true ;;
-    lockfile) record_installer_owned_manifest_files || true ;;
+    lockfile) verify_builder_owned_manifest_files || true ;;
   esac
   if ! rollback_pending_activation; then
     cleanup_status=1
