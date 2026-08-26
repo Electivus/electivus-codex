@@ -957,6 +957,28 @@ def wait_for_process_group_exit(process_group: int) -> None:
             os.killpg(process_group, 0)
         except ProcessLookupError:
             return
+        proc_root = Path("/proc")
+        if proc_root.is_dir():
+            group_states: list[bytes] = []
+            proc_read_failed = False
+            for stat_path in proc_root.glob("[0-9]*/stat"):
+                try:
+                    stat_fields = stat_path.read_bytes().rpartition(b") ")[2].split()
+                    state = stat_fields[0]
+                    member_process_group = int(stat_fields[2])
+                except FileNotFoundError:
+                    continue
+                except (IndexError, OSError, ValueError):
+                    proc_read_failed = True
+                    continue
+                if member_process_group == process_group:
+                    group_states.append(state)
+            if (
+                not proc_read_failed
+                and group_states
+                and all(state == b"Z" for state in group_states)
+            ):
+                return
         if time.monotonic() >= deadline:
             raise AssertionError(f"process group {process_group} remained alive")
         time.sleep(0.01)
