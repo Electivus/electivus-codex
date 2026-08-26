@@ -370,6 +370,38 @@ class InstallLocalShTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(legacy_lock.exists())
 
+    def test_recent_dead_fallback_lock_reports_when_to_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            env = installer_env(root, repo, force_fallback_locks=True)
+            standalone_root = root / "codex-home/packages/standalone"
+            standalone_root.mkdir(parents=True)
+            lock_path = standalone_root / "install.lock.d"
+            lock_contents = "2147483647\n1787659200\nmissing-owner\n"
+            lock_path.write_text(lock_contents, encoding="utf-8")
+            process = subprocess.Popen(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                start_new_session=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = communicate_bounded(process)
+
+                self.assertNotEqual(process.returncode, 0, stdout)
+                self.assertIn("no longer live", stderr)
+                self.assertIn("Retry after 600 seconds", stderr)
+                self.assertEqual(lock_path.read_text(encoding="utf-8"), lock_contents)
+                self.assertFalse((root / "build.json").exists())
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=2)
+
     def test_fallback_reclaimers_cannot_remove_a_new_version_lock_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -503,6 +535,71 @@ class InstallLocalShTest(unittest.TestCase):
                     if process.poll() is None:
                         os.killpg(process.pid, signal.SIGKILL)
                         process.communicate(timeout=2)
+
+    def test_malformed_fallback_lock_metadata_fails_closed_promptly(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            env = installer_env(root, repo, force_fallback_locks=True)
+            standalone_root = root / "codex-home/packages/standalone"
+            standalone_root.mkdir(parents=True)
+            lock_path = standalone_root / "install.lock.d"
+            lock_contents = "not-a-pid\nnot-a-timestamp\nforeign-owner\n"
+            lock_path.write_text(lock_contents, encoding="utf-8")
+            process = subprocess.Popen(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                start_new_session=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = communicate_bounded(process)
+
+                self.assertNotEqual(process.returncode, 0, stdout)
+                self.assertIn("metadata", stderr)
+                self.assertIn("manual recovery", stderr)
+                self.assertEqual(lock_path.read_text(encoding="utf-8"), lock_contents)
+                self.assertFalse((root / "build.json").exists())
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=2)
+
+    def test_fallback_hardlink_claim_failure_is_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            env = installer_env(root, repo, force_fallback_locks=True)
+            fake_ln = Path(env["PATH"]) / "ln"
+            fake_ln.unlink()
+            write_executable(
+                fake_ln,
+                "#!/bin/sh\nprintf '%s\\n' 'simulated hard-link failure' >&2\nexit 95\n",
+            )
+            process = subprocess.Popen(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                start_new_session=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = communicate_bounded(process)
+
+                self.assertNotEqual(process.returncode, 0, stdout)
+                self.assertIn("Cannot claim the installer lock", stderr)
+                self.assertIn("hard-link", stderr)
+                self.assertIn("retry", stderr)
+                self.assertFalse((root / "build.json").exists())
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=2)
 
     def test_signal_cleanup_preserves_a_successor_reclaim_guard(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -248,53 +248,85 @@ process_start_fingerprint() {
     return
   fi
 
-  if command -v ps >/dev/null 2>&1; then
-    identity_start="$(LC_ALL=C ps -o lstart= -p "$identity_pid" 2>/dev/null |
-      awk '{$1=$1; print}')"
-    [ -n "$identity_start" ] || return 1
-    printf 'ps-lstart:%s\n' "$(printf '%s' "$identity_start" | tr ' ' '_')"
-    return
-  fi
+  # A formatted ps start time is not a stable process identity: its precision
+  # and format vary by platform, and it can match after PID reuse. Without the
+  # Linux boot ID and /proc start time, fallback lock ownership is unprovable.
   return 1
 }
 
 report_unverifiable_lock() {
   unverifiable_lock="$1"
   unverifiable_description="$2"
-  echo "Cannot safely verify the live process recorded by the $unverifiable_description lock at $unverifiable_lock: $fallback_lock_issue Refusing automatic deletion; manual recovery is required after confirming that no installer owns this path." >&2
+  echo "Cannot safely verify the ownership metadata recorded by the $unverifiable_description lock at $unverifiable_lock: $fallback_lock_issue Refusing automatic deletion; manual recovery is required after confirming that no installer owns this path." >&2
+}
+
+report_lock_claim_error() {
+  claim_error_lock="$1"
+  claim_error_description="$2"
+  echo "Cannot claim the $claim_error_description lock at $claim_error_lock: $fallback_lock_issue No lock ownership was established. Check filesystem hard-link support and permissions, remove only artifacts confirmed to be stale, and retry." >&2
 }
 
 fallback_lock_is_stale() {
   stale_lock="$1"
   stale_threshold="$2"
   fallback_lock_issue=""
+  fallback_lock_retry_after=""
   stale_fingerprint=""
-  if [ -d "$stale_lock" ]; then
+  if [ -L "$stale_lock" ]; then
+    fallback_lock_issue="its metadata path is a symbolic link rather than an owned lock artifact."
+    return 2
+  elif [ -d "$stale_lock" ]; then
     stale_pid="$(cat "$stale_lock/pid" 2>/dev/null || true)"
     stale_started_at="$(cat "$stale_lock/started_at" 2>/dev/null || true)"
     stale_fingerprint="$(cat "$stale_lock/fingerprint" 2>/dev/null || true)"
   elif [ -f "$stale_lock" ]; then
-    stale_pid="$(sed -n '1p' "$stale_lock" 2>/dev/null || true)"
-    stale_started_at="$(sed -n '2p' "$stale_lock" 2>/dev/null || true)"
-    stale_fingerprint="$(sed -n 's/^fingerprint=//p' "$stale_lock" 2>/dev/null | head -n 1)"
+    if ! stale_contents="$(cat "$stale_lock" 2>/dev/null)"; then
+      if [ ! -e "$stale_lock" ] && [ ! -L "$stale_lock" ]; then
+        return 1
+      fi
+      fallback_lock_issue="its metadata file cannot be read."
+      return 2
+    fi
+    stale_pid="$(printf '%s\n' "$stale_contents" | sed -n '1p')"
+    stale_started_at="$(printf '%s\n' "$stale_contents" | sed -n '2p')"
+    stale_fingerprint="$(printf '%s\n' "$stale_contents" | sed -n 's/^fingerprint=//p' | head -n 1)"
   else
+    if [ -e "$stale_lock" ]; then
+      fallback_lock_issue="its metadata path is neither a regular file nor a legacy lock directory."
+      return 2
+    fi
     return 1
   fi
   case "$stale_pid" in
-    '' | *[!0-9]*) return 1 ;;
-  esac
-  if [ -n "$stale_pid" ] && kill -0 "$stale_pid" 2>/dev/null; then
-    case "$stale_started_at" in
-      '' | *[!0-9]*)
-        fallback_lock_issue="its started_at metadata is missing or malformed."
-        return 2
-        ;;
-    esac
-    stale_now="$(date +%s 2>/dev/null || printf '0')"
-    if [ "$stale_now" -eq 0 ] || [ "$stale_started_at" -gt "$stale_now" ]; then
-      fallback_lock_issue="its started_at metadata cannot describe the current live process."
+    '' | 0 | *[!0-9]* | ???????????*)
+      if [ ! -e "$stale_lock" ] && [ ! -L "$stale_lock" ]; then
+        return 1
+      fi
+      fallback_lock_issue="its PID metadata is missing or malformed."
       return 2
-    fi
+      ;;
+  esac
+  case "$stale_started_at" in
+    '' | *[!0-9]* | ???????????????????*)
+      if [ ! -e "$stale_lock" ] && [ ! -L "$stale_lock" ]; then
+        return 1
+      fi
+      fallback_lock_issue="its started_at metadata is missing or malformed."
+      return 2
+      ;;
+  esac
+  stale_now="$(date +%s 2>/dev/null || printf '0')"
+  case "$stale_now" in
+    '' | 0 | *[!0-9]* | ???????????????????*)
+      fallback_lock_issue="the current time cannot be verified against its started_at metadata."
+      return 2
+      ;;
+  esac
+  if [ "$stale_started_at" -gt "$stale_now" ]; then
+    fallback_lock_issue="its started_at metadata is in the future."
+    return 2
+  fi
+  if [ -n "$stale_pid" ] && kill -0 "$stale_pid" 2>/dev/null; then
     if [ -z "$stale_fingerprint" ]; then
       fallback_lock_issue="it has no process-start fingerprint, so PID $stale_pid cannot be proven to be the original owner."
       return 2
@@ -310,32 +342,41 @@ fallback_lock_is_stale() {
     fi
     return 1
   fi
-  if [ "$stale_threshold" -eq 0 ]; then
+  stale_age=$((stale_now - stale_started_at))
+  if [ "$stale_age" -ge "$stale_threshold" ]; then
     return 0
   fi
-  case "$stale_started_at" in
-    '' | *[!0-9]*) return 1 ;;
-  esac
-  stale_now="$(date +%s 2>/dev/null || printf '0')"
-  if [ "$stale_now" -eq 0 ]; then
-    return 1
-  fi
-  [ $((stale_now - stale_started_at)) -ge "$stale_threshold" ]
+  fallback_lock_retry_after=$((stale_threshold - stale_age))
+  return 3
 }
 
 try_claim_fallback_lock() {
   try_owner="$1"
   try_lock="$2"
+  fallback_lock_issue=""
 
-  ln "$try_owner" "$try_lock" 2>/dev/null || return 1
-  if [ -f "$try_lock" ] && cmp -s "$try_lock" "$try_owner"; then
-    return 0
+  if ln "$try_owner" "$try_lock" 2>/dev/null; then
+    if [ -f "$try_lock" ] && cmp -s "$try_lock" "$try_owner"; then
+      return 0
+    fi
+
+    # POSIX ln treats an existing directory as a destination directory.
+    # Remove the hard link it created there and report real contention.
+    try_nested_lock="$try_lock/$(basename "$try_owner")"
+    if [ -e "$try_nested_lock" ] || [ -L "$try_nested_lock" ]; then
+      if ! rm -f "$try_nested_lock" 2>/dev/null; then
+        fallback_lock_issue="the hard-link claim landed inside a legacy lock directory and could not be removed."
+        return 2
+      fi
+    fi
+    return 1
   fi
 
-  # POSIX ln treats an existing directory as a destination directory. Remove
-  # the hard link it created there and keep waiting for that legacy lock.
-  rm -f "$try_lock/$(basename "$try_owner")" 2>/dev/null || true
-  return 1
+  if [ -e "$try_lock" ] || [ -L "$try_lock" ]; then
+    return 1
+  fi
+  fallback_lock_issue="the hard-link operation failed even though no competing lock exists."
+  return 2
 }
 
 cleanup_stale_reclaim_markers() {
@@ -344,7 +385,11 @@ cleanup_stale_reclaim_markers() {
     [ -f "$cleanup_marker" ] || continue
     [ "$cleanup_marker" = "$cleanup_lock.reclaim.guard" ] && continue
     if fallback_lock_is_stale "$cleanup_marker" 0; then
-      rm -f "$cleanup_marker" 2>/dev/null || true
+      if ! rm -f "$cleanup_marker" 2>/dev/null; then
+        fallback_lock_issue="the stale reclaim marker could not be removed."
+        cleanup_reclaim_issue_path="$cleanup_marker"
+        return 1
+      fi
     elif [ -n "$fallback_lock_issue" ]; then
       cleanup_reclaim_issue_path="$cleanup_marker"
       return 1
@@ -385,19 +430,30 @@ wait_for_reclaim_barrier() {
 
 publish_reclaim_marker() {
   publish_lock="$1"
-  publish_prepare="$(mktemp "$publish_lock.reclaim-prepare.XXXXXX")"
+  if ! publish_prepare="$(mktemp "$publish_lock.reclaim-prepare.XXXXXX")"; then
+    return 1
+  fi
   publish_suffix="${publish_prepare##*.}"
   published_marker="$publish_lock.reclaim.$publish_suffix"
-  {
+  publish_fingerprint="$(process_start_fingerprint "$$" || true)"
+  if [ -z "$publish_fingerprint" ]; then
+    rm -f "$publish_prepare" 2>/dev/null || true
+    fallback_lock_issue="this platform cannot prove the reclaiming process identity without Linux /proc."
+    return 1
+  fi
+  if ! {
     printf '%s\n' "$$"
     date +%s 2>/dev/null || printf '0\n'
     printf 'marker=%s\n' "$publish_suffix"
-    publish_fingerprint="$(process_start_fingerprint "$$" || true)"
-    if [ -n "$publish_fingerprint" ]; then
-      printf 'fingerprint=%s\n' "$publish_fingerprint"
-    fi
-  } >"$publish_prepare"
-  mv "$publish_prepare" "$published_marker"
+    printf 'fingerprint=%s\n' "$publish_fingerprint"
+  } >"$publish_prepare"; then
+    rm -f "$publish_prepare" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv "$publish_prepare" "$published_marker"; then
+    rm -f "$publish_prepare" 2>/dev/null || true
+    return 1
+  fi
   printf '%s\n' "$published_marker"
 }
 
@@ -406,8 +462,11 @@ acquire_reclaim_guard() {
   guard_marker="$2"
   reclaim_guard="$guard_lock.reclaim.guard"
   active_reclaim_guard="$reclaim_guard"
-  while ! ln "$guard_marker" "$reclaim_guard" 2>/dev/null; do
-    if [ -f "$reclaim_guard" ]; then
+  while :; do
+    if ln "$guard_marker" "$reclaim_guard" 2>/dev/null; then
+      break
+    fi
+    if [ -e "$reclaim_guard" ] || [ -L "$reclaim_guard" ]; then
       if fallback_lock_is_stale "$reclaim_guard" 0; then
         echo "Stale reclaim guard at $reclaim_guard requires manual removal; refusing an unsafe automatic takeover." >&2
         return 1
@@ -415,8 +474,12 @@ acquire_reclaim_guard() {
         report_unverifiable_lock "$reclaim_guard" "reclaim guard"
         return 1
       fi
+      sleep 1
+      continue
     fi
-    sleep 1
+    fallback_lock_issue="the reclaim-guard hard-link operation failed even though no competing guard exists."
+    report_lock_claim_error "$reclaim_guard" "reclaim guard"
+    return 1
   done
   if [ ! -f "$reclaim_guard" ] || ! cmp -s "$reclaim_guard" "$guard_marker"; then
     remove_reclaim_guard_if_owned "$reclaim_guard" "$guard_marker"
@@ -447,7 +510,10 @@ reclaim_fallback_lock() {
   reclaim_lock="$1"
   reclaim_owner_prefix="$2"
   reclaim_stale_threshold="$3"
-  active_reclaim_marker="$(publish_reclaim_marker "$reclaim_lock")" || return 1
+  if ! active_reclaim_marker="$(publish_reclaim_marker "$reclaim_lock")"; then
+    fallback_lock_issue="the reclaim marker could not be published safely."
+    return 1
+  fi
   reclaim_suffix="${active_reclaim_marker##*.}"
   if ! acquire_reclaim_guard "$reclaim_lock" "$active_reclaim_marker"; then
     rm -f "$active_reclaim_marker" 2>/dev/null || true
@@ -456,11 +522,18 @@ reclaim_fallback_lock() {
     return 1
   fi
 
+  reclaim_failed=0
   if [ -d "$reclaim_lock" ]; then
     if fallback_lock_is_stale "$reclaim_lock" "$reclaim_stale_threshold"; then
       reclaimed_lock="$reclaim_lock.stale.$reclaim_suffix"
       if mv "$reclaim_lock" "$reclaimed_lock" 2>/dev/null; then
-        rm -rf "$reclaimed_lock"
+        if ! rm -rf "$reclaimed_lock"; then
+          fallback_lock_issue="the stale legacy lock was moved aside but could not be removed from $reclaimed_lock."
+          reclaim_failed=1
+        fi
+      elif [ -e "$reclaim_lock" ]; then
+        fallback_lock_issue="the stale legacy lock directory could not be moved aside."
+        reclaim_failed=1
       fi
     fi
   elif [ -f "$reclaim_lock" ]; then
@@ -468,17 +541,26 @@ reclaim_fallback_lock() {
     if ln "$reclaim_lock" "$reclaimed_lock" 2>/dev/null; then
       if fallback_lock_is_stale "$reclaimed_lock" "$reclaim_stale_threshold"; then
         reclaimed_owner="$(sed -n '3p' "$reclaimed_lock" 2>/dev/null || true)"
-        rm -f "$reclaim_lock" 2>/dev/null || true
-        case "$reclaimed_owner" in
-          "$reclaim_owner_prefix"*) rm -f "$reclaimed_owner" 2>/dev/null || true ;;
-        esac
+        if ! rm -f "$reclaim_lock" 2>/dev/null ||
+          [ -e "$reclaim_lock" ] || [ -L "$reclaim_lock" ]; then
+          fallback_lock_issue="the stale lock was verified but could not be removed."
+          reclaim_failed=1
+        else
+          case "$reclaimed_owner" in
+            "$reclaim_owner_prefix"*) rm -f "$reclaimed_owner" 2>/dev/null || true ;;
+          esac
+        fi
       fi
       rm -f "$reclaimed_lock" 2>/dev/null || true
+    elif [ -e "$reclaim_lock" ] || [ -L "$reclaim_lock" ]; then
+      fallback_lock_issue="the stale-lock snapshot hard-link operation failed."
+      reclaim_failed=1
     fi
   fi
   release_reclaim_guard "$active_reclaim_marker"
   rm -f "$active_reclaim_marker" 2>/dev/null || true
   active_reclaim_marker=""
+  return "$reclaim_failed"
 }
 
 acquire_fallback_lock() {
@@ -490,24 +572,56 @@ acquire_fallback_lock() {
 
   while :; do
     wait_for_reclaim_barrier "$claim_lock"
-    if try_claim_fallback_lock "$claim_owner" "$claim_lock"; then
-      wait_for_reclaim_barrier "$claim_lock"
-      if [ -f "$claim_lock" ] && cmp -s "$claim_lock" "$claim_owner"; then
-        return
-      fi
-      continue
-    fi
-    if fallback_lock_is_stale "$claim_lock" "$claim_stale_threshold"; then
-      warn "Removing stale $claim_description lock at $claim_lock"
-      reclaim_fallback_lock \
-        "$claim_lock" "$claim_owner_prefix" "$claim_stale_threshold" || true
-      continue
-    fi
-    if [ -n "$fallback_lock_issue" ]; then
-      report_unverifiable_lock "$claim_lock" "$claim_description"
-      return 1
-    fi
-    sleep 1
+    claim_status=0
+    try_claim_fallback_lock "$claim_owner" "$claim_lock" || claim_status=$?
+    case "$claim_status" in
+      0)
+        wait_for_reclaim_barrier "$claim_lock"
+        if [ -f "$claim_lock" ] && cmp -s "$claim_lock" "$claim_owner"; then
+          return
+        fi
+        fallback_lock_issue="the published hard-link was replaced before ownership verification."
+        report_lock_claim_error "$claim_lock" "$claim_description"
+        return 1
+        ;;
+      1) ;;
+      2)
+        report_lock_claim_error "$claim_lock" "$claim_description"
+        return 1
+        ;;
+      *)
+        fallback_lock_issue="the hard-link claim returned an unknown state."
+        report_lock_claim_error "$claim_lock" "$claim_description"
+        return 1
+        ;;
+    esac
+
+    stale_status=0
+    fallback_lock_is_stale "$claim_lock" "$claim_stale_threshold" || stale_status=$?
+    case "$stale_status" in
+      0)
+        warn "Removing stale $claim_description lock at $claim_lock"
+        if ! reclaim_fallback_lock \
+          "$claim_lock" "$claim_owner_prefix" "$claim_stale_threshold"; then
+          report_lock_claim_error "$claim_lock" "$claim_description"
+          return 1
+        fi
+        ;;
+      1) sleep 1 ;;
+      2)
+        report_unverifiable_lock "$claim_lock" "$claim_description"
+        return 1
+        ;;
+      3)
+        echo "The $claim_description lock at $claim_lock records PID $stale_pid, which is no longer live, but the lock has not reached its stale threshold. Retry after $fallback_lock_retry_after seconds, or manually recover it only after confirming that no installer owns this path." >&2
+        return 1
+        ;;
+      *)
+        fallback_lock_issue="the existing lock returned an unknown ownership state."
+        report_unverifiable_lock "$claim_lock" "$claim_description"
+        return 1
+        ;;
+    esac
   done
 }
 
@@ -529,14 +643,18 @@ acquire_version_lock() {
   fi
 
   version_lock_owner_file="$(mktemp "$version_state_dir/version.lock.owner.XXXXXX")"
+  owner_fingerprint="$(process_start_fingerprint "$$" || true)"
+  if [ -z "$owner_fingerprint" ]; then
+    echo "Cannot safely create the local-version fallback lock: this platform cannot prove process identity without Linux /proc. Install flock or use an environment with a provable process start identity, then retry." >&2
+    rm -f "$version_lock_owner_file" 2>/dev/null || true
+    version_lock_owner_file=""
+    return 1
+  fi
   {
     printf '%s\n' "$$"
     date +%s 2>/dev/null || printf '0\n'
     printf '%s\n' "$version_lock_owner_file"
-    owner_fingerprint="$(process_start_fingerprint "$$" || true)"
-    if [ -n "$owner_fingerprint" ]; then
-      printf 'fingerprint=%s\n' "$owner_fingerprint"
-    fi
+    printf 'fingerprint=%s\n' "$owner_fingerprint"
   } >"$version_lock_owner_file"
 
   acquire_fallback_lock \
@@ -807,14 +925,18 @@ acquire_install_lock() {
   fi
 
   lock_owner_file="$(mktemp "$STANDALONE_ROOT/install.lock.owner.XXXXXX")"
+  owner_fingerprint="$(process_start_fingerprint "$$" || true)"
+  if [ -z "$owner_fingerprint" ]; then
+    echo "Cannot safely create the installer fallback lock: this platform cannot prove process identity without Linux /proc. Install flock or use an environment with a provable process start identity, then retry." >&2
+    rm -f "$lock_owner_file" 2>/dev/null || true
+    lock_owner_file=""
+    return 1
+  fi
   {
     printf '%s\n' "$$"
     date +%s 2>/dev/null || printf '0\n'
     printf '%s\n' "$lock_owner_file"
-    owner_fingerprint="$(process_start_fingerprint "$$" || true)"
-    if [ -n "$owner_fingerprint" ]; then
-      printf 'fingerprint=%s\n' "$owner_fingerprint"
-    fi
+    printf 'fingerprint=%s\n' "$owner_fingerprint"
   } >"$lock_owner_file"
 
   acquire_fallback_lock \
