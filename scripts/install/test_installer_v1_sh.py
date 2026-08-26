@@ -492,21 +492,33 @@ class InstallerV1ShTest(unittest.TestCase):
             self.assertIn("does not support macOS", result.stderr)
             self.assertEqual(requests, [])
 
-    def test_duplicate_release_across_inventory_pages_fails_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            digests = create_assets(root)
-            metadata = release("7.1.1", digests)
-            pages = [[metadata, *([{}] * 99)], [metadata]]
+    def test_duplicate_release_tags_fail_closed_at_any_inventory_position(
+        self,
+    ) -> None:
+        for position in ("same-page-identical", "same-page-conflicting", "later-page"):
+            with (
+                self.subTest(position=position),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                digests = create_assets(root)
+                metadata = release("7.1.1", digests)
+                duplicate = release("7.1.1", digests)
+                if position != "same-page-identical":
+                    duplicate["draft"] = True
+                if position == "later-page":
+                    pages = [[metadata, *({} for _ in range(99))], [duplicate]]
+                    expected_requests = [inventory_url(1), inventory_url(2)]
+                else:
+                    pages = [[metadata, duplicate]]
+                    expected_requests = [inventory_url(1)]
 
-            result, requests = run_bootstrap(root, inventory_pages=pages)
+                result, requests = run_bootstrap(root, inventory_pages=pages)
 
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(requests, [inventory_url(1), inventory_url(2)])
-            self.assertIn(
-                "duplicate release record across inventory pages", result.stderr
-            )
-            self.assertFalse((root / "delegation.json").exists())
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(requests, expected_requests)
+                self.assertIn("duplicate release tag in inventory", result.stderr)
+                self.assertFalse((root / "delegation.json").exists())
 
     def test_release_version_byte_bound_is_enforced_before_network(self) -> None:
         maximum_version = "1.2.3+" + "a" * 122
