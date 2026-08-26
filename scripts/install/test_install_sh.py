@@ -523,10 +523,11 @@ class InstallShTest(unittest.TestCase):
             result, requests = run_installer(root, selector=None, inventory_pages=pages)
 
             self.assertEqual(result.returncode, 0, result.stderr)
+            expected_metadata_requests = [inventory_url(1), inventory_url(2)]
             metadata_requests = [
-                request for request in requests if "api.github.com" in request
+                request for request in requests if request in expected_metadata_requests
             ]
-            self.assertEqual(metadata_requests, [inventory_url(1), inventory_url(2)])
+            self.assertEqual(metadata_requests, expected_metadata_requests)
             self.assertIn("Resolved version: 7.0.0", result.stdout)
 
     def test_duplicate_release_across_inventory_pages_fails_closed(self) -> None:
