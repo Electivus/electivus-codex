@@ -35,10 +35,12 @@ lock_owner_file=""
 tmp_dir=""
 download_pid=""
 download_reader_pid=""
+verification_pid=""
 active_download_pipe=""
 cleanup_done=false
 active_reclaim_marker=""
 active_reclaim_guard=""
+activation_rollback_pending=false
 
 step() {
   printf '==> %s\n' "$1"
@@ -187,6 +189,15 @@ stop_active_download() {
     rm -f "$active_download_pipe"
     active_download_pipe=""
   fi
+}
+
+stop_active_verification() {
+  [ -n "$verification_pid" ] || return 0
+
+  kill "$verification_pid" 2>/dev/null || true
+  kill -KILL "$verification_pid" 2>/dev/null || true
+  wait "$verification_pid" 2>/dev/null || true
+  verification_pid=""
 }
 
 download_file() {
@@ -2012,22 +2023,31 @@ restore_activation_path() {
   esac
 }
 
-activate_release() {
-  release_dir="$1"
-  save_activation_path "$CURRENT_LINK" current
-  save_activation_path "$BIN_PATH" visible-codex
-  save_activation_path "$CODE_MODE_HOST_BIN_PATH" visible-code-mode-host
-
-  if update_current_link "$release_dir" &&
-    update_visible_command "$release_dir" &&
-    verify_visible_command; then
-    return 0
-  fi
+rollback_activation() {
+  [ "$activation_rollback_pending" = true ] || return 0
 
   warn "Activation failed; restoring the previous runnable installation."
   restore_activation_path "$CURRENT_LINK" current
   restore_activation_path "$BIN_PATH" visible-codex
   restore_activation_path "$CODE_MODE_HOST_BIN_PATH" visible-code-mode-host
+  activation_rollback_pending=false
+}
+
+activate_release() {
+  release_dir="$1"
+  save_activation_path "$CURRENT_LINK" current
+  save_activation_path "$BIN_PATH" visible-codex
+  save_activation_path "$CODE_MODE_HOST_BIN_PATH" visible-code-mode-host
+  activation_rollback_pending=true
+
+  if update_current_link "$release_dir" &&
+    update_visible_command "$release_dir" &&
+    verify_visible_command; then
+    activation_rollback_pending=false
+    return 0
+  fi
+
+  rollback_activation
   return 1
 }
 
@@ -2068,7 +2088,12 @@ update_visible_command() {
 }
 
 verify_visible_command() {
-  "$BIN_PATH" --version >/dev/null || return 1
+  verification_status=0
+  "$BIN_PATH" --version >/dev/null &
+  verification_pid=$!
+  wait "$verification_pid" || verification_status=$?
+  verification_pid=""
+  [ "$verification_status" -eq 0 ] || return "$verification_status"
   if [ "$os" = "darwin" ] && [ "$install_layout" = "package" ]; then
     [ -x "$CODE_MODE_HOST_BIN_PATH" ]
   fi
@@ -2122,6 +2147,8 @@ cleanup() {
   cleanup_done=true
   trap - EXIT HUP INT TERM
   stop_active_download
+  stop_active_verification
+  rollback_activation
   release_install_lock
   if [ -n "$tmp_dir" ]; then
     rm -rf "$tmp_dir"

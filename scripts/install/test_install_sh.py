@@ -1146,6 +1146,92 @@ class InstallShTest(unittest.TestCase):
                 "codex-cli 0.9.0\n",
             )
 
+    def test_signals_during_visible_verification_restore_previous_activation(
+        self,
+    ) -> None:
+        for sent_signal in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+            with (
+                self.subTest(signal=sent_signal),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                install_bin = root / "install-bin"
+                install_bin.mkdir()
+                standalone = root / "codex-home" / "packages" / "standalone"
+                previous = standalone / "previous"
+                (previous / "bin").mkdir(parents=True)
+                write_executable(
+                    previous / "bin" / "codex",
+                    "#!/bin/sh\nprintf 'codex-cli 0.9.0\\n'\n",
+                )
+                write_executable(
+                    previous / "bin" / "codex-code-mode-host",
+                    "#!/bin/sh\nexit 0\n",
+                )
+                current = standalone / "current"
+                current.symlink_to(previous)
+                visible = install_bin / "codex"
+                visible.symlink_to(current / "bin" / "codex")
+                visible_code_mode_host = install_bin / "codex-code-mode-host"
+                visible_code_mode_host.symlink_to(
+                    current / "bin" / "codex-code-mode-host"
+                )
+                activation_gate = root / "activation.gate"
+                os.mkfifo(activation_gate)
+                digests = create_release_assets(
+                    root, "1.12.1", block_during_activation=True
+                )
+                invocation = prepare_installer(
+                    root,
+                    selector="1.12.1",
+                    exact=release_metadata("1.12.1", digests),
+                )
+                invocation.env["CODEX_TEST_ACTIVATION_GATE"] = str(activation_gate)
+                process = subprocess.Popen(
+                    invocation.args,
+                    env=invocation.env,
+                    start_new_session=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    wait_for_path(root / "activation.ready")
+                    verification_pid = int(
+                        (root / "activation.pid").read_text(encoding="utf-8")
+                    )
+                    os.kill(process.pid, sent_signal)
+                    stdout, stderr = communicate_bounded(process)
+
+                    self.assertEqual(
+                        process.returncode,
+                        128 + sent_signal,
+                        stderr + stdout,
+                    )
+                    self.assertEqual(os.readlink(current), str(previous))
+                    self.assertEqual(
+                        os.readlink(visible), str(current / "bin" / "codex")
+                    )
+                    self.assertEqual(
+                        os.readlink(visible_code_mode_host),
+                        str(current / "bin" / "codex-code-mode-host"),
+                    )
+                    self.assertEqual(
+                        subprocess.run(
+                            [visible, "--version"],
+                            capture_output=True,
+                            text=True,
+                            check=True,
+                        ).stdout,
+                        "codex-cli 0.9.0\n",
+                    )
+                    wait_for_process_exit(verification_pid)
+                    wait_for_process_group_exit(process.pid)
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate(timeout=2)
+
 
 @dataclass(frozen=True)
 class InstallerInvocation:
@@ -1403,7 +1489,11 @@ def read_requests(request_log: Path) -> list[str]:
 
 
 def create_release_assets(
-    root: Path, version: str, *, fail_during_activation: bool = False
+    root: Path,
+    version: str,
+    *,
+    fail_during_activation: bool = False,
+    block_during_activation: bool = False,
 ) -> dict[str, str | None]:
     assets = root / "assets"
     assets.mkdir(exist_ok=True)
@@ -1412,14 +1502,23 @@ def create_release_assets(
     (package / "codex-path").mkdir(exist_ok=True)
     (package / "codex-resources").mkdir(exist_ok=True)
     (package / "codex-package.json").write_text("{}\n", encoding="utf-8")
-    if fail_during_activation:
+    if fail_during_activation or block_during_activation:
         counter = root / "candidate-invocations"
+        activation_behavior = ""
+        if fail_during_activation:
+            activation_behavior = 'if [ "$count" -ge 2 ]; then exit 1; fi'
+        else:
+            activation_behavior = f"""if [ "$count" -ge 2 ]; then
+  printf '%s\\n' "$$" >'{root / "activation.pid"}'
+  : >'{root / "activation.ready"}'
+  IFS= read -r _continue <"$CODEX_TEST_ACTIVATION_GATE"
+fi"""
         codex_body = f"""#!/bin/sh
 count=0
 if [ -f '{counter}' ]; then count=$(cat '{counter}'); fi
 count=$((count + 1))
 printf '%s\n' "$count" >'{counter}'
-if [ "$count" -ge 2 ]; then exit 1; fi
+{activation_behavior}
 printf 'codex-cli {version}\n'
 """
     else:
