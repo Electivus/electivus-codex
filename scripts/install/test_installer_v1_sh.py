@@ -296,6 +296,82 @@ class InstallerV1ShTest(unittest.TestCase):
                         os.killpg(process.pid, signal.SIGKILL)
                         process.communicate(timeout=2)
 
+    def test_signals_stop_and_reap_a_blocked_delegate_before_cleanup(self) -> None:
+        for sent_signal, expected_name in (
+            (signal.SIGHUP, "HUP"),
+            (signal.SIGINT, "INT"),
+            (signal.SIGTERM, "TERM"),
+        ):
+            with (
+                self.subTest(signal=sent_signal),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                digests = create_assets(
+                    root,
+                    installer=BLOCKING_INSTALLER.encode(),
+                )
+                args, env, _request_log = prepare_bootstrap(
+                    root,
+                    arguments=["--release", "5.0.3"],
+                    exact=release("5.0.3", digests),
+                )
+                process = subprocess.Popen(
+                    args,
+                    env=env,
+                    start_new_session=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                delegate_pid: int | None = None
+                try:
+                    wait_for_path(root / "delegate.ready")
+                    delegate_pid = int(
+                        (root / "delegate.pid").read_text(encoding="utf-8")
+                    )
+                    delegated_installer = Path(
+                        (root / "delegate.path").read_text(encoding="utf-8").strip()
+                    )
+                    self.assertTrue(delegated_installer.is_file())
+
+                    started = time.monotonic()
+                    os.kill(process.pid, sent_signal)
+                    stdout, stderr = communicate_bounded(
+                        process,
+                        additional_process_groups=(delegate_pid,),
+                    )
+                    elapsed = time.monotonic() - started
+
+                    self.assertEqual(
+                        process.returncode,
+                        128 + sent_signal,
+                        stderr + stdout,
+                    )
+                    self.assertLess(elapsed, 2)
+                    self.assertEqual(
+                        (root / "delegate.signal").read_text(encoding="utf-8"),
+                        f"{expected_name}\n",
+                    )
+                    self.assertEqual(
+                        (root / "delegate.path-state").read_text(encoding="utf-8"),
+                        "present\n",
+                    )
+                    wait_for_process_exit(delegate_pid)
+                    wait_for_process_group_exit(delegate_pid)
+                    self.assertFalse(delegated_installer.exists())
+                    self.assertEqual(list(root.glob("tmp.*")), [])
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    if delegate_pid is not None:
+                        try:
+                            os.killpg(delegate_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    if process.poll() is None:
+                        process.communicate(timeout=2)
+
     def test_metadata_manifest_and_downloaded_installer_digests_must_agree(
         self,
     ) -> None:
@@ -672,6 +748,28 @@ PY
 """
 
 
+BLOCKING_INSTALLER = """#!/bin/sh
+handle_signal() {
+  printf '%s\n' "$1" >"$CODEX_TEST_ROOT/delegate.signal"
+  if [ -f "$0" ]; then
+    printf 'present\n' >"$CODEX_TEST_ROOT/delegate.path-state"
+  else
+    printf 'missing\n' >"$CODEX_TEST_ROOT/delegate.path-state"
+  fi
+  exit 0
+}
+trap 'handle_signal HUP' HUP
+trap 'handle_signal INT' INT
+trap 'handle_signal TERM' TERM
+printf '%s\n' "$$" >"$CODEX_TEST_ROOT/delegate.pid"
+printf '%s\n' "$0" >"$CODEX_TEST_ROOT/delegate.path"
+: >"$CODEX_TEST_ROOT/delegate.ready"
+while :; do
+  sleep 1
+done
+"""
+
+
 def release(
     version: str,
     digests: dict[str, str],
@@ -758,11 +856,20 @@ def recorded_download_pids(root: Path) -> list[int]:
     return pids
 
 
-def communicate_bounded(process: subprocess.Popen[str]) -> tuple[str, str]:
+def communicate_bounded(
+    process: subprocess.Popen[str],
+    *,
+    additional_process_groups: tuple[int, ...] = (),
+) -> tuple[str, str]:
     try:
         return process.communicate(timeout=2)
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGKILL)
+        for process_group in additional_process_groups:
+            try:
+                os.killpg(process_group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         stdout, stderr = process.communicate(timeout=2)
         raise AssertionError(
             f"bootstrap did not exit promptly after a direct signal: {stderr}{stdout}"

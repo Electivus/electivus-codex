@@ -26,6 +26,10 @@ manifest_digest=""
 download_pid=""
 download_reader_pid=""
 active_download_pipe=""
+delegate_pid=""
+delegate_starting=false
+pending_signal_status=""
+pending_signal_name=""
 cleanup_done=false
 
 usage() {
@@ -480,16 +484,91 @@ download_and_verify_installer() {
 }
 
 delegate() {
+  delegate_starting=true
   CODEX_NON_INTERACTIVE=1 \
     CODEX_RELEASE="$resolved_version" \
     CODEX_UPDATE_CHANNEL="$resolved_channel" \
     CODEX_INSTALLER_PROTOCOL="$PROTOCOL" \
     CODEX_INSTALLER_DIGEST="$installer_digest" \
-    /bin/sh "$tmp_dir/install.sh" \
-      --release "$resolved_version" \
-      --channel "$resolved_channel" \
-      --installer-protocol "$PROTOCOL" \
-      --installer-digest "$installer_digest"
+    python3 - "$tmp_dir/install.sh" \
+    --release "$resolved_version" \
+    --channel "$resolved_channel" \
+    --installer-protocol "$PROTOCOL" \
+    --installer-digest "$installer_digest" <<'PY' &
+import os
+import signal
+import subprocess
+import sys
+
+installer_path, *arguments = sys.argv[1:]
+child = None
+signal_status = None
+forwarded_signals = {
+    signal.SIGHUP: signal.SIGHUP,
+    signal.SIGINT: signal.SIGINT,
+    signal.SIGUSR1: signal.SIGINT,
+    signal.SIGTERM: signal.SIGTERM,
+}
+
+
+def force_child_exit(_received_signal, _frame):
+    if child is not None:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def stop_child(received_signal, _frame):
+    global signal_status
+    forwarded_signal = forwarded_signals[received_signal]
+    if signal_status is None:
+        signal_status = 128 + forwarded_signal
+    if child is None:
+        raise SystemExit(signal_status)
+    try:
+        os.killpg(child.pid, forwarded_signal)
+    except ProcessLookupError:
+        pass
+    signal.alarm(1)
+
+
+signal.signal(signal.SIGALRM, force_child_exit)
+for received_signal in forwarded_signals:
+    signal.signal(received_signal, stop_child)
+
+blocked_signals = set(forwarded_signals)
+signal.pthread_sigmask(signal.SIG_BLOCK, blocked_signals)
+try:
+    child = subprocess.Popen(
+        ["/bin/sh", installer_path, *arguments],
+        start_new_session=True,
+    )
+finally:
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, blocked_signals)
+
+returncode = child.wait()
+signal.alarm(0)
+if signal_status is not None:
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    raise SystemExit(signal_status)
+if returncode < 0:
+    returncode = 128 - returncode
+raise SystemExit(returncode)
+PY
+  delegate_pid=$!
+  delegate_starting=false
+  if [ -n "$pending_signal_name" ]; then
+    handle_signal "$pending_signal_status" "$pending_signal_name"
+  fi
+
+  delegate_status=0
+  wait "$delegate_pid" || delegate_status=$?
+  delegate_pid=""
+  return "$delegate_status"
 }
 
 parse_args "$@"
@@ -513,21 +592,45 @@ require_command head
 require_command mkfifo
 tmp_dir="$(mktemp -d)"
 cleanup() {
-  [ "$cleanup_done" = false ] || return
+  [ "$cleanup_done" = false ] || return 0
   cleanup_done=true
-  trap - EXIT HUP INT TERM
+  trap '' EXIT HUP INT TERM
+  stop_active_delegate TERM
   stop_active_download
   rm -rf "$tmp_dir"
+  trap - EXIT HUP INT TERM
+}
+stop_active_delegate() {
+  signal_name="$1"
+  [ -n "$delegate_pid" ] || return 0
+  case "$signal_name" in
+    INT) supervisor_signal=USR1 ;;
+    HUP | TERM) supervisor_signal="$signal_name" ;;
+    *) supervisor_signal=TERM ;;
+  esac
+  kill -s "$supervisor_signal" "$delegate_pid" 2>/dev/null || true
+  wait "$delegate_pid" 2>/dev/null || true
+  delegate_pid=""
 }
 handle_signal() {
   signal_status="$1"
+  signal_name="$2"
+  if [ "$delegate_starting" = true ]; then
+    if [ -z "$pending_signal_name" ]; then
+      pending_signal_status="$signal_status"
+      pending_signal_name="$signal_name"
+    fi
+    return
+  fi
+  trap '' HUP INT TERM
+  stop_active_delegate "$signal_name"
   cleanup
   exit "$signal_status"
 }
 trap cleanup EXIT
-trap 'handle_signal 129' HUP
-trap 'handle_signal 130' INT
-trap 'handle_signal 143' TERM
+trap 'handle_signal 129 HUP' HUP
+trap 'handle_signal 130 INT' INT
+trap 'handle_signal 143 TERM' TERM
 
 fetch_metadata
 resolve_release
