@@ -1479,9 +1479,36 @@ fallback_lock_is_stale() {
     fallback_lock_issue="it is a symbolic link, which the fallback lock protocol never follows."
     return 2
   elif [ -d "$stale_lock" ]; then
-    stale_pid="$(cat "$stale_lock/pid" 2>/dev/null || true)"
-    stale_started_at="$(cat "$stale_lock/started_at" 2>/dev/null || true)"
-    stale_fingerprint="$(cat "$stale_lock/fingerprint" 2>/dev/null || true)"
+    stale_pid_path="$stale_lock/pid"
+    stale_started_at_path="$stale_lock/started_at"
+    stale_fingerprint_path="$stale_lock/fingerprint"
+    if [ -L "$stale_pid_path" ] || [ ! -f "$stale_pid_path" ]; then
+      fallback_lock_issue="its legacy PID metadata at $stale_pid_path is not a regular non-symbolic-link file."
+      return 2
+    fi
+    if [ -L "$stale_started_at_path" ] || [ ! -f "$stale_started_at_path" ]; then
+      fallback_lock_issue="its legacy started_at metadata at $stale_started_at_path is not a regular non-symbolic-link file."
+      return 2
+    fi
+    if { [ -e "$stale_fingerprint_path" ] || [ -L "$stale_fingerprint_path" ]; } &&
+      { [ -L "$stale_fingerprint_path" ] || [ ! -f "$stale_fingerprint_path" ]; }; then
+      fallback_lock_issue="its legacy fingerprint metadata at $stale_fingerprint_path is not a regular non-symbolic-link file."
+      return 2
+    fi
+    if ! stale_pid="$(cat "$stale_pid_path" 2>/dev/null)"; then
+      fallback_lock_issue="its legacy PID metadata at $stale_pid_path could not be read."
+      return 2
+    fi
+    if ! stale_started_at="$(cat "$stale_started_at_path" 2>/dev/null)"; then
+      fallback_lock_issue="its legacy started_at metadata at $stale_started_at_path could not be read."
+      return 2
+    fi
+    if [ -f "$stale_fingerprint_path" ]; then
+      if ! stale_fingerprint="$(cat "$stale_fingerprint_path" 2>/dev/null)"; then
+        fallback_lock_issue="its legacy fingerprint metadata at $stale_fingerprint_path could not be read."
+        return 2
+      fi
+    fi
   elif [ -f "$stale_lock" ]; then
     stale_pid="$(sed -n '1p' "$stale_lock" 2>/dev/null || true)"
     stale_started_at="$(sed -n '2p' "$stale_lock" 2>/dev/null || true)"
@@ -1598,7 +1625,12 @@ wait_for_reclaim_barrier() {
       return 1
     fi
     barrier_guard="$barrier_lock.reclaim.guard"
-    if [ -f "$barrier_guard" ]; then
+    if [ -e "$barrier_guard" ] || [ -L "$barrier_guard" ]; then
+      if [ -L "$barrier_guard" ] || [ ! -f "$barrier_guard" ]; then
+        fallback_lock_issue="it is not a regular non-symbolic-link reclaim guard."
+        report_unverifiable_lock "$barrier_guard" "reclaim guard"
+        return 1
+      fi
       if fallback_lock_is_stale "$barrier_guard"; then
         echo "Stale reclaim guard at $barrier_guard requires manual removal; refusing an unsafe automatic takeover." >&2
         return 1
@@ -1612,32 +1644,75 @@ wait_for_reclaim_barrier() {
   done
 }
 
+discard_reclaim_artifact() {
+  discard_path="$1"
+  discard_description="$2"
+  if [ -e "$discard_path" ] || [ -L "$discard_path" ]; then
+    if ! rm -f "$discard_path" 2>/dev/null ||
+      [ -e "$discard_path" ] || [ -L "$discard_path" ]; then
+      echo "Could not remove $discard_description $discard_path." >&2
+      return 1
+    fi
+  fi
+}
+
 publish_reclaim_marker() {
   publish_lock="$1"
   if ! publish_prepare="$(mktemp "$publish_lock.reclaim-prepare.XXXXXX")"; then
     echo "Could not prepare a reclaim marker beside $publish_lock." >&2
     return 1
   fi
+  if [ -L "$publish_prepare" ] || [ ! -f "$publish_prepare" ]; then
+    echo "Reclaim marker preparation did not create the expected regular file at $publish_prepare." >&2
+    discard_reclaim_artifact "$publish_prepare" "invalid reclaim marker preparation" || true
+    return 1
+  fi
   publish_suffix="${publish_prepare##*.}"
   published_marker="$publish_lock.reclaim.$publish_suffix"
-  {
-    printf '%s\n' "$$"
-    date +%s 2>/dev/null || printf '0\n'
-    printf 'marker=%s\n' "$publish_suffix"
-    publish_fingerprint="$(process_start_fingerprint "$$" || true)"
-    if [ -n "$publish_fingerprint" ]; then
-      printf 'fingerprint=%s\n' "$publish_fingerprint"
+  if ! printf '%s\n' "$$" >"$publish_prepare"; then
+    echo "Could not write the owner PID to reclaim marker preparation $publish_prepare." >&2
+    discard_reclaim_artifact "$publish_prepare" "partial reclaim marker preparation" || true
+    return 1
+  fi
+  if ! publish_started_at="$(date +%s 2>/dev/null)" ||
+    ! bounded_positive_decimal "$publish_started_at" 253402300799; then
+    echo "Could not determine a valid creation time for reclaim marker preparation $publish_prepare." >&2
+    discard_reclaim_artifact "$publish_prepare" "partial reclaim marker preparation" || true
+    return 1
+  fi
+  if ! printf '%s\n' "$publish_started_at" >>"$publish_prepare"; then
+    echo "Could not write the creation time to reclaim marker preparation $publish_prepare." >&2
+    discard_reclaim_artifact "$publish_prepare" "partial reclaim marker preparation" || true
+    return 1
+  fi
+  if ! printf 'marker=%s\n' "$publish_suffix" >>"$publish_prepare"; then
+    echo "Could not write the identifier to reclaim marker preparation $publish_prepare." >&2
+    discard_reclaim_artifact "$publish_prepare" "partial reclaim marker preparation" || true
+    return 1
+  fi
+  publish_fingerprint=""
+  if publish_fingerprint="$(process_start_fingerprint "$$")"; then
+    if ! printf 'fingerprint=%s\n' "$publish_fingerprint" >>"$publish_prepare"; then
+      echo "Could not write the process fingerprint to reclaim marker preparation $publish_prepare." >&2
+      discard_reclaim_artifact "$publish_prepare" "partial reclaim marker preparation" || true
+      return 1
     fi
-  } >"$publish_prepare"
+  fi
+  if [ -L "$publish_prepare" ] || [ ! -f "$publish_prepare" ]; then
+    echo "Reclaim marker preparation is no longer the expected regular file at $publish_prepare." >&2
+    discard_reclaim_artifact "$publish_prepare" "invalid reclaim marker preparation" || true
+    return 1
+  fi
   if ! mv "$publish_prepare" "$published_marker"; then
     echo "Could not publish reclaim marker $published_marker." >&2
-    if ! rm -f "$publish_prepare" 2>/dev/null; then
-      echo "Could not remove unpublished reclaim marker preparation $publish_prepare." >&2
-    fi
+    discard_reclaim_artifact "$publish_prepare" "unpublished reclaim marker preparation" || true
+    discard_reclaim_artifact "$published_marker" "partially published reclaim marker" || true
     return 1
   fi
   if [ ! -f "$published_marker" ] || [ -L "$published_marker" ]; then
     echo "Reclaim marker publication did not create the expected regular file at $published_marker." >&2
+    discard_reclaim_artifact "$publish_prepare" "unpublished reclaim marker preparation" || true
+    discard_reclaim_artifact "$published_marker" "invalid published reclaim marker" || true
     return 1
   fi
   printf '%s\n' "$published_marker"
@@ -1649,7 +1724,12 @@ acquire_reclaim_guard() {
   reclaim_guard="$guard_lock.reclaim.guard"
   active_reclaim_guard="$reclaim_guard"
   while ! ln -T "$guard_marker" "$reclaim_guard" 2>/dev/null; do
-    if fallback_lock_is_stale "$reclaim_guard"; then
+    if { [ -e "$reclaim_guard" ] || [ -L "$reclaim_guard" ]; } &&
+      { [ -L "$reclaim_guard" ] || [ ! -f "$reclaim_guard" ]; }; then
+      fallback_lock_issue="it is not a regular non-symbolic-link reclaim guard."
+      report_unverifiable_lock "$reclaim_guard" "reclaim guard"
+      return 1
+    elif fallback_lock_is_stale "$reclaim_guard"; then
       echo "Stale reclaim guard at $reclaim_guard requires manual removal; refusing an unsafe automatic takeover." >&2
       return 1
     elif [ -n "$fallback_lock_issue" ]; then
@@ -1723,7 +1803,12 @@ reclaim_fallback_lock() {
     if fallback_lock_is_stale "$reclaim_lock"; then
       reclaimed_lock="$reclaim_lock.stale.$reclaim_suffix"
       if mv "$reclaim_lock" "$reclaimed_lock" 2>/dev/null; then
-        rm -rf "$reclaimed_lock"
+        if ! rm -rf "$reclaimed_lock" 2>/dev/null ||
+          [ -e "$reclaimed_lock" ] || [ -L "$reclaimed_lock" ]; then
+          echo "Could not remove stale legacy lock snapshot at $reclaimed_lock after reclamation." >&2
+          release_reclaim_guard "$active_reclaim_marker" || true
+          return 1
+        fi
       elif [ -d "$reclaim_lock" ]; then
         fallback_claim_issue="the stale legacy lock directory could not be moved for safe reclamation."
         report_lock_claim_error "$reclaim_lock" "stale lock"
@@ -1736,12 +1821,25 @@ reclaim_fallback_lock() {
     if ln -T "$reclaim_lock" "$reclaimed_lock" 2>/dev/null; then
       if fallback_lock_is_stale "$reclaimed_lock"; then
         reclaimed_owner="$(sed -n '3p' "$reclaimed_lock" 2>/dev/null || true)"
-        rm -f "$reclaim_lock" 2>/dev/null || true
+        if ! rm -f "$reclaim_lock" 2>/dev/null ||
+          [ -e "$reclaim_lock" ] || [ -L "$reclaim_lock" ]; then
+          echo "Could not remove stale lock at $reclaim_lock after its safe snapshot was created." >&2
+          if ! rm -f "$reclaimed_lock" 2>/dev/null; then
+            echo "Could not remove stale lock snapshot $reclaimed_lock after the lock removal failure." >&2
+          fi
+          release_reclaim_guard "$active_reclaim_marker" || true
+          return 1
+        fi
         case "$reclaimed_owner" in
           "$reclaim_owner_prefix"*) rm -f "$reclaimed_owner" 2>/dev/null || true ;;
         esac
       fi
-      rm -f "$reclaimed_lock" 2>/dev/null || true
+      if ! rm -f "$reclaimed_lock" 2>/dev/null ||
+        [ -e "$reclaimed_lock" ] || [ -L "$reclaimed_lock" ]; then
+        echo "Could not remove stale lock snapshot at $reclaimed_lock after reclamation." >&2
+        release_reclaim_guard "$active_reclaim_marker" || true
+        return 1
+      fi
     elif [ -f "$reclaim_lock" ]; then
       fallback_claim_issue="the stale lock could not be hard-linked for safe reclamation."
       report_lock_claim_error "$reclaim_lock" "stale lock"

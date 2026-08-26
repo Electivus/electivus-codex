@@ -1093,6 +1093,112 @@ class InstallShTest(unittest.TestCase):
                         os.killpg(process.pid, signal.SIGKILL)
                         process.communicate(timeout=2)
 
+    def test_non_regular_reclaim_guard_fails_closed_promptly(self) -> None:
+        for case in ("directory", "fifo", "broken-symlink"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                digests = create_release_assets(root, "7.1.17")
+                invocation = prepare_installer(
+                    root,
+                    selector="7.1.17",
+                    exact=release_metadata("7.1.17", digests),
+                    force_fallback_lock=True,
+                )
+                standalone_root = root / "codex-home/packages/standalone"
+                standalone_root.mkdir(parents=True)
+                guard = standalone_root / "install.lock.d.reclaim.guard"
+                if case == "directory":
+                    guard.mkdir()
+                elif case == "fifo":
+                    os.mkfifo(guard)
+                else:
+                    guard.symlink_to(root / "missing-reclaim-marker")
+
+                process = subprocess.Popen(
+                    invocation.args,
+                    env=invocation.env,
+                    start_new_session=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    stdout, stderr = communicate_bounded(process)
+
+                    self.assertNotEqual(process.returncode, 0, stdout)
+                    self.assertIn(str(guard), stderr)
+                    self.assertIn("manual recovery", stderr)
+                    self.assertFalse((standalone_root / "current").exists())
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate(timeout=2)
+
+    def test_non_regular_legacy_lock_metadata_is_never_read(self) -> None:
+        for metadata_name in ("pid", "started_at", "fingerprint"):
+            for metadata_type in ("fifo", "symlink"):
+                with (
+                    self.subTest(
+                        metadata_name=metadata_name, metadata_type=metadata_type
+                    ),
+                    tempfile.TemporaryDirectory() as temp_dir,
+                ):
+                    root = Path(temp_dir)
+                    digests = create_release_assets(root, "7.1.19")
+                    invocation = prepare_installer(
+                        root,
+                        selector="7.1.19",
+                        exact=release_metadata("7.1.19", digests),
+                        force_fallback_lock=True,
+                    )
+                    standalone_root = root / "codex-home/packages/standalone"
+                    lock_path = standalone_root / "install.lock.d"
+                    lock_path.mkdir(parents=True)
+                    metadata_values = {
+                        "pid": "2147483647\n",
+                        "started_at": f"{int(time.time())}\n",
+                        "fingerprint": (
+                            "linux-proc:00000000-0000-0000-0000-000000000000:1\n"
+                        ),
+                    }
+                    for name, value in metadata_values.items():
+                        (lock_path / name).write_text(value, encoding="utf-8")
+                    metadata_path = lock_path / metadata_name
+                    metadata_path.unlink()
+                    external_target = root / f"external-{metadata_name}"
+                    if metadata_type == "fifo":
+                        os.mkfifo(metadata_path)
+                    else:
+                        external_target.write_text(
+                            metadata_values[metadata_name], encoding="utf-8"
+                        )
+                        metadata_path.symlink_to(external_target)
+
+                    process = subprocess.Popen(
+                        invocation.args,
+                        env=invocation.env,
+                        start_new_session=True,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    try:
+                        stdout, stderr = communicate_bounded(process)
+
+                        self.assertNotEqual(process.returncode, 0, stdout)
+                        self.assertIn(str(metadata_path), stderr)
+                        self.assertIn("manual recovery", stderr)
+                        self.assertFalse((standalone_root / "current").exists())
+                        if metadata_type == "symlink":
+                            self.assertEqual(
+                                external_target.read_text(encoding="utf-8"),
+                                metadata_values[metadata_name],
+                            )
+                    finally:
+                        if process.poll() is None:
+                            os.killpg(process.pid, signal.SIGKILL)
+                            process.communicate(timeout=2)
+
     def test_dead_fallback_lock_is_reclaimed_without_an_age_wait(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1183,6 +1289,58 @@ class InstallShTest(unittest.TestCase):
             self.assertTrue(marker.exists())
             self.assertFalse((standalone_root / "current").exists())
 
+    def test_stale_lock_removal_failures_are_explicit_and_terminal(self) -> None:
+        for case in ("lock", "legacy-snapshot", "snapshot"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                digests = create_release_assets(root, "7.1.18")
+                invocation = prepare_installer(
+                    root,
+                    selector="7.1.18",
+                    exact=release_metadata("7.1.18", digests),
+                    force_fallback_lock=True,
+                )
+                standalone_root = root / "codex-home/packages/standalone"
+                standalone_root.mkdir(parents=True)
+                lock_path = standalone_root / "install.lock.d"
+                if case == "legacy-snapshot":
+                    lock_path.mkdir()
+                    (lock_path / "pid").write_text("2147483647\n", encoding="utf-8")
+                    (lock_path / "started_at").write_text(
+                        f"{int(time.time())}\n", encoding="utf-8"
+                    )
+                else:
+                    lock_path.write_text(
+                        f"2147483647\n{int(time.time())}\nforeign-owner\n",
+                        encoding="utf-8",
+                    )
+                install_rm_failure(
+                    invocation.env,
+                    failed_path=lock_path if case == "lock" else None,
+                    fail_persistently=case == "lock",
+                    fail_reclaim_stale_cleanup=case == "legacy-snapshot",
+                    fail_reclaim_snapshot_cleanup=case == "snapshot",
+                )
+                process = subprocess.Popen(
+                    invocation.args,
+                    env=invocation.env,
+                    start_new_session=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    stdout, stderr = communicate_bounded(process)
+
+                    self.assertNotEqual(process.returncode, 0, stdout)
+                    self.assertIn("Could not remove", stderr)
+                    self.assertIn(str(lock_path), stderr)
+                    self.assertFalse((standalone_root / "current").exists())
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate(timeout=2)
+
     def test_reclaim_marker_publication_failure_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1206,6 +1364,37 @@ class InstallShTest(unittest.TestCase):
             self.assertIn("Could not publish reclaim marker", result.stderr)
             self.assertEqual(lock_path.read_text(encoding="utf-8"), original_lock)
             self.assertEqual(list(standalone_root.glob("*.reclaim-prepare.*")), [])
+
+    def test_reclaim_marker_partial_publication_is_removed(self) -> None:
+        for case in ("write", "missing-publication"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                digests = create_release_assets(root, "7.1.20")
+                invocation = prepare_installer(
+                    root,
+                    selector="7.1.20",
+                    exact=release_metadata("7.1.20", digests),
+                    force_fallback_lock=True,
+                )
+                standalone_root = root / "codex-home/packages/standalone"
+                standalone_root.mkdir(parents=True)
+                lock_path = standalone_root / "install.lock.d"
+                original_lock = f"2147483647\n{int(time.time())}\nforeign-owner\n"
+                lock_path.write_text(original_lock, encoding="utf-8")
+                if case == "write":
+                    install_reclaim_marker_date_failure(invocation.env)
+                else:
+                    install_reclaim_marker_mv_failure(
+                        invocation.env, reports_success=True
+                    )
+
+                result = run_prepared_installer(invocation)
+
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("reclaim marker", result.stderr.lower())
+                self.assertEqual(lock_path.read_text(encoding="utf-8"), original_lock)
+                self.assertEqual(list(standalone_root.glob("*.reclaim-prepare.*")), [])
+                self.assertEqual(list(standalone_root.glob("*.reclaim.*")), [])
 
     def test_process_identity_fails_closed_without_proc(self) -> None:
         script = INSTALL_SCRIPT.read_text(encoding="utf-8")
@@ -2257,6 +2446,9 @@ def install_rm_failure(
     *,
     failed_path: Path | None = None,
     fail_staging_cleanup: bool = False,
+    fail_persistently: bool = False,
+    fail_reclaim_stale_cleanup: bool = False,
+    fail_reclaim_snapshot_cleanup: bool = False,
 ) -> None:
     fake_rm = Path(env["PATH"]) / "rm"
     fake_rm.unlink()
@@ -2264,6 +2456,11 @@ def install_rm_failure(
     assert real_rm is not None
     env["CODEX_TEST_FAIL_RM_PATH"] = str(failed_path or "")
     env["CODEX_TEST_FAIL_STAGE_CLEANUP"] = "1" if fail_staging_cleanup else ""
+    env["CODEX_TEST_FAIL_RM_PERSISTENT"] = "1" if fail_persistently else ""
+    env["CODEX_TEST_FAIL_RECLAIM_STALE"] = "1" if fail_reclaim_stale_cleanup else ""
+    env["CODEX_TEST_FAIL_RECLAIM_SNAPSHOT"] = (
+        "1" if fail_reclaim_snapshot_cleanup else ""
+    )
     write_executable(
         fake_rm,
         textwrap.dedent(
@@ -2272,11 +2469,23 @@ def install_rm_failure(
             last=""
             for argument in "$@"; do last="$argument"; done
             printf '%s\n' "$last" >>"$CODEX_TEST_ROOT/rm-targets.log"
-            if [ "$last" = "$CODEX_TEST_FAIL_RM_PATH" ] &&
-              mkdir "$CODEX_TEST_ROOT/fail-rm-once" 2>/dev/null; then
-              exit 74
+            if [ "$last" = "$CODEX_TEST_FAIL_RM_PATH" ]; then
+              if [ -n "$CODEX_TEST_FAIL_RM_PERSISTENT" ] ||
+                mkdir "$CODEX_TEST_ROOT/fail-rm-once" 2>/dev/null; then
+                exit 74
+              fi
             fi
             case "$last" in
+            *.stale.*)
+              if [ -n "$CODEX_TEST_FAIL_RECLAIM_STALE" ]; then
+                exit 74
+              fi
+              ;;
+            *.snapshot.*)
+              if [ -n "$CODEX_TEST_FAIL_RECLAIM_SNAPSHOT" ]; then
+                exit 74
+              fi
+              ;;
             */.staging.*)
               if [ -n "$CODEX_TEST_FAIL_STAGE_CLEANUP" ] &&
                 mkdir "$CODEX_TEST_ROOT/saw-initial-stage-rm" 2>/dev/null; then
@@ -2304,11 +2513,14 @@ def install_extracting_tar_failure(env: dict[str, str]) -> None:
     )
 
 
-def install_reclaim_marker_mv_failure(env: dict[str, str]) -> None:
+def install_reclaim_marker_mv_failure(
+    env: dict[str, str], *, reports_success: bool = False
+) -> None:
     fake_mv = Path(env["PATH"]) / "mv"
     fake_mv.unlink()
     real_mv = shutil.which("mv")
     assert real_mv is not None
+    env["CODEX_TEST_MV_REPORTS_SUCCESS"] = "1" if reports_success else ""
     write_executable(
         fake_mv,
         textwrap.dedent(
@@ -2317,9 +2529,34 @@ def install_reclaim_marker_mv_failure(env: dict[str, str]) -> None:
             last=""
             for argument in "$@"; do last="$argument"; done
             case "$last" in
-            *.reclaim.*) exit 77 ;;
+            *.reclaim.*)
+              if [ -n "$CODEX_TEST_MV_REPORTS_SUCCESS" ]; then exit 0; fi
+              exit 77
+              ;;
             esac
             exec "{real_mv}" "$@"
+            """
+        ),
+    )
+
+
+def install_reclaim_marker_date_failure(env: dict[str, str]) -> None:
+    fake_date = Path(env["PATH"]) / "date"
+    fake_date.unlink()
+    real_date = shutil.which("date")
+    assert real_date is not None
+    write_executable(
+        fake_date,
+        textwrap.dedent(
+            f"""\
+            #!/bin/sh
+            if mkdir "$CODEX_TEST_ROOT/date-call-1" 2>/dev/null; then
+              exec "{real_date}" "$@"
+            fi
+            if mkdir "$CODEX_TEST_ROOT/date-call-2" 2>/dev/null; then
+              exec "{real_date}" "$@"
+            fi
+            exit 78
             """
         ),
     )
