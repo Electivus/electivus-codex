@@ -1783,6 +1783,14 @@ try:
 except FileNotFoundError:
     fail(f"Concurrent activation edit detected at {path}: installer-owned path is absent.")
 
+current_identity = (
+    f"{current_stat.st_dev}:{current_stat.st_ino}:"
+    f"{current_stat.st_mode}"
+)
+expected_identity = identity_path.read_text(encoding="utf-8").strip()
+if current_identity != expected_identity:
+    fail(f"Concurrent activation edit detected at {path}; preserving the current value.")
+
 claimed_path = recovery_dir / "claimed-value"
 os.rename(path, claimed_path)
 claimed_stat = claimed_path.lstat()
@@ -1790,7 +1798,6 @@ claimed_identity = (
     f"{claimed_stat.st_dev}:{claimed_stat.st_ino}:"
     f"{claimed_stat.st_mode}"
 )
-expected_identity = identity_path.read_text(encoding="utf-8").strip()
 
 
 def put_claim_back() -> None:
@@ -1889,12 +1896,12 @@ activate_release() {
   save_activation_path "$CURRENT_LINK" current
   save_activation_path "$BIN_PATH" visible-codex
   activation_pending=true
+  activation_current_updated=true
 
   if ! update_current_link "$release_dir"; then
     rollback_pending_activation || true
     return 1
   fi
-  activation_current_updated=true
   if ! update_visible_command; then
     rollback_pending_activation || true
     return 1

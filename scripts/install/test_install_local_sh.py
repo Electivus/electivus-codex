@@ -363,6 +363,74 @@ class InstallLocalShTest(unittest.TestCase):
                         os.killpg(process.pid, signal.SIGKILL)
                         process.communicate(timeout=2)
 
+    def test_term_after_current_swap_restores_previous_current(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            releases_dir = prepare_previous_releases(root)
+            previous_release = releases_dir / "previous-1"
+            (previous_release / "bin").mkdir()
+            write_executable(previous_release / "bin/codex", "#!/bin/sh\nexit 0\n")
+            current = releases_dir.parent / "current"
+            current.symlink_to(previous_release)
+            previous_current_target = os.readlink(current)
+            visible_command = root / "install-bin/codex"
+            visible_command.parent.mkdir()
+            visible_command.symlink_to(current / "bin/codex")
+            env = installer_env(root, repo)
+            install_current_swap_signal(env)
+
+            process = subprocess.run(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(process.returncode, 143, process.stderr + process.stdout)
+            self.assertEqual(os.readlink(current), previous_current_target)
+
+    def test_term_after_current_swap_preserves_concurrent_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            releases_dir = prepare_previous_releases(root)
+            previous_release = releases_dir / "previous-1"
+            (previous_release / "bin").mkdir()
+            write_executable(previous_release / "bin/codex", "#!/bin/sh\nexit 0\n")
+            current = releases_dir.parent / "current"
+            current.symlink_to(previous_release)
+            visible_command = root / "install-bin/codex"
+            visible_command.parent.mkdir()
+            visible_command.symlink_to(current / "bin/codex")
+            env = installer_env(
+                root,
+                repo,
+                extra_env={"CODEX_TEST_CURRENT_SWAP_CONCURRENT": "1"},
+            )
+            install_current_swap_signal(env)
+
+            process = subprocess.run(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(process.returncode, 143, process.stderr + process.stdout)
+            self.assertTrue(current.is_dir())
+            self.assertEqual(
+                (current / "concurrent-owner.txt").read_text(encoding="utf-8"),
+                "keep in place\n",
+            )
+            recovery_paths = list(current.parent.glob(".activation-recovery.current.*"))
+            self.assertEqual(len(recovery_paths), 1)
+            self.assertTrue((recovery_paths[0] / "previous.value").is_file())
+
     def test_concurrent_workspace_edit_is_preserved_and_blocks_activation(self) -> None:
         for edited_name in ("Cargo.toml", "Cargo.lock"):
             with (
@@ -703,6 +771,61 @@ class InstallLocalShTest(unittest.TestCase):
                 self.assertNotEqual(process.returncode, 0, stdout)
                 self.assertEqual(current.resolve(), user_current)
                 self.assertEqual(visible_command.read_bytes(), user_command)
+                self.assertIn("Concurrent activation edit detected", stderr)
+                self.assertIn("Activation recovery material retained at:", stderr)
+            finally:
+                verify_continue.touch(exist_ok=True)
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+
+    def test_activation_rollback_preserves_concurrent_directory_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            releases_dir = prepare_previous_releases(root)
+            previous_release = releases_dir / "previous-1"
+            (previous_release / "bin").mkdir()
+            write_executable(previous_release / "bin/codex", "#!/bin/sh\nexit 0\n")
+            current = releases_dir.parent / "current"
+            current.symlink_to(previous_release)
+            visible_command = root / "install-bin/codex"
+            visible_command.parent.mkdir()
+            visible_command.symlink_to(current / "bin/codex")
+            verify_ready = root / "verify.ready"
+            verify_continue = root / "verify.continue"
+            env = installer_env(
+                root,
+                repo,
+                codex_exit=19,
+                extra_env={
+                    "CODEX_TEST_VERIFY_READY": str(verify_ready),
+                    "CODEX_TEST_VERIFY_CONTINUE": str(verify_continue),
+                },
+            )
+            process = subprocess.Popen(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                wait_for_path(verify_ready)
+                current.unlink()
+                current.mkdir()
+                concurrent_content = current / "concurrent-owner.txt"
+                concurrent_content.write_text("keep in place\n", encoding="utf-8")
+                verify_continue.touch()
+                stdout, stderr = process.communicate(timeout=10)
+
+                self.assertNotEqual(process.returncode, 0, stdout)
+                self.assertTrue(current.is_dir())
+                self.assertEqual(
+                    concurrent_content.read_text(encoding="utf-8"),
+                    "keep in place\n",
+                )
                 self.assertIn("Concurrent activation edit detected", stderr)
                 self.assertIn("Activation recovery material retained at:", stderr)
             finally:
@@ -1974,6 +2097,39 @@ def install_lockf_handoff_barrier(env: dict[str, str]) -> None:
               ;;
             esac
             exec /usr/bin/cat "$@"
+            """
+        ),
+    )
+
+
+def install_current_swap_signal(env: dict[str, str]) -> None:
+    fake_mv = Path(env["PATH"].split(os.pathsep, 1)[0]) / "mv"
+    write_executable(
+        fake_mv,
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            previous=""
+            last=""
+            for argument in "$@"; do
+              previous="$last"
+              last="$argument"
+            done
+            /usr/bin/mv "$@"
+            mv_status=$?
+            case "$previous:$last" in
+            */.current.*:*/current)
+              if [ "$mv_status" -eq 0 ] && mkdir "$TMPDIR/current-swap-signaled" 2>/dev/null; then
+                if [ "${CODEX_TEST_CURRENT_SWAP_CONCURRENT:-0}" = 1 ]; then
+                  /usr/bin/rm -f "$last"
+                  /usr/bin/mkdir "$last"
+                  printf '%s\n' 'keep in place' >"$last/concurrent-owner.txt"
+                fi
+                kill -TERM "$PPID"
+              fi
+              ;;
+            esac
+            exit "$mv_status"
             """
         ),
     )
