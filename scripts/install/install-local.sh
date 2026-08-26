@@ -1746,11 +1746,11 @@ restore_activation_path() {
     "$tmp_dir/$restored_name.value" \
     "$tmp_dir/$restored_name.installed-identity" \
     "$$" <<'PY'
+import ctypes
 import errno
 import os
 from pathlib import Path
 import shutil
-import stat
 import sys
 
 
@@ -1801,16 +1801,49 @@ claimed_identity = (
 
 
 def put_claim_back() -> None:
-    try:
-        if stat.S_ISLNK(claimed_stat.st_mode):
-            os.symlink(os.readlink(claimed_path), path)
-        elif stat.S_ISREG(claimed_stat.st_mode):
-            os.link(claimed_path, path, follow_symlinks=False)
-        else:
-            fail(f"Concurrent activation edit at {path} has an unsupported file type.")
-    except FileExistsError:
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform.startswith("linux"):
+        rename_no_replace = getattr(library, "renameat2", None)
+        if rename_no_replace is None:
+            fail(f"Atomic no-clobber rename is unavailable while preserving {path}.")
+        rename_no_replace.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename_no_replace.restype = ctypes.c_int
+        result = rename_no_replace(
+            -100,
+            os.fsencode(claimed_path),
+            -100,
+            os.fsencode(path),
+            1,
+        )
+    elif sys.platform == "darwin":
+        rename_no_replace = getattr(library, "renamex_np", None)
+        if rename_no_replace is None:
+            fail(f"Atomic no-clobber rename is unavailable while preserving {path}.")
+        rename_no_replace.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename_no_replace.restype = ctypes.c_int
+        result = rename_no_replace(
+            os.fsencode(claimed_path),
+            os.fsencode(path),
+            4,
+        )
+    else:
+        fail(f"Atomic no-clobber rename is unavailable while preserving {path}.")
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error in (errno.EEXIST, errno.ENOTEMPTY):
         fail(f"Another activation edit appeared while preserving {path}.")
-    claimed_path.unlink()
+    fail(f"Failed to put the concurrent activation edit back at {path}: {os.strerror(error)}")
 
 
 if claimed_identity != expected_identity:

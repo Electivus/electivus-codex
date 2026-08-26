@@ -834,6 +834,96 @@ class InstallLocalShTest(unittest.TestCase):
                     process.kill()
                     process.communicate()
 
+    def test_activation_rollback_puts_back_object_swapped_before_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            releases_dir = prepare_previous_releases(root)
+            previous_release = releases_dir / "previous-1"
+            (previous_release / "bin").mkdir()
+            write_executable(previous_release / "bin/codex", "#!/bin/sh\nexit 0\n")
+            current = releases_dir.parent / "current"
+            current.symlink_to(previous_release)
+            visible_command = root / "install-bin/codex"
+            visible_command.parent.mkdir()
+            visible_command.symlink_to(current / "bin/codex")
+            raced_identity = root / "raced-identity"
+            env = installer_env(root, repo, codex_exit=19)
+            install_activation_claim_race(env, current, raced_identity)
+
+            result = subprocess.run(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            current_stat = current.lstat()
+            self.assertEqual(
+                f"{current_stat.st_dev}:{current_stat.st_ino}:{current_stat.st_mode}",
+                raced_identity.read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                (current / "concurrent-owner.txt").read_text(encoding="utf-8"),
+                "keep in place\n",
+            )
+            recovery_paths = list(current.parent.glob(".activation-recovery.current.*"))
+            self.assertEqual(len(recovery_paths), 1)
+            self.assertFalse((recovery_paths[0] / "claimed-value").exists())
+            self.assertIn("Concurrent activation edit detected", result.stderr)
+            self.assertIn("Activation recovery material retained at:", result.stderr)
+
+    def test_activation_claim_race_preserves_successor_and_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            releases_dir = prepare_previous_releases(root)
+            previous_release = releases_dir / "previous-1"
+            (previous_release / "bin").mkdir()
+            write_executable(previous_release / "bin/codex", "#!/bin/sh\nexit 0\n")
+            current = releases_dir.parent / "current"
+            current.symlink_to(previous_release)
+            visible_command = root / "install-bin/codex"
+            visible_command.parent.mkdir()
+            visible_command.symlink_to(current / "bin/codex")
+            raced_identity = root / "raced-identity"
+            env = installer_env(root, repo, codex_exit=19)
+            install_activation_claim_race(
+                env,
+                current,
+                raced_identity,
+                successor="successor value\n",
+            )
+
+            result = subprocess.run(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(current.read_text(encoding="utf-8"), "successor value\n")
+            recovery_paths = list(current.parent.glob(".activation-recovery.current.*"))
+            self.assertEqual(len(recovery_paths), 1)
+            claimed_path = recovery_paths[0] / "claimed-value"
+            claimed_stat = claimed_path.lstat()
+            self.assertEqual(
+                f"{claimed_stat.st_dev}:{claimed_stat.st_ino}:{claimed_stat.st_mode}",
+                raced_identity.read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                (claimed_path / "concurrent-owner.txt").read_text(encoding="utf-8"),
+                "keep in place\n",
+            )
+            self.assertIn("Another activation edit appeared", result.stderr)
+            self.assertIn("Activation recovery material retained at:", result.stderr)
+
     def test_missing_lockfile_is_restored_as_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2133,6 +2223,76 @@ def install_current_swap_signal(env: dict[str, str]) -> None:
             """
         ),
     )
+
+
+def install_activation_claim_race(
+    env: dict[str, str],
+    target: Path,
+    raced_identity: Path,
+    *,
+    successor: str | None = None,
+) -> None:
+    hook_dir = raced_identity.parent / "python-hook"
+    hook_dir.mkdir()
+    (hook_dir / "sitecustomize.py").write_text(
+        textwrap.dedent(
+            """\
+            import os
+
+
+            real_rename = os.rename
+
+
+            def race_rename(source, destination, *args, **kwargs):
+                source_path = os.fsdecode(source)
+                destination_path = os.fsdecode(destination)
+                if (
+                    source_path == os.environ["CODEX_TEST_ACTIVATION_CLAIM_TARGET"]
+                    and os.path.basename(destination_path) == "claimed-value"
+                    and not os.path.exists(os.environ["CODEX_TEST_ACTIVATION_RACED"])
+                ):
+                    os.unlink(source_path)
+                    os.mkdir(source_path)
+                    with open(
+                        os.path.join(source_path, "concurrent-owner.txt"),
+                        "w",
+                        encoding="utf-8",
+                    ) as stream:
+                        stream.write("keep in place\\n")
+                    raced_stat = os.lstat(source_path)
+                    with open(
+                        os.environ["CODEX_TEST_ACTIVATION_RACED"],
+                        "w",
+                        encoding="utf-8",
+                    ) as stream:
+                        stream.write(
+                            f"{raced_stat.st_dev}:{raced_stat.st_ino}:"
+                            f"{raced_stat.st_mode}"
+                        )
+                    result = real_rename(source, destination, *args, **kwargs)
+                    successor = os.environ.get("CODEX_TEST_ACTIVATION_SUCCESSOR")
+                    if successor is not None:
+                        with open(source_path, "w", encoding="utf-8") as stream:
+                            stream.write(successor)
+                    return result
+                return real_rename(source, destination, *args, **kwargs)
+
+
+            os.rename = race_rename
+            """
+        ),
+        encoding="utf-8",
+    )
+    existing_python_path = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        f"{hook_dir}{os.pathsep}{existing_python_path}"
+        if existing_python_path
+        else str(hook_dir)
+    )
+    env["CODEX_TEST_ACTIVATION_CLAIM_TARGET"] = str(target)
+    env["CODEX_TEST_ACTIVATION_RACED"] = str(raced_identity)
+    if successor is not None:
+        env["CODEX_TEST_ACTIVATION_SUCCESSOR"] = successor
 
 
 def communicate_bounded(process: subprocess.Popen[str]) -> tuple[str, str]:
