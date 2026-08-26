@@ -45,6 +45,11 @@ EOF
 
 validate_version() {
   version="$1"
+  version_without_line_breaks="$(printf '%s' "$version" | tr -d '\r\n')"
+  if [ "$version_without_line_breaks" != "$version" ]; then
+    echo "Invalid Electivus release version: values must not contain CR or LF characters." >&2
+    return 1
+  fi
   version_bytes="$(printf '%s' "$version" | LC_ALL=C wc -c | tr -d ' ')"
   if [ "$version_bytes" -gt 128 ]; then
     echo "Invalid Electivus release version: values must not exceed the 128-byte safety limit." >&2
@@ -96,6 +101,11 @@ parse_args() {
 }
 
 normalize_selector() {
+  selector_without_line_breaks="$(printf '%s' "$SELECTOR" | tr -d '\r\n')"
+  if [ "$selector_without_line_breaks" != "$SELECTOR" ]; then
+    echo "Invalid Electivus release selector: values must not contain CR or LF characters." >&2
+    return 1
+  fi
   case "$SELECTOR" in
     stable | pre-release)
       requested_kind="$SELECTOR"
@@ -198,9 +208,22 @@ import json
 from pathlib import Path
 import sys
 
+
+def reject_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
 try:
-    page = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-except (OSError, UnicodeError, json.JSONDecodeError):
+    page = json.loads(
+        Path(sys.argv[1]).read_text(encoding="utf-8"),
+        object_pairs_hook=reject_duplicate_keys,
+    )
+except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
     print("invalid")
     raise SystemExit
 if not isinstance(page, list) or len(page) > 100:
@@ -278,6 +301,15 @@ published_at_pattern = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
     r"(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})"
 )
+
+
+def reject_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
 
 
 def parse_version(value):
@@ -380,11 +412,19 @@ def candidate(release):
 metadata_path = Path(metadata_dir)
 try:
     if kind == "exact":
-        documents = [json.loads((metadata_path / "exact.json").read_text(encoding="utf-8"))]
+        documents = [
+            json.loads(
+                (metadata_path / "exact.json").read_text(encoding="utf-8"),
+                object_pairs_hook=reject_duplicate_keys,
+            )
+        ]
     else:
         documents = []
         for path in sorted(metadata_path.glob("page-*.json")):
-            page = json.loads(path.read_text(encoding="utf-8"))
+            page = json.loads(
+                path.read_text(encoding="utf-8"),
+                object_pairs_hook=reject_duplicate_keys,
+            )
             if not isinstance(page, list):
                 raise ValueError("inventory root is not an array")
             documents.extend(page)

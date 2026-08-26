@@ -199,6 +199,61 @@ class InstallerV1ShTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(requests, [])
 
+    def test_duplicate_release_keys_fail_closed_in_exact_and_inventory_metadata(
+        self,
+    ) -> None:
+        duplicate_values: dict[str, object] = {
+            "draft": True,
+            "tag_name": "electivus-v999.0.0",
+            "assets": [],
+        }
+        for key, duplicate_value in duplicate_values.items():
+            for route in ("exact", "inventory"):
+                with (
+                    self.subTest(key=key, route=route),
+                    tempfile.TemporaryDirectory() as temp_dir,
+                ):
+                    root = Path(temp_dir)
+                    digests = create_assets(root)
+                    raw_release = release_json_with_duplicate_key(
+                        release("4.1.0", digests), key, duplicate_value
+                    )
+                    options: dict[str, object]
+                    if route == "exact":
+                        options = {
+                            "arguments": ["--release", "4.1.0"],
+                            "exact": raw_release,
+                        }
+                        expected_requests = [exact_url("4.1.0")]
+                    else:
+                        options = {"inventory": f"[{raw_release}]"}
+                        expected_requests = [inventory_url(1)]
+
+                    result, requests = run_bootstrap(root, **options)
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(requests, expected_requests)
+                    self.assertFalse((root / "delegation.json").exists())
+
+    def test_release_selectors_reject_cr_and_lf_before_network(self) -> None:
+        for selector in (
+            "1.2.3\n",
+            "electivus-v1.2.3\r",
+            "stable\n",
+            "pre-release\r\n",
+        ):
+            with (
+                self.subTest(selector=repr(selector)),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                result, requests = run_bootstrap(
+                    Path(temp_dir), arguments=["--release", selector]
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("must not contain CR or LF", result.stderr)
+                self.assertEqual(requests, [])
+
     def test_metadata_and_installer_body_limits_fail_before_delegation(self) -> None:
         for mode, expected_limit in (
             ("metadata-oversized", "1048576-byte safety limit"),
@@ -581,7 +636,7 @@ def prepare_bootstrap(
     root: Path,
     *,
     arguments: list[str] | None = None,
-    inventory: list[dict[str, object]] | None = None,
+    inventory: list[dict[str, object]] | str | None = None,
     exact: object | None = None,
     mode: str = "",
     operating_system: str = "Linux",
@@ -595,7 +650,8 @@ def prepare_bootstrap(
         encoding="utf-8",
     )
     (metadata_dir / "inventory.json").write_text(
-        json.dumps(inventory or []), encoding="utf-8"
+        inventory if isinstance(inventory, str) else json.dumps(inventory or []),
+        encoding="utf-8",
     )
     request_log = root / "requests.log"
     write_executable(
@@ -794,6 +850,20 @@ def release(
             if name not in omitted
         ],
     }
+
+
+def release_json_with_duplicate_key(
+    metadata: dict[str, object], key: str, duplicate_value: object
+) -> str:
+    serialized = json.dumps(metadata, separators=(",", ":"))
+    return (
+        "{"
+        + json.dumps(key)
+        + ":"
+        + json.dumps(duplicate_value, separators=(",", ":"))
+        + ","
+        + serialized[1:]
+    )
 
 
 def valid_extra_assets(
