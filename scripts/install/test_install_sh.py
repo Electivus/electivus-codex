@@ -1619,6 +1619,70 @@ class InstallShTest(unittest.TestCase):
             self.assertEqual(list(standalone.glob("install.lock.owner.*")), [])
             self.assertEqual(list(root.glob("tmp.*")), [])
 
+    def test_concurrent_recreation_during_release_rollback_preserves_backup(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            version = "1.11.5"
+            initial_digests = create_release_assets(root, version)
+            initial, _requests = run_installer(
+                root,
+                selector=version,
+                exact=release_metadata(version, initial_digests),
+            )
+            self.assertEqual(initial.returncode, 0, initial.stderr)
+            installed_release = release_dir(root, version)
+            receipt_path = installed_release / "installation-receipt.json"
+            receipt_path.write_bytes(b'{"publisher":"incomplete"}\n')
+            old_codex_bytes = (installed_release / "bin/codex").read_bytes()
+            old_receipt_bytes = receipt_path.read_bytes()
+            failing_digests = create_release_assets(
+                root, version, fail_during_activation=True
+            )
+            invocation = prepare_installer(
+                root,
+                selector=version,
+                exact=release_metadata(version, failing_digests),
+                force_fallback_lock=True,
+            )
+            invocation.env["TMPDIR"] = str(root)
+            install_release_restore_destination_race(
+                invocation.env, restored_path=installed_release
+            )
+
+            result = run_prepared_installer(invocation)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertNotIn("restoring the previous installed bytes", result.stderr)
+            self.assertIn(
+                f"Could not restore the previous release at {installed_release} "
+                "because that destination reappeared during rollback.",
+                result.stderr,
+            )
+            self.assertEqual(
+                (installed_release / "concurrent-owner").read_text(encoding="utf-8"),
+                "concurrent\n",
+            )
+            self.assertEqual(list(installed_release.glob(".rollback.*")), [])
+            releases = installed_release.parents[1]
+            backups = list(releases.glob(f".rollback.{version}.{TARGET}.*"))
+            self.assertEqual(len(backups), 1)
+            self.assertIn(
+                f"The previous release remains preserved at {backups[0]}; "
+                "manual recovery is required.",
+                result.stderr,
+            )
+            self.assertEqual((backups[0] / "bin/codex").read_bytes(), old_codex_bytes)
+            self.assertEqual(
+                (backups[0] / "installation-receipt.json").read_bytes(),
+                old_receipt_bytes,
+            )
+            standalone = root / "codex-home/packages/standalone"
+            self.assertFalse((standalone / "install.lock.d").exists())
+            self.assertEqual(list(standalone.glob("install.lock.owner.*")), [])
+            self.assertEqual(list(root.glob("tmp.*")), [])
+
     def test_signals_during_same_version_reinstall_restore_exact_active_release(
         self,
     ) -> None:
@@ -2532,6 +2596,41 @@ def install_reclaim_marker_mv_failure(
             *.reclaim.*)
               if [ -n "$CODEX_TEST_MV_REPORTS_SUCCESS" ]; then exit 0; fi
               exit 77
+              ;;
+            esac
+            exec "{real_mv}" "$@"
+            """
+        ),
+    )
+
+
+def install_release_restore_destination_race(
+    env: dict[str, str], *, restored_path: Path
+) -> None:
+    fake_mv = Path(env["PATH"]) / "mv"
+    fake_mv.unlink()
+    real_mv = shutil.which("mv")
+    assert real_mv is not None
+    env["CODEX_TEST_RESTORED_RELEASE_PATH"] = str(restored_path)
+    write_executable(
+        fake_mv,
+        textwrap.dedent(
+            f"""\
+            #!/bin/sh
+            source=""
+            destination=""
+            for argument in "$@"; do
+              case "$argument" in
+              -*) ;;
+              *) source="$destination"; destination="$argument" ;;
+              esac
+            done
+            case "$source:$destination" in
+            */.rollback.*:"$CODEX_TEST_RESTORED_RELEASE_PATH")
+              if mkdir "$CODEX_TEST_ROOT/recreated-release-once" 2>/dev/null; then
+                mkdir -p "$destination"
+                printf 'concurrent\n' >"$destination/concurrent-owner"
+              fi
               ;;
             esac
             exec "{real_mv}" "$@"

@@ -2280,9 +2280,18 @@ rollback_release_replacement() {
         warn "The previous release remains preserved at $replaced_release_backup; manual recovery is required."
         rollback_release_status=1
       else
-        warn "Release replacement failed; restoring the previous installed bytes."
-        if ! mv "$replaced_release_backup" "$replaced_release_dir"; then
+        if mv -nT "$replaced_release_backup" "$replaced_release_dir" &&
+          ! { [ -e "$replaced_release_backup" ] || [ -L "$replaced_release_backup" ]; }; then
+          warn "Release replacement failed; restoring the previous installed bytes."
+        elif [ -e "$replaced_release_dir" ] || [ -L "$replaced_release_dir" ]; then
+          warn "Could not restore the previous release at $replaced_release_dir because that destination reappeared during rollback."
+          warn "The previous release remains preserved at $replaced_release_backup; manual recovery is required."
+          rollback_release_status=1
+        else
           warn "Could not restore the previous release from $replaced_release_backup."
+          if [ -e "$replaced_release_backup" ] || [ -L "$replaced_release_backup" ]; then
+            warn "The previous release remains preserved at $replaced_release_backup; manual recovery is required."
+          fi
           rollback_release_status=1
         fi
       fi
