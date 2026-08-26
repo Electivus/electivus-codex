@@ -213,6 +213,82 @@ class InstallShTest(unittest.TestCase):
             current = root / "codex-home/packages/standalone/current"
             self.assertEqual(current.resolve(), release_dir(root, current_version))
 
+    def test_concurrent_lower_release_cannot_replace_a_newer_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            lower_root = root / "lower"
+            newer_root = root / "newer"
+            lower_root.mkdir()
+            newer_root.mkdir()
+            lower_version = "2.0.0"
+            newer_version = "3.0.0"
+            lower_digests = create_release_assets(lower_root, lower_version)
+            newer_digests = create_release_assets(newer_root, newer_version)
+            lower = prepare_installer(
+                lower_root,
+                selector=lower_version,
+                exact=release_metadata(lower_version, lower_digests),
+            )
+            newer = prepare_installer(
+                newer_root,
+                selector=newer_version,
+                exact=release_metadata(newer_version, newer_digests),
+            )
+            shared_codex_home = root / "shared-codex-home"
+            shared_install_dir = root / "shared-bin"
+            shared_home = root / "shared-home"
+            shared_home.mkdir()
+            for invocation in (lower, newer):
+                invocation.env.update(
+                    {
+                        "CODEX_HOME": str(shared_codex_home),
+                        "CODEX_INSTALL_DIR": str(shared_install_dir),
+                        "HOME": str(shared_home),
+                    }
+                )
+
+            flock_gate = lower_root / "flock-gate"
+            os.mkfifo(flock_gate)
+            lower.env["CODEX_TEST_FLOCK_GATE"] = str(flock_gate)
+            install_flock_gate(lower.env)
+            lower_process = subprocess.Popen(
+                lower.args,
+                env=lower.env,
+                start_new_session=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                wait_for_path(lower_root / "flock.ready")
+                newer_result = subprocess.run(
+                    newer.args,
+                    capture_output=True,
+                    check=False,
+                    env=newer.env,
+                    text=True,
+                )
+                self.assertEqual(
+                    newer_result.returncode,
+                    0,
+                    newer_result.stderr + newer_result.stdout,
+                )
+
+                flock_gate.write_text("continue\n", encoding="utf-8")
+                lower_stdout, lower_stderr = lower_process.communicate(timeout=10)
+
+                self.assertNotEqual(lower_process.returncode, 0, lower_stdout)
+                self.assertIn("Refusing to downgrade", lower_stderr)
+                current = shared_codex_home / "packages/standalone/current"
+                current_receipt = json.loads(
+                    (current / "installation-receipt.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(current_receipt["tag"], f"electivus-v{newer_version}")
+            finally:
+                if lower_process.poll() is None:
+                    os.killpg(lower_process.pid, signal.SIGKILL)
+                    lower_process.communicate(timeout=2)
+
     def test_pre_release_channel_promotes_to_compatible_newer_stable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -317,6 +393,28 @@ class InstallShTest(unittest.TestCase):
                     self.assertIn("1048576-byte safety limit", result.stderr)
                 else:
                     self.assertIn("Could not parse", result.stderr)
+
+    def test_structurally_malformed_metadata_fails_closed(self) -> None:
+        malformed_documents = (
+            '{"tag_name":"electivus-v1.6.1" "draft":false}',
+            '{"tag_name":"electivus-v1.6.1",}',
+            '{"assets":[{} {}],"tag_name":"electivus-v1.6.1"}',
+            '{"tag_name" "electivus-v1.6.1"}',
+            r'{"tag_name":"electivus-v1.6.1\q"}',
+            '{"tag_name":"electivus-v1.6.1\ninvalid"}',
+        )
+        for document in malformed_documents:
+            with (
+                self.subTest(document=document),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                result, requests = run_installer(
+                    Path(temp_dir), selector="1.6.1", exact=document
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(requests, [exact_url("1.6.1")])
+                self.assertIn("Could not parse", result.stderr)
 
     def test_release_version_and_inventory_pagination_bounds_fail_closed(self) -> None:
         cases = (
@@ -832,6 +930,134 @@ class InstallShTest(unittest.TestCase):
                         os.killpg(process.pid, signal.SIGKILL)
                         process.communicate(timeout=2)
 
+    def test_malformed_fallback_lock_fails_closed_promptly(self) -> None:
+        for case in ("file", "directory", "fifo"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                digests = create_release_assets(root, "7.1.12")
+                invocation = prepare_installer(
+                    root,
+                    selector="7.1.12",
+                    exact=release_metadata("7.1.12", digests),
+                    force_fallback_lock=True,
+                )
+                standalone_root = root / "codex-home/packages/standalone"
+                standalone_root.mkdir(parents=True)
+                lock_path = standalone_root / "install.lock.d"
+                if case == "file":
+                    lock_path.write_text("not-a-pid\n1\n", encoding="utf-8")
+                elif case == "directory":
+                    lock_path.mkdir()
+                    (lock_path / "pid").write_text("not-a-pid\n", encoding="utf-8")
+                    (lock_path / "started_at").write_text("1\n", encoding="utf-8")
+                else:
+                    os.mkfifo(lock_path)
+
+                process = subprocess.Popen(
+                    invocation.args,
+                    env=invocation.env,
+                    start_new_session=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    stdout, stderr = communicate_bounded(process)
+
+                    self.assertNotEqual(process.returncode, 0, stdout)
+                    self.assertIn(str(lock_path), stderr)
+                    self.assertIn("manual recovery", stderr)
+                    self.assertFalse((standalone_root / "current").exists())
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate(timeout=2)
+
+    def test_dead_fallback_lock_is_reclaimed_without_an_age_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_release_assets(root, "7.1.14")
+            invocation = prepare_installer(
+                root,
+                selector="7.1.14",
+                exact=release_metadata("7.1.14", digests),
+                force_fallback_lock=True,
+            )
+            standalone_root = root / "codex-home/packages/standalone"
+            standalone_root.mkdir(parents=True)
+            lock_path = standalone_root / "install.lock.d"
+            lock_path.write_text(
+                f"2147483647\n{int(time.time())}\nforeign-owner\n",
+                encoding="utf-8",
+            )
+            process = subprocess.Popen(
+                invocation.args,
+                env=invocation.env,
+                start_new_session=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = communicate_bounded(process)
+
+                self.assertEqual(process.returncode, 0, stderr + stdout)
+                self.assertIn("Removing stale installer lock", stderr)
+                self.assertEqual(
+                    read_receipt(root, "7.1.14")["tag"], "electivus-v7.1.14"
+                )
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=2)
+
+    def test_fallback_hard_link_claim_failure_exits_promptly(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            digests = create_release_assets(root, "7.1.13")
+            invocation = prepare_installer(
+                root,
+                selector="7.1.13",
+                exact=release_metadata("7.1.13", digests),
+                force_fallback_lock=True,
+            )
+            install_failing_hard_link(invocation.env)
+            process = subprocess.Popen(
+                invocation.args,
+                env=invocation.env,
+                start_new_session=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            stdout, stderr = communicate_bounded(process)
+
+            self.assertNotEqual(process.returncode, 0, stdout)
+            self.assertIn("Could not claim the installer lock", stderr)
+            self.assertIn("no competing lock exists", stderr)
+            standalone_root = root / "codex-home/packages/standalone"
+            self.assertFalse((standalone_root / "current").exists())
+
+    def test_process_identity_fails_closed_without_proc(self) -> None:
+        script = INSTALL_SCRIPT.read_text(encoding="utf-8")
+        function_start = script.index("process_start_fingerprint() {")
+        function_end = script.index("\n}\n", function_start) + 3
+        function_source = script[function_start:function_end]
+        result = subprocess.run(
+            [
+                "/bin/sh",
+                "-c",
+                f"{function_source}\nprocess_start_fingerprint 2147483647",
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+
+        self.assertNotIn("ps ", function_source)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
     def test_macos_fails_before_any_network_request(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             result, requests = run_installer(Path(temp_dir), force_macos=True)
@@ -1043,7 +1269,6 @@ def prepare_installer(
             "dd",
             "dirname",
             "find",
-            "fold",
             "grep",
             "gzip",
             "head",
@@ -1052,6 +1277,7 @@ def prepare_installer(
             "mkfifo",
             "mktemp",
             "mv",
+            "od",
             "readlink",
             "rm",
             "sed",
@@ -1417,6 +1643,26 @@ def wait_for_glob_count(pattern: str, count: int) -> None:
         if time.monotonic() >= deadline:
             raise AssertionError(f"timed out waiting for {count} matches of {pattern}")
         time.sleep(0.01)
+
+
+def install_flock_gate(env: dict[str, str]) -> None:
+    write_executable(
+        Path(env["PATH"].split(os.pathsep, maxsplit=1)[0]) / "flock",
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            : >"$CODEX_TEST_ROOT/flock.ready"
+            IFS= read -r _continue <"$CODEX_TEST_FLOCK_GATE"
+            exec /usr/bin/flock "$@"
+            """
+        ),
+    )
+
+
+def install_failing_hard_link(env: dict[str, str]) -> None:
+    fake_ln = Path(env["PATH"]) / "ln"
+    fake_ln.unlink()
+    write_executable(fake_ln, "#!/bin/sh\nexit 73\n")
 
 
 def install_reclaim_guard_barrier(env: dict[str, str]) -> None:

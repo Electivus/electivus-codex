@@ -27,8 +27,6 @@ RELEASES_DIR="$STANDALONE_ROOT/releases/$PUBLISHER/electivus-codex"
 CURRENT_LINK="$STANDALONE_ROOT/current"
 LOCK_FILE="$STANDALONE_ROOT/install.lock"
 LOCK_PATH="$STANDALONE_ROOT/install.lock.d"
-LOCK_STALE_AFTER_SECS=600
-
 path_action="already"
 path_profile=""
 conflict_manager=""
@@ -252,10 +250,13 @@ download_text() {
 }
 
 parse_release_metadata() {
-  # Bound awk's record size so compact, single-line JSON stays fast on every
-  # supported awk implementation. JSON strings cannot contain literal newlines,
-  # so the record boundaries inserted by fold do not change the document.
-  LC_ALL=C fold -b -w 4096 | LC_ALL=C awk '
+  # od gives awk bounded records while preserving every input byte, including
+  # literal newlines that JSON permits as whitespace but forbids in strings.
+  LC_ALL=C od -An -v -tu1 | LC_ALL=C awk '
+    function is_whitespace(value) {
+      return value == 9 || value == 10 || value == 13 || value == 32
+    }
+
     function reset_release() {
       release_tag = ""
       release_draft = ""
@@ -263,190 +264,292 @@ parse_release_metadata() {
       release_published_at = ""
     }
 
-    function save_value(value, value_type) {
-      if (object_depth == release_object_depth) {
-        if (key == "tag_name") {
+    function save_value(value, value_type, value_depth, value_key) {
+      if (value_depth == release_object_depth) {
+        if (value_key == "tag_name") {
           release_tag = value_type == "string" ? value : ""
-        } else if (key == "draft") {
+        } else if (value_key == "draft") {
           release_draft = value_type == "boolean" ? value : ""
-        } else if (key == "prerelease") {
+        } else if (value_key == "prerelease") {
           release_prerelease = value_type == "boolean" ? value : ""
-        } else if (key == "published_at") {
+        } else if (value_key == "published_at") {
           release_published_at = value_type == "string" ? value : ""
         }
-      } else if (object_depth == asset_object_depth) {
-        if (key == "name") {
+      } else if (value_depth == asset_object_depth) {
+        if (value_key == "name") {
           asset_name = value_type == "string" ? value : ""
-        } else if (key == "digest") {
+        } else if (value_key == "digest") {
           asset_digest = value_type == "string" ? value : ""
-        } else if (key == "state") {
+        } else if (value_key == "state") {
           asset_state = value_type == "string" ? value : ""
-        } else if (key == "size") {
+        } else if (value_key == "size") {
           asset_size = value_type == "number" ? value : ""
         }
       }
-      expecting_value = 0
-      primitive = ""
-      key = ""
     }
 
-    function finish_primitive() {
-      if (expecting_value && primitive != "") {
-        if (primitive ~ /^(true|false|null|-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?)$/) {
-          if (primitive == "true" || primitive == "false") {
-            primitive_type = "boolean"
-          } else if (primitive == "null") {
-            primitive_type = "null"
-          } else {
-            primitive_type = "number"
-          }
-          save_value(primitive, primitive_type)
-        } else {
-          invalid = 1
-        }
+    function value_is_expected() {
+      if (depth == 0) {
+        return root_state == "value"
+      }
+      return (container[depth] == "object" && state[depth] == "value") ||
+        (container[depth] == "array" &&
+          (state[depth] == "value" || state[depth] == "value_or_end"))
+    }
+
+    function accept_value_start(value_kind) {
+      if (!value_is_expected()) {
+        invalid = 1
+        return 0
+      }
+      if (depth == 0) {
+        root_state = "started"
+        root_kind = value_kind
+        return 1
+      }
+      if (container[depth] == "array" && depth == 1 &&
+          root_kind == "array" && value_kind != "object") {
+        invalid = 1
+      }
+      if (container[depth] == "array" && depth == assets_array_depth &&
+          value_kind != "object") {
+        invalid = 1
+      }
+      state[depth] = "comma_or_end"
+      return 1
+    }
+
+    function begin_container(value_kind, parent_depth, parent_key) {
+      parent_depth = depth
+      parent_key = parent_depth > 0 && container[parent_depth] == "object" ?
+        member_key[parent_depth] : ""
+      if (!accept_value_start(value_kind)) {
+        return
+      }
+
+      depth++
+      container[depth] = value_kind
+      if (value_kind == "object") {
+        state[depth] = "key_or_end"
+        object_id[depth] = ++next_object_id
+      } else {
+        state[depth] = "value_or_end"
+      }
+
+      if (value_kind == "object" &&
+          (depth == 1 ||
+            (depth == 2 && container[1] == "array" && root_kind == "array"))) {
+        release_object_depth = depth
+        reset_release()
+      } else if (value_kind == "array" &&
+          parent_depth == release_object_depth && parent_key == "assets") {
+        assets_array_depth = depth
+      } else if (value_kind == "object" &&
+          assets_array_depth != 0 && parent_depth == assets_array_depth) {
+        asset_object_depth = depth
+        asset_name = ""
+        asset_digest = ""
+        asset_state = ""
+        asset_size = ""
       }
     }
 
+    function finish_scalar(value, value_type, value_depth, value_key) {
+      save_value(value, value_type, value_depth, value_key)
+      if (value_depth == 0) {
+        root_state = "done"
+      }
+    }
+
+    function finish_primitive(primitive_type) {
+      if (!primitive_mode || primitive == "" ||
+          primitive !~ /^(true|false|null|-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?)$/) {
+        invalid = 1
+      } else {
+        if (primitive == "true" || primitive == "false") {
+          primitive_type = "boolean"
+        } else if (primitive == "null") {
+          primitive_type = "null"
+        } else {
+          primitive_type = "number"
+        }
+        finish_scalar(primitive, primitive_type, scalar_depth, scalar_key)
+      }
+      primitive_mode = 0
+      primitive = ""
+    }
+
+    function close_object() {
+      if (depth == 0 || container[depth] != "object" ||
+          (state[depth] != "key_or_end" && state[depth] != "comma_or_end")) {
+        invalid = 1
+        return
+      }
+      if (depth == asset_object_depth) {
+        print "asset|" asset_name "|" asset_digest "|" asset_state "|" asset_size
+        asset_object_depth = 0
+      }
+      if (depth == release_object_depth) {
+        print "release|" release_tag "|" release_draft "|" release_prerelease "|" release_published_at
+        print "end"
+        release_object_depth = 0
+      }
+      delete container[depth]
+      delete state[depth]
+      delete member_key[depth]
+      delete object_id[depth]
+      depth--
+      if (depth == 0) {
+        root_state = "done"
+      }
+    }
+
+    function close_array() {
+      if (depth == 0 || container[depth] != "array" ||
+          (state[depth] != "value_or_end" && state[depth] != "comma_or_end")) {
+        invalid = 1
+        return
+      }
+      if (depth == assets_array_depth) {
+        assets_array_depth = 0
+      }
+      delete container[depth]
+      delete state[depth]
+      depth--
+      if (depth == 0) {
+        root_state = "done"
+      }
+    }
+
+    BEGIN {
+      root_state = "value"
+    }
+
     {
-      for (i = 1; i <= length($0); i++) {
-        char = substr($0, i, 1)
-
-        if (root_closed && char !~ /[[:space:]]/) {
-          invalid = 1
-        }
-
-        if (root_kind == "" && char !~ /[[:space:]]/) {
-          if (char == "[") {
-            root_kind = "array"
-          } else if (char == "{") {
-            root_kind = "object"
-          } else {
-            invalid = 1
-          }
-        }
-
-        if (!in_string && root_kind == "array" && array_depth == 1 &&
-            object_depth == 0 && char !~ /[[:space:]]/ &&
-            char != "{" && char != "]" && char != ",") {
-          invalid = 1
-        }
-
-        if (!in_string && assets_array_depth != 0 &&
-            array_depth == assets_array_depth &&
-            object_depth == release_object_depth &&
-            char !~ /[[:space:]]/ && char != "{" &&
-            char != "]" && char != ",") {
-          invalid = 1
-        }
+      for (i = 1; i <= NF; i++) {
+        byte = $i + 0
+        char = sprintf("%c", byte)
 
         if (in_string) {
-          if (escaped) {
-            token = token "\\" char
+          if (unicode_remaining > 0) {
+            if (char !~ /[0-9A-Fa-f]/) {
+              invalid = 1
+            }
+            token = token char
+            unicode_remaining--
+          } else if (escaped) {
+            if (char == "u") {
+              token = token char
+              unicode_remaining = 4
+            } else if (char == "\"" || char == "\\" || char == "/" ||
+                char == "b" || char == "f" || char == "n" ||
+                char == "r" || char == "t") {
+              token = token char
+            } else {
+              invalid = 1
+            }
             escaped = 0
           } else if (char == "\\") {
+            token = token char
             escaped = 1
           } else if (char == "\"") {
             in_string = 0
-            if (string_is_value) {
-              save_value(token, "string")
+            if (string_role == "key") {
+              seen_index = object_id[string_depth] SUBSEP token
+              if (seen_key[seen_index]++) {
+                invalid = 1
+              }
+              member_key[string_depth] = token
+              state[string_depth] = "colon"
             } else {
-              pending_key = token
+              finish_scalar(token, "string", scalar_depth, scalar_key)
             }
+          } else if (byte < 32) {
+            invalid = 1
           } else {
             token = token char
           }
           continue
         }
 
+        if (primitive_mode) {
+          if (is_whitespace(byte) || char == "," || char == "]" || char == "}") {
+            finish_primitive()
+          } else {
+            primitive = primitive char
+            continue
+          }
+        }
+
+        if (is_whitespace(byte)) {
+          continue
+        }
+        if (depth == 0 && root_state == "done") {
+          invalid = 1
+          continue
+        }
+
         if (char == "\"") {
+          if (depth > 0 && container[depth] == "object" &&
+              (state[depth] == "key_or_end" || state[depth] == "key")) {
+            string_role = "key"
+            string_depth = depth
+          } else if (value_is_expected()) {
+            scalar_depth = depth
+            scalar_key = depth > 0 && container[depth] == "object" ?
+              member_key[depth] : ""
+            accept_value_start("string")
+            string_role = "value"
+          } else {
+            invalid = 1
+            continue
+          }
           in_string = 1
           token = ""
           escaped = 0
-          string_is_value = expecting_value
-        } else if (char == ":" && pending_key != "") {
-          key = pending_key
-          pending_key = ""
-          expecting_value = 1
-          primitive = ""
+          unicode_remaining = 0
         } else if (char == "{") {
-          object_depth++
-          if (release_object_depth == 0 &&
-              ((root_kind == "object" && object_depth == 1 && array_depth == 0) ||
-               (root_kind == "array" && object_depth == 1 && array_depth == 1))) {
-            release_object_depth = object_depth
-            reset_release()
-          } else if (assets_array_depth != 0 &&
-              array_depth == assets_array_depth &&
-              asset_object_depth == 0) {
-            asset_object_depth = object_depth
-            asset_name = ""
-            asset_digest = ""
-            asset_state = ""
-            asset_size = ""
-          }
-          expecting_value = 0
-          primitive = ""
-          key = ""
+          begin_container("object")
         } else if (char == "}") {
-          finish_primitive()
-          if (object_depth == asset_object_depth) {
-            print "asset|" asset_name "|" asset_digest "|" asset_state "|" asset_size
-            asset_object_depth = 0
-            asset_name = ""
-            asset_digest = ""
-            asset_state = ""
-            asset_size = ""
-          }
-          if (object_depth == release_object_depth) {
-            print "release|" release_tag "|" release_draft "|" release_prerelease "|" release_published_at
-            print "end"
-            release_object_depth = 0
-          }
-          object_depth--
-          if (root_kind == "object" && object_depth == 0) {
-            root_closed = 1
-          }
-          expecting_value = 0
-          primitive = ""
-          key = ""
-          pending_key = ""
+          close_object()
         } else if (char == "[") {
-          array_depth++
-          if (expecting_value && key == "assets" &&
-              object_depth == release_object_depth) {
-            assets_array_depth = array_depth
-          }
-          expecting_value = 0
-          primitive = ""
-          key = ""
+          begin_container("array")
         } else if (char == "]") {
-          finish_primitive()
-          if (array_depth == assets_array_depth) {
-            assets_array_depth = 0
-          }
-          array_depth--
-          if (root_kind == "array" && array_depth == 0) {
-            root_closed = 1
-          }
-          expecting_value = 0
-          primitive = ""
-          key = ""
-          pending_key = ""
+          close_array()
         } else if (char == ",") {
-          finish_primitive()
-          expecting_value = 0
-          primitive = ""
-          key = ""
-          pending_key = ""
-        } else if (expecting_value && char !~ /[[:space:]]/) {
-          primitive = primitive char
+          if (depth == 0 || state[depth] != "comma_or_end") {
+            invalid = 1
+          } else if (container[depth] == "object") {
+            state[depth] = "key"
+          } else {
+            state[depth] = "value"
+          }
+        } else if (char == ":") {
+          if (depth == 0 || container[depth] != "object" || state[depth] != "colon") {
+            invalid = 1
+          } else {
+            state[depth] = "value"
+          }
+        } else if (value_is_expected()) {
+          scalar_depth = depth
+          scalar_key = depth > 0 && container[depth] == "object" ?
+            member_key[depth] : ""
+          accept_value_start("primitive")
+          primitive_mode = 1
+          primitive = char
+        } else {
+          invalid = 1
         }
       }
     }
 
     END {
-      if (invalid || root_kind == "" || !root_closed || in_string || object_depth != 0 ||
-          array_depth != 0 || release_object_depth != 0) {
+      if (primitive_mode) {
+        finish_primitive()
+      }
+      if (invalid || root_state != "done" || in_string || escaped ||
+          unicode_remaining != 0 || depth != 0 || release_object_depth != 0 ||
+          asset_object_depth != 0 || assets_array_depth != 0) {
         exit 1
       }
     }
@@ -1034,6 +1137,14 @@ load_current_managed_receipt() {
   installed_managed_channel="$receipt_channel"
 }
 
+refuse_managed_downgrade() {
+  if [ -n "$installed_managed_version" ] &&
+    [ "$(semver_compare "$resolved_version" "$installed_managed_version")" -lt 0 ]; then
+    echo "Refusing to downgrade managed Electivus Codex from $installed_managed_version to $resolved_version." >&2
+    return 1
+  fi
+}
+
 bind_installer_provenance() {
   metadata_installer_digest="$1"
   if [ ! -f "$0" ] || [ ! -r "$0" ]; then
@@ -1249,14 +1360,6 @@ process_start_fingerprint() {
     printf 'linux-proc:%s:%s\n' "$identity_boot" "$identity_start"
     return
   fi
-
-  if command -v ps >/dev/null 2>&1; then
-    identity_start="$(LC_ALL=C ps -o lstart= -p "$identity_pid" 2>/dev/null |
-      awk '{$1=$1; print}')"
-    [ -n "$identity_start" ] || return 1
-    printf 'ps-lstart:%s\n' "$(printf '%s' "$identity_start" | tr ' ' '_')"
-    return
-  fi
   return 1
 }
 
@@ -1268,7 +1371,6 @@ report_unverifiable_lock() {
 
 fallback_lock_is_stale() {
   stale_lock="$1"
-  stale_threshold="$2"
   fallback_lock_issue=""
   stale_fingerprint=""
   if [ -d "$stale_lock" ]; then
@@ -1279,24 +1381,30 @@ fallback_lock_is_stale() {
     stale_pid="$(sed -n '1p' "$stale_lock" 2>/dev/null || true)"
     stale_started_at="$(sed -n '2p' "$stale_lock" 2>/dev/null || true)"
     stale_fingerprint="$(sed -n 's/^fingerprint=//p' "$stale_lock" 2>/dev/null | head -n 1)"
+  elif [ -e "$stale_lock" ] || [ -L "$stale_lock" ]; then
+    fallback_lock_issue="it is not a regular file or legacy lock directory."
+    return 2
   else
     return 1
   fi
   case "$stale_pid" in
-    '' | *[!0-9]*) return 1 ;;
-  esac
-  if [ -n "$stale_pid" ] && kill -0 "$stale_pid" 2>/dev/null; then
-    case "$stale_started_at" in
-      '' | *[!0-9]*)
-        fallback_lock_issue="its started_at metadata is missing or malformed."
-        return 2
-        ;;
-    esac
-    stale_now="$(date +%s 2>/dev/null || printf '0')"
-    if [ "$stale_now" -eq 0 ] || [ "$stale_started_at" -gt "$stale_now" ]; then
-      fallback_lock_issue="its started_at metadata cannot describe the current live process."
+    '' | *[!0-9]*)
+      fallback_lock_issue="its owner PID is missing or malformed."
       return 2
-    fi
+      ;;
+  esac
+  case "$stale_started_at" in
+    '' | *[!0-9]*)
+      fallback_lock_issue="its started_at metadata is missing or malformed."
+      return 2
+      ;;
+  esac
+  stale_now="$(date +%s 2>/dev/null || printf '0')"
+  if [ "$stale_now" -eq 0 ] || [ "$stale_started_at" -gt "$stale_now" ]; then
+    fallback_lock_issue="its started_at metadata cannot describe the recorded owner."
+    return 2
+  fi
+  if kill -0 "$stale_pid" 2>/dev/null; then
     if [ -z "$stale_fingerprint" ]; then
       fallback_lock_issue="it has no process-start fingerprint, so PID $stale_pid cannot be proven to be the original owner."
       return 2
@@ -1312,32 +1420,48 @@ fallback_lock_is_stale() {
     fi
     return 1
   fi
-  if [ "$stale_threshold" -eq 0 ]; then
-    return 0
-  fi
-  case "$stale_started_at" in
-    '' | *[!0-9]*) return 1 ;;
-  esac
-  stale_now="$(date +%s 2>/dev/null || printf '0')"
-  if [ "$stale_now" -eq 0 ]; then
-    return 1
-  fi
-  [ $((stale_now - stale_started_at)) -ge "$stale_threshold" ]
+  # A well-formed lock whose PID no longer exists has no possible owner. Its
+  # age cannot make that dead process live again, so reclaim it immediately.
+  return 0
 }
 
 try_claim_fallback_lock() {
   try_owner="$1"
   try_lock="$2"
+  fallback_claim_issue=""
 
-  ln "$try_owner" "$try_lock" 2>/dev/null || return 1
-  if [ -f "$try_lock" ] && cmp -s "$try_lock" "$try_owner"; then
-    return 0
-  fi
+  try_attempt=1
+  while [ "$try_attempt" -le 2 ]; do
+    if ln "$try_owner" "$try_lock" 2>/dev/null; then
+      if [ -f "$try_lock" ] && cmp -s "$try_lock" "$try_owner"; then
+        return 0
+      fi
 
-  # POSIX ln treats an existing directory as a destination directory. Remove
-  # the hard link it created there and keep waiting for that legacy lock.
-  rm -f "$try_lock/$(basename "$try_owner")" 2>/dev/null || true
-  return 1
+      # POSIX ln treats an existing directory as a destination directory.
+      # Remove the probe it created there and wait for that legacy lock.
+      try_nested_lock="$try_lock/$(basename "$try_owner")"
+      if [ -f "$try_nested_lock" ]; then
+        if ! rm -f "$try_nested_lock" 2>/dev/null; then
+          fallback_claim_issue="the hard-link probe inside the legacy lock directory could not be removed."
+          return 2
+        fi
+        return 1
+      fi
+    fi
+
+    if [ -e "$try_lock" ] || [ -L "$try_lock" ]; then
+      return 1
+    fi
+    try_attempt=$((try_attempt + 1))
+  done
+  fallback_claim_issue="hard-link creation failed even though no competing lock exists."
+  return 2
+}
+
+report_lock_claim_error() {
+  claim_error_lock="$1"
+  claim_error_description="$2"
+  echo "Could not claim the $claim_error_description lock at $claim_error_lock: $fallback_claim_issue" >&2
 }
 
 cleanup_stale_reclaim_markers() {
@@ -1345,7 +1469,7 @@ cleanup_stale_reclaim_markers() {
   for cleanup_marker in "$cleanup_lock".reclaim.*; do
     [ -f "$cleanup_marker" ] || continue
     [ "$cleanup_marker" = "$cleanup_lock.reclaim.guard" ] && continue
-    if fallback_lock_is_stale "$cleanup_marker" 0; then
+    if fallback_lock_is_stale "$cleanup_marker"; then
       rm -f "$cleanup_marker" 2>/dev/null || true
     elif [ -n "$fallback_lock_issue" ]; then
       cleanup_reclaim_issue_path="$cleanup_marker"
@@ -1372,7 +1496,7 @@ wait_for_reclaim_barrier() {
     fi
     barrier_guard="$barrier_lock.reclaim.guard"
     if [ -f "$barrier_guard" ]; then
-      if fallback_lock_is_stale "$barrier_guard" 0; then
+      if fallback_lock_is_stale "$barrier_guard"; then
         echo "Stale reclaim guard at $barrier_guard requires manual removal; refusing an unsafe automatic takeover." >&2
         return 1
       elif [ -n "$fallback_lock_issue" ]; then
@@ -1409,12 +1533,21 @@ acquire_reclaim_guard() {
   reclaim_guard="$guard_lock.reclaim.guard"
   active_reclaim_guard="$reclaim_guard"
   while ! ln "$guard_marker" "$reclaim_guard" 2>/dev/null; do
-    if [ -f "$reclaim_guard" ]; then
-      if fallback_lock_is_stale "$reclaim_guard" 0; then
-        echo "Stale reclaim guard at $reclaim_guard requires manual removal; refusing an unsafe automatic takeover." >&2
-        return 1
-      elif [ -n "$fallback_lock_issue" ]; then
-        report_unverifiable_lock "$reclaim_guard" "reclaim guard"
+    if fallback_lock_is_stale "$reclaim_guard"; then
+      echo "Stale reclaim guard at $reclaim_guard requires manual removal; refusing an unsafe automatic takeover." >&2
+      return 1
+    elif [ -n "$fallback_lock_issue" ]; then
+      report_unverifiable_lock "$reclaim_guard" "reclaim guard"
+      return 1
+    elif [ ! -f "$reclaim_guard" ]; then
+      # The previous owner may have released the guard between ln failing and
+      # this check. Retry once to separate that race from a hard-link error.
+      if ln "$guard_marker" "$reclaim_guard" 2>/dev/null; then
+        break
+      fi
+      if [ ! -f "$reclaim_guard" ]; then
+        fallback_claim_issue="hard-link creation failed even though no competing reclaim guard exists."
+        report_lock_claim_error "$reclaim_guard" "reclaim guard"
         return 1
       fi
     fi
@@ -1448,7 +1581,6 @@ release_reclaim_guard() {
 reclaim_fallback_lock() {
   reclaim_lock="$1"
   reclaim_owner_prefix="$2"
-  reclaim_stale_threshold="$3"
   active_reclaim_marker="$(publish_reclaim_marker "$reclaim_lock")" || return 1
   reclaim_suffix="${active_reclaim_marker##*.}"
   if ! acquire_reclaim_guard "$reclaim_lock" "$active_reclaim_marker"; then
@@ -1459,16 +1591,21 @@ reclaim_fallback_lock() {
   fi
 
   if [ -d "$reclaim_lock" ]; then
-    if fallback_lock_is_stale "$reclaim_lock" "$reclaim_stale_threshold"; then
+    if fallback_lock_is_stale "$reclaim_lock"; then
       reclaimed_lock="$reclaim_lock.stale.$reclaim_suffix"
       if mv "$reclaim_lock" "$reclaimed_lock" 2>/dev/null; then
         rm -rf "$reclaimed_lock"
+      elif [ -d "$reclaim_lock" ]; then
+        fallback_claim_issue="the stale legacy lock directory could not be moved for safe reclamation."
+        report_lock_claim_error "$reclaim_lock" "stale lock"
+        release_reclaim_guard "$active_reclaim_marker"
+        return 1
       fi
     fi
   elif [ -f "$reclaim_lock" ]; then
     reclaimed_lock="$reclaim_lock.snapshot.$reclaim_suffix"
     if ln "$reclaim_lock" "$reclaimed_lock" 2>/dev/null; then
-      if fallback_lock_is_stale "$reclaimed_lock" "$reclaim_stale_threshold"; then
+      if fallback_lock_is_stale "$reclaimed_lock"; then
         reclaimed_owner="$(sed -n '3p' "$reclaimed_lock" 2>/dev/null || true)"
         rm -f "$reclaim_lock" 2>/dev/null || true
         case "$reclaimed_owner" in
@@ -1476,6 +1613,11 @@ reclaim_fallback_lock() {
         esac
       fi
       rm -f "$reclaimed_lock" 2>/dev/null || true
+    elif [ -f "$reclaim_lock" ]; then
+      fallback_claim_issue="the stale lock could not be hard-linked for safe reclamation."
+      report_lock_claim_error "$reclaim_lock" "stale lock"
+      release_reclaim_guard "$active_reclaim_marker"
+      return 1
     fi
   fi
   release_reclaim_guard "$active_reclaim_marker"
@@ -1487,22 +1629,26 @@ acquire_fallback_lock() {
   claim_owner="$1"
   claim_lock="$2"
   claim_owner_prefix="$3"
-  claim_stale_threshold="$4"
-  claim_description="$5"
+  claim_description="$4"
 
   while :; do
-    wait_for_reclaim_barrier "$claim_lock"
-    if try_claim_fallback_lock "$claim_owner" "$claim_lock"; then
-      wait_for_reclaim_barrier "$claim_lock"
+    wait_for_reclaim_barrier "$claim_lock" || return 1
+    claim_status=0
+    try_claim_fallback_lock "$claim_owner" "$claim_lock" || claim_status=$?
+    if [ "$claim_status" -eq 0 ]; then
+      wait_for_reclaim_barrier "$claim_lock" || return 1
       if [ -f "$claim_lock" ] && cmp -s "$claim_lock" "$claim_owner"; then
         return
       fi
       continue
     fi
-    if fallback_lock_is_stale "$claim_lock" "$claim_stale_threshold"; then
+    if [ "$claim_status" -eq 2 ]; then
+      report_lock_claim_error "$claim_lock" "$claim_description"
+      return 1
+    fi
+    if fallback_lock_is_stale "$claim_lock"; then
       warn "Removing stale $claim_description lock at $claim_lock"
-      reclaim_fallback_lock \
-        "$claim_lock" "$claim_owner_prefix" "$claim_stale_threshold" || true
+      reclaim_fallback_lock "$claim_lock" "$claim_owner_prefix" || return 1
       continue
     fi
     if [ -n "$fallback_lock_issue" ]; then
@@ -1546,7 +1692,6 @@ acquire_install_lock() {
     "$lock_owner_file" \
     "$LOCK_PATH" \
     "$STANDALONE_ROOT/install.lock.owner." \
-    "$LOCK_STALE_AFTER_SECS" \
     installer
   lock_kind="hardlink"
 }
@@ -1934,6 +2079,7 @@ parse_args "$@"
 require_command mktemp
 require_command tar
 require_command cmp
+require_command od
 
 case "$(uname -s)" in
   Darwin)
@@ -1997,11 +2143,7 @@ release_dir="$RELEASES_DIR/$resolved_version/$vendor_target"
 package_metadata_digest="$(release_asset_digest "$package_asset")"
 installer_metadata_digest="$(release_asset_digest "$installer_asset")"
 bind_installer_provenance "$installer_metadata_digest"
-if [ -n "$installed_managed_version" ] &&
-  [ "$(semver_compare "$resolved_version" "$installed_managed_version")" -lt 0 ]; then
-  echo "Refusing to downgrade managed Electivus Codex from $installed_managed_version to $resolved_version." >&2
-  exit 1
-fi
+refuse_managed_downgrade
 expected_receipt="$tmp_dir/installation-receipt.json"
 write_installation_receipt \
   "$expected_receipt" \
@@ -2062,6 +2204,8 @@ if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target"
   echo "Installed Electivus Codex command or receipt did not match expected release $resolved_version." >&2
   exit 1
 fi
+load_current_managed_receipt
+refuse_managed_downgrade
 activate_release "$release_dir"
 add_to_path
 release_install_lock
