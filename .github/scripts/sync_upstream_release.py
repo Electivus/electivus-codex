@@ -274,6 +274,10 @@ def synchronize(
             pr_url=frozen.url,
         )
 
+    if config.manual_tag and _semantic_version(config.manual_tag) is None:
+        raise SyncError(
+            f"{config.manual_tag!r} is not an exact rust-v<SemVer> release tag"
+        )
     candidates = (
         [releases.release_for_tag(config.manual_tag)]
         if config.manual_tag
@@ -379,7 +383,13 @@ def _select_release(
     ]
     if manual_tag:
         selected = next(
-            (release for release in eligible if release.tag == manual_tag), None
+            (
+                release
+                for release in eligible
+                if release.tag == manual_tag
+                and _semantic_version(release.tag) is not None
+            ),
+            None,
         )
         if selected is None:
             raise SyncError(
@@ -389,11 +399,17 @@ def _select_release(
     automatic = [
         _VersionedRelease(release, version)
         for release in eligible
-        if (version := _semantic_version(release.tag)) is not None
+        if (version := _semantic_version(release.tag)) is not None and version.is_stable
     ]
     if not automatic:
-        raise SyncError("no published Codex CLI release with a valid version is available")
-    return max(automatic, key=lambda candidate: candidate.version).release, "automatic"
+        raise SyncError("no published stable Codex CLI release is available")
+    greatest = max(candidate.version for candidate in automatic)
+    selected = [
+        candidate.release for candidate in automatic if candidate.version == greatest
+    ]
+    if len(selected) != 1:
+        raise SyncError("greatest stable Codex CLI Semantic Version is ambiguous")
+    return selected[0], "automatic"
 
 
 def _semantic_version(

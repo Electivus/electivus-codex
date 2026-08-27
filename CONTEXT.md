@@ -94,9 +94,14 @@ preserving fork-owned behavior and validation.
 _Avoid_: Fork reset, upstream replacement, automatic update
 
 **Release baseline**:
-The published non-draft GitHub Release from `openai/codex` with the greatest valid Semantic
-Version, whether stable or pre-release, selected as the target of an Upstream synchronization.
-_Avoid_: Upstream main, latest stable, latest publication timestamp
+The immutable commit of a published, non-draft `openai/codex` Release selected for synchronization.
+Automation selects the greatest stable Semantic Version; manual dispatch may select one exact stable
+or pre-release Semantic Version.
+_Avoid_: Upstream main, publication timestamp, automatically selected pre-release
+
+**Fork baseline**:
+The immutable default-branch commit frozen before preparing a Synchronization PR.
+_Avoid_: Current default branch, moving merge target
 
 **Fork development version**:
 The `0.0.0` Rust workspace version that identifies Electivus source builds independently of the
@@ -109,10 +114,31 @@ gate before it enters the default branch.
 _Avoid_: Sync branch, upstream alert, direct sync
 
 **Synchronization baseline**:
-The Release baseline fixed when a Synchronization PR is created and retained unchanged until that
-PR is merged or closed. Closing without merge abandons that attempt; automation preserves it as
-history and does not reopen it.
+The frozen pair of Release baseline and Fork baseline recorded for one synchronization attempt.
+Closing its PR without merge abandons the pair permanently; automation does not reopen it.
 _Avoid_: Rolling release target, latest available release, automatic retry
+
+**Synchronization manifest**:
+The canonical, immutable repository record that chains one Synchronization baseline to its
+predecessor and records selection, preparation, and deterministic conflict paths.
+_Avoid_: Pull-request body, mutable progress record
+
+**Baseline reconciliation**:
+The unique two-parent merge that joins the frozen Release and Fork baselines.
+_Avoid_: GitHub synthetic merge, Catch-up merge
+
+**Deterministic synchronization**:
+Preparation reproduced only from one manifest's immutable inputs and declared mechanical commits.
+_Avoid_: Recomputing against current main, implicit path preference
+
+**Semantic reconciliation**:
+Human-owned resolution of behavioral conflicts before a conflicting Synchronization PR becomes
+ready.
+_Avoid_: Automatic ours/theirs selection, normalization commit
+
+**Catch-up merge**:
+A separately attributable merge of a newer default-branch head after Baseline reconciliation.
+_Avoid_: Baseline reconciliation, GitHub synthetic merge
 
 **Validation PR**:
 A draft pull request used to prove a compatibility patch on real fork infrastructure before its
