@@ -157,6 +157,9 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             newer_prerelease = fixture.release(
                 "rust-v0.149.0-alpha.1", "0.149.0", "not automatic"
             )
+            unpublished = fixture.release(
+                "rust-v99.0.0", "99.0.0", "not published"
+            )
             fork_head = fixture.fork_head
             pull_requests = RecordingPullRequests()
 
@@ -196,10 +199,10 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                             url="https://example.test/sdk",
                         ),
                         Release(
-                            tag="rust-v-unpublished",
+                            tag=unpublished.tag,
                             published_at=None,
                             draft=False,
-                            url="https://example.test/unpublished",
+                            url=unpublished.url,
                         ),
                     ]
                 ),
@@ -319,6 +322,26 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                         pr_url="https://example.test/pull/1",
                     ),
                 )
+
+    def test_automatic_selection_rejects_only_published_prereleases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            older = fixture.release("rust-v2.0.0-alpha.1", "2.0.0", "older")
+            newer = fixture.release("rust-v2.0.0-rc.1", "2.0.0", "newer")
+            pull_requests = RecordingPullRequests()
+            before = fixture.ref_snapshot()
+
+            with self.assertRaisesRegex(
+                SyncError, "^no published stable Codex CLI release is available$"
+            ):
+                synchronize(
+                    fixture.config(),
+                    FixtureReleases.published(older, newer),
+                    pull_requests,
+                )
+
+            self.assertEqual(fixture.ref_snapshot(), before)
+            self.assertEqual(pull_requests.created, [])
 
     def test_automatic_selection_rejects_build_metadata_precedence_tie(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
