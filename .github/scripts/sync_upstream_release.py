@@ -129,6 +129,10 @@ class PullRequestService(Protocol):
 
     def for_branches(self, branches: tuple[str, ...]) -> dict[str, PullRequest]: ...
 
+    def for_branches_for_orphan_scan(
+        self, branches: tuple[str, ...]
+    ) -> dict[str, PullRequest]: ...
+
     def create(self, intent: PullRequestIntent) -> tuple[int, str]: ...
 
 
@@ -180,6 +184,26 @@ class GitHubClient:
         return self.for_branches((branch,)).get(branch)
 
     def for_branches(self, branches: tuple[str, ...]) -> dict[str, PullRequest]:
+        matches_by_branch = self._pull_request_matches_by_branch(branches)
+        return {
+            branch: pull_request
+            for branch, matches in matches_by_branch.items()
+            if (pull_request := self._only_pull_request(matches, branch)) is not None
+        }
+
+    def for_branches_for_orphan_scan(
+        self, branches: tuple[str, ...]
+    ) -> dict[str, PullRequest]:
+        matches_by_branch = self._pull_request_matches_by_branch(branches)
+        return {
+            branch: matches[0]
+            for branch, matches in matches_by_branch.items()
+            if matches
+        }
+
+    def _pull_request_matches_by_branch(
+        self, branches: tuple[str, ...]
+    ) -> dict[str, list[PullRequest]]:
         requested = set(branches)
         matches_by_branch: dict[str, list[PullRequest]] = {
             branch: [] for branch in requested
@@ -190,11 +214,7 @@ class GitHubClient:
                 and pull_request.head in requested
             ):
                 matches_by_branch[pull_request.head].append(pull_request)
-        return {
-            branch: pull_request
-            for branch, matches in matches_by_branch.items()
-            if (pull_request := self._only_pull_request(matches, branch)) is not None
-        }
+        return matches_by_branch
 
     def create(self, intent: PullRequestIntent) -> tuple[int, str]:
         result = self._request(
@@ -363,7 +383,7 @@ def _orphaned_attempt(
     branches = synchronization_branches(repo_root)
     if not branches:
         return None
-    pull_requests_by_branch = pull_requests.for_branches(
+    pull_requests_by_branch = pull_requests.for_branches_for_orphan_scan(
         tuple(branch for branch, _head in branches)
     )
     attempts = [

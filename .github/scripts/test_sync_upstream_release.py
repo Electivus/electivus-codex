@@ -144,6 +144,9 @@ class RecordingPullRequests:
             if (pull_request := self.for_branch(branch)) is not None
         }
 
+    def for_branches_for_orphan_scan(self, branches: tuple[str, ...]):
+        return self.for_branches(branches)
+
     def create(self, intent: PullRequestIntent):
         self.created.append(intent)
         return 1, "https://example.test/pull/1"
@@ -1556,6 +1559,29 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
         )
 
         self.assertEqual(client.for_branches(branches), {branch: owned})
+        self.assertEqual(client.pull_request_queries, ["all"])
+
+    def test_github_client_orphan_scan_ignores_duplicate_historical_prs(self) -> None:
+        branch = "automation/upstream-sync/" + "a" * 40
+        unrelated_branch = "automation/upstream-sync/" + "b" * 40
+        owned = PullRequest(
+            number=43,
+            url="https://example.test/pull/43",
+            state="closed",
+            merged=False,
+            head=branch,
+            head_sha="c" * 40,
+            title="Synchronize openai/codex rust-v-owned",
+            body="",
+            head_repository="Electivus/electivus-codex",
+        )
+        duplicate = replace(owned, number=44, head=unrelated_branch)
+        client = FixtureGitHubClient([owned, duplicate, replace(duplicate, number=45)])
+
+        self.assertEqual(
+            client.for_branches_for_orphan_scan((branch, unrelated_branch)),
+            {branch: owned, unrelated_branch: duplicate},
+        )
         self.assertEqual(client.pull_request_queries, ["all"])
 
     def test_workflow_is_a_safe_thin_adapter_for_the_sync_contract(self) -> None:
