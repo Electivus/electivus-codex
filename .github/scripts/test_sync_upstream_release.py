@@ -152,6 +152,24 @@ class RecordingPullRequests:
         return 1, "https://example.test/pull/1"
 
 
+class DuplicateHistoricalPullRequests(RecordingPullRequests):
+    def for_branches_for_orphan_scan(self, branches: tuple[str, ...]):
+        self.branch_batches.append(branches)
+        return {
+            branch: pull_request
+            for branch in branches
+            if (pull_request := next(
+                (
+                    pull_request
+                    for pull_request in self.pull_requests
+                    if pull_request.head == branch
+                ),
+                None,
+            ))
+            is not None
+        }
+
+
 class SyncUpstreamReleaseTest(unittest.TestCase):
     def test_github_release_listing_accepts_more_than_1000_records(self) -> None:
         pages = [
@@ -1242,13 +1260,105 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                 (result.tag, result.release_commit, result.branch),
                 (selected.tag, selected.commit, branch),
             )
+            manifest = parse_manifest(
+                fixture.git("show", f"origin/{branch}:{result.manifest_path}") + "\n"
+            )
+            self.assertEqual(
+                result,
+                SyncResult(
+                    outcome="pr-created-clean",
+                    tag=selected.tag,
+                    release_commit=selected.commit,
+                    branch=branch,
+                    preparation_mode="clean",
+                    pr_number=1,
+                    pr_url="https://example.test/pull/1",
+                    **prepared_metadata(fixture.fork_head, selected.commit),
+                ),
+            )
+            self.assertEqual(
+                pull_requests.created,
+                [
+                    PullRequestIntent(
+                        title=f"Synchronize openai/codex {selected.tag}",
+                        head=branch,
+                        base="main",
+                        body=render_pull_request_body(manifest),
+                        draft=False,
+                    )
+                ],
+            )
             self.assertEqual(fixture.remote_branch_head(branch), prepared_head)
             self.assertIsNone(
                 fixture.remote_branch_head(
                     f"automation/upstream-sync/{moved_commit}"
                 )
             )
-            self.assertEqual(len(pull_requests.created), 1)
+
+    def test_synchronize_ignores_duplicate_historical_prs_on_unrelated_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            historical = fixture.release(
+                "rust-v8.0.0", "8.0.0", "historical synchronization"
+            )
+            historical_branch = f"automation/upstream-sync/{historical.commit}"
+            fixture.git(
+                "push", "origin", f"{fixture.fork_head}:refs/heads/{historical_branch}"
+            )
+            historical_head = fixture.remote_branch_head(historical_branch)
+            selected = fixture.release("rust-v8.1.0", "8.1.0", "selected release")
+            default_head = fixture.remote_branch_head("main")
+            pull_requests = DuplicateHistoricalPullRequests(
+                [
+                    closed_pull_request(
+                        43, historical_branch, historical_head, historical
+                    ),
+                    closed_pull_request(
+                        44, historical_branch, historical_head, historical
+                    ),
+                ]
+            )
+
+            result = synchronize(
+                fixture.config(),
+                FixtureReleases.published(historical, selected),
+                pull_requests,
+            )
+
+            branch = f"automation/upstream-sync/{selected.commit}"
+            self.assertEqual(
+                result,
+                SyncResult(
+                    outcome="pr-created-clean",
+                    tag=selected.tag,
+                    release_commit=selected.commit,
+                    branch=branch,
+                    preparation_mode="clean",
+                    pr_number=1,
+                    pr_url="https://example.test/pull/1",
+                    **prepared_metadata(fixture.fork_head, selected.commit),
+                ),
+            )
+            manifest = parse_manifest(
+                fixture.git("show", f"origin/{branch}:{result.manifest_path}") + "\n"
+            )
+            self.assertEqual(
+                pull_requests.created,
+                [
+                    PullRequestIntent(
+                        title=f"Synchronize openai/codex {selected.tag}",
+                        head=branch,
+                        base="main",
+                        body=render_pull_request_body(manifest),
+                        draft=False,
+                    )
+                ],
+            )
+            self.assertEqual(
+                fixture.remote_branch_head(historical_branch), historical_head
+            )
+            self.assertEqual(fixture.remote_branch_head("main"), default_head)
+            self.assertEqual(pull_requests.branch_batches, [(historical_branch,)])
 
     def test_orphaned_legacy_branch_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
