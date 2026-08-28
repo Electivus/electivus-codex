@@ -114,6 +114,7 @@ class RecordingPullRequests:
     def __init__(self, pull_requests: list[PullRequest] | None = None) -> None:
         self.created: list[PullRequestIntent] = []
         self.pull_requests = pull_requests or []
+        self.branch_batches: list[tuple[str, ...]] = []
 
     def open_synchronization(self):
         return next(
@@ -134,6 +135,14 @@ class RecordingPullRequests:
             ),
             None,
         )
+
+    def for_branches(self, branches: tuple[str, ...]):
+        self.branch_batches.append(branches)
+        return {
+            branch: pull_request
+            for branch in branches
+            if (pull_request := self.for_branch(branch)) is not None
+        }
 
     def create(self, intent: PullRequestIntent):
         self.created.append(intent)
@@ -1086,6 +1095,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                 )
             )
             self.assertEqual(len(retry_pull_requests.created), 1)
+            self.assertEqual(retry_pull_requests.branch_batches, [(branch,)])
 
             prepared_head = prepared_head or ""
             for tamper, error in (
@@ -1362,6 +1372,27 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
         self.assertEqual(client.open_synchronization(), owned)
         self.assertEqual(client.for_branch(branch), owned)
 
+    def test_github_client_indexes_pull_requests_once_for_many_branches(self) -> None:
+        branch = "automation/upstream-sync/" + "a" * 40
+        owned = PullRequest(
+            number=43,
+            url="https://example.test/pull/43",
+            state="closed",
+            merged=False,
+            head=branch,
+            head_sha="c" * 40,
+            title="Synchronize openai/codex rust-v-owned",
+            body="",
+            head_repository="Electivus/electivus-codex",
+        )
+        client = FixtureGitHubClient([owned])
+        branches = (branch,) + tuple(
+            f"automation/upstream-sync/{index:040x}" for index in range(1, 600)
+        )
+
+        self.assertEqual(client.for_branches(branches), {branch: owned})
+        self.assertEqual(client.pull_request_queries, ["all"])
+
     def test_workflow_is_a_safe_thin_adapter_for_the_sync_contract(self) -> None:
         workflow = (
             Path(__file__).parents[1] / "workflows" / "upstream-release-sync.yml"
@@ -1437,8 +1468,10 @@ class FixtureGitHubClient(GitHubClient):
     def __init__(self, pull_requests: list[PullRequest]) -> None:
         super().__init__("token", "Electivus/electivus-codex")
         self.pull_requests = pull_requests
+        self.pull_request_queries: list[str] = []
 
     def _pull_requests(self, state: str) -> list[PullRequest]:
+        self.pull_request_queries.append(state)
         return [
             pull_request
             for pull_request in self.pull_requests

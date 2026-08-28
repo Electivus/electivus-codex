@@ -127,6 +127,8 @@ class PullRequestService(Protocol):
 
     def for_branch(self, branch: str) -> PullRequest | None: ...
 
+    def for_branches(self, branches: tuple[str, ...]) -> dict[str, PullRequest]: ...
+
     def create(self, intent: PullRequestIntent) -> tuple[int, str]: ...
 
 
@@ -175,13 +177,24 @@ class GitHubClient:
         return self._only_pull_request(matches, "open Synchronization")
 
     def for_branch(self, branch: str) -> PullRequest | None:
-        matches = [
-            pull_request
-            for pull_request in self._pull_requests("all")
-            if pull_request.head_repository == self.repository
-            and pull_request.head == branch
-        ]
-        return self._only_pull_request(matches, branch)
+        return self.for_branches((branch,)).get(branch)
+
+    def for_branches(self, branches: tuple[str, ...]) -> dict[str, PullRequest]:
+        requested = set(branches)
+        matches_by_branch: dict[str, list[PullRequest]] = {
+            branch: [] for branch in requested
+        }
+        for pull_request in self._pull_requests("all"):
+            if (
+                pull_request.head_repository == self.repository
+                and pull_request.head in requested
+            ):
+                matches_by_branch[pull_request.head].append(pull_request)
+        return {
+            branch: pull_request
+            for branch, matches in matches_by_branch.items()
+            if (pull_request := self._only_pull_request(matches, branch)) is not None
+        }
 
     def create(self, intent: PullRequestIntent) -> tuple[int, str]:
         result = self._request(
@@ -347,10 +360,16 @@ def _orphaned_attempt(
     pull_requests: PullRequestService,
     requested_tag: str | None,
 ) -> PreparedAttempt | None:
+    branches = synchronization_branches(repo_root)
+    if not branches:
+        return None
+    pull_requests_by_branch = pull_requests.for_branches(
+        tuple(branch for branch, _head in branches)
+    )
     attempts = [
         inspect_retry_attempt(repo_root, branch, head)
-        for branch, head in synchronization_branches(repo_root)
-        if pull_requests.for_branch(branch) is None
+        for branch, head in branches
+        if branch not in pull_requests_by_branch
     ]
     if len(attempts) > 1:
         raise SyncError("found multiple orphaned Synchronization attempts")
