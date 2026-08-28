@@ -19,7 +19,6 @@ from sync_upstream_release import _require_model_visible_budget
 from sync_upstream_release import _write_outputs
 from sync_upstream_release import _write_summary
 from sync_upstream_release import synchronize
-from upstream_sync_attempt import SYNC_BRANCH_PREFIX
 from upstream_sync_manifest import MAX_MODEL_VISIBLE_ITEM_BYTES
 from upstream_sync_manifest import MAX_RENDERED_DIAGNOSTIC_BYTES
 from upstream_sync_manifest import parse_manifest
@@ -30,6 +29,14 @@ PR153_RELEASE_COMMIT = "b3a6d7f67cf056e18472c2b9ec26d3999ed40b7b"
 PR153_MANIFEST_INTRODUCTION_MESSAGE = (
     "feat(sync): define strict synchronization manifest schema"
 )
+PR153_RELEASE_COMMIT_OBJECT = """\
+tree 58524fd767b96ea166b5700ff9e766c6a85926af
+parent 8edb95f274ae70faac9dc35f079ed7b997dd862c
+author jif <jif@openai.com> 1787333353 +0100
+committer jif <jif@openai.com> 1787333353 +0100
+
+Release 0.150.0-alpha.5
+"""
 
 
 def prepared_metadata(fork_base_sha: str, release_commit: str) -> dict[str, str]:
@@ -1508,15 +1515,34 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             fixture.git_at(
                 fixture.root,
                 "clone",
-                "--no-local",
                 str(fixture.origin),
                 str(fresh_fork),
             )
             GitFixture.configure(fresh_fork)
+            self.assertTrue(
+                GitFixture.has_object(fresh_fork, PR153_RELEASE_COMMIT)
+            )
+            seed_object = (
+                fresh_fork
+                / ".git/objects"
+                / PR153_RELEASE_COMMIT[:2]
+                / PR153_RELEASE_COMMIT[2:]
+            )
+            seed_object.unlink()
+            self.assertFalse(
+                GitFixture.has_object(fresh_fork, PR153_RELEASE_COMMIT)
+            )
+            GitFixture.git_at(
+                fresh_fork,
+                "replace",
+                "--force",
+                PR153_RELEASE_COMMIT,
+                fixture.fixture_seed,
+            )
             retry_pull_requests = RecordingPullRequests()
             retry_config = SyncConfig(
                 fresh_fork,
-                str(fixture.root / "missing-upstream.git"),
+                "https://127.0.0.1:9/unreachable-upstream.git",
                 "main",
             )
 
@@ -2020,9 +2046,6 @@ class CreatedRelease:
 
 
 class GitFixture:
-    _canonical_source: Path | None = None
-    _canonical_source_dir: tempfile.TemporaryDirectory | None = None
-
     def __init__(
         self,
         root: Path,
@@ -2033,67 +2056,60 @@ class GitFixture:
         self.upstream = root / "upstream"
         self.origin = root / "fork.git"
         self.fork = root / "fork"
-        source = Path(__file__).parents[2]
-        canonical_source = self.canonical_source(source)
         self.git_at(root, "init", "--initial-branch=main", str(self.upstream))
         self.configure(self.upstream)
-        self.git_at(
-            self.upstream,
-            "fetch",
-            "--no-tags",
-            str(canonical_source),
-            PR153_RELEASE_COMMIT,
-        )
-        self.git_at(self.upstream, "checkout", "--detach", "FETCH_HEAD")
         self.write_workspace(self.upstream, "0.0.0")
         (self.upstream / "package.json").write_text('{"version":"7.7.7"}\n')
         (self.upstream / "shared.txt").write_text("shared\n")
         for index in range(25):
             (self.upstream / f"conflict-{index:02}.txt").write_text("shared\n")
         self.commit(self.upstream, "shared base")
-        self.git_at(self.upstream, "switch", "-c", "main")
+        fixture_seed = self.git_at(self.upstream, "rev-parse", "HEAD")
+        release_seed = self.hash_object(
+            self.upstream,
+            "commit",
+            PR153_RELEASE_COMMIT_OBJECT.removesuffix("\n"),
+        )
+        if release_seed != PR153_RELEASE_COMMIT:
+            raise AssertionError("PR #153 fixture commit object has an unexpected ID")
+        self.fixture_seed = fixture_seed
+        self.git_at(self.upstream, "branch", "fixture-seed", fixture_seed)
+        self.git_at(self.upstream, "replace", release_seed, fixture_seed)
+        tree = self.git_at(self.upstream, "rev-parse", "HEAD^{tree}")
+        bridge = self.git_at(
+            self.upstream,
+            "commit-tree",
+            tree,
+            "-p",
+            release_seed,
+            "-m",
+            "historical seed bridge",
+        )
+        self.git_at(self.upstream, "reset", "--hard", bridge)
+        self.git_at(self.upstream, "branch", "-M", "main")
         self.git_at(
             root,
             "clone",
             "--bare",
-            "--no-local",
             str(self.upstream),
             str(self.origin),
         )
+        self.git_at(self.origin, "replace", release_seed, fixture_seed)
         self.git_at(root, "clone", str(self.origin), str(self.fork))
+        self.git_at(self.fork, "replace", release_seed, fixture_seed)
         self.configure(self.fork)
         (self.fork / "fork.txt").write_text("fork\n")
-        seed = source / ".github/upstream-sync-manifests" / f"{PR153_RELEASE_COMMIT}.json"
-        destination = self.fork / ".github/upstream-sync-manifests" / seed.name
+        seed = Path(__file__).parent / "testdata/pr153-seed.json"
+        destination = (
+            self.fork
+            / ".github/upstream-sync-manifests"
+            / f"{PR153_RELEASE_COMMIT}.json"
+        )
         destination.parent.mkdir(parents=True)
         destination.write_bytes(seed.read_bytes())
         self.commit(self.fork, seed_commit_message)
         self.git_at(self.fork, "push", "origin", "main")
         self.fork_head = self.git("rev-parse", "HEAD")
-
-    @classmethod
-    def canonical_source(cls, source: Path) -> Path:
-        if cls._has_commit(source, PR153_RELEASE_COMMIT):
-            return source
-        if cls._canonical_source is None:
-            cls._canonical_source_dir = tempfile.TemporaryDirectory(
-                prefix="codex-canonical-seed-"
-            )
-            cache_root = Path(cls._canonical_source_dir.name)
-            remote = cls.git_at(source, "remote", "get-url", "origin")
-            cls._canonical_source = cache_root / "source.git"
-            cls.git_at(
-                cache_root,
-                "clone",
-                "--bare",
-                "--no-tags",
-                "--single-branch",
-                "--branch",
-                f"{SYNC_BRANCH_PREFIX}{PR153_RELEASE_COMMIT}",
-                remote,
-                str(cls._canonical_source),
-            )
-        return cls._canonical_source
 
     def config(self, *, manual_tag: str | None = None) -> SyncConfig:
         return SyncConfig(
@@ -2183,10 +2199,16 @@ class GitFixture:
         ).stdout.strip()
 
     @staticmethod
-    def _has_commit(root: Path, commit: str) -> bool:
+    def has_object(root: Path, object_id: str) -> bool:
         return (
             subprocess.run(
-                ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+                [
+                    "git",
+                    "--no-replace-objects",
+                    "cat-file",
+                    "-e",
+                    f"{object_id}^{{commit}}",
+                ],
                 cwd=root,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
