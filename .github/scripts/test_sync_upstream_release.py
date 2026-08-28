@@ -13,11 +13,13 @@ from sync_upstream_release import Release
 from sync_upstream_release import SyncConfig
 from sync_upstream_release import SyncError
 from sync_upstream_release import SyncResult
+from sync_upstream_release import _bounded_diagnostic
 from sync_upstream_release import _require_model_visible_budget
 from sync_upstream_release import _write_outputs
 from sync_upstream_release import _write_summary
 from sync_upstream_release import synchronize
 from upstream_sync_manifest import MAX_MODEL_VISIBLE_ITEM_BYTES
+from upstream_sync_manifest import MAX_RENDERED_DIAGNOSTIC_BYTES
 from upstream_sync_manifest import parse_manifest
 from upstream_sync_manifest import render_pull_request_body
 from upstream_sync_manifest import serialize_manifest
@@ -666,6 +668,33 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(SyncError, "model-visible byte budget"):
             _require_model_visible_budget(f"{at_budget}x", "test surface")
+
+        oversized_error = ("é" * MAX_RENDERED_DIAGNOSTIC_BYTES) + "\ntrailing"
+        diagnostic = _bounded_diagnostic(oversized_error)
+        self.assertLessEqual(
+            len(diagnostic.encode("utf-8")), MAX_RENDERED_DIAGNOSTIC_BYTES
+        )
+        self.assertTrue(diagnostic.endswith(" ... [diagnostic truncated]"))
+        self.assertNotIn("\n", diagnostic)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_path = root / "failure-output"
+            summary_path = root / "failure-summary.md"
+            _write_outputs(str(output_path), None, oversized_error)
+            _write_summary(str(summary_path), None, oversized_error)
+
+            output = output_path.read_text()
+            summary = summary_path.read_text()
+            self.assertIn("outcome=failure", output)
+            self.assertIn("error=", output)
+            self.assertIn("- Outcome: failure", summary)
+            self.assertIn("- Error: ", summary)
+            for content in (output, summary):
+                self.assertIn(" ... [diagnostic truncated]", content)
+                self.assertLessEqual(
+                    len(content.encode("utf-8")), MAX_MODEL_VISIBLE_ITEM_BYTES
+                )
 
     def test_open_pr_freezes_its_baseline_without_release_discovery(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

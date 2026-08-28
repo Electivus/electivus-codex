@@ -23,6 +23,7 @@ from upstream_sync_attempt import prepare_attempt
 from upstream_sync_attempt import synchronization_branches
 from upstream_sync_manifest import ReleaseIdentity
 from upstream_sync_manifest import MAX_MODEL_VISIBLE_ITEM_BYTES
+from upstream_sync_manifest import MAX_RENDERED_DIAGNOSTIC_BYTES
 from upstream_sync_manifest import bounded_conflict_paths
 from upstream_sync_manifest import canonical_release_url
 from upstream_sync_manifest import manifest_path
@@ -602,7 +603,7 @@ def _write_outputs(
             "manifest_path": result.manifest_path,
         }
         if result is not None
-        else {"outcome": outcome, "error": error.replace("\n", " ")}
+        else {"outcome": outcome, "error": _bounded_diagnostic(error)}
     )
     content = "".join(f"{key}={value}\n" for key, value in values.items())
     with Path(path).open("a") as output:
@@ -619,7 +620,9 @@ def _write_summary(
         return
     lines = ["## Upstream synchronization", ""]
     if result is None:
-        lines.extend([f"- Outcome: {outcome}", f"- Error: {error}"])
+        lines.extend(
+            [f"- Outcome: {outcome}", f"- Error: {_bounded_diagnostic(error)}"]
+        )
     else:
         lines.extend(
             [
@@ -651,6 +654,17 @@ def _require_model_visible_budget(content: str, surface: str) -> str:
     return content
 
 
+def _bounded_diagnostic(error: str) -> str:
+    message = error.replace("\r", " ").replace("\n", " ")
+    encoded = message.encode("utf-8", errors="replace")
+    if len(encoded) <= MAX_RENDERED_DIAGNOSTIC_BYTES:
+        return encoded.decode("utf-8")
+    marker = " ... [diagnostic truncated]"
+    prefix_bytes = MAX_RENDERED_DIAGNOSTIC_BYTES - len(marker.encode("utf-8"))
+    prefix = encoded[:prefix_bytes].decode("utf-8", errors="ignore")
+    return prefix + marker
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
@@ -678,7 +692,7 @@ def main() -> int:
             client,
         )
     except Exception as error:
-        message = str(error)
+        message = _bounded_diagnostic(str(error))
         outcome = getattr(error, "outcome", "failure")
         _write_outputs(args.output, None, message, outcome)
         _write_summary(args.summary, None, message, outcome)
