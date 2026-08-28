@@ -257,7 +257,7 @@ Next action: {next_action}
 
     encoded_paths = [
         f"    {json.dumps(path, ensure_ascii=True)}"
-        for path in manifest.conflict_paths[:MAX_CONFLICTS_SHOWN]
+        for path in bounded_conflict_paths(manifest.conflict_paths)
     ]
     displayed_paths: list[str] = []
     total_conflicts = len(manifest.conflict_paths)

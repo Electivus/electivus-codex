@@ -467,7 +467,7 @@ Omitted conflicts: 0. The complete conflict evidence is in `{manifest_path(manif
         self.assertEqual(render_pull_request_body(manifest), body)
 
     def test_pull_request_body_budget_omits_only_complete_long_paths(self) -> None:
-        paths = tuple(f"{index:02}-" + "x" * 2_000 for index in range(20))
+        paths = tuple(f"{index:02}-" + "x" * 900 for index in range(20))
         manifest = make_manifest(
             previous=SEED_COMMIT,
             preparation_mode="conflicting",
@@ -503,6 +503,24 @@ Omitted conflicts: 0. The complete conflict evidence is in `{manifest_path(manif
         self.assertIn("Conflicts (2 total; showing 1)", body)
         self.assertIn("Omitted conflicts: 1", body)
         self.assertLessEqual(len(body.encode("utf-8")), MAX_PULL_REQUEST_BODY_BYTES)
+
+    def test_pull_request_body_applies_aggregate_conflict_budget(self) -> None:
+        path = f"nested/{'x' * 1_993}"
+        manifest = make_manifest(
+            previous=SEED_COMMIT,
+            preparation_mode="conflicting",
+            conflict_paths=(path,),
+        )
+
+        self.assertGreater(
+            len(json.dumps((path,), ensure_ascii=True).encode("ascii")),
+            MAX_RENDERED_CONFLICT_BYTES,
+        )
+        body = render_pull_request_body(manifest)
+
+        self.assertIn("Conflicts (1 total; showing 0)", body)
+        self.assertNotIn(json.dumps(path, ensure_ascii=True), body)
+        self.assertIn(f"`{manifest_path(manifest.release.commit)}`", body)
 
     def test_pull_request_body_omits_all_paths_when_escaping_exceeds_budget(
         self,
