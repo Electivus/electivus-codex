@@ -8,9 +8,10 @@ from pathlib import PurePosixPath
 
 MANIFEST_DIRECTORY = ".github/upstream-sync-manifests"
 MAX_CONFLICTS_SHOWN = 20
-MAX_MANIFEST_BYTES = 8_000
-MAX_PULL_REQUEST_BODY_CHARACTERS = 8_000
-MAX_RENDERED_CONFLICT_BYTES = 6_000
+MAX_MODEL_VISIBLE_ITEM_BYTES = 3_000
+MAX_MANIFEST_BYTES = MAX_MODEL_VISIBLE_ITEM_BYTES
+MAX_PULL_REQUEST_BODY_BYTES = MAX_MODEL_VISIBLE_ITEM_BYTES
+MAX_RENDERED_CONFLICT_BYTES = 2_000
 RELEASE_URL_PREFIX = "https://github.com/openai/codex/releases/tag/"
 _MAX_REPOSITORY_PATH_LENGTH = 4096
 _PR153_RELEASE_COMMIT = "b3a6d7f67cf056e18472c2b9ec26d3999ed40b7b"
@@ -248,8 +249,8 @@ Synchronizes the published Codex CLI release [{manifest.release.tag}]({manifest.
 
 Next action: {next_action}
 """
-    if len(body) > MAX_PULL_REQUEST_BODY_CHARACTERS:
-        raise ValueError("pull-request body metadata exceeds its character budget")
+    if len(body.encode("utf-8")) > MAX_PULL_REQUEST_BODY_BYTES:
+        raise ValueError("pull-request body metadata exceeds its byte budget")
     if not manifest.conflict_paths:
         return body
 
@@ -274,14 +275,14 @@ Next action: {next_action}
             f"`{manifest_location}`.\n"
         )
         candidate = body + conflict_section
-        if len(candidate) <= MAX_PULL_REQUEST_BODY_CHARACTERS:
+        if len(candidate.encode("utf-8")) <= MAX_PULL_REQUEST_BODY_BYTES:
             displayed_paths.append(encoded_path)
             rendered_body = candidate
     if rendered_body is not None:
         return rendered_body
     raise ValueError(
         "pull-request body cannot include a complete conflict path within its "
-        "character budget"
+        "byte budget"
     )
 
 

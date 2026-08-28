@@ -13,8 +13,11 @@ from sync_upstream_release import Release
 from sync_upstream_release import SyncConfig
 from sync_upstream_release import SyncError
 from sync_upstream_release import SyncResult
+from sync_upstream_release import _require_model_visible_budget
+from sync_upstream_release import _write_outputs
 from sync_upstream_release import _write_summary
 from sync_upstream_release import synchronize
+from upstream_sync_manifest import MAX_MODEL_VISIBLE_ITEM_BYTES
 from upstream_sync_manifest import parse_manifest
 from upstream_sync_manifest import render_pull_request_body
 from upstream_sync_manifest import serialize_manifest
@@ -627,6 +630,42 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                 '  - "line one\\n`injected`\\nconflit-\\u00e7.txt"', summary
             )
             self.assertNotIn("\n`injected`\n", summary)
+
+    def test_rendered_workflow_surfaces_share_a_model_visible_byte_budget(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_path = root / "output"
+            summary_path = root / "summary.md"
+            result = SyncResult(
+                outcome="draft-pr-created-conflicts",
+                tag="rust-v1.0.0",
+                release_commit="a" * 40,
+                branch=f"automation/upstream-sync/{'a' * 40}",
+                preparation_mode="conflicting",
+                pr_number=1,
+                pr_url="https://example.test/pull/1",
+                conflict_count=100,
+                conflicts=tuple(f"{index:03}-{'x' * 100}.txt" for index in range(100)),
+                fork_base_sha="b" * 40,
+                manifest_path=f".github/upstream-sync-manifests/{'a' * 40}.json",
+            )
+
+            _write_outputs(str(output_path), result)
+            _write_summary(str(summary_path), result)
+
+            for path in (output_path, summary_path):
+                self.assertLessEqual(
+                    len(path.read_bytes()), MAX_MODEL_VISIBLE_ITEM_BYTES
+                )
+
+        at_budget = "é" * (MAX_MODEL_VISIBLE_ITEM_BYTES // 2)
+        self.assertEqual(
+            _require_model_visible_budget(at_budget, "test surface"), at_budget
+        )
+        with self.assertRaisesRegex(SyncError, "model-visible byte budget"):
+            _require_model_visible_budget(f"{at_budget}x", "test surface")
 
     def test_open_pr_freezes_its_baseline_without_release_discovery(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

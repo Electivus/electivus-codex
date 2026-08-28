@@ -22,6 +22,7 @@ from upstream_sync_attempt import inspect_retry_attempt
 from upstream_sync_attempt import prepare_attempt
 from upstream_sync_attempt import synchronization_branches
 from upstream_sync_manifest import ReleaseIdentity
+from upstream_sync_manifest import MAX_MODEL_VISIBLE_ITEM_BYTES
 from upstream_sync_manifest import bounded_conflict_paths
 from upstream_sync_manifest import canonical_release_url
 from upstream_sync_manifest import manifest_path
@@ -603,9 +604,9 @@ def _write_outputs(
         if result is not None
         else {"outcome": outcome, "error": error.replace("\n", " ")}
     )
+    content = "".join(f"{key}={value}\n" for key, value in values.items())
     with Path(path).open("a") as output:
-        for key, value in values.items():
-            print(f"{key}={value}", file=output)
+        output.write(_require_model_visible_budget(content, "GitHub output"))
 
 
 def _write_summary(
@@ -639,8 +640,15 @@ def _write_summary(
                 f"  - {json.dumps(conflict, ensure_ascii=True)}"
                 for conflict in bounded_conflict_paths(result.conflicts)
             )
+    content = "\n".join(lines) + "\n"
     with Path(path).open("a") as summary:
-        summary.write("\n".join(lines) + "\n")
+        summary.write(_require_model_visible_budget(content, "GitHub summary"))
+
+
+def _require_model_visible_budget(content: str, surface: str) -> str:
+    if len(content.encode("utf-8")) > MAX_MODEL_VISIBLE_ITEM_BYTES:
+        raise SyncError(f"{surface} exceeds its model-visible byte budget")
+    return content
 
 
 def main() -> int:
@@ -682,7 +690,8 @@ def main() -> int:
         **result.__dict__,
         "conflicts": bounded_conflict_paths(result.conflicts),
     }
-    print(json.dumps(payload, sort_keys=True))
+    rendered_payload = json.dumps(payload, sort_keys=True)
+    print(_require_model_visible_budget(rendered_payload, "standard output"))
     return 0
 
 
