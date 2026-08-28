@@ -25,6 +25,9 @@ from upstream_sync_manifest import render_pull_request_body
 from upstream_sync_manifest import serialize_manifest
 
 PR153_RELEASE_COMMIT = "b3a6d7f67cf056e18472c2b9ec26d3999ed40b7b"
+PR153_MANIFEST_INTRODUCTION_MESSAGE = (
+    "feat(sync): define strict synchronization manifest schema"
+)
 PR153_RELEASE_COMMIT_OBJECT = """\
 tree 58524fd767b96ea166b5700ff9e766c6a85926af
 parent 8edb95f274ae70faac9dc35f079ed7b997dd862c
@@ -1065,6 +1068,51 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             self.assertEqual(fixture.remote_branch_head("main"), default_head)
             self.assertEqual(pull_requests.created, [])
 
+    def test_seed_manifest_accepts_its_established_reintroduction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(
+                Path(temp_dir), seed_commit_message="fixture seed manifest"
+            )
+            seed_path = (
+                fixture.fork
+                / ".github/upstream-sync-manifests/b3a6d7f67cf056e18472c2b9ec26d3999ed40b7b.json"
+            )
+            seed_path.unlink()
+            fixture.commit(fixture.fork, "remove seed manifest")
+            seed_path.write_bytes(
+                (Path(__file__).parents[2] / seed_path.relative_to(fixture.fork)).read_bytes()
+            )
+            fixture.commit(
+                fixture.fork,
+                PR153_MANIFEST_INTRODUCTION_MESSAGE,
+            )
+            fixture.git("push", "origin", "main")
+            fixture.fork_head = fixture.git("rev-parse", "HEAD")
+            selected = fixture.release("rust-v7.0.1", "7.0.1", "release")
+            pull_requests = RecordingPullRequests()
+
+            result = synchronize(
+                fixture.config(),
+                FixtureReleases.published(selected),
+                pull_requests,
+            )
+
+            self.assertEqual(
+                result,
+                SyncResult(
+                    outcome="pr-created-clean",
+                    tag=selected.tag,
+                    release_commit=selected.commit,
+                    branch=f"automation/upstream-sync/{selected.commit}",
+                    preparation_mode="clean",
+                    pr_number=1,
+                    pr_url="https://example.test/pull/1",
+                    **prepared_metadata(fixture.fork_head, selected.commit),
+                ),
+            )
+            self.assertEqual(fixture.remote_branch_head("main"), fixture.fork_head)
+            self.assertEqual(len(pull_requests.created), 1)
+
     def test_pr_creation_failure_reuses_valid_prepared_branch_on_retry(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))
@@ -1808,7 +1856,12 @@ class CreatedRelease:
 
 
 class GitFixture:
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        seed_commit_message: str = PR153_MANIFEST_INTRODUCTION_MESSAGE,
+    ) -> None:
         self.root = root
         self.upstream = root / "upstream"
         self.origin = root / "fork.git"
@@ -1854,7 +1907,7 @@ class GitFixture:
         destination = self.fork / ".github/upstream-sync-manifests" / seed.name
         destination.parent.mkdir(parents=True)
         destination.write_bytes(seed.read_bytes())
-        self.commit(self.fork, "fork work")
+        self.commit(self.fork, seed_commit_message)
         self.git_at(self.fork, "push", "origin", "main")
         self.fork_head = self.git("rev-parse", "HEAD")
 

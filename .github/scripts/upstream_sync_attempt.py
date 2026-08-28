@@ -18,6 +18,12 @@ from upstream_sync_manifest import validate_chain
 SYNC_BRANCH_PREFIX = "automation/upstream-sync/"
 _MAX_SYNCHRONIZATION_BRANCHES = 1_000
 _NORMALIZATION_MESSAGE = "Normalize Rust workspace version to 0.0.0"
+_PR153_RELEASE_COMMIT = "b3a6d7f67cf056e18472c2b9ec26d3999ed40b7b"
+_PR153_MANIFEST_INTRODUCTION = "1fa5e1fa4167c1bce4060695024d738f8d68956e"
+_PR153_MANIFEST_BLOB = "e05e54690ed0dd24891fc9fb41d7199a5ab7d3d2"
+_PR153_MANIFEST_INTRODUCTION_MESSAGE = (
+    "feat(sync): define strict synchronization manifest schema"
+)
 _SHA = re.compile(r"[0-9a-f]{40}")
 
 
@@ -292,6 +298,9 @@ def _manifest_texts_at(repo: Path, commit: str) -> dict[str, str]:
 
 
 def _verify_manifest_history(repo: Path, commit: str, path: str) -> None:
+    if path == manifest_path(_PR153_RELEASE_COMMIT):
+        _verify_pr153_manifest_history(repo, commit, path)
+        return
     changes = _git(
         repo,
         "log",
@@ -306,6 +315,66 @@ def _verify_manifest_history(repo: Path, commit: str, path: str) -> None:
         raise SyncError(f"Synchronization manifest history changed after introduction: {path}")
     if _tree_entry(repo, commit, path) != _tree_entry(repo, changes[0], path):
         raise SyncError(f"Synchronization manifest differs from its introduction: {path}")
+
+
+def _verify_pr153_manifest_history(repo: Path, commit: str, path: str) -> None:
+    expected_entry = ("100644", "blob", _PR153_MANIFEST_BLOB)
+    if _tree_entry(repo, commit, path) != expected_entry:
+        raise SyncError("PR #153 seed manifest differs from its canonical blob")
+
+    canonical_commit = _run_git(
+        repo, "cat-file", "-e", f"{_PR153_MANIFEST_INTRODUCTION}^{{commit}}"
+    )
+    if canonical_commit.returncode == 0 and _is_ancestor(
+        repo, _PR153_MANIFEST_INTRODUCTION, commit
+    ):
+        introduction = _PR153_MANIFEST_INTRODUCTION
+        if _tree_entry(repo, introduction, path) != expected_entry:
+            raise SyncError(
+                "PR #153 seed manifest canonical introduction differs from its blob"
+            )
+    else:
+        changes = _git(
+            repo,
+            "log",
+            "--first-parent",
+            "--reverse",
+            "--format=%H",
+            commit,
+            "--",
+            path,
+        ).splitlines()
+        canonical_introductions = [
+            change
+            for change in changes
+            if _git(repo, "show", "-s", "--format=%s", change)
+            == _PR153_MANIFEST_INTRODUCTION_MESSAGE
+            and _tree_entry(repo, change, path) == expected_entry
+        ]
+        if len(canonical_introductions) == 1:
+            introduction = canonical_introductions[0]
+        elif (
+            len(changes) == 1
+            and _tree_entry(repo, changes[0], path) == expected_entry
+            and _git(repo, "show", "-s", "--format=%s", changes[0]).startswith(
+                "Record Synchronization manifest for "
+            )
+        ):
+            introduction = changes[0]
+        else:
+            raise SyncError("PR #153 seed manifest history is not anchored")
+
+    changes = _git(
+        repo,
+        "log",
+        "--first-parent",
+        "--format=%H",
+        f"{introduction}..{commit}",
+        "--",
+        path,
+    )
+    if changes:
+        raise SyncError("PR #153 seed manifest history changed after introduction")
 
 
 def _tree_entry(repo: Path, commit: str, path: str) -> tuple[str, str, str] | None:
