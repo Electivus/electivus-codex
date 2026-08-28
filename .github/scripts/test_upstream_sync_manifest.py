@@ -3,22 +3,29 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from upstream_sync_manifest import ReleaseIdentity
-from upstream_sync_manifest import RELEASE_URL_PREFIX
-from upstream_sync_manifest import SynchronizationManifest
-from upstream_sync_manifest import canonical_release_url
-from upstream_sync_manifest import manifest_path
-from upstream_sync_manifest import parse_manifest
-from upstream_sync_manifest import serialize_manifest
-
+from upstream_sync_manifest import (
+    MAX_CONFLICTS_SHOWN,
+    MAX_PULL_REQUEST_BODY_CHARACTERS,
+    RELEASE_URL_PREFIX,
+    ReleaseIdentity,
+    SynchronizationManifest,
+    canonical_release_url,
+    manifest_path,
+    parse_manifest,
+    render_pull_request_body,
+    serialize_manifest,
+    validate_chain,
+)
 
 RELEASE = "a" * 40
 FORK = "b" * 40
+SEED_COMMIT = "b3a6d7f67cf056e18472c2b9ec26d3999ed40b7b"
 DELETE = object()
 
 
 def make_manifest(
     *,
+    commit: str = RELEASE,
     tag: str = "rust-v1.2.3",
     previous: str | None = None,
     selection_mode: str = "automatic",
@@ -27,13 +34,20 @@ def make_manifest(
 ) -> SynchronizationManifest:
     return SynchronizationManifest(
         schema_version=1,
-        release=ReleaseIdentity(tag, RELEASE, canonical_release_url(tag)),
+        release=ReleaseIdentity(tag, commit, canonical_release_url(tag)),
         fork_base_sha=FORK,
         previous_release_commit=previous,
         selection_mode=selection_mode,
         preparation_mode=preparation_mode,
         conflict_paths=conflict_paths,
     )
+
+
+def load_seed() -> tuple[SynchronizationManifest, str, Path]:
+    repository = Path(__file__).parents[2]
+    seed_path = repository / manifest_path(SEED_COMMIT)
+    seed_text = seed_path.read_text(encoding="utf-8")
+    return parse_manifest(seed_text), seed_text, seed_path
 
 
 class UpstreamSyncManifestTest(unittest.TestCase):
@@ -203,16 +217,13 @@ class UpstreamSyncManifestTest(unittest.TestCase):
         self.assert_manifest_mutations_rejected(manifest, mutations)
 
     def test_pr153_seed_is_canonical_and_checkout_independent(self) -> None:
+        seed, seed_text, seed_path = load_seed()
         repository = Path(__file__).parents[2]
-        seed_commit = "b3a6d7f67cf056e18472c2b9ec26d3999ed40b7b"
         seed_tag = "rust-v0.150.0-alpha.5"
-        seed_path = repository / f".github/upstream-sync-manifests/{seed_commit}.json"
-        seed_text = seed_path.read_text(encoding="utf-8")
-        seed = parse_manifest(seed_text)
 
         expected = SynchronizationManifest(
             1,
-            ReleaseIdentity(seed_tag, seed_commit, canonical_release_url(seed_tag)),
+            ReleaseIdentity(seed_tag, SEED_COMMIT, canonical_release_url(seed_tag)),
             "da655a4b51761edaa429fcad912e6ac3e17e32ee",
             None,
             "automatic",
@@ -228,7 +239,7 @@ class UpstreamSyncManifestTest(unittest.TestCase):
         self.assertEqual(serialize_manifest(seed), seed_text)
         stable_tag = "rust-v0.150.0"
         stable_release = ReleaseIdentity(
-            stable_tag, seed_commit, canonical_release_url(stable_tag)
+            stable_tag, SEED_COMMIT, canonical_release_url(stable_tag)
         )
         seed_diagnostic = "PR #153 seed manifest"
         self.assert_manifest_mutations_rejected(
@@ -254,6 +265,247 @@ class UpstreamSyncManifestTest(unittest.TestCase):
                 ),
             ),
         )
+
+    def test_chain_accepts_out_of_order_input_and_returns_the_unique_tip(self) -> None:
+        seed, _, _ = load_seed()
+        second = make_manifest(
+            commit="c" * 40,
+            tag="rust-v1.2.4",
+            previous=SEED_COMMIT,
+        )
+        tip = make_manifest(
+            commit="d" * 40,
+            tag="rust-v1.2.5",
+            previous=second.release.commit,
+            selection_mode="manual",
+            preparation_mode="conflicting",
+            conflict_paths=("codex-rs/core/src/lib.rs",),
+        )
+
+        self.assertEqual(validate_chain((tip, seed, second)), tip)
+        self.assertEqual(validate_chain((seed, second, tip)), tip)
+
+    def test_chain_rejects_every_non_linear_or_noncanonical_shape(self) -> None:
+        seed, _, _ = load_seed()
+        second = make_manifest(
+            commit="c" * 40,
+            tag="rust-v1.2.4",
+            previous=SEED_COMMIT,
+        )
+        duplicate_commit = make_manifest(
+            commit=second.release.commit,
+            tag="rust-v1.2.9",
+            previous=SEED_COMMIT,
+        )
+        duplicate_tag = make_manifest(
+            commit="d" * 40,
+            tag=second.release.tag,
+            previous=second.release.commit,
+        )
+        fork = make_manifest(
+            commit="e" * 40,
+            tag="rust-v1.2.6",
+            previous=SEED_COMMIT,
+        )
+        cycle_left = make_manifest(
+            commit="e" * 40,
+            tag="rust-v1.2.6",
+            previous="f" * 40,
+        )
+        cycle_right = make_manifest(
+            commit="f" * 40,
+            tag="rust-v1.2.7",
+            previous=cycle_left.release.commit,
+        )
+        disconnected_root = make_manifest(
+            commit="e" * 40,
+            tag="rust-v1.2.6",
+        )
+        missing_link = replace(second, previous_release_commit="e" * 40)
+        invalid_chains = (
+            ("empty", (), "must not be empty"),
+            ("wrong root", (make_manifest(),), "rooted at the PR #153 seed"),
+            (
+                "duplicate commit",
+                (seed, second, duplicate_commit),
+                "duplicate release commit",
+            ),
+            (
+                "duplicate tag",
+                (seed, second, duplicate_tag),
+                "duplicate release tag",
+            ),
+            ("missing link", (seed, missing_link), "predecessor .* is missing"),
+            ("fork and multiple tips", (seed, second, fork), "forks.*multiple tips"),
+            ("cycle", (seed, cycle_left, cycle_right), "contains a cycle"),
+            (
+                "disconnected roots",
+                (seed, disconnected_root),
+                "exactly one root.*disconnected components",
+            ),
+        )
+
+        for name, manifests, diagnostic in invalid_chains:
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, diagnostic):
+                    validate_chain(manifests)
+
+    def test_clean_pull_request_body_is_a_pure_manifest_rendering(self) -> None:
+        manifest = make_manifest(previous=SEED_COMMIT)
+        expected = f"""\
+Synchronizes the published Codex CLI release [rust-v1.2.3]({manifest.release.url}).
+
+- Release SHA (`release.commit`): `{manifest.release.commit}`
+- Fork baseline (`forkBaseSha`): `{manifest.fork_base_sha}`
+- Predecessor (`previousReleaseCommit`): `{SEED_COMMIT}`
+- Selection (`selectionMode`): `automatic`
+- Preparation (`preparationMode`): `clean`
+- Manifest: `{manifest_path(manifest.release.commit)}`
+
+Next action: Review the Baseline reconciliation and approve its workflow runs.
+"""
+
+        self.assertEqual(render_pull_request_body(manifest), expected)
+        self.assertEqual(render_pull_request_body(manifest), expected)
+
+    def test_pull_request_body_requires_a_predecessor_except_for_the_seed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "non-seed.*requires a predecessor"):
+            render_pull_request_body(make_manifest())
+
+        seed, _, _ = load_seed()
+        seed_body = render_pull_request_body(seed)
+        self.assertIn(
+            "- Predecessor (`previousReleaseCommit`): `none (PR #153 seed)`",
+            seed_body,
+        )
+
+    def test_conflicting_pull_request_body_has_a_coherent_next_action(self) -> None:
+        manifest = make_manifest(
+            previous=SEED_COMMIT,
+            selection_mode="manual",
+            preparation_mode="conflicting",
+            conflict_paths=("docs/a.md", "src/b.rs"),
+        )
+        expected = f"""\
+Synchronizes the published Codex CLI release [rust-v1.2.3]({manifest.release.url}).
+
+- Release SHA (`release.commit`): `{manifest.release.commit}`
+- Fork baseline (`forkBaseSha`): `{manifest.fork_base_sha}`
+- Predecessor (`previousReleaseCommit`): `{SEED_COMMIT}`
+- Selection (`selectionMode`): `manual`
+- Preparation (`preparationMode`): `conflicting`
+- Manifest: `{manifest_path(manifest.release.commit)}`
+
+Next action: Perform explicit Semantic reconciliation, then mark this PR ready for review.
+
+Conflicts (2 total; showing 2):
+
+    "docs/a.md"
+    "src/b.rs"
+
+Omitted conflicts: 0. The complete conflict evidence is in `{manifest_path(manifest.release.commit)}`.
+"""
+
+        self.assertEqual(render_pull_request_body(manifest), expected)
+
+    def test_pull_request_body_shows_at_most_twenty_conflicts_and_exact_total(
+        self,
+    ) -> None:
+        conflicts = tuple(f"conflict-{index:02}.txt" for index in range(22))
+        manifest = make_manifest(
+            previous=SEED_COMMIT,
+            preparation_mode="conflicting",
+            conflict_paths=conflicts,
+        )
+
+        body = render_pull_request_body(manifest)
+
+        self.assertIn("Conflicts (22 total; showing 20)", body)
+        self.assertIn('    "conflict-19.txt"', body)
+        self.assertNotIn("conflict-20.txt", body)
+        self.assertIn("Omitted conflicts: 2", body)
+        self.assertEqual(body.count('\n    "conflict-'), MAX_CONFLICTS_SHOWN)
+
+    def test_pull_request_body_escapes_paths_without_markdown_injection(self) -> None:
+        path = "docs/safe` **markdown**\n# injected-☃.md"
+        manifest = make_manifest(
+            previous=SEED_COMMIT,
+            preparation_mode="conflicting",
+            conflict_paths=(path,),
+        )
+
+        body = render_pull_request_body(manifest)
+        encoded_lines = [
+            line.strip() for line in body.splitlines() if line.startswith("    ")
+        ]
+
+        self.assertEqual([json.loads(line) for line in encoded_lines], [path])
+        self.assertNotIn("\n# injected", body)
+        self.assertNotIn("☃", body)
+        self.assertIn(r"\n# injected-\u2603.md", body)
+        self.assertEqual(render_pull_request_body(manifest), body)
+
+    def test_pull_request_body_budget_omits_only_complete_long_paths(self) -> None:
+        paths = tuple(f"{index:02}-" + "x" * 4_080 for index in range(20))
+        manifest = make_manifest(
+            previous=SEED_COMMIT,
+            preparation_mode="conflicting",
+            conflict_paths=paths,
+        )
+
+        body = render_pull_request_body(manifest)
+        encoded_lines = [
+            line.strip() for line in body.splitlines() if line.startswith("    ")
+        ]
+        displayed = [json.loads(line) for line in encoded_lines]
+
+        self.assertLessEqual(len(body), MAX_PULL_REQUEST_BODY_CHARACTERS)
+        self.assertGreater(len(displayed), 0)
+        self.assertLess(len(displayed), len(paths))
+        self.assertEqual(displayed, list(paths[: len(displayed)]))
+        self.assertIn(f"Omitted conflicts: {len(paths) - len(displayed)}", body)
+
+    def test_pull_request_body_skips_an_expanded_path_that_does_not_fit(self) -> None:
+        conflicts = ("\x01" * 4_096, "z.txt")
+        manifest = make_manifest(
+            previous=SEED_COMMIT,
+            preparation_mode="conflicting",
+            conflict_paths=conflicts,
+        )
+
+        body = render_pull_request_body(manifest)
+        encoded_lines = [
+            line.strip() for line in body.splitlines() if line.startswith("    ")
+        ]
+
+        self.assertEqual([json.loads(line) for line in encoded_lines], ["z.txt"])
+        self.assertIn("Conflicts (2 total; showing 1)", body)
+        self.assertIn("Omitted conflicts: 1", body)
+        self.assertLessEqual(len(body), MAX_PULL_REQUEST_BODY_CHARACTERS)
+
+    def test_pull_request_body_fails_closed_when_no_complete_path_fits(self) -> None:
+        path = ("☃" * 1_364) + ".md"
+        manifest = make_manifest(
+            previous=SEED_COMMIT,
+            preparation_mode="conflicting",
+            conflict_paths=(path,),
+        )
+
+        with self.assertRaisesRegex(ValueError, "complete conflict path"):
+            render_pull_request_body(manifest)
+
+    def test_pull_request_body_fails_closed_when_fixed_metadata_exceeds_budget(
+        self,
+    ) -> None:
+        tag = f"rust-v1.2.{('9' * MAX_PULL_REQUEST_BODY_CHARACTERS)}"
+        manifest = make_manifest(
+            tag=tag,
+            previous=SEED_COMMIT,
+            selection_mode="manual",
+        )
+
+        with self.assertRaisesRegex(ValueError, "metadata exceeds"):
+            render_pull_request_body(manifest)
 
 
 if __name__ == "__main__":

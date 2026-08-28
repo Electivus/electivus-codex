@@ -6,8 +6,9 @@ import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-
 MANIFEST_DIRECTORY = ".github/upstream-sync-manifests"
+MAX_CONFLICTS_SHOWN = 20
+MAX_PULL_REQUEST_BODY_CHARACTERS = 8_000
 RELEASE_URL_PREFIX = "https://github.com/openai/codex/releases/tag/"
 _MAX_REPOSITORY_PATH_LENGTH = 4096
 _PR153_RELEASE_COMMIT = "b3a6d7f67cf056e18472c2b9ec26d3999ed40b7b"
@@ -124,6 +125,147 @@ def parse_manifest(text: str) -> SynchronizationManifest:
     if serialize_manifest(manifest) != text:
         raise ValueError("Synchronization manifest is not canonically serialized")
     return manifest
+
+
+def validate_chain(
+    manifests: tuple[SynchronizationManifest, ...],
+) -> SynchronizationManifest:
+    if not manifests:
+        raise ValueError("Synchronization manifest chain must not be empty")
+    for manifest in manifests:
+        _validate_manifest(manifest)
+
+    by_commit = {manifest.release.commit: manifest for manifest in manifests}
+    if len(by_commit) != len(manifests):
+        raise ValueError(
+            "Synchronization manifest chain contains a duplicate release commit"
+        )
+    if len({manifest.release.tag for manifest in manifests}) != len(manifests):
+        raise ValueError(
+            "Synchronization manifest chain contains a duplicate release tag"
+        )
+
+    resolved: set[str] = set()
+    for start in by_commit:
+        current: str | None = start
+        path: set[str] = set()
+        while current is not None and current not in resolved:
+            if current in path:
+                raise ValueError("Synchronization manifest chain contains a cycle")
+            path.add(current)
+            current = by_commit[current].previous_release_commit
+            if current is not None and current not in by_commit:
+                raise ValueError(
+                    f"Synchronization manifest predecessor {current} is missing"
+                )
+        resolved.update(path)
+
+    roots = [
+        manifest for manifest in manifests if manifest.previous_release_commit is None
+    ]
+    if len(roots) != 1:
+        raise ValueError(
+            "Synchronization manifest chain must have exactly one root; "
+            "disconnected components are not allowed"
+        )
+    if roots[0].release.commit != _PR153_RELEASE_COMMIT:
+        raise ValueError(
+            "Synchronization manifest chain must be rooted at the PR #153 seed"
+        )
+
+    children: dict[str, list[SynchronizationManifest]] = {}
+    for manifest in manifests:
+        previous = manifest.previous_release_commit
+        if previous is not None:
+            children.setdefault(previous, []).append(manifest)
+    if any(len(successors) > 1 for successors in children.values()):
+        raise ValueError("Synchronization manifest chain forks and has multiple tips")
+
+    tips = [
+        manifest for manifest in manifests if manifest.release.commit not in children
+    ]
+    if len(tips) != 1:
+        raise ValueError("Synchronization manifest chain must have exactly one tip")
+
+    visited = {_PR153_RELEASE_COMMIT}
+    current = roots[0]
+    while successors := children.get(current.release.commit):
+        current = successors[0]
+        visited.add(current.release.commit)
+    if len(visited) != len(manifests):
+        raise ValueError(
+            "Synchronization manifest chain contains a disconnected component"
+        )
+    return tips[0]
+
+
+def render_pull_request_body(manifest: SynchronizationManifest) -> str:
+    _validate_manifest(manifest)
+    if (
+        manifest.previous_release_commit is None
+        and manifest.release.commit != _PR153_RELEASE_COMMIT
+    ):
+        raise ValueError(
+            "non-seed Synchronization manifest requires a predecessor for rendering"
+        )
+    predecessor = manifest.previous_release_commit or "none (PR #153 seed)"
+    if manifest.preparation_mode == "conflicting":
+        next_action = (
+            "Perform explicit Semantic reconciliation, then mark this PR ready "
+            "for review."
+        )
+    else:
+        next_action = (
+            "Review the Baseline reconciliation and approve its workflow runs."
+        )
+    manifest_location = manifest_path(manifest.release.commit)
+    body = f"""\
+Synchronizes the published Codex CLI release [{manifest.release.tag}]({manifest.release.url}).
+
+- Release SHA (`release.commit`): `{manifest.release.commit}`
+- Fork baseline (`forkBaseSha`): `{manifest.fork_base_sha}`
+- Predecessor (`previousReleaseCommit`): `{predecessor}`
+- Selection (`selectionMode`): `{manifest.selection_mode}`
+- Preparation (`preparationMode`): `{manifest.preparation_mode}`
+- Manifest: `{manifest_location}`
+
+Next action: {next_action}
+"""
+    if len(body) > MAX_PULL_REQUEST_BODY_CHARACTERS:
+        raise ValueError("pull-request body metadata exceeds its character budget")
+    if not manifest.conflict_paths:
+        return body
+
+    encoded_paths = [
+        f"    {json.dumps(path, ensure_ascii=True)}"
+        for path in manifest.conflict_paths[:MAX_CONFLICTS_SHOWN]
+    ]
+    displayed_paths: list[str] = []
+    rendered_body: str | None = None
+    for encoded_path in encoded_paths:
+        tentative_paths = [*displayed_paths, encoded_path]
+        shown_count = len(tentative_paths)
+        omitted = len(manifest.conflict_paths) - shown_count
+        conflict_section = (
+            f"\nConflicts ({len(manifest.conflict_paths)} total; "
+            f"showing {shown_count}):\n"
+        )
+        shown_paths = "\n".join(tentative_paths)
+        conflict_section += f"\n{shown_paths}\n"
+        conflict_section += (
+            f"\nOmitted conflicts: {omitted}. The complete conflict evidence is in "
+            f"`{manifest_location}`.\n"
+        )
+        candidate = body + conflict_section
+        if len(candidate) <= MAX_PULL_REQUEST_BODY_CHARACTERS:
+            displayed_paths.append(encoded_path)
+            rendered_body = candidate
+    if rendered_body is not None:
+        return rendered_body
+    raise ValueError(
+        "pull-request body cannot include a complete conflict path within its "
+        "character budget"
+    )
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
