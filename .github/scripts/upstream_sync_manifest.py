@@ -15,7 +15,8 @@ MAX_RENDERED_CONFLICT_BYTES = 2_000
 MAX_RENDERED_DIAGNOSTIC_BYTES = 2_000
 RELEASE_URL_PREFIX = "https://github.com/openai/codex/releases/tag/"
 _MAX_REPOSITORY_PATH_LENGTH = 4096
-_PR153_RELEASE_COMMIT = "b3a6d7f67cf056e18472c2b9ec26d3999ed40b7b"
+MANIFEST_SEED_COMMIT = "b3a6d7f67cf056e18472c2b9ec26d3999ed40b7b"
+_PR153_RELEASE_COMMIT = MANIFEST_SEED_COMMIT
 # SHA-256 of the canonical PR #153 seed, binding every field and conflict path.
 _PR153_SEED_MANIFEST_SHA256 = (
     "f7a3f94ef75e8f911ae6e9b4e123a65cfb1223c06b1c6ea07352123d6388620e"
@@ -148,9 +149,12 @@ def parse_manifest(text: str) -> SynchronizationManifest:
 
 def validate_chain(
     manifests: tuple[SynchronizationManifest, ...],
+    *,
+    seed_commit: str = MANIFEST_SEED_COMMIT,
 ) -> SynchronizationManifest:
     if not manifests:
         raise ValueError("Synchronization manifest chain must not be empty")
+    _validate_sha(seed_commit, "seed_commit")
     for manifest in manifests:
         _validate_manifest(manifest)
 
@@ -187,7 +191,7 @@ def validate_chain(
             "Synchronization manifest chain must have exactly one root; "
             "disconnected components are not allowed"
         )
-    if roots[0].release.commit != _PR153_RELEASE_COMMIT:
+    if roots[0].release.commit != seed_commit:
         raise ValueError(
             "Synchronization manifest chain must be rooted at the PR #153 seed"
         )
@@ -206,7 +210,7 @@ def validate_chain(
     if len(tips) != 1:
         raise ValueError("Synchronization manifest chain must have exactly one tip")
 
-    visited = {_PR153_RELEASE_COMMIT}
+    visited = {seed_commit}
     current = roots[0]
     while successors := children.get(current.release.commit):
         current = successors[0]

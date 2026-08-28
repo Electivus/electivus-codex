@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from upstream_sync_manifest import MANIFEST_DIRECTORY
+from upstream_sync_manifest import MANIFEST_SEED_COMMIT
 from upstream_sync_manifest import ReleaseIdentity
 from upstream_sync_manifest import SynchronizationManifest
 from upstream_sync_manifest import manifest_path
@@ -18,7 +19,7 @@ from upstream_sync_manifest import validate_chain
 SYNC_BRANCH_PREFIX = "automation/upstream-sync/"
 _MAX_SYNCHRONIZATION_BRANCHES = 1_000
 _NORMALIZATION_MESSAGE = "Normalize Rust workspace version to 0.0.0"
-_PR153_RELEASE_COMMIT = "b3a6d7f67cf056e18472c2b9ec26d3999ed40b7b"
+_PR153_RELEASE_COMMIT = MANIFEST_SEED_COMMIT
 _PR153_MANIFEST_INTRODUCTION = "1fa5e1fa4167c1bce4060695024d738f8d68956e"
 _PR153_MANIFEST_BLOB = "e05e54690ed0dd24891fc9fb41d7199a5ab7d3d2"
 _PR153_MANIFEST_INTRODUCTION_MESSAGE = (
@@ -47,20 +48,24 @@ def prepare_attempt(
     release: ReleaseIdentity,
     fork_base_sha: str,
     selection_mode: str,
+    *,
+    seed_commit: str = MANIFEST_SEED_COMMIT,
 ) -> PreparedAttempt:
     branch = f"{SYNC_BRANCH_PREFIX}{release.commit}"
     if _remote_branch_exists(repo, branch):
-        prepared = _remote_attempt(repo, branch)
+        prepared = _remote_attempt(repo, branch, seed_commit=seed_commit)
         if prepared is None:
             raise LegacyAttemptError(
                 f"refusing legacy Synchronization branch without manifest {branch}"
             )
         if prepared.manifest.release != release:
             raise SyncError(f"manifest does not own Synchronization branch {branch}")
-        _verify_prepared(repo, prepared)
+        _verify_prepared(repo, prepared, seed_commit=seed_commit)
         return prepared
 
-    _, fork_chain, predecessor = _read_chain_at(repo, fork_base_sha)
+    _, fork_chain, predecessor = _read_chain_at(
+        repo, fork_base_sha, seed_commit=seed_commit
+    )
     if not _is_ancestor(repo, predecessor.release.commit, release.commit):
         raise SyncError("selected release does not descend from the manifest predecessor")
     if _manifest_texts_at(repo, release.commit):
@@ -97,7 +102,7 @@ def prepare_attempt(
                 conflicts,
             )
             try:
-                validate_chain((*fork_chain, manifest))
+                validate_chain((*fork_chain, manifest), seed_commit=seed_commit)
                 text = serialize_manifest(manifest)
             except ValueError as error:
                 raise SyncError(str(error)) from error
@@ -116,16 +121,22 @@ def prepare_attempt(
             _git(repo, "worktree", "remove", "--force", str(worktree))
 
     prepared = PreparedAttempt(manifest, branch, head)
-    _verify_prepared(repo, prepared)
+    _verify_prepared(repo, prepared, seed_commit=seed_commit)
     create_only_lease = f"--force-with-lease=refs/heads/{branch}:"
     _git(repo, "push", create_only_lease, "origin", f"{head}:refs/heads/{branch}")
     return prepared
 
 
 def inspect_open_attempt(
-    repo: Path, branch: str, expected_head: str
+    repo: Path,
+    branch: str,
+    expected_head: str,
+    *,
+    seed_commit: str = MANIFEST_SEED_COMMIT,
 ) -> PreparedAttempt | None:
-    prepared = _remote_attempt(repo, branch, expected_head)
+    prepared = _remote_attempt(
+        repo, branch, expected_head, seed_commit=seed_commit
+    )
     if prepared is not None and prepared.manifest.release.commit != _branch_commit(branch):
         raise SyncError(f"manifest does not own Synchronization branch {branch}")
     if prepared is not None:
@@ -145,7 +156,11 @@ def inspect_open_attempt(
         )
         if changes:
             raise SyncError("open Synchronization manifest history changed after introduction")
-        _verify_prepared(repo, PreparedAttempt(prepared.manifest, branch, manifest_head))
+        _verify_prepared(
+            repo,
+            PreparedAttempt(prepared.manifest, branch, manifest_head),
+            seed_commit=seed_commit,
+        )
     return prepared
 
 
@@ -171,18 +186,30 @@ def synchronization_branches(repo: Path) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(branches))
 
 
-def inspect_retry_attempt(repo: Path, branch: str, expected_head: str) -> PreparedAttempt:
-    prepared = _remote_attempt(repo, branch, expected_head)
+def inspect_retry_attempt(
+    repo: Path,
+    branch: str,
+    expected_head: str,
+    *,
+    seed_commit: str = MANIFEST_SEED_COMMIT,
+) -> PreparedAttempt:
+    prepared = _remote_attempt(
+        repo, branch, expected_head, seed_commit=seed_commit
+    )
     if prepared is None:
         raise LegacyAttemptError(
             f"refusing legacy Synchronization branch without manifest {branch}"
         )
-    _verify_prepared(repo, prepared)
+    _verify_prepared(repo, prepared, seed_commit=seed_commit)
     return prepared
 
 
 def _remote_attempt(
-    repo: Path, branch: str, expected_head: str | None = None
+    repo: Path,
+    branch: str,
+    expected_head: str | None = None,
+    *,
+    seed_commit: str = MANIFEST_SEED_COMMIT,
 ) -> PreparedAttempt | None:
     release_commit = _branch_commit(branch)
     _git(repo, "fetch", "--no-tags", "origin", f"refs/heads/{branch}")
@@ -195,16 +222,25 @@ def _remote_attempt(
         if history:
             raise SyncError("active Synchronization manifest was removed from branch history")
         return None
-    _, _, manifest = _read_chain_at(repo, head)
+    _, _, manifest = _read_chain_at(repo, head, seed_commit=seed_commit)
     return PreparedAttempt(manifest, branch, head)
 
 
-def _verify_prepared(repo: Path, prepared: PreparedAttempt) -> None:
+def _verify_prepared(
+    repo: Path,
+    prepared: PreparedAttempt,
+    *,
+    seed_commit: str = MANIFEST_SEED_COMMIT,
+) -> None:
     manifest = prepared.manifest
     if manifest.release.commit != _branch_commit(prepared.branch):
         raise SyncError(f"manifest does not own Synchronization branch {prepared.branch}")
-    head_texts, _, tip = _read_chain_at(repo, prepared.head)
-    fork_texts, _, fork_tip = _read_chain_at(repo, manifest.fork_base_sha)
+    head_texts, _, tip = _read_chain_at(
+        repo, prepared.head, seed_commit=seed_commit
+    )
+    fork_texts, _, fork_tip = _read_chain_at(
+        repo, manifest.fork_base_sha, seed_commit=seed_commit
+    )
     active = manifest_path(manifest.release.commit)
     if (
         tip != manifest
@@ -252,11 +288,16 @@ def _verify_prepared(repo: Path, prepared: PreparedAttempt) -> None:
         raise SyncError("conflicting branch has unexpected Fork ancestry")
 
 
-def _read_chain_at(repo: Path, commit: str):
+def _read_chain_at(
+    repo: Path,
+    commit: str,
+    *,
+    seed_commit: str = MANIFEST_SEED_COMMIT,
+):
     texts = _manifest_texts_at(repo, commit)
     manifests = []
     for path, text in sorted(texts.items()):
-        _verify_manifest_history(repo, commit, path)
+        _verify_manifest_history(repo, commit, path, seed_commit=seed_commit)
         try:
             manifest = parse_manifest(text)
         except ValueError as error:
@@ -265,7 +306,7 @@ def _read_chain_at(repo: Path, commit: str):
             raise SyncError(f"Synchronization manifest filename does not match {path}")
         manifests.append(manifest)
     try:
-        tip = validate_chain(tuple(manifests))
+        tip = validate_chain(tuple(manifests), seed_commit=seed_commit)
     except ValueError as error:
         raise SyncError(str(error)) from error
     return texts, tuple(manifests), tip
@@ -297,8 +338,14 @@ def _manifest_texts_at(repo: Path, commit: str) -> dict[str, str]:
     return texts
 
 
-def _verify_manifest_history(repo: Path, commit: str, path: str) -> None:
-    if path == manifest_path(_PR153_RELEASE_COMMIT):
+def _verify_manifest_history(
+    repo: Path,
+    commit: str,
+    path: str,
+    *,
+    seed_commit: str = MANIFEST_SEED_COMMIT,
+) -> None:
+    if path == manifest_path(_PR153_RELEASE_COMMIT) and seed_commit == MANIFEST_SEED_COMMIT:
         _verify_pr153_manifest_history(repo, commit, path)
         return
     changes = _git(
@@ -311,6 +358,13 @@ def _verify_manifest_history(repo: Path, commit: str, path: str) -> None:
         "--",
         path,
     ).splitlines()
+    if path == manifest_path(seed_commit) and len(changes) >= 2:
+        if (
+            _git(repo, "show", "-s", "--format=%s", changes[-1])
+            == _PR153_MANIFEST_INTRODUCTION_MESSAGE
+            and _tree_entry(repo, commit, path) == _tree_entry(repo, changes[-1], path)
+        ):
+            return
     if len(changes) != 1:
         raise SyncError(f"Synchronization manifest history changed after introduction: {path}")
     if _tree_entry(repo, commit, path) != _tree_entry(repo, changes[0], path):

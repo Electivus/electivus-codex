@@ -24,6 +24,7 @@ from upstream_sync_attempt import synchronization_branches
 from upstream_sync_manifest import ReleaseIdentity
 from upstream_sync_manifest import MAX_MODEL_VISIBLE_ITEM_BYTES
 from upstream_sync_manifest import MAX_RENDERED_DIAGNOSTIC_BYTES
+from upstream_sync_manifest import MANIFEST_SEED_COMMIT
 from upstream_sync_manifest import bounded_conflict_paths
 from upstream_sync_manifest import canonical_release_url
 from upstream_sync_manifest import manifest_path
@@ -99,6 +100,7 @@ class SyncConfig:
     upstream_url: str
     default_branch: str
     manual_tag: str | None = None
+    manifest_seed_commit: str = MANIFEST_SEED_COMMIT
 
 
 @dataclass(frozen=True)
@@ -312,13 +314,20 @@ def synchronize(
 ) -> SyncResult:
     frozen = pull_requests.open_synchronization()
     if frozen is not None:
-        return _frozen_result(config.repo_root, frozen)
+        return _frozen_result(
+            config.repo_root, frozen, config.manifest_seed_commit
+        )
 
     if config.manual_tag and _semantic_version(config.manual_tag) is None:
         raise SyncError(
             f"{config.manual_tag!r} is not an exact rust-v<SemVer> release tag"
         )
-    retry = _orphaned_attempt(config.repo_root, pull_requests, config.manual_tag)
+    retry = _orphaned_attempt(
+        config.repo_root,
+        pull_requests,
+        config.manual_tag,
+        config.manifest_seed_commit,
+    )
     if retry is not None:
         return _create_pull_request(config, pull_requests, retry)
 
@@ -355,7 +364,9 @@ def synchronize(
             pr_url=existing.url,
         )
     if existing is not None and existing.state == "open":
-        return _frozen_result(config.repo_root, existing)
+        return _frozen_result(
+            config.repo_root, existing, config.manifest_seed_commit
+        )
     if existing is not None:
         return SyncResult(
             outcome="closed-pr-abandoned",
@@ -371,6 +382,7 @@ def synchronize(
         release_identity,
         fork_head,
         selection_mode,
+        seed_commit=config.manifest_seed_commit,
     )
     return _create_pull_request(config, pull_requests, prepared)
 
@@ -379,6 +391,7 @@ def _orphaned_attempt(
     repo_root: Path,
     pull_requests: PullRequestService,
     requested_tag: str | None,
+    seed_commit: str,
 ) -> PreparedAttempt | None:
     branches = synchronization_branches(repo_root)
     if not branches:
@@ -387,7 +400,9 @@ def _orphaned_attempt(
         tuple(branch for branch, _head in branches)
     )
     attempts = [
-        inspect_retry_attempt(repo_root, branch, head)
+        inspect_retry_attempt(
+            repo_root, branch, head, seed_commit=seed_commit
+        )
         for branch, head in branches
         if branch not in pull_requests_by_branch
     ]
@@ -438,8 +453,14 @@ def _create_pull_request(
     )
 
 
-def _frozen_result(repo_root: Path, frozen: PullRequest) -> SyncResult:
-    prepared = inspect_open_attempt(repo_root, frozen.head, frozen.head_sha)
+def _frozen_result(
+    repo_root: Path,
+    frozen: PullRequest,
+    seed_commit: str,
+) -> SyncResult:
+    prepared = inspect_open_attempt(
+        repo_root, frozen.head, frozen.head_sha, seed_commit=seed_commit
+    )
     if prepared is None:
         tag = _tag_from_title(frozen.title)
         branch_commit = frozen.head.removeprefix(SYNC_BRANCH_PREFIX)
