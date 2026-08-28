@@ -6,7 +6,6 @@ import json
 import os
 import re
 import subprocess
-import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -14,9 +13,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from upstream_sync_attempt import LegacyAttemptError
+from upstream_sync_attempt import PreparedAttempt
+from upstream_sync_attempt import SYNC_BRANCH_PREFIX
+from upstream_sync_attempt import SyncError
+from upstream_sync_attempt import inspect_open_attempt
+from upstream_sync_attempt import inspect_retry_attempt
+from upstream_sync_attempt import prepare_attempt
+from upstream_sync_attempt import synchronization_branches
+from upstream_sync_manifest import ReleaseIdentity
+from upstream_sync_manifest import bounded_conflict_paths
+from upstream_sync_manifest import canonical_release_url
+from upstream_sync_manifest import manifest_path
+from upstream_sync_manifest import render_pull_request_body
 
-SYNC_BRANCH_PREFIX = "automation/upstream-sync/"
-MAX_CONFLICTS_SHOWN = 20
 GITHUB_PAGE_SIZE = 100
 DEFAULT_GITHUB_RECORD_LIMIT = 1_000
 UPSTREAM_RELEASE_RECORD_LIMIT = 10_000
@@ -100,6 +110,8 @@ class SyncResult:
     pr_url: str = ""
     conflict_count: int = 0
     conflicts: tuple[str, ...] = ()
+    fork_base_sha: str = ""
+    manifest_path: str = ""
 
 
 class ReleaseClient(Protocol):
@@ -116,8 +128,8 @@ class PullRequestService(Protocol):
     def create(self, intent: PullRequestIntent) -> tuple[int, str]: ...
 
 
-class SyncError(RuntimeError):
-    pass
+class PendingAttemptError(SyncError):
+    outcome = "pending-attempt"
 
 
 class GitHubClient:
@@ -265,19 +277,16 @@ def synchronize(
 ) -> SyncResult:
     frozen = pull_requests.open_synchronization()
     if frozen is not None:
-        return SyncResult(
-            outcome="open-pr-frozen",
-            tag=_tag_from_title(frozen.title),
-            release_commit=_commit_from_body(frozen.body) or frozen.head_sha,
-            branch=frozen.head,
-            pr_number=frozen.number,
-            pr_url=frozen.url,
-        )
+        return _frozen_result(config.repo_root, frozen)
 
     if config.manual_tag and _semantic_version(config.manual_tag) is None:
         raise SyncError(
             f"{config.manual_tag!r} is not an exact rust-v<SemVer> release tag"
         )
+    retry = _orphaned_attempt(config.repo_root, pull_requests, config.manual_tag)
+    if retry is not None:
+        return _create_pull_request(config, pull_requests, retry)
+
     candidates = (
         [releases.release_for_tag(config.manual_tag)]
         if config.manual_tag
@@ -287,6 +296,11 @@ def synchronize(
     release_commit = _fetch_release(config, release.tag)
     branch = f"{SYNC_BRANCH_PREFIX}{release_commit}"
     fork_head = _default_head(config)
+    release_identity = ReleaseIdentity(
+        tag=release.tag,
+        commit=release_commit,
+        url=canonical_release_url(release.tag),
+    )
 
     if _is_ancestor(config.repo_root, release_commit, fork_head):
         return SyncResult(
@@ -306,14 +320,7 @@ def synchronize(
             pr_url=existing.url,
         )
     if existing is not None and existing.state == "open":
-        return SyncResult(
-            outcome="open-pr-frozen",
-            tag=release.tag,
-            release_commit=release_commit,
-            branch=branch,
-            pr_number=existing.number,
-            pr_url=existing.url,
-        )
+        return _frozen_result(config.repo_root, existing)
     if existing is not None:
         return SyncResult(
             outcome="closed-pr-abandoned",
@@ -324,51 +331,108 @@ def synchronize(
             pr_url=existing.url,
         )
 
-    if _remote_branch_exists(config.repo_root, branch):
-        prepared = _inspect_prepared_branch(config, fork_head, release_commit, branch)
-    else:
-        prepared = _prepare_branch(config, fork_head, release_commit, branch)
+    prepared = prepare_attempt(
+        config.repo_root,
+        release_identity,
+        fork_head,
+        selection_mode,
+    )
+    return _create_pull_request(config, pull_requests, prepared)
+
+
+def _orphaned_attempt(
+    repo_root: Path,
+    pull_requests: PullRequestService,
+    requested_tag: str | None,
+) -> PreparedAttempt | None:
+    attempts = [
+        inspect_retry_attempt(repo_root, branch, head)
+        for branch, head in synchronization_branches(repo_root)
+        if pull_requests.for_branch(branch) is None
+    ]
+    if len(attempts) > 1:
+        raise SyncError("found multiple orphaned Synchronization attempts")
+    if not attempts:
+        return None
+    attempt = attempts[0]
+    if requested_tag is not None and attempt.manifest.release.tag != requested_tag:
+        raise PendingAttemptError(
+            f"pending Synchronization attempt for {attempt.manifest.release.tag} "
+            f"does not match requested release {requested_tag}"
+        )
+    return attempt
+
+
+def _create_pull_request(
+    config: SyncConfig,
+    pull_requests: PullRequestService,
+    prepared: PreparedAttempt,
+) -> SyncResult:
+    manifest = prepared.manifest
     intent = PullRequestIntent(
-        title=f"Synchronize openai/codex {release.tag}",
-        head=branch,
+        title=f"Synchronize openai/codex {manifest.release.tag}",
+        head=prepared.branch,
         base=config.default_branch,
-        body=_pull_request_body(
-            release,
-            release_commit,
-            selection_mode,
-            prepared.mode,
-            prepared.conflicts,
-        ),
-        draft=prepared.mode == "conflicting",
+        body=render_pull_request_body(manifest),
+        draft=manifest.preparation_mode == "conflicting",
     )
     number, url = pull_requests.create(intent)
     outcome = (
-        "pr-created-clean" if prepared.mode == "clean" else "draft-pr-created-conflicts"
+        "pr-created-clean"
+        if manifest.preparation_mode == "clean"
+        else "draft-pr-created-conflicts"
     )
     return SyncResult(
         outcome=outcome,
-        tag=release.tag,
-        release_commit=release_commit,
-        branch=branch,
-        preparation_mode=prepared.mode,
+        tag=manifest.release.tag,
+        release_commit=manifest.release.commit,
+        branch=prepared.branch,
+        preparation_mode=manifest.preparation_mode,
         pr_number=number,
         pr_url=url,
-        conflict_count=len(prepared.conflicts),
-        conflicts=prepared.conflicts[:MAX_CONFLICTS_SHOWN],
+        conflict_count=len(manifest.conflict_paths),
+        conflicts=bounded_conflict_paths(manifest.conflict_paths),
+        fork_base_sha=manifest.fork_base_sha,
+        manifest_path=manifest_path(manifest.release.commit),
     )
 
 
-@dataclass(frozen=True)
-class _PreparedBranch:
-    mode: str
-    conflicts: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class _MergeProbe:
-    returncode: int
-    stderr: str
-    conflicts: tuple[str, ...]
+def _frozen_result(repo_root: Path, frozen: PullRequest) -> SyncResult:
+    prepared = inspect_open_attempt(repo_root, frozen.head, frozen.head_sha)
+    if prepared is None:
+        tag = _tag_from_title(frozen.title)
+        branch_commit = frozen.head.removeprefix(SYNC_BRANCH_PREFIX)
+        body_commit = _commit_from_body(frozen.body)
+        if (
+            not tag
+            or not re.fullmatch(r"[0-9a-f]{40}", branch_commit)
+            or body_commit != branch_commit
+        ):
+            raise LegacyAttemptError(
+                "open legacy Synchronization PR identity is ambiguous"
+            )
+        return SyncResult(
+            outcome="open-pr-frozen",
+            tag=tag,
+            release_commit=branch_commit,
+            branch=frozen.head,
+            pr_number=frozen.number,
+            pr_url=frozen.url,
+        )
+    manifest = prepared.manifest
+    return SyncResult(
+        outcome="open-pr-frozen",
+        tag=manifest.release.tag,
+        release_commit=manifest.release.commit,
+        branch=prepared.branch,
+        preparation_mode=manifest.preparation_mode,
+        pr_number=frozen.number,
+        pr_url=frozen.url,
+        conflict_count=len(manifest.conflict_paths),
+        conflicts=bounded_conflict_paths(manifest.conflict_paths),
+        fork_base_sha=manifest.fork_base_sha,
+        manifest_path=manifest_path(manifest.release.commit),
+    )
 
 
 def _select_release(
@@ -469,253 +533,20 @@ def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
     return process.returncode == 0
 
 
-def _remote_branch_exists(repo: Path, branch: str) -> bool:
-    process = _run_git(
-        repo,
-        "ls-remote",
-        "--exit-code",
-        "--heads",
-        "origin",
-        f"refs/heads/{branch}",
-    )
-    if process.returncode not in (0, 2):
-        raise SyncError(process.stderr.strip())
-    return process.returncode == 0
-
-
-def _prepare_branch(
-    config: SyncConfig,
-    fork_head: str,
-    release_commit: str,
-    branch: str,
-) -> _PreparedBranch:
-    with tempfile.TemporaryDirectory(prefix="codex-upstream-sync-") as temp_dir:
-        worktree = Path(temp_dir)
-        _git(config.repo_root, "worktree", "add", "--detach", str(worktree), fork_head)
-        try:
-            probe = _probe_merge(worktree, release_commit)
-            if probe.returncode == 0:
-                parents = _git(worktree, "show", "-s", "--format=%P", "HEAD").split()
-                if parents != [fork_head, release_commit]:
-                    raise SyncError(
-                        "clean synchronization did not create a two-parent merge"
-                    )
-                mode = "clean"
-            elif probe.conflicts:
-                _git(worktree, "merge", "--abort")
-                _git(worktree, "reset", "--hard", release_commit)
-                mode = "conflicting"
-            else:
-                raise SyncError(
-                    f"merge failed without content conflicts: {probe.stderr}"
-                )
-
-            if _normalize_workspace_version(worktree):
-                _git(worktree, "add", "codex-rs/Cargo.toml")
-                _git(
-                    worktree,
-                    "commit",
-                    "-m",
-                    "Normalize Rust workspace version to 0.0.0",
-                )
-            _git(worktree, "diff", "--check")
-            if _git(worktree, "status", "--porcelain"):
-                raise SyncError("prepared synchronization worktree is not clean")
-            _git(worktree, "push", "origin", f"HEAD:refs/heads/{branch}")
-            return _PreparedBranch(mode=mode, conflicts=probe.conflicts)
-        finally:
-            _run_git(config.repo_root, "worktree", "remove", "--force", str(worktree))
-
-
-def _inspect_prepared_branch(
-    config: SyncConfig,
-    fork_head: str,
-    release_commit: str,
-    branch: str,
-) -> _PreparedBranch:
-    _git(
-        config.repo_root,
-        "fetch",
-        "--no-tags",
-        "origin",
-        f"refs/heads/{branch}",
-    )
-    head = _git(config.repo_root, "rev-parse", "FETCH_HEAD^{commit}")
-    manifest = _git(config.repo_root, "show", f"{head}:codex-rs/Cargo.toml")
-    if _workspace_version(manifest)[2]["version"] != "0.0.0":
-        raise SyncError(f"refusing to use unnormalized branch {branch}")
-
-    normalization_parent = _normalization_parent(config.repo_root, head)
-    if head == release_commit or normalization_parent == release_commit:
-        mode = "conflicting"
-        conflicts = _conflicts_between(config, fork_head, release_commit)
-    else:
-        merge_commit = normalization_parent or head
-        parents = _commit_parents(config.repo_root, merge_commit)
-        if len(parents) != 2 or parents[1] != release_commit:
-            raise SyncError(f"refusing to overwrite unowned branch {branch}")
-        mode = "clean"
-        conflicts = ()
-    return _PreparedBranch(mode=mode, conflicts=conflicts)
-
-
-def _normalization_parent(repo: Path, commit: str) -> str | None:
-    parents = _commit_parents(repo, commit)
-    if (
-        len(parents) != 1
-        or _git(repo, "show", "-s", "--format=%s", commit)
-        != "Normalize Rust workspace version to 0.0.0"
-        or _git(repo, "diff", "--name-only", parents[0], commit)
-        != "codex-rs/Cargo.toml"
-    ):
-        return None
-    return parents[0]
-
-
-def _commit_parents(repo: Path, commit: str) -> list[str]:
-    return _git(repo, "show", "-s", "--format=%P", commit).split()
-
-
-def _conflicts_between(
-    config: SyncConfig,
-    fork_head: str,
-    release_commit: str,
-) -> tuple[str, ...]:
-    with tempfile.TemporaryDirectory(prefix="codex-upstream-conflicts-") as temp_dir:
-        worktree = Path(temp_dir)
-        _git(config.repo_root, "worktree", "add", "--detach", str(worktree), fork_head)
-        try:
-            probe = _probe_merge(worktree, release_commit)
-            if probe.returncode != 0 and not probe.conflicts:
-                raise SyncError(
-                    f"merge failed without content conflicts: {probe.stderr}"
-                )
-            return probe.conflicts
-        finally:
-            _run_git(config.repo_root, "worktree", "remove", "--force", str(worktree))
-
-
-def _probe_merge(worktree: Path, release_commit: str) -> _MergeProbe:
-    merge = _run_git(
-        worktree,
-        "merge",
-        "--no-ff",
-        "-m",
-        f"Merge openai/codex release {release_commit}",
-        release_commit,
-    )
-    conflicts = tuple(
-        path
-        for path in _git(
-            worktree, "diff", "--name-only", "--diff-filter=U"
-        ).splitlines()
-        if path
-    )
-    return _MergeProbe(
-        returncode=merge.returncode,
-        stderr=merge.stderr.strip(),
-        conflicts=conflicts,
-    )
-
-
-def _normalize_workspace_version(worktree: Path) -> bool:
-    manifest = worktree / "codex-rs" / "Cargo.toml"
-    try:
-        text = manifest.read_text()
-    except OSError as error:
-        raise SyncError(f"cannot read Rust workspace version: {error}") from error
-    lines, index, match = _workspace_version(text)
-    if match["version"] == "0.0.0":
-        return False
-    lines[index] = f'{match["prefix"]}"0.0.0"{match["suffix"]}'
-    manifest.write_text("".join(lines))
-    if _workspace_version(manifest.read_text())[2]["version"] != "0.0.0":
-        raise SyncError("failed to normalize Rust workspace package version")
-    return True
-
-
-def _workspace_version(text: str) -> tuple[list[str], int, re.Match[str]]:
-    lines = text.splitlines(keepends=True)
-    table_starts = [
-        index
-        for index, line in enumerate(lines)
-        if re.fullmatch(r"\s*\[workspace\.package]\s*(?:#.*)?\n?", line)
-    ]
-    if len(table_starts) != 1:
-        raise SyncError("Rust workspace package table is missing or ambiguous")
-    start = table_starts[0] + 1
-    end = next(
-        (
-            index
-            for index in range(start, len(lines))
-            if re.match(r"\s*\[", lines[index])
-        ),
-        len(lines),
-    )
-    version_lines = [
-        index
-        for index in range(start, end)
-        if re.match(r"\s*version\s*=", lines[index])
-    ]
-    if len(version_lines) != 1:
-        raise SyncError("Rust workspace package version is missing or ambiguous")
-    index = version_lines[0]
-    match = re.fullmatch(
-        r'(?P<prefix>\s*version\s*=\s*)"(?P<version>[^"]+)"'
-        r"(?P<suffix>\s*(?:#.*)?\n?)",
-        lines[index],
-    )
-    if match is None:
-        raise SyncError("Rust workspace package version is not a string literal")
-    return lines, index, match
-
-
-def _pull_request_body(
-    release: Release,
-    release_commit: str,
-    selection_mode: str,
-    preparation_mode: str,
-    conflicts: tuple[str, ...],
-) -> str:
-    if conflicts:
-        shown = "\n".join(f"- `{path}`" for path in conflicts[:MAX_CONFLICTS_SHOWN])
-        conflict_context = (
-            f"\n\nConflicts ({len(conflicts)} total; showing up to "
-            f"{MAX_CONFLICTS_SHOWN}):\n{shown}"
-        )
-        next_action = (
-            "Merge the current fork default branch, resolve every conflict, "
-            "then mark this PR ready for review."
-        )
-    else:
-        conflict_context = ""
-        next_action = (
-            "Review the synchronization, update it against the current default "
-            "branch, and approve its workflow runs."
-        )
-    return f"""\
-Synchronizes the published Codex CLI release `{release.tag}`.
-
-- Upstream release: {release.url}
-- Immutable commit: `{release_commit}`
-- Selection: {selection_mode}
-- Preparation: {preparation_mode}
-- Rust workspace version: normalized to `0.0.0`
-
-CI triggered by this `GITHUB_TOKEN`-created PR requires maintainer approval.
-
-Next action: {next_action}{conflict_context}
-"""
-
-
 def _tag_from_title(title: str) -> str:
-    match = re.search(r"\brust-v\S+", title)
-    return match.group(0) if match else ""
+    match = re.fullmatch(r"Synchronize openai/codex (rust-v\S+)", title)
+    if match is None or _semantic_version(match.group(1)) is None:
+        return ""
+    return match.group(1)
 
 
 def _commit_from_body(body: str) -> str:
-    match = re.search(r"Immutable commit: `([0-9a-f]{40})`", body)
-    return match.group(1) if match else ""
+    if body.count("Immutable commit:") != 1:
+        return ""
+    match = re.search(r"Immutable commit: `([^`\r\n]*)`", body)
+    if match is None or re.fullmatch(r"[0-9a-f]{40}", match.group(1)) is None:
+        return ""
+    return match.group(1)
 
 
 def _run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -748,7 +579,10 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def _write_outputs(
-    path: str | None, result: SyncResult | None, error: str = ""
+    path: str | None,
+    result: SyncResult | None,
+    error: str = "",
+    outcome: str = "failure",
 ) -> None:
     if not path:
         return
@@ -762,10 +596,12 @@ def _write_outputs(
             "pr_number": result.pr_number or "",
             "pr_url": result.pr_url,
             "conflict_count": result.conflict_count,
-            "conflicts": json.dumps(result.conflicts),
+            "conflicts": json.dumps(bounded_conflict_paths(result.conflicts)),
+            "fork_base_sha": result.fork_base_sha,
+            "manifest_path": result.manifest_path,
         }
         if result is not None
-        else {"outcome": "failure", "error": error.replace("\n", " ")}
+        else {"outcome": outcome, "error": error.replace("\n", " ")}
     )
     with Path(path).open("a") as output:
         for key, value in values.items():
@@ -773,13 +609,16 @@ def _write_outputs(
 
 
 def _write_summary(
-    path: str | None, result: SyncResult | None, error: str = ""
+    path: str | None,
+    result: SyncResult | None,
+    error: str = "",
+    outcome: str = "failure",
 ) -> None:
     if not path:
         return
     lines = ["## Upstream synchronization", ""]
     if result is None:
-        lines.extend(["- Outcome: failure", f"- Error: {error}"])
+        lines.extend([f"- Outcome: {outcome}", f"- Error: {error}"])
     else:
         lines.extend(
             [
@@ -790,9 +629,16 @@ def _write_summary(
         )
         if result.pr_url:
             lines.append(f"- Pull request: {result.pr_url}")
+        if result.fork_base_sha:
+            lines.append(f"- Fork baseline: `{result.fork_base_sha}`")
+        if result.manifest_path:
+            lines.append(f"- Manifest: `{result.manifest_path}`")
         if result.conflict_count:
             lines.append(f"- Conflicts: {result.conflict_count} total")
-            lines.extend(f"  - `{path}`" for path in result.conflicts)
+            lines.extend(
+                f"  - {json.dumps(conflict, ensure_ascii=True)}"
+                for conflict in bounded_conflict_paths(result.conflicts)
+            )
     with Path(path).open("a") as summary:
         summary.write("\n".join(lines) + "\n")
 
@@ -825,13 +671,18 @@ def main() -> int:
         )
     except Exception as error:
         message = str(error)
-        _write_outputs(args.output, None, message)
-        _write_summary(args.summary, None, message)
+        outcome = getattr(error, "outcome", "failure")
+        _write_outputs(args.output, None, message, outcome)
+        _write_summary(args.summary, None, message, outcome)
         print(message, file=os.sys.stderr)
         return 1
     _write_outputs(args.output, result)
     _write_summary(args.summary, result)
-    print(json.dumps(result.__dict__, sort_keys=True))
+    payload = {
+        **result.__dict__,
+        "conflicts": bounded_conflict_paths(result.conflicts),
+    }
+    print(json.dumps(payload, sort_keys=True))
     return 0
 
 

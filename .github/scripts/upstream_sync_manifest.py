@@ -8,7 +8,9 @@ from pathlib import PurePosixPath
 
 MANIFEST_DIRECTORY = ".github/upstream-sync-manifests"
 MAX_CONFLICTS_SHOWN = 20
+MAX_MANIFEST_BYTES = 8_000
 MAX_PULL_REQUEST_BODY_CHARACTERS = 8_000
+MAX_RENDERED_CONFLICT_BYTES = 6_000
 RELEASE_URL_PREFIX = "https://github.com/openai/codex/releases/tag/"
 _MAX_REPOSITORY_PATH_LENGTH = 4096
 _PR153_RELEASE_COMMIT = "b3a6d7f67cf056e18472c2b9ec26d3999ed40b7b"
@@ -61,7 +63,22 @@ def manifest_path(release_commit: str) -> str:
 
 def serialize_manifest(manifest: SynchronizationManifest) -> str:
     _validate_manifest(manifest)
-    return _canonical_manifest_text(manifest)
+    text = _canonical_manifest_text(manifest)
+    if len(text.encode("utf-8")) > MAX_MANIFEST_BYTES:
+        raise ValueError("Synchronization manifest exceeds its byte budget")
+    return text
+
+
+def bounded_conflict_paths(conflict_paths: tuple[str, ...]) -> tuple[str, ...]:
+    displayed = []
+    for path in conflict_paths:
+        if len(displayed) == MAX_CONFLICTS_SHOWN:
+            break
+        candidate = (*displayed, path)
+        encoded = json.dumps(candidate, ensure_ascii=True).encode("ascii")
+        if len(encoded) <= MAX_RENDERED_CONFLICT_BYTES:
+            displayed.append(path)
+    return tuple(displayed)
 
 
 def _canonical_manifest_text(manifest: SynchronizationManifest) -> str:
