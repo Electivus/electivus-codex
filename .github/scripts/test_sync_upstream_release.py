@@ -1436,6 +1436,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             fixture.git("fetch", str(fixture.upstream), selected.commit)
             fixture.git("push", "origin", f"FETCH_HEAD:refs/heads/{branch}")
             pull_requests = RecordingPullRequests()
+            before = fixture.git("ls-remote", "--heads", "origin")
             with self.assertRaises(SyncError) as raised:
                 synchronize(
                     fixture.config(),
@@ -1443,6 +1444,49 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     pull_requests,
                 )
             self.assertEqual(raised.exception.outcome, "legacy-rejected")
+            self.assertEqual(fixture.git("ls-remote", "--heads", "origin"), before)
+            self.assertEqual(pull_requests.created, [])
+
+    def test_multiple_orphaned_attempts_fail_closed_before_release_discovery(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            first = fixture.release("rust-v7.1.1", "7.1.1", "first")
+            first_branch = f"automation/upstream-sync/{first.commit}"
+            with self.assertRaisesRegex(SyncError, "PR API unavailable"):
+                synchronize(
+                    fixture.config(),
+                    FixtureReleases.published(first),
+                    CreateFailurePullRequests(),
+                )
+            first_head = fixture.remote_branch_head(first_branch)
+            self.assertIsNotNone(first_head)
+
+            second = fixture.release("rust-v7.2.1", "7.2.1", "second")
+            second_branch = f"automation/upstream-sync/{second.commit}"
+            known_first_attempt = closed_pull_request(
+                17, first_branch, first_head, first
+            )
+            with self.assertRaisesRegex(SyncError, "PR API unavailable"):
+                synchronize(
+                    fixture.config(),
+                    FixtureReleases.published(first, second),
+                    CreateFailurePullRequests([known_first_attempt]),
+                )
+            second_head = fixture.remote_branch_head(second_branch)
+            before = fixture.ref_snapshot()
+            pull_requests = RecordingPullRequests()
+
+            with self.assertRaisesRegex(
+                SyncError, "^found multiple orphaned Synchronization attempts$"
+            ):
+                synchronize(fixture.config(), FailingReleases(), pull_requests)
+
+            self.assertEqual(fixture.ref_snapshot(), before)
+            self.assertEqual(pull_requests.created, [])
+            self.assertIsNotNone(first_head)
+            self.assertIsNotNone(second_head)
 
     def test_retry_survives_a_fresh_clone_without_source_repositories(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
