@@ -19,6 +19,7 @@ from sync_upstream_release import _require_model_visible_budget
 from sync_upstream_release import _write_outputs
 from sync_upstream_release import _write_summary
 from sync_upstream_release import synchronize
+from upstream_sync_attempt import SYNC_BRANCH_PREFIX
 from upstream_sync_manifest import MAX_MODEL_VISIBLE_ITEM_BYTES
 from upstream_sync_manifest import MAX_RENDERED_DIAGNOSTIC_BYTES
 from upstream_sync_manifest import parse_manifest
@@ -2019,6 +2020,9 @@ class CreatedRelease:
 
 
 class GitFixture:
+    _canonical_source: Path | None = None
+    _canonical_source_dir: tempfile.TemporaryDirectory | None = None
+
     def __init__(
         self,
         root: Path,
@@ -2030,13 +2034,14 @@ class GitFixture:
         self.origin = root / "fork.git"
         self.fork = root / "fork"
         source = Path(__file__).parents[2]
+        canonical_source = self.canonical_source(source)
         self.git_at(root, "init", "--initial-branch=main", str(self.upstream))
         self.configure(self.upstream)
         self.git_at(
             self.upstream,
             "fetch",
             "--no-tags",
-            str(source),
+            str(canonical_source),
             PR153_RELEASE_COMMIT,
         )
         self.git_at(self.upstream, "checkout", "--detach", "FETCH_HEAD")
@@ -2065,6 +2070,30 @@ class GitFixture:
         self.commit(self.fork, seed_commit_message)
         self.git_at(self.fork, "push", "origin", "main")
         self.fork_head = self.git("rev-parse", "HEAD")
+
+    @classmethod
+    def canonical_source(cls, source: Path) -> Path:
+        if cls._has_commit(source, PR153_RELEASE_COMMIT):
+            return source
+        if cls._canonical_source is None:
+            cls._canonical_source_dir = tempfile.TemporaryDirectory(
+                prefix="codex-canonical-seed-"
+            )
+            cache_root = Path(cls._canonical_source_dir.name)
+            remote = cls.git_at(source, "remote", "get-url", "origin")
+            cls._canonical_source = cache_root / "source.git"
+            cls.git_at(
+                cache_root,
+                "clone",
+                "--bare",
+                "--no-tags",
+                "--single-branch",
+                "--branch",
+                f"{SYNC_BRANCH_PREFIX}{PR153_RELEASE_COMMIT}",
+                remote,
+                str(cls._canonical_source),
+            )
+        return cls._canonical_source
 
     def config(self, *, manual_tag: str | None = None) -> SyncConfig:
         return SyncConfig(
@@ -2152,6 +2181,18 @@ class GitFixture:
             text=True,
             check=True,
         ).stdout.strip()
+
+    @staticmethod
+    def _has_commit(root: Path, commit: str) -> bool:
+        return (
+            subprocess.run(
+                ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+                cwd=root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode
+            == 0
+        )
 
     @classmethod
     def configure(cls, root: Path) -> None:
