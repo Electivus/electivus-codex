@@ -504,16 +504,26 @@ Omitted conflicts: 0. The complete conflict evidence is in `{manifest_path(manif
         self.assertIn("Omitted conflicts: 1", body)
         self.assertLessEqual(len(body.encode("utf-8")), MAX_PULL_REQUEST_BODY_BYTES)
 
-    def test_pull_request_body_fails_closed_when_no_complete_path_fits(self) -> None:
-        path = ("☃" * 1_364) + ".md"
+    def test_pull_request_body_omits_all_paths_when_escaping_exceeds_budget(
+        self,
+    ) -> None:
+        path = f"nested/{'é' * 546}"
         manifest = make_manifest(
             previous=SEED_COMMIT,
             preparation_mode="conflicting",
             conflict_paths=(path,),
         )
 
-        with self.assertRaisesRegex(ValueError, "complete conflict path"):
-            render_pull_request_body(manifest)
+        self.assertLessEqual(
+            len(serialize_manifest(manifest).encode("utf-8")), MAX_MANIFEST_BYTES
+        )
+        body = render_pull_request_body(manifest)
+
+        self.assertIn("Conflicts (1 total; showing 0)", body)
+        self.assertIn("Omitted conflicts: 1", body)
+        self.assertNotIn(json.dumps(path, ensure_ascii=True), body)
+        self.assertIn(f"`{manifest_path(manifest.release.commit)}`", body)
+        self.assertLessEqual(len(body.encode("utf-8")), MAX_PULL_REQUEST_BODY_BYTES)
 
     def test_pull_request_body_fails_closed_when_fixed_metadata_exceeds_budget(
         self,

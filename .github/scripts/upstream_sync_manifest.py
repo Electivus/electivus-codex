@@ -259,14 +259,21 @@ Next action: {next_action}
         for path in manifest.conflict_paths[:MAX_CONFLICTS_SHOWN]
     ]
     displayed_paths: list[str] = []
-    rendered_body: str | None = None
+    total_conflicts = len(manifest.conflict_paths)
+    rendered_body = (
+        body
+        + f"\nConflicts ({total_conflicts} total; showing 0):\n"
+        + f"\nOmitted conflicts: {total_conflicts}. The complete conflict evidence is in "
+        + f"`{manifest_location}`.\n"
+    )
+    if len(rendered_body.encode("utf-8")) > MAX_PULL_REQUEST_BODY_BYTES:
+        raise ValueError("pull-request conflict metadata exceeds its byte budget")
     for encoded_path in encoded_paths:
         tentative_paths = [*displayed_paths, encoded_path]
         shown_count = len(tentative_paths)
-        omitted = len(manifest.conflict_paths) - shown_count
+        omitted = total_conflicts - shown_count
         conflict_section = (
-            f"\nConflicts ({len(manifest.conflict_paths)} total; "
-            f"showing {shown_count}):\n"
+            f"\nConflicts ({total_conflicts} total; showing {shown_count}):\n"
         )
         shown_paths = "\n".join(tentative_paths)
         conflict_section += f"\n{shown_paths}\n"
@@ -278,12 +285,7 @@ Next action: {next_action}
         if len(candidate.encode("utf-8")) <= MAX_PULL_REQUEST_BODY_BYTES:
             displayed_paths.append(encoded_path)
             rendered_body = candidate
-    if rendered_body is not None:
-        return rendered_body
-    raise ValueError(
-        "pull-request body cannot include a complete conflict path within its "
-        "byte budget"
-    )
+    return rendered_body
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
