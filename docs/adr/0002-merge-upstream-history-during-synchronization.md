@@ -9,3 +9,14 @@ Issue #170 later hardened release selection. Automatic discovery selects only th
 Semantic Version, while manual dispatch may name one exact published stable or pre-release tag; the
 tag's SemVer is authoritative. Closing a Synchronization PR without merge abandons that attempt
 permanently.
+
+Preparation freezes both the selected Release baseline and the current Fork baseline in a canonical
+Synchronization manifest. A clean Baseline reconciliation is an exact fork-first merge with those
+two commits as parents. If that merge conflicts, preparation records the complete conflict set and
+starts a draft, release-first branch without prematurely importing Fork ancestry; Semantic
+reconciliation remains explicit review work.
+
+The manifest, not mutable pull-request text, is authoritative for new attempts. A retry validates
+the owned branch, manifest chain, normalization, topology, and frozen conflict evidence, then reuses
+the existing head without another push or moving either baseline. Legacy open attempts are frozen
+only when their title, branch, and body identify one release unambiguously.

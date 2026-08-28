@@ -6,9 +6,11 @@ from pathlib import Path
 from upstream_sync_manifest import (
     MAX_CONFLICTS_SHOWN,
     MAX_PULL_REQUEST_BODY_CHARACTERS,
+    MAX_RENDERED_CONFLICT_BYTES,
     RELEASE_URL_PREFIX,
     ReleaseIdentity,
     SynchronizationManifest,
+    bounded_conflict_paths,
     canonical_release_url,
     manifest_path,
     parse_manifest,
@@ -215,6 +217,22 @@ class UpstreamSyncManifestTest(unittest.TestCase):
             ),
         )
         self.assert_manifest_mutations_rejected(manifest, mutations)
+
+    def test_manifest_and_rendered_conflicts_have_aggregate_budgets(self) -> None:
+        oversized_manifest = make_manifest(
+            preparation_mode="conflicting",
+            conflict_paths=tuple(
+                f"{index:03}-{'x' * 100}.txt" for index in range(100)
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "manifest exceeds its byte budget"):
+            serialize_manifest(oversized_manifest)
+
+        expanded_path = "é" * 2048
+        displayed = bounded_conflict_paths((expanded_path, "z.txt"))
+        encoded = json.dumps(displayed, ensure_ascii=True).encode("ascii")
+        self.assertEqual(displayed, ("z.txt",))
+        self.assertLessEqual(len(encoded), MAX_RENDERED_CONFLICT_BYTES)
 
     def test_pr153_seed_is_canonical_and_checkout_independent(self) -> None:
         seed, seed_text, seed_path = load_seed()

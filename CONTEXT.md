@@ -99,6 +99,26 @@ Automation selects the greatest stable Semantic Version; manual dispatch may sel
 or pre-release Semantic Version.
 _Avoid_: Upstream main, publication timestamp, automatically selected pre-release
 
+**Fork baseline**:
+The immutable Electivus default-branch commit captured when one synchronization attempt is first
+prepared. Retries use that same commit even if the default branch advances.
+_Avoid_: Current default branch, rolling fork head
+
+**Synchronization manifest**:
+The canonical, repository-tracked authority for one attempt's Release baseline, Fork baseline,
+predecessor, selection, preparation mode, and complete conflict evidence.
+_Avoid_: Pull-request title, pull-request body, branch-name metadata
+
+**Baseline reconciliation**:
+The mechanically prepared relationship between one fixed Fork baseline and Release baseline: an
+exact fork-first merge when clean, or a release-first conflict branch when reconciliation is needed.
+_Avoid_: Semantic conflict resolution, moving-base retry
+
+**Semantic reconciliation**:
+The reviewable human work that resolves a conflicting Baseline reconciliation without changing its
+frozen Release or Fork baseline.
+_Avoid_: Automatic merge preparation, new synchronization attempt
+
 **Fork development version**:
 The `0.0.0` Rust workspace version that identifies Electivus source builds independently of the
 published version attached to a Release baseline.
@@ -110,9 +130,9 @@ gate before it enters the default branch.
 _Avoid_: Sync branch, upstream alert, direct sync
 
 **Synchronization baseline**:
-The Release baseline fixed when a Synchronization PR is created and retained unchanged until that
-PR is merged or closed. Closing without merge abandons that attempt; automation preserves it as
-history and does not reopen it.
+The Release baseline and Fork baseline pair fixed when preparation first creates its manifest and
+retained unchanged through retries and an open Synchronization PR. Closing without merge abandons
+that attempt; automation preserves it as history and does not reopen it.
 _Avoid_: Rolling release target, latest available release, automatic retry
 
 **Validation PR**:
