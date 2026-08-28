@@ -197,6 +197,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                 "rust-v99.0.0", "99.0.0", "not published"
             )
             fork_head = fixture.fork_head
+            default_head = fixture.remote_branch_head("main")
             pull_requests = RecordingPullRequests()
 
             result = synchronize(
@@ -283,6 +284,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             self.assertFalse(intent.draft)
             self.assertEqual(intent.body, render_pull_request_body(manifest))
             self.assertEqual(manifest.fork_base_sha, fork_head)
+            self.assertEqual(fixture.remote_branch_head("main"), default_head)
 
     def test_automatic_selection_ignores_invalid_semantic_version_tag(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -516,6 +518,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             selected = fixture.release(
                 "rust-v3.0.0", "3.0.0", "upstream version", path="shared.txt"
             )
+            default_head = fixture.remote_branch_head("main")
             pull_requests = RecordingPullRequests()
 
             result = synchronize(
@@ -559,6 +562,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                 pull_requests.created[0].body, render_pull_request_body(manifest)
             )
             self.assertEqual(manifest.conflict_paths, ("shared.txt",))
+            self.assertEqual(fixture.remote_branch_head("main"), default_head)
 
     def test_conflict_reporting_is_bounded_but_retains_total(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -970,8 +974,16 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
 
                 if tamper == "symlink":
                     path.unlink()
-                    path.symlink_to("../immutable-manifest.json")
-                    fixture.commit(fixture.fork, "replace manifest with symlink")
+                    blob = fixture.hash_object(
+                        fixture.fork, "blob", "../immutable-manifest.json"
+                    )
+                    fixture.git(
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        f"120000,{blob},{first_result.manifest_path}",
+                    )
+                    fixture.git("commit", "-m", "replace manifest with symlink")
                 else:
                     manifest = parse_manifest(original)
                     path.write_text(
@@ -1058,13 +1070,24 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                 f"- Immutable commit: `{'f' * 40}`",
                 "Electivus/electivus-codex",
             )
+            frozen_pull_requests = RecordingPullRequests([frozen])
             frozen_result = synchronize(
-                fixture.config(), FailingReleases(), RecordingPullRequests([frozen])
+                fixture.config(), FailingReleases(), frozen_pull_requests
             )
             self.assertEqual(
-                (frozen_result.tag, frozen_result.release_commit),
-                (selected.tag, selected.commit),
+                frozen_result,
+                SyncResult(
+                    outcome="open-pr-frozen",
+                    tag=selected.tag,
+                    release_commit=selected.commit,
+                    branch=branch,
+                    preparation_mode="clean",
+                    pr_number=frozen.number,
+                    pr_url=frozen.url,
+                    **prepared_metadata(fork_base, selected.commit),
+                ),
             )
+            self.assertEqual(frozen_pull_requests.created, [])
             newer = fixture.release("rust-v7.2.0", "7.2.0", "newer release")
             releases = FixtureReleases.published(selected, newer)
             retry_pull_requests = RecordingPullRequests()
@@ -1101,9 +1124,14 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             for tamper, error in (
                 ("normalization", "exact workspace version edit"),
                 ("merge-tree", "unexpected Baseline reconciliation"),
+                ("preparation-mode", "conflict evidence differs"),
             ):
                 with self.subTest(tamper=tamper):
-                    merge = fixture.git("rev-parse", f"{prepared_head}^^")
+                    merge = (
+                        selected.commit
+                        if tamper == "preparation-mode"
+                        else fixture.git("rev-parse", f"{prepared_head}^^")
+                    )
                     fixture.git("switch", "--detach", merge)
                     if tamper == "merge-tree":
                         (fixture.fork / "unexpected.txt").write_text("unexpected\n")
@@ -1130,7 +1158,26 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     fixture.commit(
                         fixture.fork, "Normalize Rust workspace version to 0.0.0"
                     )
+                    if tamper == "preparation-mode":
+                        fixture.git(
+                            "checkout",
+                            fork_base,
+                            "--",
+                            ".github/upstream-sync-manifests",
+                        )
                     fixture.git("checkout", prepared_head, "--", result.manifest_path)
+                    if tamper == "preparation-mode":
+                        path = fixture.fork / result.manifest_path
+                        manifest = parse_manifest(path.read_text())
+                        path.write_text(
+                            serialize_manifest(
+                                replace(
+                                    manifest,
+                                    preparation_mode="conflicting",
+                                    conflict_paths=("forged.txt",),
+                                )
+                            )
+                        )
                     fixture.commit(
                         fixture.fork,
                         f"Record Synchronization manifest for {selected.tag}",
@@ -1217,6 +1264,56 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             self.assertEqual(raised.exception.outcome, "legacy-rejected")
             self.assertEqual(pull_requests.created, [])
 
+    def test_manifest_backed_branch_rejects_mismatched_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            selected = fixture.release("rust-v7.1.2", "7.1.2", "release")
+            branch = f"automation/upstream-sync/{selected.commit}"
+
+            with self.assertRaisesRegex(SyncError, "PR API unavailable"):
+                synchronize(
+                    fixture.config(),
+                    FixtureReleases.published(selected),
+                    CreateFailurePullRequests(),
+                )
+            prepared_head = fixture.remote_branch_head(branch)
+            fixture.git("fetch", "origin", branch)
+            fixture.git("switch", "--detach", "FETCH_HEAD")
+            mismatched_commit = "f" * 40
+            mismatched_branch = f"automation/upstream-sync/{mismatched_commit}"
+            mismatched_manifest = (
+                f".github/upstream-sync-manifests/{mismatched_commit}.json"
+            )
+            fixture.git(
+                "mv",
+                f".github/upstream-sync-manifests/{selected.commit}.json",
+                mismatched_manifest,
+            )
+            fixture.commit(fixture.fork, "move manifest away from its owning branch")
+            mismatched_head = fixture.git("rev-parse", "HEAD")
+            fixture.git("push", "origin", f":refs/heads/{branch}")
+            fixture.git(
+                "push", "origin", f"HEAD:refs/heads/{mismatched_branch}"
+            )
+            fixture.git("switch", "main")
+            default_head = fixture.remote_branch_head("main")
+            pull_requests = RecordingPullRequests()
+
+            with self.assertRaisesRegex(
+                SyncError, "Synchronization manifest filename does not match"
+            ):
+                synchronize(
+                    fixture.config(), FailingReleases(), pull_requests
+                )
+
+            self.assertEqual(fixture.remote_branch_head("main"), default_head)
+            self.assertEqual(
+                fixture.remote_branch_head(mismatched_branch), mismatched_head
+            )
+            self.assertIsNotNone(prepared_head)
+            self.assertIsNone(fixture.remote_branch_head(branch))
+            self.assertEqual(pull_requests.created, [])
+
     def test_removed_active_manifest_is_not_misclassified_as_legacy(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))
@@ -1294,6 +1391,74 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             self.assertIn('"shared.txt"', retry_pull_requests.created[0].body)
             self.assertEqual(
                 fixture.remote_branch_head(result.branch), prepared_head
+            )
+
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "Windows cannot materialize a filename containing a newline",
+    )
+    def test_conflicting_retry_preserves_hostile_path_and_default_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            conflict = "line one\n`injected`\nconflit-ç.txt"
+            fixture.fork_change(conflict, "fork version\n")
+            selected = fixture.release(
+                "rust-v7.3.0", "7.3.0", "upstream version", path=conflict
+            )
+            releases = FixtureReleases.published(selected)
+            fork_base = fixture.fork_head
+            default_head = fixture.remote_branch_head("main")
+            branch = f"automation/upstream-sync/{selected.commit}"
+            failed_pull_requests = CreateFailurePullRequests()
+
+            with self.assertRaisesRegex(SyncError, "PR API unavailable"):
+                synchronize(fixture.config(), releases, failed_pull_requests)
+
+            prepared_head = fixture.remote_branch_head(branch)
+            manifest_path = (
+                f".github/upstream-sync-manifests/{selected.commit}.json"
+            )
+            manifest = parse_manifest(
+                fixture.git("show", f"origin/{branch}:{manifest_path}") + "\n"
+            )
+            intent = PullRequestIntent(
+                title=f"Synchronize openai/codex {selected.tag}",
+                head=branch,
+                base="main",
+                body=render_pull_request_body(manifest),
+                draft=True,
+            )
+            self.assertEqual(manifest.conflict_paths, (conflict,))
+            self.assertEqual(failed_pull_requests.created, [intent])
+            self.assertEqual(fixture.remote_branch_head("main"), default_head)
+
+            fixture.fork_change("later.txt", "later fork work\n")
+            retry_default_head = fixture.remote_branch_head("main")
+            retry_pull_requests = RecordingPullRequests()
+
+            result = synchronize(
+                fixture.config(), FailingReleases(), retry_pull_requests
+            )
+
+            self.assertEqual(
+                result,
+                SyncResult(
+                    outcome="draft-pr-created-conflicts",
+                    tag=selected.tag,
+                    release_commit=selected.commit,
+                    branch=branch,
+                    preparation_mode="conflicting",
+                    pr_number=1,
+                    pr_url="https://example.test/pull/1",
+                    conflict_count=1,
+                    conflicts=(conflict,),
+                    **prepared_metadata(fork_base, selected.commit),
+                ),
+            )
+            self.assertEqual(retry_pull_requests.created, [intent])
+            self.assertEqual(fixture.remote_branch_head(branch), prepared_head)
+            self.assertEqual(
+                fixture.remote_branch_head("main"), retry_default_head
             )
 
     def test_discovery_and_fetch_failures_stop_before_branch_or_pr_mutation(
@@ -1461,6 +1626,7 @@ class ApiFailureReleases:
 
 class CreateFailurePullRequests(RecordingPullRequests):
     def create(self, intent: PullRequestIntent):
+        self.created.append(intent)
         raise SyncError("PR API unavailable")
 
 
@@ -1522,7 +1688,9 @@ class GitFixture:
         self.commit(self.upstream, "shared base")
         fixture_seed = self.git_at(self.upstream, "rev-parse", "HEAD")
         release_seed = self.hash_object(
-            self.upstream, PR153_RELEASE_COMMIT_OBJECT.removesuffix("\n")
+            self.upstream,
+            "commit",
+            PR153_RELEASE_COMMIT_OBJECT.removesuffix("\n"),
         )
         if release_seed != PR153_RELEASE_COMMIT:
             raise AssertionError("PR #153 fixture commit object has an unexpected ID")
@@ -1631,9 +1799,9 @@ class GitFixture:
         ).strip()
 
     @staticmethod
-    def hash_object(root: Path, content: str) -> str:
+    def hash_object(root: Path, object_type: str, content: str) -> str:
         return subprocess.run(
-            ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+            ["git", "hash-object", "-t", object_type, "-w", "--stdin"],
             cwd=root,
             input=content,
             capture_output=True,
