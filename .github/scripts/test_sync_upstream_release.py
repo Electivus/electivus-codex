@@ -1,8 +1,10 @@
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 
 from sync_upstream_release import GitHubClient
@@ -12,7 +14,26 @@ from sync_upstream_release import Release
 from sync_upstream_release import SyncConfig
 from sync_upstream_release import SyncError
 from sync_upstream_release import SyncResult
+from sync_upstream_release import _bounded_diagnostic
+from sync_upstream_release import _require_model_visible_budget
+from sync_upstream_release import _write_outputs
+from sync_upstream_release import _write_summary
 from sync_upstream_release import synchronize
+from upstream_sync_manifest import MAX_MODEL_VISIBLE_ITEM_BYTES
+from upstream_sync_manifest import MAX_RENDERED_DIAGNOSTIC_BYTES
+from upstream_sync_manifest import parse_manifest
+from upstream_sync_manifest import render_pull_request_body
+from upstream_sync_manifest import serialize_manifest
+
+PR153_RELEASE_COMMIT = "b3a6d7f67cf056e18472c2b9ec26d3999ed40b7b"
+PR153_MANIFEST_INTRODUCTION_MESSAGE = (
+    "feat(sync): define strict synchronization manifest schema"
+)
+def prepared_metadata(fork_base_sha: str, release_commit: str) -> dict[str, str]:
+    return {
+        "fork_base_sha": fork_base_sha,
+        "manifest_path": f".github/upstream-sync-manifests/{release_commit}.json",
+    }
 
 
 @dataclass
@@ -87,6 +108,7 @@ class RecordingPullRequests:
     def __init__(self, pull_requests: list[PullRequest] | None = None) -> None:
         self.created: list[PullRequestIntent] = []
         self.pull_requests = pull_requests or []
+        self.branch_batches: list[tuple[str, ...]] = []
 
     def open_synchronization(self):
         return next(
@@ -108,9 +130,38 @@ class RecordingPullRequests:
             None,
         )
 
+    def for_branches(self, branches: tuple[str, ...]):
+        self.branch_batches.append(branches)
+        return {
+            branch: pull_request
+            for branch in branches
+            if (pull_request := self.for_branch(branch)) is not None
+        }
+
+    def for_branches_for_orphan_scan(self, branches: tuple[str, ...]):
+        return self.for_branches(branches)
+
     def create(self, intent: PullRequestIntent):
         self.created.append(intent)
         return 1, "https://example.test/pull/1"
+
+
+class DuplicateHistoricalPullRequests(RecordingPullRequests):
+    def for_branches_for_orphan_scan(self, branches: tuple[str, ...]):
+        self.branch_batches.append(branches)
+        return {
+            branch: pull_request
+            for branch in branches
+            if (pull_request := next(
+                (
+                    pull_request
+                    for pull_request in self.pull_requests
+                    if pull_request.head == branch
+                ),
+                None,
+            ))
+            is not None
+        }
 
 
 class SyncUpstreamReleaseTest(unittest.TestCase):
@@ -161,6 +212,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                 "rust-v99.0.0", "99.0.0", "not published"
             )
             fork_head = fixture.fork_head
+            default_head = fixture.remote_branch_head("main")
             pull_requests = RecordingPullRequests()
 
             result = synchronize(
@@ -220,10 +272,11 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     preparation_mode="clean",
                     pr_number=1,
                     pr_url="https://example.test/pull/1",
+                    **prepared_metadata(fork_head, selected.commit),
                 ),
             )
             branch_head = fixture.git("rev-parse", f"origin/{branch}")
-            merge_commit = fixture.git("rev-parse", f"{branch_head}^")
+            merge_commit = fixture.git("rev-parse", f"{branch_head}^^")
             self.assertEqual(
                 fixture.git("show", "-s", "--format=%P", merge_commit).split(),
                 [fork_head, selected.commit],
@@ -238,15 +291,15 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             )
             self.assertEqual(len(pull_requests.created), 1)
             intent = pull_requests.created[0]
+            manifest = parse_manifest(
+                fixture.git("show", f"origin/{branch}:{result.manifest_path}") + "\n"
+            )
             self.assertEqual(intent.head, branch)
             self.assertEqual(intent.base, "main")
             self.assertFalse(intent.draft)
-            self.assertIn(selected.tag, intent.title)
-            self.assertIn(selected.commit, intent.body)
-            self.assertIn(selected.url, intent.body)
-            self.assertIn("automatic", intent.body)
-            self.assertIn("0.0.0", intent.body)
-            self.assertIn("maintainer approval", intent.body)
+            self.assertEqual(intent.body, render_pull_request_body(manifest))
+            self.assertEqual(manifest.fork_base_sha, fork_head)
+            self.assertEqual(fixture.remote_branch_head("main"), default_head)
 
     def test_automatic_selection_ignores_invalid_semantic_version_tag(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -286,6 +339,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     preparation_mode="clean",
                     pr_number=1,
                     pr_url="https://example.test/pull/1",
+                    **prepared_metadata(fixture.fork_head, selected.commit),
                 ),
             )
 
@@ -320,6 +374,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                         preparation_mode="clean",
                         pr_number=1,
                         pr_url="https://example.test/pull/1",
+                        **prepared_metadata(fixture.fork_head, selected.commit),
                     ),
                 )
 
@@ -400,9 +455,10 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     preparation_mode="clean",
                     pr_number=1,
                     pr_url="https://example.test/pull/1",
+                    **prepared_metadata(fixture.fork_head, valid.commit),
                 ),
             )
-            self.assertIn("Selection: manual", pull_requests.created[0].body)
+            self.assertIn("Selection (`selectionMode`): `manual`", pull_requests.created[0].body)
 
     def test_manual_override_does_not_require_release_listing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -426,9 +482,10 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     preparation_mode="clean",
                     pr_number=1,
                     pr_url="https://example.test/pull/1",
+                    **prepared_metadata(fixture.fork_head, selected.commit),
                 ),
             )
-            self.assertIn("Selection: manual", pull_requests.created[0].body)
+            self.assertIn("Selection (`selectionMode`): `manual`", pull_requests.created[0].body)
 
     def test_manual_override_rejects_invalid_tag_before_release_lookup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -476,6 +533,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             selected = fixture.release(
                 "rust-v3.0.0", "3.0.0", "upstream version", path="shared.txt"
             )
+            default_head = fixture.remote_branch_head("main")
             pull_requests = RecordingPullRequests()
 
             result = synchronize(
@@ -497,6 +555,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     pr_url="https://example.test/pull/1",
                     conflict_count=1,
                     conflicts=("shared.txt",),
+                    **prepared_metadata(fixture.fork_head, selected.commit),
                 ),
             )
             branch_head = fixture.git("rev-parse", f"origin/{branch}")
@@ -504,9 +563,21 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                 fixture.git("merge-base", selected.commit, branch_head),
                 selected.commit,
             )
+            ancestry = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", fixture.fork_head, branch_head],
+                cwd=fixture.fork,
+                check=False,
+            )
+            self.assertEqual(ancestry.returncode, 1)
+            manifest = parse_manifest(
+                fixture.git("show", f"origin/{branch}:{result.manifest_path}") + "\n"
+            )
             self.assertTrue(pull_requests.created[0].draft)
-            self.assertIn("1 total", pull_requests.created[0].body)
-            self.assertIn("`shared.txt`", pull_requests.created[0].body)
+            self.assertEqual(
+                pull_requests.created[0].body, render_pull_request_body(manifest)
+            )
+            self.assertEqual(manifest.conflict_paths, ("shared.txt",))
+            self.assertEqual(fixture.remote_branch_head("main"), default_head)
 
     def test_conflict_reporting_is_bounded_but_retains_total(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -532,42 +603,196 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     pr_url="https://example.test/pull/1",
                     conflict_count=25,
                     conflicts=tuple(f"conflict-{index:02}.txt" for index in range(20)),
+                    **prepared_metadata(fixture.fork_head, selected.commit),
                 ),
             )
-            self.assertIn("25 total; showing up to 20", pull_requests.created[0].body)
-            self.assertNotIn("`conflict-24.txt`", pull_requests.created[0].body)
+            self.assertIn("25 total; showing 20", pull_requests.created[0].body)
+            self.assertNotIn('"conflict-24.txt"', pull_requests.created[0].body)
+
+    def test_oversized_complete_conflict_evidence_fails_before_push_or_pr(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            conflict_directory = "large-conflicts"
+            for index in range(100):
+                path = f"{conflict_directory}/{index:03}-{'x' * 100}.txt"
+                fork_path = fixture.fork / path
+                fork_path.parent.mkdir(exist_ok=True)
+                fork_path.write_text("fork\n")
+            fixture.commit(fixture.fork, "add large fork conflict set")
+            fixture.git("push", "origin", "main")
+            fixture.fork_head = fixture.git("rev-parse", "HEAD")
+            for index in range(100):
+                path = f"{conflict_directory}/{index:03}-{'x' * 100}.txt"
+                upstream_path = fixture.upstream / path
+                upstream_path.parent.mkdir(exist_ok=True)
+                upstream_path.write_text("upstream\n")
+            selected = fixture.release("rust-v6.1.0", "6.1.0", "release")
+            branch = f"automation/upstream-sync/{selected.commit}"
+            pull_requests = RecordingPullRequests()
+
+            with self.assertRaisesRegex(SyncError, "manifest exceeds its byte budget"):
+                synchronize(
+                    fixture.config(),
+                    FixtureReleases.published(selected),
+                    pull_requests,
+                )
+
+            self.assertIsNone(fixture.remote_branch_head(branch))
+            self.assertEqual(pull_requests.created, [])
+
+    def test_summary_json_encodes_conflict_paths_on_one_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary_path = Path(temp_dir) / "summary.md"
+            conflict = "line one\n`injected`\nconflit-ç.txt"
+            _write_summary(
+                str(summary_path),
+                SyncResult(
+                    outcome="draft-pr-created-conflicts",
+                    tag="rust-v1.0.0",
+                    release_commit="a" * 40,
+                    conflict_count=1,
+                    conflicts=(conflict,),
+                ),
+            )
+
+            summary = summary_path.read_text()
+            self.assertIn(
+                '  - "line one\\n`injected`\\nconflit-\\u00e7.txt"', summary
+            )
+            self.assertNotIn("\n`injected`\n", summary)
+
+    def test_rendered_workflow_surfaces_share_a_model_visible_byte_budget(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_path = root / "output"
+            summary_path = root / "summary.md"
+            result = SyncResult(
+                outcome="draft-pr-created-conflicts",
+                tag="rust-v1.0.0",
+                release_commit="a" * 40,
+                branch=f"automation/upstream-sync/{'a' * 40}",
+                preparation_mode="conflicting",
+                pr_number=1,
+                pr_url="https://example.test/pull/1",
+                conflict_count=100,
+                conflicts=tuple(f"{index:03}-{'x' * 100}.txt" for index in range(100)),
+                fork_base_sha="b" * 40,
+                manifest_path=f".github/upstream-sync-manifests/{'a' * 40}.json",
+            )
+
+            _write_outputs(str(output_path), result)
+            _write_summary(str(summary_path), result)
+
+            for path in (output_path, summary_path):
+                self.assertLessEqual(
+                    len(path.read_bytes()), MAX_MODEL_VISIBLE_ITEM_BYTES
+                )
+
+        at_budget = "é" * (MAX_MODEL_VISIBLE_ITEM_BYTES // 2)
+        self.assertEqual(
+            _require_model_visible_budget(at_budget, "test surface"), at_budget
+        )
+        with self.assertRaisesRegex(SyncError, "model-visible byte budget"):
+            _require_model_visible_budget(f"{at_budget}x", "test surface")
+
+        oversized_error = ("é" * MAX_RENDERED_DIAGNOSTIC_BYTES) + "\ntrailing"
+        diagnostic = _bounded_diagnostic(oversized_error)
+        self.assertLessEqual(
+            len(diagnostic.encode("utf-8")), MAX_RENDERED_DIAGNOSTIC_BYTES
+        )
+        self.assertTrue(diagnostic.endswith(" ... [diagnostic truncated]"))
+        self.assertNotIn("\n", diagnostic)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_path = root / "failure-output"
+            summary_path = root / "failure-summary.md"
+            _write_outputs(str(output_path), None, oversized_error)
+            _write_summary(str(summary_path), None, oversized_error)
+
+            output = output_path.read_text()
+            summary = summary_path.read_text()
+            self.assertIn("outcome=failure", output)
+            self.assertIn("error=", output)
+            self.assertIn("- Outcome: failure", summary)
+            self.assertIn("- Error: ", summary)
+            for content in (output, summary):
+                self.assertIn(" ... [diagnostic truncated]", content)
+                self.assertLessEqual(
+                    len(content.encode("utf-8")), MAX_MODEL_VISIBLE_ITEM_BYTES
+                )
 
     def test_open_pr_freezes_its_baseline_without_release_discovery(self) -> None:
-        baseline = "a" * 40
-        pull_request = PullRequest(
-            number=17,
-            url="https://example.test/pull/17",
-            state="open",
-            merged=False,
-            head=f"automation/upstream-sync/{baseline}",
-            head_sha="b" * 40,
-            title="Synchronize openai/codex rust-v1.0.0",
-            body=f"- Immutable commit: `{baseline}`",
-            head_repository="Electivus/electivus-codex",
-        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            release = fixture.release("rust-v1.0.0", "1.0.0", "legacy")
+            branch = f"automation/upstream-sync/{release.commit}"
+            fixture.git("fetch", str(fixture.upstream), release.commit)
+            fixture.git("switch", "--detach", fixture.fork_head)
+            fixture.git(
+                "merge",
+                "--no-ff",
+                "-m",
+                f"Merge openai/codex release {release.commit}",
+                release.commit,
+            )
+            legacy_head = fixture.git("rev-parse", "HEAD")
+            fixture.git("push", "origin", f"HEAD:refs/heads/{branch}")
+            fixture.git("switch", "main")
+            pull_request = PullRequest(
+                17,
+                "https://example.test/pull/17",
+                "open",
+                False,
+                branch,
+                legacy_head,
+                f"Synchronize openai/codex {release.tag}",
+                f"- Immutable commit: `{release.commit}`",
+                "Electivus/electivus-codex",
+            )
 
-        result = synchronize(
-            SyncConfig(Path("/unused"), "/unused", "main"),
-            FailingReleases(),
-            RecordingPullRequests([pull_request]),
-        )
+            default_head = fixture.remote_branch_head("main")
+            legacy_head_before = fixture.remote_branch_head(branch)
+            pull_requests = RecordingPullRequests([pull_request])
+            result = synchronize(
+                fixture.config(), FailingReleases(), pull_requests
+            )
 
-        self.assertEqual(
-            result,
-            SyncResult(
-                outcome="open-pr-frozen",
-                tag="rust-v1.0.0",
-                release_commit=baseline,
-                branch=pull_request.head,
-                pr_number=17,
-                pr_url=pull_request.url,
-            ),
-        )
+            self.assertEqual(
+                result,
+                SyncResult(
+                    outcome="open-pr-frozen",
+                    tag=release.tag,
+                    release_commit=release.commit,
+                    branch=branch,
+                    pr_number=17,
+                    pr_url=pull_request.url,
+                ),
+            )
+            self.assertEqual(pull_requests.created, [])
+            self.assertEqual(fixture.remote_branch_head(branch), legacy_head_before)
+            self.assertEqual(fixture.remote_branch_head("main"), default_head)
+
+            ambiguous_attempts = (
+                replace(pull_request, body="missing immutable identity"),
+                replace(pull_request, body=f"{pull_request.body}\n{pull_request.body}"),
+                replace(
+                    pull_request,
+                    body=f"{pull_request.body}\nImmutable commit: `{'A' * 40}`",
+                ),
+                replace(pull_request, title="Synchronize openai/codex rust-v01.0.0"),
+            )
+            for ambiguous in ambiguous_attempts:
+                with self.subTest(ambiguous=ambiguous):
+                    with self.assertRaises(SyncError) as raised:
+                        synchronize(
+                            fixture.config(),
+                            FailingReleases(),
+                            RecordingPullRequests([ambiguous]),
+                        )
+                    self.assertEqual(raised.exception.outcome, "legacy-rejected")
 
     def test_closed_pr_does_not_block_a_newer_release(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -604,6 +829,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     preparation_mode="clean",
                     pr_number=1,
                     pr_url="https://example.test/pull/1",
+                    **prepared_metadata(fixture.fork_head, selected.commit),
                 ),
             )
             self.assertEqual(
@@ -641,7 +867,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             self.assertEqual(pull_requests.created, [])
             self.assertIsNone(fixture.remote_branch_head(branch))
 
-    def test_merged_baseline_allows_a_later_release_on_a_distinct_branch(self) -> None:
+    def test_later_release_freezes_manifest_chain_and_rejects_predecessor_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))
             first = fixture.release("rust-v1.0.0", "1.0.0", "first")
@@ -666,6 +892,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                 )
             )
             later = fixture.release("rust-v2.0.0", "2.0.0", "later")
+            later_fork_base = fixture.remote_branch_head("main") or ""
 
             later_result = synchronize(
                 fixture.config(),
@@ -690,9 +917,150 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     pr_url="https://example.test/pull/1",
                     conflict_count=1,
                     conflicts=("codex-rs/Cargo.toml",),
+                    **prepared_metadata(later_fork_base, later.commit),
                 ),
             )
             self.assertNotEqual(later_result.branch, first_result.branch)
+            manifest_text = fixture.git(
+                "show", f"origin/{later_result.branch}:{later_result.manifest_path}"
+            )
+            later_manifest = parse_manifest(f"{manifest_text}\n")
+            self.assertEqual(later_manifest.previous_release_commit, first.commit)
+
+            fixture.git("fetch", "origin", later_result.branch)
+            fixture.git("switch", "--detach", "FETCH_HEAD")
+            fixture.git(
+                "merge", "--no-ff", "-s", "ours", "-m",
+                "semantic reconciliation", later_fork_base,
+            )
+            reconciled_head = fixture.git("rev-parse", "HEAD")
+            fixture.git("push", "origin", f"HEAD:refs/heads/{later_result.branch}")
+            frozen = PullRequest(
+                2, "https://example.test/pull/2", "open", False,
+                later_result.branch, reconciled_head,
+                "ignored title", "ignored body", "Electivus/electivus-codex",
+            )
+            reconciled_default_head = fixture.remote_branch_head("main")
+            frozen_pull_requests = RecordingPullRequests([frozen])
+            frozen_result = synchronize(
+                fixture.config(), FailingReleases(), frozen_pull_requests
+            )
+            self.assertEqual(
+                frozen_result,
+                SyncResult(
+                    outcome="open-pr-frozen",
+                    tag=later.tag,
+                    release_commit=later.commit,
+                    branch=later_result.branch,
+                    preparation_mode="conflicting",
+                    pr_number=frozen.number,
+                    pr_url=frozen.url,
+                    conflict_count=1,
+                    conflicts=("codex-rs/Cargo.toml",),
+                    **prepared_metadata(later_fork_base, later.commit),
+                ),
+            )
+            self.assertEqual(frozen_pull_requests.created, [])
+            self.assertEqual(
+                fixture.remote_branch_head(later_result.branch), reconciled_head
+            )
+            self.assertEqual(fixture.remote_branch_head("main"), reconciled_default_head)
+            predecessor_path = fixture.fork / first_result.manifest_path
+            predecessor = parse_manifest(predecessor_path.read_text())
+            predecessor_path.write_text(
+                serialize_manifest(replace(predecessor, selection_mode="manual"))
+            )
+            fixture.commit(fixture.fork, "alter predecessor manifest")
+            fixture.git("push", "origin", f"HEAD:refs/heads/{later_result.branch}")
+            drift_head = fixture.git("rev-parse", "HEAD")
+            fixture.git("switch", "main")
+            frozen_pull_requests = RecordingPullRequests([replace(frozen, head_sha=drift_head)])
+            with self.assertRaisesRegex(SyncError, "history changed"):
+                synchronize(
+                    fixture.config(), FailingReleases(), frozen_pull_requests
+                )
+            self.assertEqual(
+                fixture.remote_branch_head(later_result.branch), drift_head
+            )
+            self.assertEqual(frozen_pull_requests.created, [])
+
+            fixture.git("switch", "--detach", drift_head)
+            fixture.git("checkout", "HEAD^", "--", first_result.manifest_path)
+            fixture.commit(fixture.fork, "revert predecessor manifest")
+            reverted_head = fixture.git("rev-parse", "HEAD")
+            fixture.git("push", "origin", f"HEAD:refs/heads/{later_result.branch}")
+            fixture.git("switch", "main")
+            reverted = replace(frozen, head_sha=reverted_head)
+            with self.assertRaisesRegex(SyncError, "history changed"):
+                synchronize(
+                    fixture.config(), FailingReleases(), RecordingPullRequests([reverted])
+                )
+
+    def test_integrated_manifest_history_and_mode_are_immutable(self) -> None:
+        for tamper, error in (
+            ("rewrite", "history changed after introduction"),
+            ("rewrite-and-revert", "history changed after introduction"),
+            ("symlink", "regular blobs"),
+        ):
+            with self.subTest(tamper=tamper), tempfile.TemporaryDirectory() as temp_dir:
+                fixture = GitFixture(Path(temp_dir))
+                first = fixture.release("rust-v1.0.0", "1.0.0", "first")
+                first_result = synchronize(
+                    fixture.config(),
+                    FixtureReleases.published(first),
+                    RecordingPullRequests(),
+                )
+                fixture.integrate_branch(first_result.branch)
+                path = fixture.fork / first_result.manifest_path
+                original = path.read_text()
+
+                if tamper == "symlink":
+                    path.unlink()
+                    blob = fixture.hash_object(
+                        fixture.fork, "blob", "../immutable-manifest.json"
+                    )
+                    fixture.git(
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        f"120000,{blob},{first_result.manifest_path}",
+                    )
+                    fixture.git("commit", "-m", "replace manifest with symlink")
+                else:
+                    manifest = parse_manifest(original)
+                    path.write_text(
+                        serialize_manifest(replace(manifest, selection_mode="manual"))
+                    )
+                    fixture.commit(fixture.fork, "rewrite integrated manifest")
+                    if tamper == "rewrite-and-revert":
+                        path.write_text(original)
+                        fixture.commit(fixture.fork, "revert integrated manifest")
+                fixture.git("push", "origin", "main")
+                later = fixture.release("rust-v2.0.0", "2.0.0", "later")
+                first_pull_request = replace(
+                    closed_pull_request(
+                        1,
+                        first_result.branch,
+                        fixture.remote_branch_head(first_result.branch),
+                        first,
+                    ),
+                    merged=True,
+                )
+                pull_requests = RecordingPullRequests([first_pull_request])
+
+                with self.assertRaisesRegex(SyncError, error):
+                    synchronize(
+                        fixture.config(),
+                        FixtureReleases.published(first, later),
+                        pull_requests,
+                    )
+
+                self.assertIsNone(
+                    fixture.remote_branch_head(
+                        f"automation/upstream-sync/{later.commit}"
+                    )
+                )
+                self.assertEqual(pull_requests.created, [])
 
     def test_push_failure_does_not_mutate_default_branch_or_request_a_pr(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -718,12 +1086,53 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             self.assertEqual(fixture.remote_branch_head("main"), default_head)
             self.assertEqual(pull_requests.created, [])
 
+    def test_seed_manifest_accepts_its_established_reintroduction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(
+                Path(temp_dir), seed_commit_message="fixture seed manifest"
+            )
+            seed_path = fixture.fork / fixture.seed_manifest_path
+            seed_path.unlink()
+            fixture.commit(fixture.fork, "remove seed manifest")
+            seed_path.write_text(fixture.seed_text)
+            fixture.commit(
+                fixture.fork,
+                PR153_MANIFEST_INTRODUCTION_MESSAGE,
+            )
+            fixture.git("push", "origin", "main")
+            fixture.fork_head = fixture.git("rev-parse", "HEAD")
+            selected = fixture.release("rust-v7.0.1", "7.0.1", "release")
+            pull_requests = RecordingPullRequests()
+
+            result = synchronize(
+                fixture.config(),
+                FixtureReleases.published(selected),
+                pull_requests,
+            )
+
+            self.assertEqual(
+                result,
+                SyncResult(
+                    outcome="pr-created-clean",
+                    tag=selected.tag,
+                    release_commit=selected.commit,
+                    branch=f"automation/upstream-sync/{selected.commit}",
+                    preparation_mode="clean",
+                    pr_number=1,
+                    pr_url="https://example.test/pull/1",
+                    **prepared_metadata(fixture.fork_head, selected.commit),
+                ),
+            )
+            self.assertEqual(fixture.remote_branch_head("main"), fixture.fork_head)
+            self.assertEqual(len(pull_requests.created), 1)
+
     def test_pr_creation_failure_reuses_valid_prepared_branch_on_retry(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))
             selected = fixture.release("rust-v7.1.0", "7.1.0", "release")
             releases = FixtureReleases.published(selected)
             branch = f"automation/upstream-sync/{selected.commit}"
+            fork_base = fixture.fork_head
 
             with self.assertRaisesRegex(SyncError, "PR API unavailable"):
                 synchronize(
@@ -732,6 +1141,37 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     CreateFailurePullRequests(),
                 )
             prepared_head = fixture.remote_branch_head(branch)
+            frozen = PullRequest(
+                9,
+                "https://example.test/pull/9",
+                "open",
+                False,
+                branch,
+                prepared_head or "",
+                "malicious rust-v9.9.9",
+                f"- Immutable commit: `{'f' * 40}`",
+                "Electivus/electivus-codex",
+            )
+            frozen_pull_requests = RecordingPullRequests([frozen])
+            frozen_result = synchronize(
+                fixture.config(), FailingReleases(), frozen_pull_requests
+            )
+            self.assertEqual(
+                frozen_result,
+                SyncResult(
+                    outcome="open-pr-frozen",
+                    tag=selected.tag,
+                    release_commit=selected.commit,
+                    branch=branch,
+                    preparation_mode="clean",
+                    pr_number=frozen.number,
+                    pr_url=frozen.url,
+                    **prepared_metadata(fork_base, selected.commit),
+                ),
+            )
+            self.assertEqual(frozen_pull_requests.created, [])
+            newer = fixture.release("rust-v7.2.0", "7.2.0", "newer release")
+            releases = FixtureReleases.published(selected, newer)
             retry_pull_requests = RecordingPullRequests()
 
             result = synchronize(
@@ -750,19 +1190,534 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     preparation_mode="clean",
                     pr_number=1,
                     pr_url="https://example.test/pull/1",
+                    **prepared_metadata(fork_base, selected.commit),
                 ),
             )
             self.assertEqual(fixture.remote_branch_head(branch), prepared_head)
+            self.assertIsNone(
+                fixture.remote_branch_head(
+                    f"automation/upstream-sync/{newer.commit}"
+                )
+            )
             self.assertEqual(len(retry_pull_requests.created), 1)
+            self.assertEqual(retry_pull_requests.branch_batches, [(branch,)])
+
+            prepared_head = prepared_head or ""
+            for tamper, error in (
+                ("normalization", "exact workspace version edit"),
+                ("merge-tree", "unexpected Baseline reconciliation"),
+                ("preparation-mode", "conflict evidence differs"),
+            ):
+                with self.subTest(tamper=tamper):
+                    merge = (
+                        selected.commit
+                        if tamper == "preparation-mode"
+                        else fixture.git("rev-parse", f"{prepared_head}^^")
+                    )
+                    fixture.git("switch", "--detach", merge)
+                    if tamper == "merge-tree":
+                        (fixture.fork / "unexpected.txt").write_text("unexpected\n")
+                        fixture.git("add", "unexpected.txt")
+                        tree = fixture.git("write-tree")
+                        parents = fixture.git("show", "-s", "--format=%P", merge).split()
+                        merge = fixture.git(
+                            "commit-tree",
+                            tree,
+                            "-p",
+                            parents[0],
+                            "-p",
+                            parents[1],
+                            "-m",
+                            "altered Baseline reconciliation",
+                        )
+                        fixture.git("reset", "--hard", merge)
+                    fixture.write_workspace(fixture.fork, "0.0.0")
+                    if tamper == "normalization":
+                        cargo_manifest = fixture.fork / "codex-rs/Cargo.toml"
+                        cargo_manifest.write_text(
+                            f"{cargo_manifest.read_text()}edition = \"2099\"\n"
+                        )
+                    fixture.commit(
+                        fixture.fork, "Normalize Rust workspace version to 0.0.0"
+                    )
+                    if tamper == "preparation-mode":
+                        fixture.git(
+                            "checkout",
+                            fork_base,
+                            "--",
+                            ".github/upstream-sync-manifests",
+                        )
+                    fixture.git("checkout", prepared_head, "--", result.manifest_path)
+                    if tamper == "preparation-mode":
+                        path = fixture.fork / result.manifest_path
+                        manifest = parse_manifest(path.read_text())
+                        path.write_text(
+                            serialize_manifest(
+                                replace(
+                                    manifest,
+                                    preparation_mode="conflicting",
+                                    conflict_paths=("forged.txt",),
+                                )
+                            )
+                        )
+                    fixture.commit(
+                        fixture.fork,
+                        f"Record Synchronization manifest for {selected.tag}",
+                    )
+                    fixture.git("push", "--force", "origin", f"HEAD:refs/heads/{branch}")
+                    fixture.git("switch", "main")
+                    with self.assertRaisesRegex(SyncError, error):
+                        synchronize(fixture.config(), releases, RecordingPullRequests())
+
+    def test_pr_creation_retry_ignores_a_moved_release_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            selected = fixture.release("rust-v7.1.1", "7.1.1", "original release")
+            branch = f"automation/upstream-sync/{selected.commit}"
+
+            with self.assertRaisesRegex(SyncError, "PR API unavailable"):
+                synchronize(
+                    fixture.config(manual_tag=selected.tag),
+                    FixtureReleases.published(selected),
+                    CreateFailurePullRequests(),
+                )
+            prepared_head = fixture.remote_branch_head(branch)
+            before_invalid = fixture.ref_snapshot()
+            with self.assertRaisesRegex(SyncError, "exact rust-v<SemVer>"):
+                synchronize(
+                    fixture.config(manual_tag="rust-v-invalid"),
+                    NoReleaseLookup(),
+                    RecordingPullRequests(),
+                )
+            self.assertEqual(fixture.ref_snapshot(), before_invalid)
+            with self.assertRaises(SyncError) as mismatch:
+                synchronize(
+                    fixture.config(manual_tag="rust-v7.1.2"),
+                    FailingReleases(),
+                    RecordingPullRequests(),
+                )
+            self.assertEqual(mismatch.exception.outcome, "pending-attempt")
+            self.assertIn("does not match requested release", str(mismatch.exception))
+            fixture.write_workspace(fixture.upstream, "7.1.2")
+            (fixture.upstream / "retargeted.txt").write_text("retargeted\n")
+            fixture.commit(fixture.upstream, "retarget release tag")
+            moved_commit = fixture.git_at(fixture.upstream, "rev-parse", "HEAD")
+            fixture.git_at(
+                fixture.upstream,
+                "tag",
+                "--force",
+                selected.tag,
+                moved_commit,
+            )
+            pull_requests = RecordingPullRequests()
+
+            result = synchronize(
+                fixture.config(manual_tag=selected.tag),
+                FailingReleases(),
+                pull_requests,
+            )
+
+            self.assertEqual(
+                (result.tag, result.release_commit, result.branch),
+                (selected.tag, selected.commit, branch),
+            )
+            manifest = parse_manifest(
+                fixture.git("show", f"origin/{branch}:{result.manifest_path}") + "\n"
+            )
+            self.assertEqual(
+                result,
+                SyncResult(
+                    outcome="pr-created-clean",
+                    tag=selected.tag,
+                    release_commit=selected.commit,
+                    branch=branch,
+                    preparation_mode="clean",
+                    pr_number=1,
+                    pr_url="https://example.test/pull/1",
+                    **prepared_metadata(fixture.fork_head, selected.commit),
+                ),
+            )
+            self.assertEqual(
+                pull_requests.created,
+                [
+                    PullRequestIntent(
+                        title=f"Synchronize openai/codex {selected.tag}",
+                        head=branch,
+                        base="main",
+                        body=render_pull_request_body(manifest),
+                        draft=False,
+                    )
+                ],
+            )
+            self.assertEqual(fixture.remote_branch_head(branch), prepared_head)
+            self.assertIsNone(
+                fixture.remote_branch_head(
+                    f"automation/upstream-sync/{moved_commit}"
+                )
+            )
+
+    def test_synchronize_ignores_duplicate_historical_prs_on_unrelated_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            historical = fixture.release(
+                "rust-v8.0.0", "8.0.0", "historical synchronization"
+            )
+            historical_branch = f"automation/upstream-sync/{historical.commit}"
+            fixture.git(
+                "push", "origin", f"{fixture.fork_head}:refs/heads/{historical_branch}"
+            )
+            historical_head = fixture.remote_branch_head(historical_branch)
+            selected = fixture.release("rust-v8.1.0", "8.1.0", "selected release")
+            default_head = fixture.remote_branch_head("main")
+            pull_requests = DuplicateHistoricalPullRequests(
+                [
+                    closed_pull_request(
+                        43, historical_branch, historical_head, historical
+                    ),
+                    closed_pull_request(
+                        44, historical_branch, historical_head, historical
+                    ),
+                ]
+            )
+
+            result = synchronize(
+                fixture.config(),
+                FixtureReleases.published(historical, selected),
+                pull_requests,
+            )
+
+            branch = f"automation/upstream-sync/{selected.commit}"
+            self.assertEqual(
+                result,
+                SyncResult(
+                    outcome="pr-created-clean",
+                    tag=selected.tag,
+                    release_commit=selected.commit,
+                    branch=branch,
+                    preparation_mode="clean",
+                    pr_number=1,
+                    pr_url="https://example.test/pull/1",
+                    **prepared_metadata(fixture.fork_head, selected.commit),
+                ),
+            )
+            manifest = parse_manifest(
+                fixture.git("show", f"origin/{branch}:{result.manifest_path}") + "\n"
+            )
+            self.assertEqual(
+                pull_requests.created,
+                [
+                    PullRequestIntent(
+                        title=f"Synchronize openai/codex {selected.tag}",
+                        head=branch,
+                        base="main",
+                        body=render_pull_request_body(manifest),
+                        draft=False,
+                    )
+                ],
+            )
+            self.assertEqual(
+                fixture.remote_branch_head(historical_branch), historical_head
+            )
+            self.assertEqual(fixture.remote_branch_head("main"), default_head)
+            self.assertEqual(pull_requests.branch_batches, [(historical_branch,)])
+
+    def test_orphaned_legacy_branch_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            selected = fixture.release("rust-v7.1.1", "7.1.1", "legacy")
+            branch = f"automation/upstream-sync/{selected.commit}"
+            fixture.git("fetch", str(fixture.upstream), selected.commit)
+            fixture.git("push", "origin", f"FETCH_HEAD:refs/heads/{branch}")
+            pull_requests = RecordingPullRequests()
+            before = fixture.git("ls-remote", "--heads", "origin")
+            with self.assertRaises(SyncError) as raised:
+                synchronize(
+                    fixture.config(),
+                    FixtureReleases.published(selected),
+                    pull_requests,
+                )
+            self.assertEqual(raised.exception.outcome, "legacy-rejected")
+            self.assertEqual(fixture.git("ls-remote", "--heads", "origin"), before)
+            self.assertEqual(pull_requests.created, [])
+
+    def test_multiple_orphaned_attempts_fail_closed_before_release_discovery(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            first = fixture.release("rust-v7.1.1", "7.1.1", "first")
+            first_branch = f"automation/upstream-sync/{first.commit}"
+            with self.assertRaisesRegex(SyncError, "PR API unavailable"):
+                synchronize(
+                    fixture.config(),
+                    FixtureReleases.published(first),
+                    CreateFailurePullRequests(),
+                )
+            first_head = fixture.remote_branch_head(first_branch)
+            self.assertIsNotNone(first_head)
+
+            second = fixture.release("rust-v7.2.1", "7.2.1", "second")
+            second_branch = f"automation/upstream-sync/{second.commit}"
+            known_first_attempt = closed_pull_request(
+                17, first_branch, first_head, first
+            )
+            with self.assertRaisesRegex(SyncError, "PR API unavailable"):
+                synchronize(
+                    fixture.config(),
+                    FixtureReleases.published(first, second),
+                    CreateFailurePullRequests([known_first_attempt]),
+                )
+            second_head = fixture.remote_branch_head(second_branch)
+            before_remote_refs = fixture.git("ls-remote", "--heads", "origin")
+            pull_requests = RecordingPullRequests()
+
+            with self.assertRaisesRegex(
+                SyncError, "^found multiple orphaned Synchronization attempts$"
+            ):
+                synchronize(fixture.config(), FailingReleases(), pull_requests)
+
+            self.assertEqual(
+                fixture.git("ls-remote", "--heads", "origin"), before_remote_refs
+            )
+            self.assertEqual(pull_requests.created, [])
+            self.assertIsNotNone(first_head)
+            self.assertIsNotNone(second_head)
+
+    def test_retry_survives_a_fresh_clone_without_source_repositories(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            selected = fixture.release("rust-v1.0.1", "1.0.1", "release")
+            releases = FixtureReleases.published(selected)
+            branch = f"automation/upstream-sync/{selected.commit}"
+            fork_base = fixture.fork_head
+
+            with self.assertRaisesRegex(SyncError, "PR API unavailable"):
+                synchronize(fixture.config(), releases, CreateFailurePullRequests())
+            prepared_head = fixture.remote_branch_head(branch)
+            default_head = fixture.remote_branch_head("main")
+
+            shutil.rmtree(fixture.upstream)
+            shutil.rmtree(fixture.fork)
+            fresh_fork = fixture.root / "fresh-fork"
+            fixture.git_at(
+                fixture.root,
+                "clone",
+                "--no-local",
+                str(fixture.origin),
+                str(fresh_fork),
+            )
+            GitFixture.configure(fresh_fork)
+            self.assertTrue(
+                GitFixture.has_object(fresh_fork, fixture.seed_commit)
+            )
+            self.assertFalse(
+                GitFixture.has_object(fresh_fork, PR153_RELEASE_COMMIT)
+            )
+            self.assertEqual(GitFixture.git_at(fresh_fork, "replace", "-l"), "")
+            retry_pull_requests = RecordingPullRequests()
+            retry_config = SyncConfig(
+                fresh_fork,
+                "https://127.0.0.1:9/unreachable-upstream.git",
+                "main",
+                manifest_seed_commit=fixture.seed_commit,
+            )
+
+            result = synchronize(
+                retry_config, FailingReleases(), retry_pull_requests
+            )
+
+            self.assertEqual(
+                result,
+                SyncResult(
+                    outcome="pr-created-clean",
+                    tag=selected.tag,
+                    release_commit=selected.commit,
+                    branch=branch,
+                    preparation_mode="clean",
+                    pr_number=1,
+                    pr_url="https://example.test/pull/1",
+                    **prepared_metadata(fork_base, selected.commit),
+                ),
+            )
+            manifest = parse_manifest(
+                GitFixture.git_at(
+                    fresh_fork,
+                    "show",
+                    f"origin/{branch}:{result.manifest_path}",
+                )
+                + "\n"
+            )
+            self.assertEqual(
+                retry_pull_requests.created,
+                [
+                    PullRequestIntent(
+                        title=f"Synchronize openai/codex {selected.tag}",
+                        head=branch,
+                        base="main",
+                        body=render_pull_request_body(manifest),
+                        draft=False,
+                    )
+                ],
+            )
+            self.assertEqual(
+                GitFixture.git_at(
+                    fresh_fork,
+                    "ls-remote",
+                    "--heads",
+                    "origin",
+                    f"refs/heads/{branch}",
+                ).split()[0],
+                prepared_head,
+            )
+            self.assertEqual(
+                GitFixture.git_at(
+                    fresh_fork,
+                    "ls-remote",
+                    "--heads",
+                    "origin",
+                    "refs/heads/main",
+                ).split()[0],
+                default_head,
+            )
+
+    def test_manifest_backed_branch_rejects_mismatched_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            selected = fixture.release("rust-v7.1.2", "7.1.2", "release")
+            branch = f"automation/upstream-sync/{selected.commit}"
+
+            with self.assertRaisesRegex(SyncError, "PR API unavailable"):
+                synchronize(
+                    fixture.config(),
+                    FixtureReleases.published(selected),
+                    CreateFailurePullRequests(),
+                )
+            prepared_head = fixture.remote_branch_head(branch)
+            fixture.git("fetch", "origin", branch)
+            fixture.git("switch", "--detach", "FETCH_HEAD")
+            mismatched_commit = "f" * 40
+            mismatched_branch = f"automation/upstream-sync/{mismatched_commit}"
+            mismatched_manifest = (
+                f".github/upstream-sync-manifests/{mismatched_commit}.json"
+            )
+            fixture.git(
+                "mv",
+                f".github/upstream-sync-manifests/{selected.commit}.json",
+                mismatched_manifest,
+            )
+            fixture.commit(fixture.fork, "move manifest away from its owning branch")
+            mismatched_head = fixture.git("rev-parse", "HEAD")
+            fixture.git("push", "origin", f":refs/heads/{branch}")
+            fixture.git(
+                "push", "origin", f"HEAD:refs/heads/{mismatched_branch}"
+            )
+            fixture.git("switch", "main")
+            default_head = fixture.remote_branch_head("main")
+            pull_requests = RecordingPullRequests()
+
+            with self.assertRaisesRegex(
+                SyncError, "Synchronization manifest filename does not match"
+            ):
+                synchronize(
+                    fixture.config(), FailingReleases(), pull_requests
+                )
+
+            self.assertEqual(fixture.remote_branch_head("main"), default_head)
+            self.assertEqual(
+                fixture.remote_branch_head(mismatched_branch), mismatched_head
+            )
+            self.assertIsNotNone(prepared_head)
+            self.assertIsNone(fixture.remote_branch_head(branch))
+            self.assertEqual(pull_requests.created, [])
+
+    def test_open_manifest_pr_rejects_a_stale_head_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            selected = fixture.release("rust-v4.2.0", "4.2.0", "selected")
+            branch = f"automation/upstream-sync/{selected.commit}"
+            with self.assertRaisesRegex(SyncError, "PR API unavailable"):
+                synchronize(
+                    fixture.config(),
+                    FixtureReleases.published(selected),
+                    CreateFailurePullRequests(),
+                )
+            original_head = fixture.remote_branch_head(branch)
+            self.assertIsNotNone(original_head)
+            fixture.git("fetch", "origin", branch)
+            fixture.git("switch", "--detach", "FETCH_HEAD")
+            fixture.git("commit", "--allow-empty", "-m", "force-pushed head")
+            stale_head = fixture.git("rev-parse", "HEAD")
+            fixture.git("push", "--force", "origin", f"HEAD:refs/heads/{branch}")
+            fixture.git("fetch", "origin", branch)
+            before = fixture.ref_snapshot()
+            pull_requests = RecordingPullRequests(
+                [
+                    PullRequest(
+                        42,
+                        "https://example.test/pull/42",
+                        "open",
+                        False,
+                        branch,
+                        original_head or "",
+                        f"Synchronize openai/codex {selected.tag}",
+                        f"- Immutable commit: `{selected.commit}`",
+                        "Electivus/electivus-codex",
+                    )
+                ]
+            )
+
+            with self.assertRaisesRegex(
+                SyncError, "open Synchronization PR head changed during inspection"
+            ):
+                synchronize(fixture.config(), FailingReleases(), pull_requests)
+
+            self.assertEqual(fixture.ref_snapshot(), before)
+            self.assertEqual(fixture.remote_branch_head(branch), stale_head)
+            self.assertEqual(pull_requests.created, [])
+
+    def test_removed_active_manifest_is_not_misclassified_as_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            selected = fixture.release("rust-v7.1.2", "7.1.2", "release")
+            result = synchronize(
+                fixture.config(),
+                FixtureReleases.published(selected),
+                RecordingPullRequests(),
+            )
+            fixture.git("fetch", "origin", result.branch)
+            fixture.git("switch", "--detach", "FETCH_HEAD")
+            fixture.git("rm", result.manifest_path)
+            fixture.commit(fixture.fork, "remove active manifest")
+            fixture.git("push", "origin", f"HEAD:refs/heads/{result.branch}")
+            fixture.git("switch", "main")
+            fixture.git("fetch", "origin", result.branch)
+            before = fixture.ref_snapshot()
+            pull_requests = RecordingPullRequests()
+
+            with self.assertRaisesRegex(SyncError, "removed from branch history"):
+                synchronize(fixture.config(), FailingReleases(), pull_requests)
+
+            self.assertEqual(fixture.ref_snapshot(), before)
+            self.assertEqual(pull_requests.created, [])
 
     def test_pr_creation_retry_preserves_conflict_context_and_draft_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))
             fixture.fork_change("shared.txt", "fork version\n")
-            selected = fixture.release(
-                "rust-v7.2.0", "7.2.0", "upstream version", path="shared.txt"
+            fixture.write_workspace(fixture.upstream, "0.0.0")
+            (fixture.upstream / "shared.txt").write_text("upstream version\n")
+            fixture.commit(
+                fixture.upstream, "Normalize Rust workspace version to 0.0.0"
+            )
+            tag = "rust-v7.2.0"
+            fixture.git_at(fixture.upstream, "tag", tag)
+            selected = CreatedRelease(
+                tag,
+                fixture.git_at(fixture.upstream, "rev-parse", "HEAD"),
+                f"https://example.test/releases/{tag}",
             )
             releases = FixtureReleases.published(selected)
+            fork_base = fixture.fork_head
 
             with self.assertRaisesRegex(SyncError, "PR API unavailable"):
                 synchronize(
@@ -770,6 +1725,10 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     releases,
                     CreateFailurePullRequests(),
                 )
+            prepared_head = fixture.remote_branch_head(
+                f"automation/upstream-sync/{selected.commit}"
+            )
+            fixture.fork_change("later.txt", "later fork work\n")
             retry_pull_requests = RecordingPullRequests()
 
             result = synchronize(
@@ -790,10 +1749,93 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     pr_url="https://example.test/pull/1",
                     conflict_count=1,
                     conflicts=("shared.txt",),
+                    **prepared_metadata(fork_base, selected.commit),
                 ),
             )
             self.assertTrue(retry_pull_requests.created[0].draft)
-            self.assertIn("`shared.txt`", retry_pull_requests.created[0].body)
+            self.assertIn('"shared.txt"', retry_pull_requests.created[0].body)
+            self.assertEqual(
+                fixture.remote_branch_head(result.branch), prepared_head
+            )
+
+    def _assert_conflicting_retry_preserves_path_and_default_branch(
+        self, conflict: str
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            fixture.fork_change(conflict, "fork version\n")
+            selected = fixture.release(
+                "rust-v7.3.0", "7.3.0", "upstream version", path=conflict
+            )
+            releases = FixtureReleases.published(selected)
+            fork_base = fixture.fork_head
+            default_head = fixture.remote_branch_head("main")
+            branch = f"automation/upstream-sync/{selected.commit}"
+            failed_pull_requests = CreateFailurePullRequests()
+
+            with self.assertRaisesRegex(SyncError, "PR API unavailable"):
+                synchronize(fixture.config(), releases, failed_pull_requests)
+
+            prepared_head = fixture.remote_branch_head(branch)
+            manifest_path = (
+                f".github/upstream-sync-manifests/{selected.commit}.json"
+            )
+            manifest = parse_manifest(
+                fixture.git("show", f"origin/{branch}:{manifest_path}") + "\n"
+            )
+            intent = PullRequestIntent(
+                title=f"Synchronize openai/codex {selected.tag}",
+                head=branch,
+                base="main",
+                body=render_pull_request_body(manifest),
+                draft=True,
+            )
+            self.assertEqual(manifest.conflict_paths, (conflict,))
+            self.assertEqual(failed_pull_requests.created, [intent])
+            self.assertEqual(fixture.remote_branch_head("main"), default_head)
+
+            fixture.fork_change("later.txt", "later fork work\n")
+            retry_default_head = fixture.remote_branch_head("main")
+            retry_pull_requests = RecordingPullRequests()
+
+            result = synchronize(
+                fixture.config(), FailingReleases(), retry_pull_requests
+            )
+
+            self.assertEqual(
+                result,
+                SyncResult(
+                    outcome="draft-pr-created-conflicts",
+                    tag=selected.tag,
+                    release_commit=selected.commit,
+                    branch=branch,
+                    preparation_mode="conflicting",
+                    pr_number=1,
+                    pr_url="https://example.test/pull/1",
+                    conflict_count=1,
+                    conflicts=(conflict,),
+                    **prepared_metadata(fork_base, selected.commit),
+                ),
+            )
+            self.assertEqual(retry_pull_requests.created, [intent])
+            self.assertEqual(fixture.remote_branch_head(branch), prepared_head)
+            self.assertEqual(
+                fixture.remote_branch_head("main"), retry_default_head
+            )
+
+    def test_conflicting_retry_preserves_hostile_path_and_default_branch(self) -> None:
+        self._assert_conflicting_retry_preserves_path_and_default_branch(
+            "`injected`-conflit-ç.txt"
+        )
+
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "Windows cannot materialize a filename containing a newline",
+    )
+    def test_conflicting_retry_preserves_newline_path_and_default_branch(self) -> None:
+        self._assert_conflicting_retry_preserves_path_and_default_branch(
+            "line one\n`injected`\nconflit-ç.txt"
+        )
 
     def test_discovery_and_fetch_failures_stop_before_branch_or_pr_mutation(
         self,
@@ -871,6 +1913,50 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
         self.assertEqual(client.open_synchronization(), owned)
         self.assertEqual(client.for_branch(branch), owned)
 
+    def test_github_client_indexes_pull_requests_once_for_many_branches(self) -> None:
+        branch = "automation/upstream-sync/" + "a" * 40
+        owned = PullRequest(
+            number=43,
+            url="https://example.test/pull/43",
+            state="closed",
+            merged=False,
+            head=branch,
+            head_sha="c" * 40,
+            title="Synchronize openai/codex rust-v-owned",
+            body="",
+            head_repository="Electivus/electivus-codex",
+        )
+        client = FixtureGitHubClient([owned])
+        branches = (branch,) + tuple(
+            f"automation/upstream-sync/{index:040x}" for index in range(1, 600)
+        )
+
+        self.assertEqual(client.for_branches(branches), {branch: owned})
+        self.assertEqual(client.pull_request_queries, ["all"])
+
+    def test_github_client_orphan_scan_ignores_duplicate_historical_prs(self) -> None:
+        branch = "automation/upstream-sync/" + "a" * 40
+        unrelated_branch = "automation/upstream-sync/" + "b" * 40
+        owned = PullRequest(
+            number=43,
+            url="https://example.test/pull/43",
+            state="closed",
+            merged=False,
+            head=branch,
+            head_sha="c" * 40,
+            title="Synchronize openai/codex rust-v-owned",
+            body="",
+            head_repository="Electivus/electivus-codex",
+        )
+        duplicate = replace(owned, number=44, head=unrelated_branch)
+        client = FixtureGitHubClient([owned, duplicate, replace(duplicate, number=45)])
+
+        self.assertEqual(
+            client.for_branches_for_orphan_scan((branch, unrelated_branch)),
+            {branch: owned, unrelated_branch: duplicate},
+        )
+        self.assertEqual(client.pull_request_queries, ["all"])
+
     def test_workflow_is_a_safe_thin_adapter_for_the_sync_contract(self) -> None:
         workflow = (
             Path(__file__).parents[1] / "workflows" / "upstream-release-sync.yml"
@@ -939,6 +2025,7 @@ class ApiFailureReleases:
 
 class CreateFailurePullRequests(RecordingPullRequests):
     def create(self, intent: PullRequestIntent):
+        self.created.append(intent)
         raise SyncError("PR API unavailable")
 
 
@@ -946,8 +2033,10 @@ class FixtureGitHubClient(GitHubClient):
     def __init__(self, pull_requests: list[PullRequest]) -> None:
         super().__init__("token", "Electivus/electivus-codex")
         self.pull_requests = pull_requests
+        self.pull_request_queries: list[str] = []
 
     def _pull_requests(self, state: str) -> list[PullRequest]:
+        self.pull_request_queries.append(state)
         return [
             pull_request
             for pull_request in self.pull_requests
@@ -982,7 +2071,12 @@ class CreatedRelease:
 
 
 class GitFixture:
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        seed_commit_message: str = PR153_MANIFEST_INTRODUCTION_MESSAGE,
+    ) -> None:
         self.root = root
         self.upstream = root / "upstream"
         self.origin = root / "fork.git"
@@ -995,11 +2089,33 @@ class GitFixture:
         for index in range(25):
             (self.upstream / f"conflict-{index:02}.txt").write_text("shared\n")
         self.commit(self.upstream, "shared base")
-        self.git_at(root, "clone", "--bare", str(self.upstream), str(self.origin))
-        self.git_at(root, "clone", str(self.origin), str(self.fork))
+        self.seed_commit = self.git_at(self.upstream, "rev-parse", "HEAD")
+        self.git_at(
+            root,
+            "clone",
+            "--bare",
+            "--no-local",
+            str(self.upstream),
+            str(self.origin),
+        )
+        self.git_at(root, "clone", "--no-local", str(self.origin), str(self.fork))
         self.configure(self.fork)
         (self.fork / "fork.txt").write_text("fork\n")
-        self.commit(self.fork, "fork work")
+        seed = Path(__file__).parent / "testdata/pr153-seed.json"
+        self.seed_text = seed.read_text().replace(
+            '"commit": "fixture-seed"', f'"commit": "{self.seed_commit}"'
+        )
+        self.seed_manifest_path = (
+            f".github/upstream-sync-manifests/{self.seed_commit}.json"
+        )
+        destination = (
+            self.fork
+            / ".github/upstream-sync-manifests"
+            / f"{self.seed_commit}.json"
+        )
+        destination.parent.mkdir(parents=True)
+        destination.write_text(self.seed_text)
+        self.commit(self.fork, seed_commit_message)
         self.git_at(self.fork, "push", "origin", "main")
         self.fork_head = self.git("rev-parse", "HEAD")
 
@@ -1009,6 +2125,7 @@ class GitFixture:
             upstream_url=str(self.upstream),
             default_branch="main",
             manual_tag=manual_tag,
+            manifest_seed_commit=self.seed_commit,
         )
 
     def release(
@@ -1078,6 +2195,35 @@ class GitFixture:
             stderr=subprocess.PIPE,
             text=True,
         ).strip()
+
+    @staticmethod
+    def hash_object(root: Path, object_type: str, content: str) -> str:
+        return subprocess.run(
+            ["git", "hash-object", "-t", object_type, "-w", "--stdin"],
+            cwd=root,
+            input=content,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    @staticmethod
+    def has_object(root: Path, object_id: str) -> bool:
+        return (
+            subprocess.run(
+                [
+                    "git",
+                    "--no-replace-objects",
+                    "cat-file",
+                    "-e",
+                    f"{object_id}^{{commit}}",
+                ],
+                cwd=root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode
+            == 0
+        )
 
     @classmethod
     def configure(cls, root: Path) -> None:
