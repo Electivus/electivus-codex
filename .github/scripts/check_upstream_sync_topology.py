@@ -3,25 +3,30 @@
 
 import argparse
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-import sys
 
-from upstream_sync_attempt import PreparedAttempt
-from upstream_sync_attempt import SYNC_BRANCH_PREFIX
-from upstream_sync_attempt import SyncError
-from upstream_sync_attempt import _SHA
-from upstream_sync_attempt import _git
-from upstream_sync_attempt import _is_ancestor
-from upstream_sync_attempt import _read_chain_at
-from upstream_sync_attempt import _run_git
-from upstream_sync_attempt import synchronization_release_commit
-from upstream_sync_attempt import _verify_prepared
 from sync_upstream_release import _bounded_diagnostic
-from upstream_sync_manifest import MANIFEST_DIRECTORY
-from upstream_sync_manifest import MANIFEST_SEED_COMMIT
-from upstream_sync_manifest import SynchronizationManifest
-
+from upstream_sync_attempt import (
+    _SHA,
+    SYNC_BRANCH_PREFIX,
+    PreparedAttempt,
+    SyncError,
+    _git,
+    _git_paths,
+    _is_ancestor,
+    _merge_tree,
+    _read_chain_at,
+    _run_git,
+    _verify_prepared,
+    synchronization_release_commit,
+)
+from upstream_sync_manifest import (
+    MANIFEST_DIRECTORY,
+    MANIFEST_SEED_COMMIT,
+    SynchronizationManifest,
+)
 
 _NORMALIZATION_MESSAGE = "Normalize Rust workspace version to 0.0.0"
 _MANIFEST_COMMIT_PREFIX = "Record Synchronization manifest for "
@@ -357,6 +362,7 @@ def _select_clean_catch_up(
         raise TopologyError(
             "Catch-up merge does not descend from Baseline reconciliation"
         )
+    _validate_reconciliation_tree(repo, commit, parents, "Catch-up")
     return commit
 
 
@@ -397,6 +403,12 @@ def _select_conflicting_reconciliations(
         raise TopologyError(
             "Baseline reconciliation was already contaminated by Fork ancestry"
         )
+    _validate_reconciliation_tree(
+        repo,
+        baseline,
+        baseline_parents,
+        "Baseline",
+    )
 
     if base_sha == manifest.fork_base_sha:
         if len(merges) != 1:
@@ -409,9 +421,38 @@ def _select_conflicting_reconciliations(
         raise TopologyError(
             "Catch-up merge does not descend from Baseline reconciliation"
         )
+    _validate_reconciliation_tree(repo, catch_up, catch_up_parents, "Catch-up")
     if len(merges) != 2:
         raise TopologyError("Synchronization contains an unsupported extra merge")
     return baseline, catch_up
+
+
+def _validate_reconciliation_tree(
+    repo: Path,
+    commit: str,
+    parents: tuple[str, ...],
+    label: str,
+) -> None:
+    returncode, automatic_tree, conflict_paths = _merge_tree(
+        repo,
+        parents[0],
+        parents[1],
+    )
+    actual_tree = _git(repo, "show", "-s", "--format=%T", commit)
+    if returncode == 0:
+        if actual_tree != automatic_tree:
+            raise TopologyError(
+                f"{label} merge tree does not match Git's conflict-free result"
+            )
+        return
+
+    changed_paths = set(_git_paths(repo, "diff", automatic_tree, actual_tree))
+    unexpected_paths = sorted(changed_paths.difference(conflict_paths))
+    if unexpected_paths:
+        raise TopologyError(
+            f"{label} conflicted resolution changed non-conflicted path "
+            f"{unexpected_paths[0]}"
+        )
 
 
 def main(argv: list[str] | None = None) -> int:

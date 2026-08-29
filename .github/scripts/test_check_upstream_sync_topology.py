@@ -3,18 +3,20 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from check_upstream_sync_topology import TopologyError
-from check_upstream_sync_topology import TopologyEvidence
-from check_upstream_sync_topology import validate_topology
+from check_upstream_sync_topology import (
+    TopologyError,
+    TopologyEvidence,
+    validate_topology,
+)
 from sync_upstream_release import synchronize
-from test_sync_upstream_release import CreatedRelease
-from test_sync_upstream_release import FixtureReleases
-from test_sync_upstream_release import GitFixture
-from test_sync_upstream_release import RecordingPullRequests
-from upstream_sync_attempt import PreparedAttempt
-from upstream_sync_attempt import prepare_attempt
-from upstream_sync_manifest import canonical_release_url
-from upstream_sync_manifest import ReleaseIdentity
+from test_sync_upstream_release import (
+    CreatedRelease,
+    FixtureReleases,
+    GitFixture,
+    RecordingPullRequests,
+)
+from upstream_sync_attempt import PreparedAttempt, prepare_attempt
+from upstream_sync_manifest import ReleaseIdentity, canonical_release_url
 
 
 class UpstreamSyncTopologyTests(unittest.TestCase):
@@ -86,6 +88,79 @@ class UpstreamSyncTopologyTests(unittest.TestCase):
 
             self.assertIsNotNone(evidence)
             self.assertEqual(evidence.catch_up_merge, head)
+
+    def test_clean_catch_up_cannot_discard_unrelated_base_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            _, branch, prepared_head = self._prepare_clean(fixture)
+            fixture.git("switch", "main")
+            fixture.fork_change("later.txt", "later fork work\n")
+            advanced_base = fixture.fork_head
+            invalid_catch_up = self._commit_with_parents(
+                fixture,
+                prepared_head,
+                (prepared_head, advanced_base),
+                "Catch up while discarding unrelated base work",
+            )
+            self._push_branch(fixture, branch, invalid_catch_up)
+
+            with self.assertRaisesRegex(
+                TopologyError, "merge tree does not match Git's conflict-free result"
+            ):
+                validate_topology(
+                    fixture.fork,
+                    invalid_catch_up,
+                    advanced_base,
+                    branch,
+                    seed_commit=fixture.seed_commit,
+                )
+
+    def test_conflicted_catch_up_may_resolve_conflicted_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            _, branch, _ = self._prepare_clean(fixture)
+            fixture.git("switch", "main")
+            fixture.fork_change("upstream.txt", "later fork version\n")
+            fixture.fork_change("later.txt", "later fork work\n")
+            advanced_base = fixture.fork_head
+            head = self._merge_current_main_with_conflict(fixture, branch)
+
+            evidence = validate_topology(
+                fixture.fork,
+                head,
+                advanced_base,
+                branch,
+                seed_commit=fixture.seed_commit,
+            )
+
+            self.assertIsNotNone(evidence)
+            self.assertEqual(evidence.catch_up_merge, head)
+
+    def test_conflicted_catch_up_cannot_change_non_conflicted_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            _, branch, _ = self._prepare_clean(fixture)
+            fixture.git("switch", "main")
+            fixture.fork_change("upstream.txt", "later fork version\n")
+            fixture.fork_change("later.txt", "later fork work\n")
+            advanced_base = fixture.fork_head
+            head = self._merge_current_main_with_conflict(
+                fixture,
+                branch,
+                discard_path="later.txt",
+            )
+
+            with self.assertRaisesRegex(
+                TopologyError,
+                "conflicted resolution changed non-conflicted path later.txt",
+            ):
+                validate_topology(
+                    fixture.fork,
+                    head,
+                    advanced_base,
+                    branch,
+                    seed_commit=fixture.seed_commit,
+                )
 
     def test_catch_up_cannot_discard_newer_base_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -252,7 +327,7 @@ class UpstreamSyncTopologyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))
             fork_base = fixture.fork_head
-            _, branch, prepared_head = self._prepare_clean(fixture)
+            _, branch, _prepared_head = self._prepare_clean(fixture)
             fixture.git("fetch", "origin", branch)
             fixture.git("switch", "--detach", "FETCH_HEAD")
             fixture.git(
@@ -380,7 +455,7 @@ class UpstreamSyncTopologyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))
             fork_base = fixture.fork_head
-            _, branch, head = self._prepare_clean(fixture)
+            _, _branch, head = self._prepare_clean(fixture)
             substituted = f"automation/upstream-sync/{'f' * 40}"
 
             with self.assertRaisesRegex(TopologyError, "Synchronization release"):
@@ -540,6 +615,42 @@ class UpstreamSyncTopologyTests(unittest.TestCase):
         fixture.git(
             "merge", "--no-ff", "-m", "Catch up Synchronization branch", "origin/main"
         )
+        head = fixture.git("rev-parse", "HEAD")
+        self._push_branch(fixture, branch, head)
+        return head
+
+    def _merge_current_main_with_conflict(
+        self,
+        fixture: GitFixture,
+        branch: str,
+        *,
+        discard_path: str | None = None,
+    ) -> str:
+        fixture.git("fetch", "origin", "main")
+        fixture.git("fetch", "origin", branch)
+        fixture.git("switch", "--detach", "FETCH_HEAD")
+        process = subprocess.run(
+            [
+                "git",
+                "merge",
+                "--no-ff",
+                "-m",
+                "Catch up Synchronization branch",
+                "origin/main",
+            ],
+            cwd=fixture.fork,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(process.returncode, 0)
+        (fixture.fork / "upstream.txt").write_text("resolved version\n")
+        paths = ["upstream.txt"]
+        if discard_path is not None:
+            (fixture.fork / discard_path).unlink()
+            paths.append(discard_path)
+        fixture.git("add", "-A", "--", *paths)
+        fixture.git("commit", "-m", "Catch up Synchronization branch")
         head = fixture.git("rev-parse", "HEAD")
         self._push_branch(fixture, branch, head)
         return head

@@ -138,7 +138,8 @@ _Avoid_: Rolling release target, latest available release, automatic retry
 **Synchronization topology check**:
 The Merge-gate evidence that reads the real Synchronization PR head and base with complete Git
 history, verifies the immutable manifest chain, and accepts only the required Baseline and
-Catch-up parent relationships.
+Catch-up parent relationships and merge tree. Conflict resolutions may differ from Git's automatic
+merge tree only at paths Git reports as conflicted.
 _Avoid_: Semantic reconciliation, synthetic merge validation, ruleset mutation
 
 **Validation PR**:
