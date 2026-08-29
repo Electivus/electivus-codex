@@ -94,9 +94,10 @@ preserving fork-owned behavior and validation.
 _Avoid_: Fork reset, upstream replacement, automatic update
 
 **Release baseline**:
-The published non-draft GitHub Release from `openai/codex` with the greatest valid Semantic
-Version, whether stable or pre-release, selected as the target of an Upstream synchronization.
-_Avoid_: Upstream main, latest stable, latest publication timestamp
+The immutable commit of a published, non-draft `openai/codex` Release selected for synchronization.
+Automation selects the greatest stable Semantic Version; manual dispatch may select one exact stable
+or pre-release Semantic Version.
+_Avoid_: Upstream main, publication timestamp, automatically selected pre-release
 
 **Fork development version**:
 The `0.0.0` Rust workspace version that identifies Electivus source builds independently of the

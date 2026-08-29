@@ -48,6 +48,14 @@ class ExactReleaseOnly(FixtureReleases):
         raise AssertionError("manual release selection must not list every release")
 
 
+class NoReleaseLookup:
+    def list_releases(self) -> list[Release]:
+        raise AssertionError("invalid manual selection must not list releases")
+
+    def release_for_tag(self, tag: str) -> Release:
+        raise AssertionError(f"invalid manual selection must not look up {tag}")
+
+
 def github_release_payload(tag: str) -> dict:
     return {
         "tag_name": tag,
@@ -143,10 +151,14 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))
             published_later = fixture.release(
-                "rust-v0.147.0-alpha.6.6", "0.147.0", "published later"
+                "rust-v0.147.0", "0.147.0", "published later"
             )
-            selected = fixture.release(
-                "rust-v0.148.0-alpha.6", "0.148.0", "selected"
+            selected = fixture.release("rust-v0.148.0", "0.148.0", "selected")
+            newer_prerelease = fixture.release(
+                "rust-v0.149.0-alpha.1", "0.149.0", "not automatic"
+            )
+            unpublished = fixture.release(
+                "rust-v99.0.0", "99.0.0", "not published"
             )
             fork_head = fixture.fork_head
             pull_requests = RecordingPullRequests()
@@ -168,11 +180,17 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                             url=published_later.url,
                         ),
                         Release(
-                            tag=selected.tag,
+                            tag=newer_prerelease.tag,
                             published_at="2026-08-10T10:17:08Z",
                             draft=False,
-                            url=selected.url,
+                            url=newer_prerelease.url,
                             prerelease=True,
+                        ),
+                        Release(
+                            tag=selected.tag,
+                            published_at="2026-08-09T10:17:08Z",
+                            draft=False,
+                            url=selected.url,
                         ),
                         Release(
                             tag="sdk-v99.0.0",
@@ -181,10 +199,10 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                             url="https://example.test/sdk",
                         ),
                         Release(
-                            tag="rust-v-unpublished",
+                            tag=unpublished.tag,
                             published_at=None,
                             draft=False,
-                            url="https://example.test/unpublished",
+                            url=unpublished.url,
                         ),
                     ]
                 ),
@@ -271,13 +289,10 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                 ),
             )
 
-    def test_automatic_selection_uses_semantic_version_prerelease_precedence(
-        self,
-    ) -> None:
+    def test_automatic_selection_uses_stable_semantic_version_precedence(self) -> None:
         cases = (
-            ("rust-v1.0.0-alpha.9", "rust-v1.0.0-alpha.10"),
-            ("rust-v1.0.0-alpha.10", "rust-v1.0.0-alpha.beta"),
-            ("rust-v1.0.0-alpha", "rust-v1.0.0"),
+            ("rust-v1.9.0", "rust-v1.10.0"),
+            ("rust-v1.10.9", "rust-v1.11.0"),
         )
         for lower_tag, selected_tag in cases:
             with (
@@ -308,6 +323,42 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     ),
                 )
 
+    def test_automatic_selection_rejects_only_published_prereleases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            older = fixture.release("rust-v2.0.0-alpha.1", "2.0.0", "older")
+            newer = fixture.release("rust-v2.0.0-rc.1", "2.0.0", "newer")
+            pull_requests = RecordingPullRequests()
+            before = fixture.ref_snapshot()
+
+            with self.assertRaisesRegex(
+                SyncError, "^no published stable Codex CLI release is available$"
+            ):
+                synchronize(
+                    fixture.config(),
+                    FixtureReleases.published(older, newer),
+                    pull_requests,
+                )
+
+            self.assertEqual(fixture.ref_snapshot(), before)
+            self.assertEqual(pull_requests.created, [])
+
+    def test_automatic_selection_rejects_build_metadata_precedence_tie(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            first = fixture.release("rust-v2.0.0+one", "2.0.0", "first")
+            second = fixture.release("rust-v2.0.0+two", "2.0.0", "second")
+            before = fixture.ref_snapshot()
+
+            with self.assertRaisesRegex(SyncError, "ambiguous"):
+                synchronize(
+                    fixture.config(),
+                    FixtureReleases.published(first, second),
+                    RecordingPullRequests(),
+                )
+
+            self.assertEqual(fixture.ref_snapshot(), before)
+
     def test_manual_override_is_validated_before_fetch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))
@@ -315,18 +366,16 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             releases = FixtureReleases(
                 [
                     Release(valid.tag, "2026-07-20T00:00:00Z", False, valid.url),
-                    Release("rust-v-draft", "2026-07-21T00:00:00Z", True, "draft"),
-                    Release("rust-v-unpublished", None, False, "unpublished"),
-                    Release("sdk-v2", "2026-07-22T00:00:00Z", False, "sdk"),
+                    Release("rust-v2.0.0", "2026-07-21T00:00:00Z", True, "draft"),
+                    Release("rust-v2.1.0", None, False, "unpublished"),
                 ]
             )
             before = fixture.ref_snapshot()
 
             for tag in (
-                "rust-v-draft",
-                "rust-v-unpublished",
-                "sdk-v2",
-                "rust-v-unknown",
+                "rust-v2.0.0",
+                "rust-v2.1.0",
+                "rust-v9.9.9",
             ):
                 with self.subTest(tag=tag):
                     with self.assertRaisesRegex(SyncError, "not a published"):
@@ -358,7 +407,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
     def test_manual_override_does_not_require_release_listing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))
-            selected = fixture.release("rust-v1.0.0", "1.0.0", "selected")
+            selected = fixture.release("rust-v1.0.0-rc.1", "1.0.0", "selected")
             pull_requests = RecordingPullRequests()
 
             result = synchronize(
@@ -381,31 +430,22 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             )
             self.assertIn("Selection: manual", pull_requests.created[0].body)
 
-    def test_manual_override_accepts_exact_published_non_semver_tag(self) -> None:
+    def test_manual_override_rejects_invalid_tag_before_release_lookup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))
-            selected = fixture.release("rust-v-channel", "1.0.0", "selected")
-            pull_requests = RecordingPullRequests()
+            before = fixture.ref_snapshot()
 
-            result = synchronize(
-                fixture.config(manual_tag=selected.tag),
-                FixtureReleases.published(selected),
-                pull_requests,
-            )
+            for tag in ("rust-v-channel", "sdk-v1.2.3", "rust-v1.2.03"):
+                with self.subTest(tag=tag), self.assertRaisesRegex(
+                    SyncError, "exact rust-v<SemVer>"
+                ):
+                    synchronize(
+                        fixture.config(manual_tag=tag),
+                        NoReleaseLookup(),
+                        RecordingPullRequests(),
+                    )
 
-            self.assertEqual(
-                result,
-                SyncResult(
-                    outcome="pr-created-clean",
-                    tag=selected.tag,
-                    release_commit=selected.commit,
-                    branch=f"automation/upstream-sync/{selected.commit}",
-                    preparation_mode="clean",
-                    pr_number=1,
-                    pr_url="https://example.test/pull/1",
-                ),
-            )
-            self.assertIn("Selection: manual", pull_requests.created[0].body)
+            self.assertEqual(fixture.ref_snapshot(), before)
 
     def test_already_integrated_release_is_an_idempotent_no_op(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -871,7 +911,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir:
                 fixture = GitFixture(Path(temp_dir))
                 selected = fixture.release_with_manifest(
-                    f"rust-v7.0.0-{name}", manifest
+                    f"rust-v7.0.0+{name}", manifest
                 )
                 branch = f"automation/upstream-sync/{selected.commit}"
                 pull_requests = RecordingPullRequests()

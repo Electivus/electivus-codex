@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Optional exact published rust-v... release tag
+        description: Optional exact published stable or pre-release rust-v<SemVer> tag
         required: false
         type: string
 
