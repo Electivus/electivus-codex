@@ -323,6 +323,28 @@ class UpstreamSyncTopologyTests(unittest.TestCase):
                     seed_commit=fixture.seed_commit,
                 )
 
+    def test_arbitrary_single_parent_commit_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            fork_base = fixture.fork_head
+            _, branch, _ = self._prepare_clean(fixture)
+            fixture.git("fetch", "origin", branch)
+            fixture.git("switch", "--detach", "FETCH_HEAD")
+            (fixture.fork / "unexpected.txt").write_text("unreviewed branch work\n")
+            fixture.git("add", "unexpected.txt")
+            fixture.git("commit", "-m", "append unrelated branch work")
+            unexpected = fixture.git("rev-parse", "HEAD")
+            self._push_branch(fixture, branch, unexpected)
+
+            with self.assertRaisesRegex(TopologyError, "single-parent commit"):
+                validate_topology(
+                    fixture.fork,
+                    unexpected,
+                    fork_base,
+                    branch,
+                    seed_commit=fixture.seed_commit,
+                )
+
     def test_deterministic_commit_cannot_replace_reconciliation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))

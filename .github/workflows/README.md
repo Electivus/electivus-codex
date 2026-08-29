@@ -148,11 +148,12 @@ Windows output together with Linux assets in one release.
   Synchronization pull requests pass through it unchanged; a branch named
   `automation/upstream-sync/<release-commit>` must prove its immutable
   manifest chain, exact Baseline reconciliation, and the required Catch-up
-  merge when the real base advanced. Conflict-free reconciliations must equal
-  Git's computed merge tree. A conflicted resolution may change only paths
-  reported as conflicted by `git merge-tree`, so unrelated base work cannot be
-  discarded. The checker is evidence-only: it does not resolve conflicts,
-  modify pull requests, or change rulesets.
+  merge when the real base advanced. No additional single-parent commit is
+  permitted after the active manifest is introduced. Conflict-free
+  reconciliations must equal Git's computed merge tree. A conflicted resolution
+  may change only paths reported as conflicted by `git merge-tree`, so unrelated
+  base work cannot be discarded. The checker is evidence-only: it does not
+  resolve conflicts, modify pull requests, or change rulesets.
 - `v8-canary.yml` is independently Change-triggered. Known ordinary Codex and
   documentation changes finish through metadata only; V8-relevant, unknown,
   indeterminate, or manual runs require its exact eight-leg Linux matrix and a

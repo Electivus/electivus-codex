@@ -331,8 +331,11 @@ def _validate_new_commits(
             raise TopologyError(
                 "deterministic manifest/version commits cannot replace a reconciliation"
             )
-        if len(parents) == 2:
-            merges.append((index, commit, parents))
+        if len(parents) != 2:
+            raise TopologyError(
+                f"unsupported single-parent commit after manifest introduction: {commit}"
+            )
+        merges.append((index, commit, parents))
     return tuple(merges)
 
 
