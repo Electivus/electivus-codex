@@ -426,9 +426,10 @@ def _verify_pr153_manifest_history(repo: Path, commit: str, path: str) -> None:
         f"{introduction}..{commit}",
         "--",
         path,
-    )
-    if changes:
-        raise SyncError("PR #153 seed manifest history changed after introduction")
+    ).splitlines()
+    for change in changes:
+        if _tree_entry(repo, change, path) != expected_entry:
+            raise SyncError("PR #153 seed manifest history changed after introduction")
 
 
 def _tree_entry(repo: Path, commit: str, path: str) -> tuple[str, str, str] | None:
