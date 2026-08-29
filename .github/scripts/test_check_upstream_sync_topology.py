@@ -11,6 +11,10 @@ from test_sync_upstream_release import CreatedRelease
 from test_sync_upstream_release import FixtureReleases
 from test_sync_upstream_release import GitFixture
 from test_sync_upstream_release import RecordingPullRequests
+from upstream_sync_attempt import PreparedAttempt
+from upstream_sync_attempt import prepare_attempt
+from upstream_sync_manifest import canonical_release_url
+from upstream_sync_manifest import ReleaseIdentity
 
 
 class UpstreamSyncTopologyTests(unittest.TestCase):
@@ -82,6 +86,55 @@ class UpstreamSyncTopologyTests(unittest.TestCase):
 
             self.assertIsNotNone(evidence)
             self.assertEqual(evidence.catch_up_merge, head)
+
+    def test_catch_up_cannot_discard_newer_base_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            first_release = fixture.release("rust-v1.0.0", "0.0.0", "first release")
+            first_prepared = self._prepare_release(
+                fixture,
+                first_release,
+                fixture.remote_branch_head("main") or "",
+            )
+            fixture.integrate_branch(first_prepared.branch)
+
+            active_release = fixture.release("rust-v1.1.0", "0.0.0", "active release")
+            active_prepared = self._prepare_release(
+                fixture,
+                active_release,
+                fixture.remote_branch_head("main") or "",
+            )
+            active_head = fixture.remote_branch_head(active_prepared.branch)
+            self.assertIsNotNone(active_head)
+
+            later_release = fixture.release("rust-v1.2.0", "0.0.0", "later release")
+            later_prepared = self._prepare_release(
+                fixture,
+                later_release,
+                fixture.remote_branch_head("main") or "",
+            )
+            fixture.integrate_branch(later_prepared.branch)
+            advanced_base = fixture.remote_branch_head("main")
+            self.assertIsNotNone(advanced_base)
+
+            invalid_catch_up = self._commit_with_parents(
+                fixture,
+                active_head or "",
+                (active_head or "", advanced_base or ""),
+                "Catch up while discarding newer base manifest",
+            )
+            self._push_branch(fixture, active_prepared.branch, invalid_catch_up)
+
+            with self.assertRaisesRegex(
+                TopologyError, "base manifest chain tip does not match"
+            ):
+                validate_topology(
+                    fixture.fork,
+                    invalid_catch_up,
+                    advanced_base or "",
+                    active_prepared.branch,
+                    seed_commit=fixture.seed_commit,
+                )
 
     def test_conflicting_release_first_topology_passes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -420,6 +473,23 @@ class UpstreamSyncTopologyTests(unittest.TestCase):
         head = fixture.remote_branch_head(result.branch)
         self.assertIsNotNone(head)
         return release, result.branch, head or ""
+
+    @staticmethod
+    def _prepare_release(
+        fixture: GitFixture, release: CreatedRelease, fork_base: str
+    ) -> PreparedAttempt:
+        fixture.git("fetch", str(fixture.upstream), f"refs/tags/{release.tag}")
+        return prepare_attempt(
+            fixture.fork,
+            ReleaseIdentity(
+                release.tag,
+                release.commit,
+                canonical_release_url(release.tag),
+            ),
+            fork_base,
+            "automatic",
+            seed_commit=fixture.seed_commit,
+        )
 
     def _prepare_conflicting(
         self, fixture: GitFixture

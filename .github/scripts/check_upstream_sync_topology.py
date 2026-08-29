@@ -153,6 +153,16 @@ def _validate_synchronization_topology(
                     "fork manifest predecessor is not an ancestor of its release commit"
                 )
 
+    try:
+        _, _, base_tip = _read_chain_at(repo, base_sha, seed_commit=seed_commit)
+    except SyncError as error:
+        raise TopologyError(
+            f"real PR base manifest chain is invalid: {error}"
+        ) from error
+    if base_tip.release.commit != manifest.previous_release_commit:
+        raise TopologyError(
+            "real PR base manifest chain tip does not match the immutable predecessor"
+        )
     if fork_tip.release.commit != manifest.previous_release_commit:
         raise TopologyError(
             "active Synchronization manifest does not bind to the fork chain tip"
