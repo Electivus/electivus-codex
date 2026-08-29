@@ -5,10 +5,14 @@ from pathlib import Path
 
 from upstream_sync_manifest import (
     MAX_CONFLICTS_SHOWN,
-    MAX_PULL_REQUEST_BODY_CHARACTERS,
+    MAX_MANIFEST_BYTES,
+    MAX_MODEL_VISIBLE_ITEM_BYTES,
+    MAX_PULL_REQUEST_BODY_BYTES,
+    MAX_RENDERED_CONFLICT_BYTES,
     RELEASE_URL_PREFIX,
     ReleaseIdentity,
     SynchronizationManifest,
+    bounded_conflict_paths,
     canonical_release_url,
     manifest_path,
     parse_manifest,
@@ -184,10 +188,8 @@ class UpstreamSyncManifestTest(unittest.TestCase):
             conflict_paths=(".github/workflow.yml", "codex-rs/core/src/lib.rs"),
         )
         self.assertEqual(parse_manifest(serialize_manifest(manifest)), manifest)
-        utf8_boundary = replace(manifest, conflict_paths=("é" * 2048,))
-        self.assertEqual(
-            parse_manifest(serialize_manifest(utf8_boundary)), utf8_boundary
-        )
+        utf8_path = replace(manifest, conflict_paths=("é" * 1_000,))
+        self.assertEqual(parse_manifest(serialize_manifest(utf8_path)), utf8_path)
 
         invalid_paths = ("", ".", "../outside", "/absolute", "a/./b", "a/../b", "a//b")
         invalid_paths += ("nul\0path", "é" * 2049, "\ud800")
@@ -215,6 +217,25 @@ class UpstreamSyncManifestTest(unittest.TestCase):
             ),
         )
         self.assert_manifest_mutations_rejected(manifest, mutations)
+
+    def test_manifest_and_rendered_conflicts_have_aggregate_budgets(self) -> None:
+        self.assertEqual(MAX_MANIFEST_BYTES, MAX_MODEL_VISIBLE_ITEM_BYTES)
+        self.assertEqual(MAX_PULL_REQUEST_BODY_BYTES, MAX_MODEL_VISIBLE_ITEM_BYTES)
+        self.assertLess(MAX_RENDERED_CONFLICT_BYTES, MAX_MODEL_VISIBLE_ITEM_BYTES)
+        oversized_manifest = make_manifest(
+            preparation_mode="conflicting",
+            conflict_paths=tuple(
+                f"{index:03}-{'x' * 100}.txt" for index in range(100)
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "manifest exceeds its byte budget"):
+            serialize_manifest(oversized_manifest)
+
+        expanded_path = "é" * 2048
+        displayed = bounded_conflict_paths((expanded_path, "z.txt"))
+        encoded = json.dumps(displayed, ensure_ascii=True).encode("ascii")
+        self.assertEqual(displayed, ("z.txt",))
+        self.assertLessEqual(len(encoded), MAX_RENDERED_CONFLICT_BYTES)
 
     def test_pr153_seed_is_canonical_and_checkout_independent(self) -> None:
         seed, seed_text, seed_path = load_seed()
@@ -446,7 +467,7 @@ Omitted conflicts: 0. The complete conflict evidence is in `{manifest_path(manif
         self.assertEqual(render_pull_request_body(manifest), body)
 
     def test_pull_request_body_budget_omits_only_complete_long_paths(self) -> None:
-        paths = tuple(f"{index:02}-" + "x" * 4_080 for index in range(20))
+        paths = tuple(f"{index:02}-" + "x" * 900 for index in range(20))
         manifest = make_manifest(
             previous=SEED_COMMIT,
             preparation_mode="conflicting",
@@ -459,7 +480,7 @@ Omitted conflicts: 0. The complete conflict evidence is in `{manifest_path(manif
         ]
         displayed = [json.loads(line) for line in encoded_lines]
 
-        self.assertLessEqual(len(body), MAX_PULL_REQUEST_BODY_CHARACTERS)
+        self.assertLessEqual(len(body.encode("utf-8")), MAX_PULL_REQUEST_BODY_BYTES)
         self.assertGreater(len(displayed), 0)
         self.assertLess(len(displayed), len(paths))
         self.assertEqual(displayed, list(paths[: len(displayed)]))
@@ -481,23 +502,51 @@ Omitted conflicts: 0. The complete conflict evidence is in `{manifest_path(manif
         self.assertEqual([json.loads(line) for line in encoded_lines], ["z.txt"])
         self.assertIn("Conflicts (2 total; showing 1)", body)
         self.assertIn("Omitted conflicts: 1", body)
-        self.assertLessEqual(len(body), MAX_PULL_REQUEST_BODY_CHARACTERS)
+        self.assertLessEqual(len(body.encode("utf-8")), MAX_PULL_REQUEST_BODY_BYTES)
 
-    def test_pull_request_body_fails_closed_when_no_complete_path_fits(self) -> None:
-        path = ("☃" * 1_364) + ".md"
+    def test_pull_request_body_applies_aggregate_conflict_budget(self) -> None:
+        path = f"nested/{'x' * 1_993}"
         manifest = make_manifest(
             previous=SEED_COMMIT,
             preparation_mode="conflicting",
             conflict_paths=(path,),
         )
 
-        with self.assertRaisesRegex(ValueError, "complete conflict path"):
-            render_pull_request_body(manifest)
+        self.assertGreater(
+            len(json.dumps((path,), ensure_ascii=True).encode("ascii")),
+            MAX_RENDERED_CONFLICT_BYTES,
+        )
+        body = render_pull_request_body(manifest)
+
+        self.assertIn("Conflicts (1 total; showing 0)", body)
+        self.assertNotIn(json.dumps(path, ensure_ascii=True), body)
+        self.assertIn(f"`{manifest_path(manifest.release.commit)}`", body)
+
+    def test_pull_request_body_omits_all_paths_when_escaping_exceeds_budget(
+        self,
+    ) -> None:
+        path = f"nested/{'é' * 546}"
+        manifest = make_manifest(
+            previous=SEED_COMMIT,
+            preparation_mode="conflicting",
+            conflict_paths=(path,),
+        )
+
+        self.assertLessEqual(
+            len(serialize_manifest(manifest).encode("utf-8")), MAX_MANIFEST_BYTES
+        )
+        body = render_pull_request_body(manifest)
+
+        self.assertIn("Conflicts (1 total; showing 0)", body)
+        self.assertIn("Omitted conflicts: 1", body)
+        self.assertNotIn(json.dumps(path, ensure_ascii=True), body)
+        self.assertIn(f"`{manifest_path(manifest.release.commit)}`", body)
+        self.assertLessEqual(len(body.encode("utf-8")), MAX_PULL_REQUEST_BODY_BYTES)
 
     def test_pull_request_body_fails_closed_when_fixed_metadata_exceeds_budget(
         self,
     ) -> None:
-        tag = f"rust-v1.2.{('9' * MAX_PULL_REQUEST_BODY_CHARACTERS)}"
+        tag = f"rust-v1.2.{('9' * MAX_PULL_REQUEST_BODY_BYTES)}"
         manifest = make_manifest(
             tag=tag,
             previous=SEED_COMMIT,
