@@ -10,7 +10,11 @@ remain the fallback.
 
 - Required checks run against GitHub's synthetic merge commit, not the pull
   request head alone. This includes changes already on `main` and catches
-  conflicts before they reach the branch.
+  conflicts before they reach the branch. The `Synchronization topology` job
+  is the deliberate exception: it checks out the real pull request head with
+  complete history and receives the real base/head SHAs so an immutable
+  Synchronization manifest cannot be validated against GitHub's synthetic
+  merge.
 - Native Linux x64 on `ubuntu-24.04` is the current Essential platform.
 - Linux ARM64 on `ubuntu-24.04-arm` and remaining build variants are Extended
   validation. Promoted release, x64 test, and V8 lanes are not repeated after
@@ -140,6 +144,12 @@ Windows output together with Linux assets in one release.
   PostgreSQL consumer. Irrelevant changes skip both expensive release calls;
   independent Bazel and Cargo result jobs accept only the exact
   eligible/success or irrelevant/skipped pair and fail closed otherwise.
+- `blocking-ci.yml` always runs `Synchronization topology`. Non-
+  Synchronization pull requests pass through it unchanged; a branch named
+  `automation/upstream-sync/<release-commit>` must prove its immutable
+  manifest chain, exact Baseline reconciliation, and the required Catch-up
+  merge when the real base advanced. The checker is evidence-only: it does
+  not resolve conflicts, modify pull requests, or change rulesets.
 - `v8-canary.yml` is independently Change-triggered. Known ordinary Codex and
   documentation changes finish through metadata only; V8-relevant, unknown,
   indeterminate, or manual runs require its exact eight-leg Linux matrix and a

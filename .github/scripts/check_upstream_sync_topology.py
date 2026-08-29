@@ -7,18 +7,18 @@ from dataclasses import dataclass
 from pathlib import Path
 import sys
 
-from upstream_sync_attempt import MANIFEST_DIRECTORY
 from upstream_sync_attempt import PreparedAttempt
 from upstream_sync_attempt import SYNC_BRANCH_PREFIX
 from upstream_sync_attempt import SyncError
 from upstream_sync_attempt import _SHA
 from upstream_sync_attempt import _git
 from upstream_sync_attempt import _is_ancestor
-from upstream_sync_attempt import _normalization_parent
-from upstream_sync_attempt import _parents
 from upstream_sync_attempt import _read_chain_at
 from upstream_sync_attempt import _run_git
+from upstream_sync_attempt import synchronization_release_commit
 from upstream_sync_attempt import _verify_prepared
+from sync_upstream_release import _bounded_diagnostic
+from upstream_sync_manifest import MANIFEST_DIRECTORY
 from upstream_sync_manifest import MANIFEST_SEED_COMMIT
 from upstream_sync_manifest import SynchronizationManifest
 
@@ -93,7 +93,7 @@ def _validate_synchronization_topology(
     _require_commit(repo, base_sha, "real PR base")
 
     try:
-        release_commit = _branch_commit(head_branch)
+        release_commit = synchronization_release_commit(head_branch)
     except SyncError as error:
         raise TopologyError(str(error)) from error
     if release_commit != release_commit.lower():
@@ -113,7 +113,9 @@ def _validate_synchronization_topology(
             f"for {release_commit}"
         )
     if active_path not in head_texts:
-        raise TopologyError("active Synchronization manifest is missing from real PR head")
+        raise TopologyError(
+            "active Synchronization manifest is missing from real PR head"
+        )
 
     for candidate in head_manifests:
         _require_commit(repo, candidate.release.commit, "manifest release")
@@ -172,13 +174,15 @@ def _validate_synchronization_topology(
     manifest_introduction = _manifest_introduction(repo, head_sha, active_path)
     branch = head_branch
     try:
-        _verify_prepared(
+        preparation = _verify_prepared(
             repo,
             PreparedAttempt(manifest, branch, manifest_introduction),
             seed_commit=seed_commit,
         )
     except SyncError as error:
-        raise TopologyError(f"immutable preparation graph is invalid: {error}") from error
+        raise TopologyError(
+            f"immutable preparation graph is invalid: {error}"
+        ) from error
 
     changes = _git(
         repo,
@@ -194,14 +198,16 @@ def _validate_synchronization_topology(
             "Synchronization manifest history changed after its introduction"
         )
 
-    baseline = _preparation_baseline(repo, manifest, manifest_introduction)
     history = _first_parent_history(repo, manifest_introduction, head_sha)
     merges = _validate_new_commits(repo, history)
     if manifest.preparation_mode == "clean":
-        _validate_clean_baseline(repo, manifest, baseline)
-        baseline_reconciliation = baseline
+        baseline_reconciliation = preparation.baseline_reconciliation
+        if baseline_reconciliation is None:
+            raise TopologyError(
+                "clean preparation did not return a Baseline reconciliation"
+            )
         catch_up = _select_clean_catch_up(
-            repo, manifest, baseline, merges, base_sha
+            repo, manifest, baseline_reconciliation, merges, base_sha
         )
     elif manifest.preparation_mode == "conflicting":
         baseline_reconciliation, catch_up = _select_conflicting_reconciliations(
@@ -221,13 +227,6 @@ def _validate_synchronization_topology(
         baseline_reconciliation=baseline_reconciliation,
         catch_up_merge=catch_up,
     )
-
-
-def _branch_commit(branch: str) -> str:
-    commit = branch.removeprefix(SYNC_BRANCH_PREFIX)
-    if not branch.startswith(SYNC_BRANCH_PREFIX) or _SHA.fullmatch(commit) is None:
-        raise SyncError("Synchronization branch has invalid ownership")
-    return commit
 
 
 def _require_sha(value: str, label: str) -> None:
@@ -278,23 +277,6 @@ def _manifest_introduction(repo: Path, head: str, path: str) -> str:
     return changes[0]
 
 
-def _preparation_baseline(
-    repo: Path,
-    manifest: SynchronizationManifest,
-    manifest_introduction: str,
-) -> str:
-    parents = _parents(repo, manifest_introduction)
-    if len(parents) != 1:
-        raise TopologyError("Synchronization manifest introduction must have one parent")
-    parent = parents[0]
-    if manifest.preparation_mode == "clean" or parent != manifest.release.commit:
-        try:
-            return _normalization_parent(repo, parent) or parent
-        except SyncError as error:
-            raise TopologyError(str(error)) from error
-    return parent
-
-
 def _first_parent_history(
     repo: Path,
     introduction: str,
@@ -324,29 +306,19 @@ def _validate_new_commits(
     merges = []
     for index, (commit, parents) in enumerate(history):
         if len(parents) > 2:
-            raise TopologyError(f"unsupported octopus merge after manifest introduction: {commit}")
+            raise TopologyError(
+                f"unsupported octopus merge after manifest introduction: {commit}"
+            )
         subject = _git(repo, "show", "-s", "--format=%s", commit)
-        if subject == _NORMALIZATION_MESSAGE or subject.startswith(_MANIFEST_COMMIT_PREFIX):
+        if subject == _NORMALIZATION_MESSAGE or subject.startswith(
+            _MANIFEST_COMMIT_PREFIX
+        ):
             raise TopologyError(
                 "deterministic manifest/version commits cannot replace a reconciliation"
             )
         if len(parents) == 2:
             merges.append((index, commit, parents))
     return tuple(merges)
-
-
-def _validate_clean_baseline(
-    repo: Path, manifest: SynchronizationManifest, baseline: str
-) -> None:
-    parents = _parents(repo, baseline)
-    if parents != [manifest.fork_base_sha, manifest.release.commit]:
-        raise TopologyError(
-            "clean Synchronization requires exactly one Fork-first Baseline reconciliation"
-        )
-    if not _is_ancestor(repo, manifest.fork_base_sha, baseline):
-        raise TopologyError("clean Baseline reconciliation lost the Fork baseline")
-    if not _is_ancestor(repo, manifest.release.commit, baseline):
-        raise TopologyError("clean Baseline reconciliation lost the release baseline")
 
 
 def _select_clean_catch_up(
@@ -372,7 +344,9 @@ def _select_clean_catch_up(
             "Catch-up merge must use the real current PR base as its second parent"
         )
     if not _is_ancestor(repo, baseline, parents[0]):
-        raise TopologyError("Catch-up merge does not descend from Baseline reconciliation")
+        raise TopologyError(
+            "Catch-up merge does not descend from Baseline reconciliation"
+        )
     return commit
 
 
@@ -410,15 +384,21 @@ def _select_conflicting_reconciliations(
     if not _is_ancestor(repo, baseline_parents[0], baseline):
         raise TopologyError("Baseline reconciliation has an invalid first parent")
     if _is_ancestor(repo, manifest.fork_base_sha, baseline_parents[0]):
-        raise TopologyError("Baseline reconciliation was already contaminated by Fork ancestry")
+        raise TopologyError(
+            "Baseline reconciliation was already contaminated by Fork ancestry"
+        )
 
     if base_sha == manifest.fork_base_sha:
         if len(merges) != 1:
-            raise TopologyError("Fork-second Baseline reconciliation is duplicated or misplaced")
+            raise TopologyError(
+                "Fork-second Baseline reconciliation is duplicated or misplaced"
+            )
         return baseline, None
 
     if not _is_ancestor(repo, baseline, catch_up_parents[0]):
-        raise TopologyError("Catch-up merge does not descend from Baseline reconciliation")
+        raise TopologyError(
+            "Catch-up merge does not descend from Baseline reconciliation"
+        )
     if len(merges) != 2:
         raise TopologyError("Synchronization contains an unsupported extra merge")
     return baseline, catch_up
@@ -439,7 +419,10 @@ def main(argv: list[str] | None = None) -> int:
             args.repo.resolve(), args.head, args.base, args.head_branch
         )
     except (OSError, SyncError, TopologyError) as error:
-        print(f"Synchronization topology failed: {error}", file=sys.stderr)
+        print(
+            _bounded_diagnostic(f"Synchronization topology failed: {error}"),
+            file=sys.stderr,
+        )
         return 1
     if evidence is None:
         print(

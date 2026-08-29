@@ -43,6 +43,13 @@ class PreparedAttempt:
     head: str
 
 
+@dataclass(frozen=True)
+class PreparationEvidence:
+    """Evidence returned after validating the immutable preparation graph."""
+
+    baseline_reconciliation: str | None
+
+
 def prepare_attempt(
     repo: Path,
     release: ReleaseIdentity,
@@ -137,7 +144,10 @@ def inspect_open_attempt(
     prepared = _remote_attempt(
         repo, branch, expected_head, seed_commit=seed_commit
     )
-    if prepared is not None and prepared.manifest.release.commit != _branch_commit(branch):
+    if (
+        prepared is not None
+        and prepared.manifest.release.commit != synchronization_release_commit(branch)
+    ):
         raise SyncError(f"manifest does not own Synchronization branch {branch}")
     if prepared is not None:
         path = manifest_path(prepared.manifest.release.commit)
@@ -179,7 +189,7 @@ def synchronization_branches(repo: Path) -> tuple[tuple[str, str], ...]:
         if separator != "\t" or _SHA.fullmatch(head) is None or not ref.startswith(prefix):
             raise SyncError("invalid Synchronization branch listing")
         branch = ref.removeprefix(prefix)
-        _branch_commit(branch)
+        synchronization_release_commit(branch)
         branches.append((branch, head))
     if len(branches) > _MAX_SYNCHRONIZATION_BRANCHES:
         raise SyncError("Synchronization branch listing exceeds its record limit")
@@ -211,7 +221,7 @@ def _remote_attempt(
     *,
     seed_commit: str = MANIFEST_SEED_COMMIT,
 ) -> PreparedAttempt | None:
-    release_commit = _branch_commit(branch)
+    release_commit = synchronization_release_commit(branch)
     _git(repo, "fetch", "--no-tags", "origin", f"refs/heads/{branch}")
     head = _git(repo, "rev-parse", "FETCH_HEAD^{commit}")
     if expected_head is not None and head != expected_head:
@@ -231,9 +241,9 @@ def _verify_prepared(
     prepared: PreparedAttempt,
     *,
     seed_commit: str = MANIFEST_SEED_COMMIT,
-) -> None:
+) -> PreparationEvidence:
     manifest = prepared.manifest
-    if manifest.release.commit != _branch_commit(prepared.branch):
+    if manifest.release.commit != synchronization_release_commit(prepared.branch):
         raise SyncError(f"manifest does not own Synchronization branch {prepared.branch}")
     head_texts, _, tip = _read_chain_at(
         repo, prepared.head, seed_commit=seed_commit
@@ -282,10 +292,12 @@ def _verify_prepared(
             or _git(repo, "show", "-s", "--format=%T", prepared_parent) != tree
         ):
             raise SyncError("clean branch has an unexpected Baseline reconciliation")
+        return PreparationEvidence(prepared_parent)
     elif prepared_parent != manifest.release.commit or _is_ancestor(
         repo, manifest.fork_base_sha, prepared.head
     ):
         raise SyncError("conflicting branch has unexpected Fork ancestry")
+    return PreparationEvidence(None)
 
 
 def _read_chain_at(
@@ -529,7 +541,8 @@ def _workspace_version(text: str) -> re.Match[str]:
     return versions[0]
 
 
-def _branch_commit(branch: str) -> str:
+def synchronization_release_commit(branch: str) -> str:
+    """Return the immutable release SHA encoded by a Synchronization branch."""
     commit = branch.removeprefix(SYNC_BRANCH_PREFIX)
     if not branch.startswith(SYNC_BRANCH_PREFIX) or _SHA.fullmatch(commit) is None:
         raise SyncError("Synchronization branch has invalid ownership")
