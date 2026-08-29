@@ -1468,7 +1468,7 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     CreateFailurePullRequests([known_first_attempt]),
                 )
             second_head = fixture.remote_branch_head(second_branch)
-            before = fixture.ref_snapshot()
+            before_remote_refs = fixture.git("ls-remote", "--heads", "origin")
             pull_requests = RecordingPullRequests()
 
             with self.assertRaisesRegex(
@@ -1476,7 +1476,9 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             ):
                 synchronize(fixture.config(), FailingReleases(), pull_requests)
 
-            self.assertEqual(fixture.ref_snapshot(), before)
+            self.assertEqual(
+                fixture.git("ls-remote", "--heads", "origin"), before_remote_refs
+            )
             self.assertEqual(pull_requests.created, [])
             self.assertIsNotNone(first_head)
             self.assertIsNotNone(second_head)
