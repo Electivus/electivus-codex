@@ -100,6 +100,7 @@ class DisabledCodeScanningPolicyTests(unittest.TestCase):
             ("tools/analyze.py", "python3 tools/analyze.py", None),
             ("tools/analyze.bat", "tools\\analyze.bat", None),
             ("tools/analyze.cmd", "tools\\analyze.cmd", None),
+            ("tools/analyze.rb", "ruby tools/analyze.rb", 0o755),
             ("tools/analyze", "./tools/analyze", 0o755),
             ("justfile", "just analyze", None),
             ("tools/BUILD", "bazel run //tools:analyze", None),
