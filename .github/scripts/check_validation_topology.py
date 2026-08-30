@@ -18,6 +18,7 @@ VALIDATION_WORKFLOWS = (
     ".github/workflows/validation-retirement.yml",
     ".github/workflows/validation-comparison.yml",
 )
+BLOCKING_WORKFLOW = ".github/workflows/blocking-ci.yml"
 PINNED_ACTION = re.compile(r"^\s*-?\s*uses:\s*(\S+)", re.MULTILINE)
 
 
@@ -36,8 +37,10 @@ def validate_topology(sources: dict[str, str]) -> list[str]:
     shadow = sources.get(".github/workflows/validation-shadow.yml", "")
     integrated = sources.get(".github/workflows/validation-integrated.yml", "")
     release = sources.get(".github/workflows/validation-release-certification.yml", "")
+    stability = sources.get(".github/workflows/validation-stability.yml", "")
     retirement = sources.get(".github/workflows/validation-retirement.yml", "")
     comparison = sources.get(".github/workflows/validation-comparison.yml", "")
+    blocking = sources.get(BLOCKING_WORKFLOW, "")
     if "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" not in shadow:
         issues.append("Shadow must use latest-wins cancellation only for Pull requests")
     if "validation_emit_results.py" not in shadow or "if: ${{ always() }}" not in shadow:
@@ -55,12 +58,26 @@ def validate_topology(sources: dict[str, str]) -> list[str]:
         issues.append("Release promotion must not rebuild, repackage, or resign")
     if "environment:\n      name: release-public" not in release:
         issues.append("public Release promotion requires its separate protected environment")
+    if (
+        "ordinary_run_ids" not in stability
+        or "cache_disabled_run_id" not in stability
+        or "validation_stability_input.py" not in stability
+        or "records_json" in stability
+        or "samples_json" in stability
+    ):
+        issues.append("Stability must derive bounded input from identified retained artifacts")
     if "SUPERSEDED_ISSUES" not in sources.get(".github/scripts/validation_retirement.py", ""):
         issues.append("retirement must retain explicit superseded issue backlinks")
     if "--legacy-manually-runnable" not in retirement:
         issues.append("retirement must keep the legacy graph manually runnable")
     if "validation_comparison.py" not in comparison or "legacy_run_id" not in comparison or "replacement_run_id" not in comparison:
         issues.append("comparison must use explicit legacy and replacement run identities")
+    if blocking:
+        required = blocking.split("\n  required:", 1)[-1]
+        if "certification-lock:" not in blocking:
+            issues.append("blocking CI must expose the Certification lock")
+        if "\n      - certification-lock" not in required:
+            issues.append("CI required must enforce the Certification lock")
     return issues
 
 
@@ -72,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for path in VALIDATION_WORKFLOWS:
             sources[path] = (repo / path).read_text(encoding="utf-8")
+        sources[BLOCKING_WORKFLOW] = (repo / BLOCKING_WORKFLOW).read_text(encoding="utf-8")
         sources[".github/scripts/validation_retirement.py"] = (
             repo / ".github/scripts/validation_retirement.py"
         ).read_text(encoding="utf-8")

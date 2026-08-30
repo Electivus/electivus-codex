@@ -37,6 +37,15 @@ The staged workflows map to the specification subissues:
 unpinned actions, missing stages, authority gaps, accidental CodeQL upload,
 release rebuilds, or retirement that omits the superseded issue backlinks.
 
+Stability certification is dispatched with `ordinary_run_ids` containing 20 to
+50 ascending Shadow run IDs, plus one exact run ID each for the
+Certification-required candidate, the cache-disabled reconstruction, and the
+Integrated certification. The workflow downloads those named artifacts with
+`actions: read`, verifies their report and Integrated-manifest identities, and
+derives the bounded records and latency samples itself; callers cannot submit
+replacement JSON. The resulting Integrated SHA must still equal the live
+`main` tip when the finite certification runs.
+
 The workflows in this directory implement Sustainable fork CI as a compatibility
 patch over the inherited validation suite. Correctness depends only on standard
 GitHub-hosted Linux runners. BuildBuddy can accelerate Bazel work when its
