@@ -5,25 +5,13 @@ from dataclasses import dataclass
 import json
 from typing import Any
 
-from validation_contracts import MAX_ITEMS
-from validation_contracts import PROFILES
-from validation_contracts import SCHEMA_VERSION
+from validation_contracts import MAX_ITEMS, PROFILES, SCHEMA_VERSION
 from validation_contracts import VALIDATION_IMPLEMENTATION
-from validation_contracts import CandidateIdentity
-from validation_contracts import ContractError
-from validation_contracts import ValidationFingerprint
-from validation_contracts import _array
-from validation_contracts import _keys
-from validation_contracts import _object
-from validation_contracts import _strings
-from validation_contracts import _text
-from validation_contracts import candidate_from_dict
-from validation_contracts import candidate_to_dict
-from validation_contracts import canonical_json
-from validation_contracts import fingerprint_from_dict
-from validation_contracts import fingerprint_to_dict
-from validation_contracts import validate_candidate
-from validation_contracts import validate_fingerprint
+from validation_contracts import CandidateIdentity, ContractError, ValidationFingerprint
+from validation_contracts import _array, _keys, _object, _strings, _text
+from validation_contracts import candidate_from_dict, candidate_to_dict, canonical_json
+from validation_contracts import fingerprint_from_dict, fingerprint_to_dict
+from validation_contracts import validate_candidate, validate_fingerprint
 
 
 MAX_EVIDENCE = 64
@@ -31,8 +19,6 @@ MAX_PLAN_ITEMS = MAX_ITEMS
 MAX_PLAN_TEXT_BYTES = 64_000
 MAX_PLAN_INPUT_BYTES = 256_000
 MAX_PLAN_OUTPUT_BYTES = 256_000
-MAX_SERIALIZED_BYTES = MAX_PLAN_OUTPUT_BYTES
-MAX_INPUT_BYTES = MAX_PLAN_INPUT_BYTES
 
 CHANGE_SURFACES = (
     "repository",
@@ -60,26 +46,27 @@ RISK_MODIFIERS = (
 )
 KNOWN_RISK_MODIFIERS = frozenset(RISK_MODIFIERS)
 
-EVIDENCE_FAMILIES = (
-    "repository",
-    "repository-policy",
-    "repository-hygiene",
-    "rust-fast",
-    "linux-x64-bazel",
-    "api-protocol-sdk",
-    "postgresql",
-    "v8",
-    "windows-x64",
-    "code-quality",
-    "linux-x64-cargo",
-    "linux-arm64",
-    "linux-musl",
-    "release-packaging",
-    "synchronization-topology",
-)
+FAMILY_STAGES = {
+    "repository": "preflight",
+    "repository-policy": "preflight",
+    "repository-hygiene": "preflight",
+    "rust-fast": "merge",
+    "linux-x64-bazel": "merge",
+    "api-protocol-sdk": "merge",
+    "postgresql": "merge",
+    "v8": "merge",
+    "windows-x64": "merge",
+    "code-quality": "merge",
+    "linux-x64-cargo": "integrated",
+    "linux-arm64": "integrated",
+    "linux-musl": "integrated",
+    "release-packaging": "release",
+    "synchronization-topology": "synchronization",
+}
+EVIDENCE_FAMILIES = tuple(FAMILY_STAGES)
 KNOWN_EVIDENCE_FAMILIES = frozenset(EVIDENCE_FAMILIES)
 DISPOSITIONS = frozenset({"required", "not-required"})
-STAGES = frozenset({"preflight", "merge", "integrated", "release", "surveillance"})
+STAGES = frozenset(FAMILY_STAGES.values()) | {"surveillance"}
 RETENTION_CLASSES = frozenset(
     {
         "intra-run",
@@ -105,14 +92,14 @@ class EvidenceRequirement:
 
 
 def requirement_to_dict(requirement: EvidenceRequirement) -> dict[str, object]:
-    return {
-        "family": requirement.family,
-        "stage": requirement.stage,
-        "selected": requirement.selected,
-        "disposition": requirement.disposition,
-        "reason": requirement.reason,
-        "retentionClass": requirement.retention_class,
-    }
+    return dict(
+        family=requirement.family,
+        stage=requirement.stage,
+        selected=requirement.selected,
+        disposition=requirement.disposition,
+        reason=requirement.reason,
+        retentionClass=requirement.retention_class,
+    )
 
 
 def validate_requirement(requirement: EvidenceRequirement) -> None:
@@ -124,6 +111,8 @@ def validate_requirement(requirement: EvidenceRequirement) -> None:
     _text(requirement.stage, "requirement.stage")
     if requirement.stage not in STAGES:
         raise ContractError("requirement.stage is unsupported")
+    if requirement.stage != FAMILY_STAGES[requirement.family]:
+        raise ContractError("requirement.stage does not match its family")
     if not isinstance(requirement.selected, bool):
         raise ContractError("requirement.selected must be boolean")
     _text(requirement.disposition, "requirement.disposition")
@@ -170,17 +159,17 @@ class ValidationPlan:
 
 
 def plan_to_dict(plan: ValidationPlan) -> dict[str, object]:
-    return {
-        "schemaVersion": plan.schema_version,
-        "validationImplementation": plan.validation_implementation,
-        "candidate": candidate_to_dict(plan.candidate),
-        "changeSurfaces": list(plan.surfaces),
-        "riskModifiers": list(plan.risk_modifiers),
-        "profile": plan.profile,
-        "evidence": [requirement_to_dict(item) for item in plan.requirements],
-        "fingerprint": fingerprint_to_dict(plan.fingerprint),
-        "policyErrors": list(plan.policy_errors),
-    }
+    return dict(
+        schemaVersion=plan.schema_version,
+        validationImplementation=plan.validation_implementation,
+        candidate=candidate_to_dict(plan.candidate),
+        changeSurfaces=list(plan.surfaces),
+        riskModifiers=list(plan.risk_modifiers),
+        profile=plan.profile,
+        evidence=[requirement_to_dict(item) for item in plan.requirements],
+        fingerprint=fingerprint_to_dict(plan.fingerprint),
+        policyErrors=list(plan.policy_errors),
+    )
 
 
 def _canonical_array_parameter(
@@ -217,13 +206,11 @@ def _validate_fingerprint_binding(plan: ValidationPlan) -> None:
     if fingerprint.profile != plan.profile:
         raise ContractError("plan profile and fingerprint profile disagree")
 
-    source = dict(fingerprint.source)
-    expected_source = {
-        "candidateSha": plan.candidate.candidate_sha,
-        "baseSha": plan.candidate.base_sha or "",
-        "headSha": plan.candidate.head_sha or "",
-    }
-    if any(source.get(name) != value for name, value in expected_source.items()):
+    candidate = candidate_to_dict(plan.candidate)
+    expected_source = tuple(
+        (name, "" if value is None else str(value)) for name, value in candidate.items()
+    )
+    if fingerprint.source != expected_source:
         raise ContractError("plan fingerprint is bound to a different candidate")
 
     dependencies = dict(fingerprint.dependencies)
@@ -355,6 +342,9 @@ def plan_from_dict(value: object) -> ValidationPlan:
         },
         "plan",
     )
+    evidence = _array(payload["evidence"], "plan.evidence")
+    if len(evidence) > MAX_EVIDENCE:
+        raise ContractError("plan.evidence has an invalid size")
     plan = ValidationPlan(
         schema_version=payload["schemaVersion"],
         validation_implementation=_text(
@@ -364,10 +354,7 @@ def plan_from_dict(value: object) -> ValidationPlan:
         surfaces=_strings(payload["changeSurfaces"], "plan.changeSurfaces"),
         risk_modifiers=_strings(payload["riskModifiers"], "plan.riskModifiers"),
         profile=_text(payload["profile"], "plan.profile"),
-        requirements=tuple(
-            requirement_from_dict(item)
-            for item in _array(payload["evidence"], "plan.evidence")
-        ),
+        requirements=tuple(requirement_from_dict(item) for item in evidence),
         fingerprint=fingerprint_from_dict(payload["fingerprint"]),
         policy_errors=_strings(payload["policyErrors"], "plan.policyErrors"),
     )
