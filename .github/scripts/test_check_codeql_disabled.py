@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import check_codeql_disabled as policy
 
@@ -16,6 +17,14 @@ class DisabledCodeScanningPolicyTests(unittest.TestCase):
             (
                 "security-events permission",
                 {".github/workflows/example.yml": "security-events: write\n"},
+            ),
+            (
+                "security-events permission",
+                {
+                    ".github/workflows/example.yml": (
+                        "permissions: {contents: read, security-events: write}\n"
+                    )
+                },
             ),
             (
                 "code-scanning authority",
@@ -40,10 +49,29 @@ class DisabledCodeScanningPolicyTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, "\n".join(policy.validate_workflows(sources)))
 
+    def test_codeql_authority_cannot_be_hidden_in_local_actions(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            workflow = repo / ".github/workflows/example.yml"
+            action = repo / ".github/actions/example/action.yml"
+            workflow.parent.mkdir(parents=True)
+            action.parent.mkdir(parents=True)
+            workflow.write_text("name: example\n", encoding="utf-8")
+            action.write_text(
+                "runs:\n  using: composite\n  steps:\n"
+                "    - uses: github/codeql-action/init@abc\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                ["CodeQL action: .github/actions/example/action.yml"],
+                policy.validate_workflows(policy.load_automation_sources(repo)),
+            )
+
     def test_repository_checks_enforce_the_disabled_policy(self) -> None:
         repo = Path(__file__).resolve().parents[2]
         self.assertEqual(
-            [], policy.validate_workflows(policy.load_root_workflows(repo))
+            [], policy.validate_workflows(policy.load_automation_sources(repo))
         )
         repo_checks = (repo / ".github/workflows/repo-checks.yml").read_text(
             encoding="utf-8"

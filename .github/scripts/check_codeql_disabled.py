@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail when an active root workflow reintroduces CodeQL authority."""
+"""Fail when repository automation reintroduces CodeQL authority."""
 
 import argparse
 import re
@@ -8,7 +8,9 @@ from pathlib import Path
 
 POLICY_CHECK_COMMAND = "python3 .github/scripts/check_codeql_disabled.py"
 POLICY_CHECK_LINE = f"run: {POLICY_CHECK_COMMAND}"
-SECURITY_EVENTS_PERMISSION = re.compile(r"^\s*security-events\s*:", re.MULTILINE)
+SECURITY_EVENTS_PERMISSION = re.compile(
+    r"(?:^\s*|[,{]\s*)[\"']?security-events[\"']?\s*:", re.MULTILINE
+)
 CODE_SCANNING_AUTHORITY = re.compile(r"code[_ -]?scanning", re.IGNORECASE)
 
 
@@ -34,9 +36,17 @@ def validate_workflows(sources: dict[str, str]) -> list[str]:
     return issues
 
 
-def load_root_workflows(repo: Path) -> dict[str, str]:
+def load_automation_sources(repo: Path) -> dict[str, str]:
     workflow_dir = repo / ".github" / "workflows"
-    paths = sorted((*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")))
+    action_dir = repo / ".github" / "actions"
+    paths = sorted(
+        (
+            *workflow_dir.glob("*.yml"),
+            *workflow_dir.glob("*.yaml"),
+            *action_dir.glob("**/action.yml"),
+            *action_dir.glob("**/action.yaml"),
+        )
+    )
     return {
         path.relative_to(repo).as_posix(): path.read_text(encoding="utf-8")
         for path in paths
@@ -48,10 +58,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     repo = parser.parse_args(argv).repo.resolve()
     try:
-        issues = validate_workflows(load_root_workflows(repo))
+        issues = validate_workflows(load_automation_sources(repo))
     except (OSError, UnicodeError) as error:
         print(
-            f"disabled code-scanning policy could not read root workflows: {error}",
+            f"disabled code-scanning policy could not read automation sources: {error}",
             file=sys.stderr,
         )
         return 1
@@ -63,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     print(
-        "disabled code-scanning policy passed: active root workflows contain no CodeQL authority"
+        "disabled code-scanning policy passed: repository automation contains no CodeQL authority"
     )
     return 0
 
