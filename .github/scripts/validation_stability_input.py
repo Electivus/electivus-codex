@@ -87,6 +87,47 @@ def _retry_count(report: ValidationReport) -> int:
     return max(attempts, default=1) - 1
 
 
+def _generation_core(report: ValidationReport) -> tuple[object, ...]:
+    fingerprint = report.plan.fingerprint
+    dependencies = tuple(
+        item for item in fingerprint.dependencies if item[0] != "selectedEvidence"
+    )
+    return (
+        fingerprint.validation_implementation,
+        dependencies,
+        fingerprint.toolchains,
+    )
+
+
+def _generation_shape(report: ValidationReport) -> tuple[object, ...]:
+    fingerprint = report.plan.fingerprint
+    return fingerprint.commands, fingerprint.platforms
+
+
+def _validate_generation(reports: tuple[ValidationReport, ...]) -> None:
+    if not reports:
+        raise ContractError("Stability requires at least one Validation report")
+    expected_core = _generation_core(reports[0])
+    shapes_by_lane: dict[tuple[str, str], set[tuple[object, ...]]] = {}
+    for report in reports:
+        if _generation_core(report) != expected_core:
+            raise ContractError(
+                "Stability reports must use one validation implementation, dependency, "
+                "and toolchain generation"
+            )
+        lane = (report.plan.profile, report.candidate.kind)
+        shapes_by_lane.setdefault(lane, set()).add(_generation_shape(report))
+    changed_lanes = tuple(
+        lane for lane, shapes in shapes_by_lane.items() if len(shapes) != 1
+    )
+    if changed_lanes:
+        rendered = ", ".join(f"{profile}/{kind}" for profile, kind in changed_lanes)
+        raise ContractError(
+            "Stability reports changed validation commands or platforms within lane: "
+            f"{rendered}"
+        )
+
+
 def _require_shadow_profile(
     report: ValidationReport,
     *,
@@ -221,8 +262,13 @@ def build_stability_inputs(
         or integrated_manifest.outcome != integrated_report.outcome
         or integrated_manifest.candidate != integrated_report.candidate
         or integrated_manifest.fingerprint != integrated_report.plan.fingerprint
+        or integrated_manifest.attempt != _retry_count(integrated_report) + 1
     ):
         raise ContractError("Integrated authority manifest does not match its report")
+
+    _validate_generation(
+        (*ordinary_reports, certification_report, cache_disabled_report, integrated_report)
+    )
 
     ordinary_record = _record(
         ordinary_reports[0], profile="ordinary", name="ordinary report 1"

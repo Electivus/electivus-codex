@@ -102,6 +102,71 @@ class ValidationStabilityInputTests(unittest.TestCase):
                 authority,
             )
 
+    def test_stability_rejects_retry_and_mixed_validation_generations(self):
+        ordinary = tuple(
+            _report(_candidate(index), "codex-rs/core/src/lib.rs")
+            for index in range(1, 21)
+        )
+        certification = _report(
+            _candidate(101), ".github/workflows/validation-shadow.yml"
+        )
+        cache_disabled = replace(ordinary[0], cache_fallback="disabled-reconstruction")
+        integrated = _report(
+            _candidate(201, kind="integrated"), "codex-rs/core/src/lib.rs"
+        )
+        authority = integrated_manifest(report_to_dict(integrated))
+
+        retried = replace(
+            ordinary[0],
+            evidence=tuple(replace(manifest, attempt=2) for manifest in ordinary[0].evidence),
+        )
+        with self.assertRaises(ContractError):
+            build_stability_inputs(
+                (retried, *ordinary[1:]),
+                certification,
+                replace(retried, cache_fallback="disabled-reconstruction"),
+                integrated,
+                authority,
+            )
+
+        changed_toolchain = replace(
+            ordinary[1],
+            plan=replace(
+                ordinary[1].plan,
+                fingerprint=replace(
+                    ordinary[1].plan.fingerprint,
+                    toolchains=(("rust", "different"),),
+                ),
+            ),
+        )
+        with self.assertRaises(ContractError):
+            build_stability_inputs(
+                (ordinary[0], changed_toolchain, *ordinary[2:]),
+                certification,
+                cache_disabled,
+                integrated,
+                authority,
+            )
+
+        changed_shape = replace(
+            ordinary[1],
+            plan=replace(
+                ordinary[1].plan,
+                fingerprint=replace(
+                    ordinary[1].plan.fingerprint,
+                    commands=("validation:changed",),
+                ),
+            ),
+        )
+        with self.assertRaises(ContractError):
+            build_stability_inputs(
+                (ordinary[0], changed_shape, *ordinary[2:]),
+                certification,
+                cache_disabled,
+                integrated,
+                authority,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
