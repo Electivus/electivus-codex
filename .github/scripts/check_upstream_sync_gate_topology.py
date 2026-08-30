@@ -32,7 +32,7 @@ REAL_BRANCH_ENV = (
     "github.event.pull_request.head.ref || '' }}"
 )
 REQUIRED_ALWAYS = re.compile(
-    r"^    if:\s*\$\{\{\s*always\(\)\s*\}\}\s*(?:#.*)?$",
+    r"^    if:[ \t]*\$\{\{[ \t]*always\(\)[ \t]*\}\}[ \t]*(?:#.*)?$",
     re.MULTILINE,
 )
 

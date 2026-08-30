@@ -37,6 +37,13 @@ class UpstreamSyncGateTopologyTests(unittest.TestCase):
             "        if: ${{ always() }}\n",
             1,
         )
+        required_with_multiline_if = blocking[:required_start] + blocking[
+            required_start:
+        ].replace(
+            "    if: ${{ always() }}",
+            "    if:\n      ${{ always() }}",
+            1,
+        )
         cases = (
             (
                 "real head checkout",
@@ -89,6 +96,11 @@ class UpstreamSyncGateTopologyTests(unittest.TestCase):
                 "required aggregate",
                 0,
                 required_without_job_if,
+            ),
+            (
+                "required aggregate",
+                0,
+                required_with_multiline_if,
             ),
             (
                 "repository wiring test",
