@@ -143,6 +143,14 @@ class ValidationContractTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ContractError):
                 validate_candidate(invalid)
 
+    def test_text_rejects_lone_surrogates_as_contract_errors(self) -> None:
+        invalid = replace(pull_request_candidate(), repository="\ud800")
+
+        with self.assertRaisesRegex(
+            ContractError, "candidate.repository must be valid UTF-8"
+        ):
+            validate_candidate(invalid)
+
     def test_fingerprint_guards_reject_versions_digests_and_duplicate_keys(
         self,
     ) -> None:
@@ -157,11 +165,13 @@ class ValidationContractTests(unittest.TestCase):
             fingerprint,
             source=fingerprint.source + (("candidateSha", "e" * 40),),
         )
+        unknown_profile = replace(fingerprint, profile="unknown")
 
         for operation in (
             lambda: fingerprint_from_dict(fingerprint_to_dict(unsupported)),
             lambda: fingerprint_from_dict(wrong_digest),
             lambda: validate_fingerprint(duplicate_source),
+            lambda: validate_fingerprint(unknown_profile),
         ):
             with self.subTest(operation=operation), self.assertRaises(ContractError):
                 operation()
