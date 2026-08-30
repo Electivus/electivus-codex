@@ -32,11 +32,7 @@ class DisabledCodeScanningPolicyTests(unittest.TestCase):
             ),
             (
                 "CodeQL reference",
-                {
-                    ".github/workflows/example.yml": (
-                        "run: co'de'ql database analyze\n"
-                    )
-                },
+                {".github/workflows/example.yml": ("run: co'de'ql database analyze\n")},
             ),
             (
                 "security-events permission",
@@ -110,7 +106,10 @@ class DisabledCodeScanningPolicyTests(unittest.TestCase):
             ("tools/rules.bzl", "bazel run //tools:analyze", None),
         )
         for script_path, command, mode in cases:
-            with self.subTest(script_path=script_path), TemporaryDirectory() as temp_dir:
+            with (
+                self.subTest(script_path=script_path),
+                TemporaryDirectory() as temp_dir,
+            ):
                 repo = Path(temp_dir)
                 workflow = repo / ".github/workflows/example.yml"
                 script = repo / script_path

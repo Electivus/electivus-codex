@@ -150,7 +150,9 @@ class DeepLinuxChangesTest(unittest.TestCase):
             self.run_git(root, "commit", "-m", "base only")
             base = self.run_git(root, "rev-parse", "HEAD")
 
-            self.assertEqual(changed_files(base, head, root=root), {"new.txt", "old.txt"})
+            self.assertEqual(
+                changed_files(base, head, root=root), {"new.txt", "old.txt"}
+            )
 
     def test_non_pull_request_events_default_to_eligible(self) -> None:
         events = (

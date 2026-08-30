@@ -154,13 +154,10 @@ def load_automation_sources(repo: Path) -> dict[str, str]:
                 with path.open("rb") as source:
                     executable_text = b"\0" not in source.read(4096)
             if (
-                (
-                    path.suffix.casefold() in AUTOMATION_IMPLEMENTATION_SUFFIXES
-                    or path.name.casefold() in AUTOMATION_IMPLEMENTATION_FILENAMES
-                    or executable_text
-                )
-                and relative not in POLICY_IMPLEMENTATION_EXCLUSIONS
-            ):
+                path.suffix.casefold() in AUTOMATION_IMPLEMENTATION_SUFFIXES
+                or path.name.casefold() in AUTOMATION_IMPLEMENTATION_FILENAMES
+                or executable_text
+            ) and relative not in POLICY_IMPLEMENTATION_EXCLUSIONS:
                 paths.add(path)
     return {
         path.relative_to(repo).as_posix(): path.read_text(encoding="utf-8")

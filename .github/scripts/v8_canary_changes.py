@@ -138,7 +138,9 @@ def classify_changed_files(
         )
     matched = sorted(matching_canary_paths(changed_files))
     if matched:
-        return CanaryDecision(True, _bounded_reason("V8 canary path changed: ", matched))
+        return CanaryDecision(
+            True, _bounded_reason("V8 canary path changed: ", matched)
+        )
     if not changed_files:
         return CanaryDecision(True, "comparison returned no changed paths")
     unknown = sorted(
@@ -285,10 +287,7 @@ def main() -> None:
     metadata = metadata_for_revisions(args.base, args.head, force=args.force)
     print(f"canary_required={str(metadata.canary.required).lower()}")
     print(f"canary_reason={metadata.canary.reason}")
-    print(
-        "windows_source_required="
-        f"{str(metadata.windows_source_required).lower()}"
-    )
+    print(f"windows_source_required={str(metadata.windows_source_required).lower()}")
 
 
 if __name__ == "__main__":

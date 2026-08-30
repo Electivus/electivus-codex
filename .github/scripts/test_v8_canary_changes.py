@@ -124,23 +124,33 @@ class V8CanaryChangesTest(unittest.TestCase):
         cases = (
             (
                 {"codex-rs/v8-poc/Cargo.toml"},
-                CanaryDecision(True, "V8 canary path changed: codex-rs/v8-poc/Cargo.toml"),
+                CanaryDecision(
+                    True, "V8 canary path changed: codex-rs/v8-poc/Cargo.toml"
+                ),
             ),
             (
                 {"codex-rs/v8-poc/BUILD.bazel"},
-                CanaryDecision(True, "V8 canary path changed: codex-rs/v8-poc/BUILD.bazel"),
+                CanaryDecision(
+                    True, "V8 canary path changed: codex-rs/v8-poc/BUILD.bazel"
+                ),
             ),
             (
                 {"codex-rs/v8-poc/src/lib.rs"},
-                CanaryDecision(True, "V8 canary path changed: codex-rs/v8-poc/src/lib.rs"),
+                CanaryDecision(
+                    True, "V8 canary path changed: codex-rs/v8-poc/src/lib.rs"
+                ),
             ),
             (
                 {"third_party/v8/BUILD.bazel"},
-                CanaryDecision(True, "V8 canary path changed: third_party/v8/BUILD.bazel"),
+                CanaryDecision(
+                    True, "V8 canary path changed: third_party/v8/BUILD.bazel"
+                ),
             ),
             (
                 {"codex-rs/core/src/lib.rs", "docs/architecture.md"},
-                CanaryDecision(False, "all 2 changed paths are explicitly V8-irrelevant"),
+                CanaryDecision(
+                    False, "all 2 changed paths are explicitly V8-irrelevant"
+                ),
             ),
             (
                 {"new-top-level/tool.py"},
