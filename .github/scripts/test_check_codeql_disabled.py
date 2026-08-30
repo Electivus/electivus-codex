@@ -23,6 +23,14 @@ class DisabledCodeScanningPolicyTests(unittest.TestCase):
                 },
             ),
             (
+                "CodeQL reference",
+                {
+                    ".github/workflows/example.yml": (
+                        "run: |\n  codeq\\\n  l database analyze\n"
+                    )
+                },
+            ),
+            (
                 "security-events permission",
                 {".github/workflows/example.yml": "security-events: write\n"},
             ),
@@ -77,6 +85,28 @@ class DisabledCodeScanningPolicyTests(unittest.TestCase):
 
             self.assertEqual(
                 ["CodeQL action: .github/actions/example/action.yml"],
+                policy.validate_workflows(policy.load_automation_sources(repo)),
+            )
+
+    def test_codeql_authority_cannot_be_delegated_to_repository_scripts(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            workflow = repo / ".github/workflows/example.yml"
+            script = repo / ".github/scripts/analyze.py"
+            workflow.parent.mkdir(parents=True)
+            script.parent.mkdir(parents=True)
+            workflow.write_text(
+                "run: python3 .github/scripts/analyze.py\n", encoding="utf-8"
+            )
+            script.write_text(
+                'subprocess.run(["codeql", "database", "analyze"])\n',
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                ["CodeQL reference: .github/scripts/analyze.py"],
                 policy.validate_workflows(policy.load_automation_sources(repo)),
             )
 

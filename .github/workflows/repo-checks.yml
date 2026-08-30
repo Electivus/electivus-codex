@@ -52,10 +52,10 @@ jobs:
           echo "$GOBIN" >> "$GITHUB_PATH"
 
       - name: Test GitHub helper scripts
-        run: uv run --project scripts just test-github-scripts
+        run: uv run --project scripts --python python3 just test-github-scripts
 
       - name: Verify disabled security-analysis policy
-        run: uv run --project scripts python .github/scripts/check_codeql_disabled.py
+        run: uv run --project scripts --python python3 python .github/scripts/check_codeql_disabled.py
 
       - name: Verify Rust test signal policy
         run: python3 .github/scripts/check_rust_test_policy.py

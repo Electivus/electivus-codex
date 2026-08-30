@@ -21,7 +21,8 @@ requirement. The independent errors-threshold code-quality gate and
 prevents active root workflows and local action manifests from reintroducing
 CodeQL actions, `security-events` permission (including `write-all`), or
 code-scanning authority implicitly. The guard evaluates parsed YAML scalar
-values so equivalent quoted and multiline forms cannot bypass the policy.
+values and repository automation implementations so equivalent quoted,
+multiline, delegated, and shell-continuation forms cannot bypass the policy.
 
 Re-enabling CodeQL requires a new explicit specification revision and separate
 authorization for the corresponding ruleset mutation.
