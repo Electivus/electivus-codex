@@ -104,6 +104,11 @@ def _request(payload: object) -> PublicationRequest:
 def promote(args: argparse.Namespace) -> int:
     artifact_set = artifact_set_from_dict(_read_json(args.certified_set))
     request = _request(_read_json(args.request))
+    verify_release_files(
+        args.artifact_dir,
+        artifact_set.artifacts,
+        source_sha=artifact_set.source_sha,
+    )
     verify_promotion(artifact_set, request, state=args.state)
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -148,6 +153,7 @@ def parser() -> argparse.ArgumentParser:
     promote_command = subcommands.add_parser("promote")
     promote_command.add_argument("--certified-set", type=Path, required=True)
     promote_command.add_argument("--request", type=Path, required=True)
+    promote_command.add_argument("--artifact-dir", type=Path, required=True)
     promote_command.add_argument("--state", default="clean")
     promote_command.add_argument("--output", type=Path)
     promote_command.set_defaults(handler=promote)

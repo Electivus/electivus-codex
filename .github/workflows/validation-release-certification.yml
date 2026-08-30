@@ -184,7 +184,7 @@ jobs:
       - name: Checkout the exact release implementation
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
       - name: Download the exact Integrated certification
@@ -251,12 +251,13 @@ jobs:
     environment:
       name: release-public
     permissions:
+      actions: read
       contents: read
     steps:
       - name: Checkout the exact release implementation
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
       - name: Download the certified set
@@ -264,6 +265,12 @@ jobs:
         with:
           name: validation-release-certification-${{ github.run_id }}
           path: certification-input
+      - name: Download the certified platform bytes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: validation-release-${{ github.run_id }}-*
+          path: release-input
+          merge-multiple: true
       - name: Create the explicit no-rebuild publication request
         shell: bash
         run: |
@@ -299,6 +306,7 @@ jobs:
           python3 .github/scripts/validation_release_cli.py promote \
             --certified-set certification-input/certified-set.json \
             --request publication-request.json \
+            --artifact-dir release-input \
             --state "$state" \
             --output promotion-record.json \
             | tee -a "$GITHUB_STEP_SUMMARY"
