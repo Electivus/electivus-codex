@@ -44,6 +44,27 @@ class UpstreamSyncGateTopologyTests(unittest.TestCase):
             "    if:\n      ${{ always() }}",
             1,
         )
+        required_without_enforcement = blocking[:required_start] + blocking[
+            required_start:
+        ].replace(
+            "        run: python3 .github/scripts/check_ci_results.py\n",
+            "",
+            1,
+        )
+        required_with_replaced_enforcement = blocking[:required_start] + blocking[
+            required_start:
+        ].replace(
+            "        run: python3 .github/scripts/check_ci_results.py\n",
+            "        run: python3 .github/scripts/check_ci_results_legacy.py\n",
+            1,
+        )
+        required_with_replaced_needs = blocking[:required_start] + blocking[
+            required_start:
+        ].replace(
+            "          NEEDS: ${{ toJSON(needs) }}\n",
+            "          NEEDS: '{}'\n",
+            1,
+        )
         cases = (
             (
                 "real head checkout",
@@ -101,6 +122,21 @@ class UpstreamSyncGateTopologyTests(unittest.TestCase):
                 "required aggregate",
                 0,
                 required_with_multiline_if,
+            ),
+            (
+                "required aggregate enforcement",
+                0,
+                required_without_enforcement,
+            ),
+            (
+                "required aggregate enforcement",
+                0,
+                required_with_replaced_enforcement,
+            ),
+            (
+                "required aggregate enforcement",
+                0,
+                required_with_replaced_needs,
             ),
             (
                 "repository wiring test",

@@ -35,6 +35,14 @@ REQUIRED_ALWAYS = re.compile(
     r"^    if:[ \t]*\$\{\{[ \t]*always\(\)[ \t]*\}\}[ \t]*(?:#.*)?$",
     re.MULTILINE,
 )
+REQUIRED_ENFORCEMENT = re.compile(
+    r"^      - name: Require successful dependencies[ \t]*\n"
+    r"        env:[ \t]*\n"
+    r"          NEEDS:[ \t]*\$\{\{[ \t]*toJSON\(needs\)[ \t]*\}\}[ \t]*"
+    r"(?:#.*)?\n"
+    r"        run:[ \t]+python3 \.github/scripts/check_ci_results\.py[ \t]*(?:#.*)?$",
+    re.MULTILINE,
+)
 
 
 def validate_topology(
@@ -76,6 +84,10 @@ def validate_topology(
             "- synchronization-topology" in required
             and "name: CI required" in required
             and REQUIRED_ALWAYS.search(required) is not None,
+        ),
+        (
+            "required aggregate enforcement",
+            REQUIRED_ENFORCEMENT.search(required) is not None,
         ),
         (
             "repository wiring test",
