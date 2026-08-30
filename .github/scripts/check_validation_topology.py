@@ -45,6 +45,12 @@ def validate_topology(sources: dict[str, str]) -> list[str]:
         issues.append("Shadow must use latest-wins cancellation only for Pull requests")
     if "validation_emit_results.py" not in shadow or "if: ${{ always() }}" not in shadow:
         issues.append("Shadow must always aggregate every selected family")
+    if (
+        "cache_fallback:" not in shadow
+        or '--cache-fallback "$CACHE_FALLBACK"' not in shadow
+        or "disabled-reconstruction" not in shadow
+    ):
+        issues.append("Shadow must expose and emit an explicit cache-disabled reconstruction")
     if "upload: never" not in shadow or "security-events:" in shadow:
         issues.append("Shadow CodeQL must not publish security authority")
     if "group: validation-integrated-main" not in integrated or "cancel-in-progress: false" not in integrated:

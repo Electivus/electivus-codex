@@ -56,6 +56,11 @@ on:
         required: false
         default: ""
         type: string
+      cache_fallback:
+        description: Cache disposition for validation reconstruction.
+        required: false
+        default: not-applicable
+        type: string
 
 jobs:
   archive:
@@ -70,7 +75,7 @@ jobs:
       # on native Windows ARM64. Key producer-side caches by the archive runner
       # so the cross-compile build reuses the Windows x64 cache lineage.
       ARCHIVE_CACHE_RUNNER: ${{ inputs.archive_runner != '' && inputs.archive_runner || inputs.runner }}
-      USE_SCCACHE: ${{ inputs.use_sccache && 'true' || 'false' }}
+      USE_SCCACHE: ${{ inputs.use_sccache && inputs.cache_fallback != 'disabled-reconstruction' && 'true' || 'false' }}
       CODEX_CI_PROFILE: ${{ inputs.profile }}
       CODEX_CI_TARGET: ${{ inputs.target }}
       CARGO_INCREMENTAL: "0"
@@ -78,6 +83,7 @@ jobs:
       NEXTEST_ARCHIVE_FILE: nextest-${{ inputs.artifact_id }}.tar.zst
       TEST_HELPERS_ARTIFACT: nextest-test-helpers-${{ inputs.artifact_id }}
       VALIDATION_CACHE_PREFIX: ${{ inputs.validation_candidate != '' && format('validation-{0}-', inputs.validation_candidate) || '' }}
+      VALIDATION_CACHE_FALLBACK: ${{ inputs.cache_fallback || 'not-applicable' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -140,6 +146,7 @@ jobs:
           echo "toolchain_hash=$(sha256sum rust-toolchain.toml | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Restore cargo home cache
+        if: ${{ inputs.cache_fallback != 'disabled-reconstruction' }}
         id: cache_cargo_home_restore
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
@@ -269,7 +276,7 @@ jobs:
           retention-days: 1
 
       - name: Save cargo home cache
-        if: always() && !cancelled() && steps.cache_cargo_home_restore.outputs.cache-hit != 'true'
+        if: always() && !cancelled() && inputs.cache_fallback != 'disabled-reconstruction' && steps.cache_cargo_home_restore.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
@@ -281,7 +288,7 @@ jobs:
           key: ${{ env.VALIDATION_CACHE_PREFIX }}cargo-home-${{ env.ARCHIVE_CACHE_RUNNER }}-${{ inputs.target }}-${{ inputs.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
 
       - name: Save sccache cache (fallback)
-        if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
+        if: always() && !cancelled() && inputs.cache_fallback != 'disabled-reconstruction' && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
@@ -527,6 +534,7 @@ jobs:
     with:
       artifact_id: ${{ inputs.artifact_id }}
       validation_candidate: ${{ inputs.validation_candidate }}
+      cache_fallback: ${{ inputs.cache_fallback }}
 
   result:
     name: Platform result

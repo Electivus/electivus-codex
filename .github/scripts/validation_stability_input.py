@@ -233,6 +233,14 @@ def build_stability_inputs(
         raise ContractError(
             "cache-disabled Stability report must use the ordinary profile"
         )
+    if cache_disabled_report.candidate != ordinary_reports[0].candidate:
+        raise ContractError(
+            "cache-disabled Stability report must reconstruct the first ordinary candidate"
+        )
+    if cache_disabled_report.plan.fingerprint != ordinary_reports[0].plan.fingerprint:
+        raise ContractError(
+            "cache-disabled Stability report must use the first ordinary plan"
+        )
     if cache_disabled_report.cache_fallback != "disabled-reconstruction":
         raise ContractError(
             "cache-disabled Stability report must record disabled-reconstruction"

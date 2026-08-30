@@ -90,7 +90,38 @@ jobs:
           ordinary_root.mkdir(parents=True, exist_ok=True)
           report_paths = root / "ordinary-report-paths.txt"
 
-          def download(run, artifact, target):
+          def download(run, artifact, target, expected_workflow):
+              metadata = json.loads(
+                  subprocess.check_output(
+                      [
+                          "gh",
+                          "run",
+                          "view",
+                          run,
+                          "--repo",
+                          repository,
+                          "--json",
+                          "databaseId,workflowName,event,status,conclusion,headSha,headBranch",
+                      ],
+                      text=True,
+                  )
+              )
+              if str(metadata.get("databaseId")) != run:
+                  raise SystemExit(f"{artifact} resolved to a different run ID")
+              if metadata.get("workflowName") != expected_workflow:
+                  raise SystemExit(
+                      f"{artifact} was produced by {metadata.get('workflowName')!r}, "
+                      f"expected {expected_workflow!r}"
+                  )
+              if metadata.get("status") != "completed":
+                  raise SystemExit(f"{artifact} comes from a non-terminal run")
+              if expected_workflow == "Validation Integrated":
+                  if metadata.get("headBranch") != "main":
+                      raise SystemExit(f"{artifact} is not a main-branch run")
+                  if metadata.get("conclusion") != "success":
+                      raise SystemExit(f"{artifact} is not a successful Integrated run")
+              elif metadata.get("conclusion") not in {"success", "failure"}:
+                  raise SystemExit(f"{artifact} has an unsupported terminal conclusion")
               target.mkdir(parents=True, exist_ok=True)
               subprocess.run(
                   [
@@ -112,30 +143,40 @@ jobs:
                   raise SystemExit(
                       f"{artifact} must contain exactly one Validation report, found {len(reports)}"
                   )
+              report = json.loads(reports[0].read_text(encoding="utf-8"))
+              candidate_sha = report.get("identity", {}).get("candidateSha")
+              if candidate_sha != metadata.get("headSha"):
+                  raise SystemExit(
+                      f"{artifact} report identity does not match its workflow head SHA"
+                  )
               return reports[0]
 
           with report_paths.open("w", encoding="utf-8") as stream:
               for index, run in enumerate(ordinary):
                   report = download(
-                      run,
-                      f"validation-shadow-report-{run}",
-                      ordinary_root / str(index),
+                  run,
+                  f"validation-shadow-report-{run}",
+                  ordinary_root / str(index),
+                  "Validation Shadow",
                   )
                   stream.write(f"{report}\n")
           download(
               special["certification"],
               f"validation-shadow-report-{special['certification']}",
               root / "certification",
+              "Validation Shadow",
           )
           download(
               special["cache-disabled"],
               f"validation-shadow-report-{special['cache-disabled']}",
               root / "cache-disabled",
+              "Validation Shadow",
           )
           download(
               special["integrated"],
               f"validation-integrated-certification-{special['integrated']}",
               root / "integrated",
+              "Validation Integrated",
           )
           PY
       - name: Derive bounded Stability input from the retained reports

@@ -11,10 +11,16 @@ on:
         required: false
         default: ""
         type: string
+      cache_fallback:
+        description: Cache disposition for validation reconstruction.
+        required: false
+        default: not-applicable
+        type: string
   workflow_dispatch:
 
 env:
   VALIDATION_CACHE_PREFIX: ${{ inputs.validation_candidate != '' && format('validation-{0}-', inputs.validation_candidate) || '' }}
+  VALIDATION_CACHE_FALLBACK: ${{ inputs.cache_fallback || 'not-applicable' }}
 
 concurrency:
   group: ${{ github.workflow }}::${{ github.event.pull_request.number > 0 && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
@@ -398,6 +404,7 @@ jobs:
         run: git submodule status --recursive > git_submodule_status.txt
 
       - name: Restore upstream source-build cache
+        if: ${{ inputs.cache_fallback != 'disabled-reconstruction' }}
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
         with:
           path: |
@@ -408,6 +415,7 @@ jobs:
             ${{ env.VALIDATION_CACHE_PREFIX }}rusty-v8-source-${{ matrix.target }}-${{ matrix.runner }}-sandbox-
 
       - name: Install and start sccache
+        if: ${{ inputs.cache_fallback != 'disabled-reconstruction' }}
         shell: pwsh
         env:
           SCCACHE_CACHE_SIZE: 256M

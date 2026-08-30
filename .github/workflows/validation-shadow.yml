@@ -17,6 +17,9 @@ on:
 
 permissions: {}
 
+env:
+  VALIDATION_CACHE_FALLBACK: ${{ inputs.cache_fallback || 'not-applicable' }}
+
 concurrency:
   # Latest-wins applies to the complete Pull request graph. Every manifest
   # still carries candidate identity, so a late old result is stale.
@@ -103,6 +106,7 @@ jobs:
     with:
       validation_scope: essential
       validation_candidate: ${{ github.sha }}
+      cache_fallback: ${{ inputs.cache_fallback || 'not-applicable' }}
 
   postgresql:
     name: Validation PostgreSQL contracts
@@ -113,6 +117,7 @@ jobs:
     uses: ./.github/workflows/postgres-runtime-state-contracts.yml
     with:
       validation_candidate: ${{ github.sha }}
+      cache_fallback: ${{ inputs.cache_fallback || 'not-applicable' }}
 
   v8:
     name: Validation V8 evidence
@@ -123,6 +128,7 @@ jobs:
     uses: ./.github/workflows/v8-canary.yml
     with:
       validation_candidate: ${{ github.sha }}
+      cache_fallback: ${{ inputs.cache_fallback || 'not-applicable' }}
 
   windows-x64:
     name: Validation Windows x64
@@ -137,6 +143,13 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Isolate Rust paths for cache-disabled reconstruction
+        if: ${{ inputs.cache_fallback == 'disabled-reconstruction' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CARGO_HOME=$RUNNER_TEMP/cache-disabled-cargo-home" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/cache-disabled-cargo-target" >> "$GITHUB_ENV"
       - name: Install Rust
         uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
       - name: Run Windows x64 validation
@@ -159,6 +172,13 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Isolate Rust paths for cache-disabled reconstruction
+        if: ${{ inputs.cache_fallback == 'disabled-reconstruction' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CARGO_HOME=$RUNNER_TEMP/cache-disabled-cargo-home" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/cache-disabled-cargo-target" >> "$GITHUB_ENV"
       - name: Install Rust
         if: ${{ contains(needs.preflight.outputs.selected_evidence, 'rust-fast') || contains(needs.preflight.outputs.selected_evidence, 'api-protocol-sdk') || contains(needs.preflight.outputs.selected_evidence, 'code-quality') }}
         uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
@@ -212,6 +232,7 @@ jobs:
     uses: ./.github/workflows/sdk.yml
     with:
       validation_candidate: ${{ github.sha }}
+      cache_fallback: ${{ inputs.cache_fallback || 'not-applicable' }}
     secrets: inherit
 
   rust-full:
@@ -224,6 +245,7 @@ jobs:
     with:
       validation_scope: full
       validation_candidate: ${{ github.sha }}
+      cache_fallback: ${{ inputs.cache_fallback || 'not-applicable' }}
     secrets: inherit
 
   codeql-shadow:

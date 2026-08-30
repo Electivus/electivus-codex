@@ -106,7 +106,10 @@ def uses_remote_execution(args: Sequence[str]) -> bool:
 
 
 def remote_config(args: Sequence[str], env: Mapping[str, str]) -> str | None:
-    if not env.get("BUILDBUDDY_API_KEY"):
+    if (
+        not env.get("BUILDBUDDY_API_KEY")
+        or env.get("VALIDATION_CACHE_FALLBACK") == "disabled-reconstruction"
+    ):
         return None
 
     config = OPENAI_REMOTE_CONFIG if uses_openai_host(env) else GENERIC_REMOTE_CONFIG
@@ -162,6 +165,28 @@ def bazel_args_with_remote_config(
         separator_idx = configured_args.index("--")
     except ValueError:
         separator_idx = len(configured_args)
+
+    if env.get("VALIDATION_CACHE_FALLBACK") == "disabled-reconstruction":
+        cache_prefixes = (
+            "--disk_cache=",
+            "--repo_contents_cache=",
+            "--repository_cache=",
+            "--remote_cache=",
+            "--experimental_remote_downloader=",
+        )
+        return [
+            *(
+                arg
+                for arg in configured_args[:separator_idx]
+                if not arg.startswith(cache_prefixes)
+            ),
+            "--disk_cache=",
+            "--repo_contents_cache=",
+            "--repository_cache=",
+            "--remote_cache=",
+            "--experimental_remote_downloader=",
+            *configured_args[separator_idx:],
+        ]
 
     cache_args = [
         f"{option_prefix}{env[env_name]}"

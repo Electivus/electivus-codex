@@ -22,7 +22,13 @@ runs:
     - name: Configure CI build root (Unix)
       if: runner.os != 'Windows'
       shell: bash
-      run: echo "CI_BUILD_ROOT=$HOME/.cache/codex-ci" >> "$GITHUB_ENV"
+      run: |
+        set -euo pipefail
+        build_root="$HOME/.cache/codex-ci"
+        if [[ "${VALIDATION_CACHE_FALLBACK:-}" == "disabled-reconstruction" ]]; then
+          build_root="$RUNNER_TEMP/codex-cache-disabled"
+        fi
+        echo "CI_BUILD_ROOT=$build_root" >> "$GITHUB_ENV"
 
     - name: Enable unprivileged user namespaces (Linux)
       if: runner.os == 'Linux'

@@ -102,6 +102,17 @@ class ValidationStabilityInputTests(unittest.TestCase):
                 authority,
             )
 
+        with self.assertRaises(ContractError):
+            build_stability_inputs(
+                ordinary,
+                certification,
+                replace(
+                    ordinary[1], cache_fallback="disabled-reconstruction"
+                ),
+                integrated,
+                authority,
+            )
+
     def test_stability_rejects_retry_and_mixed_validation_generations(self):
         ordinary = tuple(
             _report(_candidate(index), "codex-rs/core/src/lib.rs")

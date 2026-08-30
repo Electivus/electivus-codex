@@ -16,7 +16,15 @@ on:
         required: false
         default: ""
         type: string
+      cache_fallback:
+        description: Cache disposition for validation reconstruction.
+        required: false
+        default: not-applicable
+        type: string
   workflow_dispatch:
+
+env:
+  VALIDATION_CACHE_FALLBACK: ${{ inputs.cache_fallback || 'not-applicable' }}
 
 concurrency:
   # Cancel previous actions from the same PR or branch except 'main' branch.
@@ -55,6 +63,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           cache-scope: ${{ inputs.validation_candidate != '' && format('validation-{0}-{1}', inputs.validation_candidate, github.job) || format('bazel-{0}', github.job) }}
+          cache-disabled: ${{ inputs.cache_fallback == 'disabled-reconstruction' }}
 
       - name: Install actionlint
         if: matrix.os == 'ubuntu-24.04' && matrix.target == 'x86_64-unknown-linux-gnu'
@@ -123,7 +132,7 @@ jobs:
       # Save the job-scoped Bazel repository cache after cache misses. Keep the
       # upload non-fatal so cache service issues never fail the job itself.
       - name: Save bazel repository cache
-        if: always() && !cancelled() && steps.prepare_bazel.outputs.repository-cache-hit != 'true'
+        if: always() && !cancelled() && inputs.cache_fallback != 'disabled-reconstruction' && steps.prepare_bazel.outputs.repository-cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
@@ -159,6 +168,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           cache-scope: ${{ inputs.validation_candidate != '' && format('validation-{0}-{1}', inputs.validation_candidate, github.job) || format('bazel-{0}', github.job) }}
+          cache-disabled: ${{ inputs.cache_fallback == 'disabled-reconstruction' }}
 
       - name: bazel build --config=clippy lint targets
         env:
@@ -198,7 +208,7 @@ jobs:
       # Save the job-scoped Bazel repository cache after cache misses. Keep the
       # upload non-fatal so cache service issues never fail the job itself.
       - name: Save bazel repository cache
-        if: always() && !cancelled() && steps.prepare_bazel.outputs.repository-cache-hit != 'true'
+        if: always() && !cancelled() && inputs.cache_fallback != 'disabled-reconstruction' && steps.prepare_bazel.outputs.repository-cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
@@ -236,6 +246,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           cache-scope: ${{ inputs.validation_candidate != '' && format('validation-{0}-{1}', inputs.validation_candidate, github.job) || format('bazel-{0}', github.job) }}
+          cache-disabled: ${{ inputs.cache_fallback == 'disabled-reconstruction' }}
 
       - name: bazel build verify-release-build targets
         env:
@@ -299,7 +310,7 @@ jobs:
       # Save the job-scoped Bazel repository cache after cache misses. Keep the
       # upload non-fatal so cache service issues never fail the job itself.
       - name: Save bazel repository cache
-        if: always() && !cancelled() && steps.prepare_bazel.outputs.repository-cache-hit != 'true'
+        if: always() && !cancelled() && inputs.cache_fallback != 'disabled-reconstruction' && steps.prepare_bazel.outputs.repository-cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
