@@ -6,6 +6,24 @@ GitHub-hosted Linux runners. BuildBuddy can accelerate Bazel work when its
 secret is available, while the existing local-build and GitHub-cache paths
 remain the fallback.
 
+## Disabled Code Scanning Policy
+
+CodeQL is intentionally disabled for the Electivus fork. On 2026-08-30,
+`Analyze (rust)` took 51m02s on PR #193, and the maintainer explicitly accepted
+the security tradeoff of removing that latency from admission. At that decision
+point, 93 CodeQL alerts remained open, including 42 high-or-critical alerts.
+This policy does not dismiss those alerts or represent them as remediated.
+
+The repository default setup is `not-configured`, and the active
+`Protect-Main` ruleset has no `code_scanning` rule or CodeQL status
+requirement. The independent errors-threshold code-quality gate and
+`CI required` remain enforced. `.github/scripts/check_codeql_disabled.py`
+prevents active root workflows from reintroducing CodeQL actions,
+`security-events` permission, or code-scanning authority implicitly.
+
+Re-enabling CodeQL requires a new explicit specification revision and separate
+authorization for the corresponding ruleset mutation.
+
 ## Linux Support Boundary
 
 - Required checks run against GitHub's synthetic merge commit, not the pull
