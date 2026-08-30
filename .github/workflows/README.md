@@ -6,6 +6,29 @@ GitHub-hosted Linux runners. BuildBuddy can accelerate Bazel work when its
 secret is available, while the existing local-build and GitHub-cache paths
 remain the fallback.
 
+## Disabled Code Scanning Policy
+
+CodeQL is intentionally disabled for the Electivus fork. On 2026-08-30,
+`Analyze (rust)` took 51m02s on PR #193, and the maintainer explicitly accepted
+the security tradeoff of removing that latency from admission. At that decision
+point, 93 CodeQL alerts remained open, including 42 high-or-critical alerts.
+This policy does not dismiss those alerts or represent them as remediated.
+
+The repository default setup is `not-configured`, and the active
+`Protect-Main` ruleset has no `code_scanning` rule or CodeQL status
+requirement. The independent errors-threshold code-quality gate and
+`CI required` remain enforced. `.github/scripts/check_codeql_disabled.py`
+prevents workflow manifests, local actions, and repository-owned scripts from
+reintroducing CodeQL actions, `security-events` permission (including
+`write-all`), or code-scanning authority implicitly. The guard evaluates
+parsed YAML scalar values, build/task recipes, and repository-wide automation
+implementations (including text executables with or without extensions) so
+equivalent quoted, multiline, delegated, shell quote-concatenation,
+shell-continuation, and Windows batch forms cannot bypass the policy.
+
+Re-enabling CodeQL requires a new explicit specification revision and separate
+authorization for the corresponding ruleset mutation.
+
 ## Linux Support Boundary
 
 - Required checks run against GitHub's synthetic merge commit, not the pull
@@ -118,6 +141,20 @@ release calls this workflow with `publish_release=false` and publishes the
 Windows output together with Linux assets in one release.
 
 ## Merge Gate
+
+### Temporary Shadow delivery classification
+
+Until the replacement Validation graph receives authority through #191, files
+owned exclusively by its non-authoritative `validation-*` scripts, tests, and
+workflows are explicitly irrelevant to the legacy Deep Linux and V8 product
+matrices. Pull requests that change only those paths still run the legacy
+metadata, repository, syntax, and policy checks, but do not compile product
+code through those two Change-triggered validators.
+
+The exemption does not include `blocking-ci.yml`, `repo-checks.yml`, either
+legacy selector or its tests, shared CI actions, product code, or unknown
+paths. Comparison and classifier failures remain fail-closed. The exemption is
+temporary migration infrastructure and must be removed during #191 cutover.
 
 - `blocking-ci.yml` owns the version-controlled list of merge-blocking child
   workflows. After Stability certification, the active `main` ruleset requires

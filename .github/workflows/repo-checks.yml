@@ -35,6 +35,11 @@ jobs:
       - name: Test macOS notarization
         run: python3 -m unittest discover -s .github/scripts/macos-signing -p 'test_notarize_with_akv.py'
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.3"
+
       - name: Install actionlint
         env:
           GOBIN: ${{ runner.temp }}/actionlint/bin
@@ -47,7 +52,10 @@ jobs:
           echo "$GOBIN" >> "$GITHUB_PATH"
 
       - name: Test GitHub helper scripts
-        run: just test-github-scripts
+        run: uv run --project scripts --python python3 just test-github-scripts
+
+      - name: Verify disabled security-analysis policy
+        run: uv run --project scripts --python python3 python .github/scripts/check_codeql_disabled.py
 
       - name: Verify Rust test signal policy
         run: python3 .github/scripts/check_rust_test_policy.py
@@ -94,10 +102,6 @@ jobs:
       - name: Check root README ToC
         run: python3 scripts/readme_toc.py README.md
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: "0.11.3"
       - name: Check formatting (run `just fmt` to fix)
         run: just fmt-check
 

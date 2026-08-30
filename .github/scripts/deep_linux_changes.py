@@ -10,8 +10,19 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+TEMPORARY_SHADOW_VALIDATION_PATH_PATTERNS = (
+    ".github/scripts/validation_*.py",
+    ".github/scripts/test_validation*.py",
+    ".github/scripts/check_validation_*.py",
+    ".github/scripts/test_check_validation_*.py",
+    ".github/scripts/legacy_validation_observation.py",
+    ".github/workflows/validation-*.yml",
+    ".github/workflows/validation-*.yaml",
+)
 # Unknown paths must stay eligible. Keep this allowlist deliberately narrow and
-# limited to documentation and repository community metadata.
+# limited to documentation, repository community metadata, and replacement
+# Validation paths that cannot affect product behavior while they remain
+# non-authoritative. Remove the temporary Shadow patterns during #191 cutover.
 IRRELEVANT_PATH_PATTERNS = (
     ".github/CODEOWNERS",
     ".github/ISSUE_TEMPLATE/**",
@@ -22,7 +33,7 @@ IRRELEVANT_PATH_PATTERNS = (
     "README.md",
     "SECURITY.md",
     "docs/**",
-)
+) + TEMPORARY_SHADOW_VALIDATION_PATH_PATTERNS
 
 
 @dataclass(frozen=True)

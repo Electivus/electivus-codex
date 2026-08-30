@@ -11,6 +11,31 @@ from deep_linux_changes import decision_for_event
 
 
 class DeepLinuxChangesTest(unittest.TestCase):
+    def test_non_authoritative_shadow_validation_paths_are_ineligible(self) -> None:
+        paths = (
+            ".github/scripts/validation_contracts.py",
+            ".github/scripts/test_validation.py",
+            ".github/scripts/test_validation_contracts.py",
+            ".github/scripts/check_validation_topology.py",
+            ".github/scripts/test_check_validation_topology.py",
+            ".github/scripts/legacy_validation_observation.py",
+            ".github/workflows/validation-shadow.yml",
+            ".github/workflows/validation-integrated.yaml",
+        )
+
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    DeepLinuxDecision(
+                        eligible=False,
+                        reason=(
+                            "all 1 changed path is explicitly irrelevant documentation "
+                            "or repository metadata"
+                        ),
+                    ),
+                    classify_changed_files({path}),
+                )
+
     def test_relevant_categories_are_eligible(self) -> None:
         paths = (
             "codex-rs/core/src/lib.rs",
@@ -20,8 +45,13 @@ class DeepLinuxChangesTest(unittest.TestCase):
             "codex-rs/core/tests/suite/main.rs",
             ".github/actions/setup-ci/action.yml",
             ".github/scripts/deep_linux_changes.py",
+            ".github/scripts/validation.py",
+            ".github/scripts/validation_contracts.py.backup",
             ".github/workflows/blocking-ci.yml",
+            ".github/workflows/repo-checks.yml",
             ".github/workflows/README.md",
+            ".github/workflows/validation.yml",
+            ".github/workflows/validation-shadow.yml.backup",
             "codex-rs/README.md",
             "unexpected/new-area/file.txt",
         )
@@ -87,7 +117,12 @@ class DeepLinuxChangesTest(unittest.TestCase):
 
     def test_mixed_changes_are_eligible(self) -> None:
         self.assertEqual(
-            classify_changed_files({"README.md", "codex-rs/core/src/lib.rs"}),
+            classify_changed_files(
+                {
+                    ".github/workflows/validation-shadow.yml",
+                    "codex-rs/core/src/lib.rs",
+                }
+            ),
             DeepLinuxDecision(
                 eligible=True,
                 reason="1 of 2 changed paths is not explicitly irrelevant",
@@ -115,7 +150,9 @@ class DeepLinuxChangesTest(unittest.TestCase):
             self.run_git(root, "commit", "-m", "base only")
             base = self.run_git(root, "rev-parse", "HEAD")
 
-            self.assertEqual(changed_files(base, head, root=root), {"new.txt", "old.txt"})
+            self.assertEqual(
+                changed_files(base, head, root=root), {"new.txt", "old.txt"}
+            )
 
     def test_non_pull_request_events_default_to_eligible(self) -> None:
         events = (
