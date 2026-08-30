@@ -429,7 +429,7 @@ def parse_plan(value: object) -> ValidationPlan:
         )
     except ContractError:
         raise
-    except (json.JSONDecodeError, TypeError, UnicodeDecodeError) as error:
+    except (json.JSONDecodeError, TypeError, UnicodeDecodeError, ValueError) as error:
         raise ContractError(f"invalid Validation plan JSON: {error}") from error
     plan = plan_from_dict(payload)
     if serialize_plan(plan) != text:

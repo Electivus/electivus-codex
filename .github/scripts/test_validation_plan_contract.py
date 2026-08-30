@@ -330,6 +330,7 @@ class ValidationPlanContractTests(unittest.TestCase):
             serialized.replace('"schemaVersion": 1', '"schemaVersion": NaN', 1),
             b"\xff",
             serialized.replace("Electivus/electivus-codex", r"\ud800", 1),
+            "9" * 5_000,
         )
         for invalid in invalids:
             assert_invalid(self, parse_plan, invalid)
