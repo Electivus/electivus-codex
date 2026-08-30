@@ -7,14 +7,16 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from upstream_sync_manifest import MANIFEST_DIRECTORY
-from upstream_sync_manifest import MANIFEST_SEED_COMMIT
-from upstream_sync_manifest import ReleaseIdentity
-from upstream_sync_manifest import SynchronizationManifest
-from upstream_sync_manifest import manifest_path
-from upstream_sync_manifest import parse_manifest
-from upstream_sync_manifest import serialize_manifest
-from upstream_sync_manifest import validate_chain
+from upstream_sync_manifest import (
+    MANIFEST_DIRECTORY,
+    MANIFEST_SEED_COMMIT,
+    ReleaseIdentity,
+    SynchronizationManifest,
+    manifest_path,
+    parse_manifest,
+    serialize_manifest,
+    validate_chain,
+)
 
 SYNC_BRANCH_PREFIX = "automation/upstream-sync/"
 _MAX_SYNCHRONIZATION_BRANCHES = 1_000
@@ -74,9 +76,13 @@ def prepare_attempt(
         repo, fork_base_sha, seed_commit=seed_commit
     )
     if not _is_ancestor(repo, predecessor.release.commit, release.commit):
-        raise SyncError("selected release does not descend from the manifest predecessor")
+        raise SyncError(
+            "selected release does not descend from the manifest predecessor"
+        )
     if _manifest_texts_at(repo, release.commit):
-        raise SyncError("selected release contains fork-owned Synchronization manifests")
+        raise SyncError(
+            "selected release contains fork-owned Synchronization manifests"
+        )
 
     with tempfile.TemporaryDirectory(prefix="codex-upstream-sync-") as temp_dir:
         worktree = Path(temp_dir)
@@ -85,7 +91,9 @@ def prepare_attempt(
             returncode, stderr, conflicts = _merge(worktree, release.commit)
             if returncode == 0:
                 if _parents(worktree, "HEAD") != [fork_base_sha, release.commit]:
-                    raise SyncError("clean synchronization did not create a two-parent merge")
+                    raise SyncError(
+                        "clean synchronization did not create a two-parent merge"
+                    )
                 preparation_mode = "clean"
             elif conflicts:
                 _git(worktree, "merge", "--abort")
@@ -119,7 +127,12 @@ def prepare_attempt(
                 raise SyncError(f"Synchronization manifest already exists: {target}")
             target.write_text(text)
             _git(worktree, "add", "-A", MANIFEST_DIRECTORY)
-            _git(worktree, "commit", "-m", f"Record Synchronization manifest for {release.tag}")
+            _git(
+                worktree,
+                "commit",
+                "-m",
+                f"Record Synchronization manifest for {release.tag}",
+            )
             _git(worktree, "diff", "--check")
             if _git(worktree, "status", "--porcelain"):
                 raise SyncError("prepared synchronization worktree is not clean")
@@ -141,9 +154,7 @@ def inspect_open_attempt(
     *,
     seed_commit: str = MANIFEST_SEED_COMMIT,
 ) -> PreparedAttempt | None:
-    prepared = _remote_attempt(
-        repo, branch, expected_head, seed_commit=seed_commit
-    )
+    prepared = _remote_attempt(repo, branch, expected_head, seed_commit=seed_commit)
     if (
         prepared is not None
         and prepared.manifest.release.commit != synchronization_release_commit(branch)
@@ -151,21 +162,28 @@ def inspect_open_attempt(
         raise SyncError(f"manifest does not own Synchronization branch {branch}")
     if prepared is not None:
         path = manifest_path(prepared.manifest.release.commit)
-        manifest_head = _git(repo, "log", "-1", "--format=%H", prepared.head, "--", path)
+        manifest_head = _git(
+            repo, "log", "-1", "--format=%H", prepared.head, "--", path
+        )
         if _manifest_texts_at(repo, prepared.head) != _manifest_texts_at(
             repo, manifest_head
         ):
-            raise SyncError("open Synchronization manifest directory changed after introduction")
+            raise SyncError(
+                "open Synchronization manifest directory changed after introduction"
+            )
         changes = _git(
             repo,
             "log",
             "--first-parent",
             "--format=%H",
             f"{manifest_head}..{prepared.head}",
-            "--", MANIFEST_DIRECTORY,
+            "--",
+            MANIFEST_DIRECTORY,
         )
         if changes:
-            raise SyncError("open Synchronization manifest history changed after introduction")
+            raise SyncError(
+                "open Synchronization manifest history changed after introduction"
+            )
         _verify_prepared(
             repo,
             PreparedAttempt(prepared.manifest, branch, manifest_head),
@@ -186,7 +204,11 @@ def synchronization_branches(repo: Path) -> tuple[tuple[str, str], ...]:
     for line in output.splitlines():
         head, separator, ref = line.partition("\t")
         prefix = "refs/heads/"
-        if separator != "\t" or _SHA.fullmatch(head) is None or not ref.startswith(prefix):
+        if (
+            separator != "\t"
+            or _SHA.fullmatch(head) is None
+            or not ref.startswith(prefix)
+        ):
             raise SyncError("invalid Synchronization branch listing")
         branch = ref.removeprefix(prefix)
         synchronization_release_commit(branch)
@@ -203,9 +225,7 @@ def inspect_retry_attempt(
     *,
     seed_commit: str = MANIFEST_SEED_COMMIT,
 ) -> PreparedAttempt:
-    prepared = _remote_attempt(
-        repo, branch, expected_head, seed_commit=seed_commit
-    )
+    prepared = _remote_attempt(repo, branch, expected_head, seed_commit=seed_commit)
     if prepared is None:
         raise LegacyAttemptError(
             f"refusing legacy Synchronization branch without manifest {branch}"
@@ -230,7 +250,9 @@ def _remote_attempt(
     if active not in _manifest_texts_at(repo, head):
         history = _git(repo, "log", "--format=%H", head, "--", active)
         if history:
-            raise SyncError("active Synchronization manifest was removed from branch history")
+            raise SyncError(
+                "active Synchronization manifest was removed from branch history"
+            )
         return None
     _, _, manifest = _read_chain_at(repo, head, seed_commit=seed_commit)
     return PreparedAttempt(manifest, branch, head)
@@ -244,10 +266,10 @@ def _verify_prepared(
 ) -> PreparationEvidence:
     manifest = prepared.manifest
     if manifest.release.commit != synchronization_release_commit(prepared.branch):
-        raise SyncError(f"manifest does not own Synchronization branch {prepared.branch}")
-    head_texts, _, tip = _read_chain_at(
-        repo, prepared.head, seed_commit=seed_commit
-    )
+        raise SyncError(
+            f"manifest does not own Synchronization branch {prepared.branch}"
+        )
+    head_texts, _, tip = _read_chain_at(repo, prepared.head, seed_commit=seed_commit)
     fork_texts, _, fork_tip = _read_chain_at(
         repo, manifest.fork_base_sha, seed_commit=seed_commit
     )
@@ -277,13 +299,20 @@ def _verify_prepared(
     if _workspace_version(cargo)["version"] != "0.0.0":
         raise SyncError(f"refusing to use unnormalized branch {prepared.branch}")
     prepared_parent = manifest_parent
-    if manifest.preparation_mode == "clean" or manifest_parent != manifest.release.commit:
-        prepared_parent = _normalization_parent(repo, manifest_parent) or manifest_parent
+    if (
+        manifest.preparation_mode == "clean"
+        or manifest_parent != manifest.release.commit
+    ):
+        prepared_parent = (
+            _normalization_parent(repo, manifest_parent) or manifest_parent
+        )
     returncode, tree, conflicts = _merge_tree(
         repo, manifest.fork_base_sha, manifest.release.commit
     )
     if conflicts != manifest.conflict_paths:
-        raise SyncError("prepared branch conflict evidence differs from frozen baselines")
+        raise SyncError(
+            "prepared branch conflict evidence differs from frozen baselines"
+        )
     if manifest.preparation_mode == "clean":
         if (
             returncode != 0
@@ -313,7 +342,9 @@ def _read_chain_at(
         try:
             manifest = parse_manifest(text)
         except ValueError as error:
-            raise SyncError(f"invalid Synchronization manifest {path}: {error}") from error
+            raise SyncError(
+                f"invalid Synchronization manifest {path}: {error}"
+            ) from error
         if path != manifest_path(manifest.release.commit):
             raise SyncError(f"Synchronization manifest filename does not match {path}")
         manifests.append(manifest)
@@ -357,7 +388,10 @@ def _verify_manifest_history(
     *,
     seed_commit: str = MANIFEST_SEED_COMMIT,
 ) -> None:
-    if path == manifest_path(_PR153_RELEASE_COMMIT) and seed_commit == MANIFEST_SEED_COMMIT:
+    if (
+        path == manifest_path(_PR153_RELEASE_COMMIT)
+        and seed_commit == MANIFEST_SEED_COMMIT
+    ):
         _verify_pr153_manifest_history(repo, commit, path)
         return
     changes = _git(
@@ -370,17 +404,22 @@ def _verify_manifest_history(
         "--",
         path,
     ).splitlines()
-    if path == manifest_path(seed_commit) and len(changes) >= 2:
-        if (
-            _git(repo, "show", "-s", "--format=%s", changes[-1])
-            == _PR153_MANIFEST_INTRODUCTION_MESSAGE
-            and _tree_entry(repo, commit, path) == _tree_entry(repo, changes[-1], path)
-        ):
-            return
+    if (
+        path == manifest_path(seed_commit)
+        and len(changes) >= 2
+        and _git(repo, "show", "-s", "--format=%s", changes[-1])
+        == _PR153_MANIFEST_INTRODUCTION_MESSAGE
+        and _tree_entry(repo, commit, path) == _tree_entry(repo, changes[-1], path)
+    ):
+        return
     if len(changes) != 1:
-        raise SyncError(f"Synchronization manifest history changed after introduction: {path}")
+        raise SyncError(
+            f"Synchronization manifest history changed after introduction: {path}"
+        )
     if _tree_entry(repo, commit, path) != _tree_entry(repo, changes[0], path):
-        raise SyncError(f"Synchronization manifest differs from its introduction: {path}")
+        raise SyncError(
+            f"Synchronization manifest differs from its introduction: {path}"
+        )
 
 
 def _verify_pr153_manifest_history(repo: Path, commit: str, path: str) -> None:
@@ -478,7 +517,12 @@ def _merge_tree(repo: Path, fork_base_sha: str, release_commit: str):
 
 def _merge(worktree: Path, release_commit: str) -> tuple[int, str, tuple[str, ...]]:
     merge = _run_git(
-        worktree, "merge", "--no-ff", "-m", f"Merge openai/codex release {release_commit}", release_commit
+        worktree,
+        "merge",
+        "--no-ff",
+        "-m",
+        f"Merge openai/codex release {release_commit}",
+        release_commit,
     )
     conflicts = tuple(sorted(set(_git_paths(worktree, "diff", "--diff-filter=U"))))
     return merge.returncode, merge.stderr.strip(), conflicts
@@ -486,13 +530,18 @@ def _merge(worktree: Path, release_commit: str) -> tuple[int, str, tuple[str, ..
 
 def _normalization_parent(repo: Path, commit: str) -> str | None:
     parents = _parents(repo, commit)
-    if len(parents) != 1 or _git(repo, "show", "-s", "--format=%s", commit) != _NORMALIZATION_MESSAGE:
+    if (
+        len(parents) != 1
+        or _git(repo, "show", "-s", "--format=%s", commit) != _NORMALIZATION_MESSAGE
+    ):
         return None
     if _git_paths(repo, "diff", parents[0], commit) != ("codex-rs/Cargo.toml",):
         raise SyncError("normalization commit changed unexpected paths")
     before = _git(repo, "show", f"{parents[0]}:codex-rs/Cargo.toml", strip=False)
     after = _git(repo, "show", f"{commit}:codex-rs/Cargo.toml", strip=False)
-    before_kind = _git(repo, "ls-tree", parents[0], "--", "codex-rs/Cargo.toml").split()[:2]
+    before_kind = _git(
+        repo, "ls-tree", parents[0], "--", "codex-rs/Cargo.toml"
+    ).split()[:2]
     after_kind = _git(repo, "ls-tree", commit, "--", "codex-rs/Cargo.toml").split()[:2]
     if (
         before == after
@@ -561,7 +610,9 @@ def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
 
 
 def _remote_branch_exists(repo: Path, branch: str) -> bool:
-    process = _run_git(repo, "ls-remote", "--exit-code", "--heads", "origin", f"refs/heads/{branch}")
+    process = _run_git(
+        repo, "ls-remote", "--exit-code", "--heads", "origin", f"refs/heads/{branch}"
+    )
     if process.returncode not in (0, 2):
         raise SyncError(process.stderr.strip())
     return process.returncode == 0
@@ -596,5 +647,7 @@ def _run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
 def _git(repo: Path, *args: str, strip: bool = True) -> str:
     process = _run_git(repo, *args)
     if process.returncode != 0:
-        raise SyncError(f"git {' '.join(args)} failed ({process.returncode}): {process.stderr.strip()}")
+        raise SyncError(
+            f"git {' '.join(args)} failed ({process.returncode}): {process.stderr.strip()}"
+        )
     return process.stdout.strip() if strip else process.stdout
