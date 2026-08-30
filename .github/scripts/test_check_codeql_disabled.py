@@ -91,20 +91,28 @@ class DisabledCodeScanningPolicyTests(unittest.TestCase):
     def test_codeql_authority_cannot_be_delegated_to_repository_scripts(
         self,
     ) -> None:
-        for script_path in (".github/scripts/analyze.py", "tools/analyze.py"):
+        cases = (
+            (".github/scripts/analyze.py", "python3 .github/scripts/analyze.py", None),
+            ("tools/analyze.py", "python3 tools/analyze.py", None),
+            ("tools/analyze", "./tools/analyze", 0o755),
+            ("justfile", "just analyze", None),
+            ("tools/BUILD", "bazel run //tools:analyze", None),
+            ("tools/rules.bzl", "bazel run //tools:analyze", None),
+        )
+        for script_path, command, mode in cases:
             with self.subTest(script_path=script_path), TemporaryDirectory() as temp_dir:
                 repo = Path(temp_dir)
                 workflow = repo / ".github/workflows/example.yml"
                 script = repo / script_path
                 workflow.parent.mkdir(parents=True)
-                script.parent.mkdir(parents=True)
-                workflow.write_text(
-                    f"run: python3 {script_path}\n", encoding="utf-8"
-                )
+                script.parent.mkdir(parents=True, exist_ok=True)
+                workflow.write_text(f"run: {command}\n", encoding="utf-8")
                 script.write_text(
                     'subprocess.run(["codeql", "database", "analyze"])\n',
                     encoding="utf-8",
                 )
+                if mode is not None:
+                    script.chmod(mode)
 
                 self.assertEqual(
                     [f"CodeQL reference: {script_path}"],

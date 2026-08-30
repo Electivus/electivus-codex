@@ -21,13 +21,25 @@ POLICY_CHECK_LINE = f"run: {POLICY_CHECK_COMMAND}"
 CODE_SCANNING_AUTHORITY = re.compile(r"code[_ -]?scanning", re.IGNORECASE)
 SHELL_LINE_CONTINUATION = re.compile(r"\\\r?\n")
 AUTOMATION_IMPLEMENTATION_SUFFIXES = {
+    ".bazel",
+    ".bzl",
     ".cjs",
     ".js",
+    ".mk",
     ".mjs",
     ".ps1",
     ".py",
     ".sh",
+    ".star",
     ".ts",
+}
+AUTOMATION_IMPLEMENTATION_FILENAMES = {
+    "build",
+    "dockerfile",
+    "gnumakefile",
+    "justfile",
+    "makefile",
+    "workspace",
 }
 IGNORED_IMPLEMENTATION_DIRECTORIES = {
     ".babysit-pr",
@@ -130,8 +142,16 @@ def load_automation_sources(repo: Path) -> dict[str, str]:
         for filename in filenames:
             path = Path(directory) / filename
             relative = path.relative_to(repo).as_posix()
+            executable_text = False
+            if not path.suffix and path.stat().st_mode & 0o111:
+                with path.open("rb") as source:
+                    executable_text = b"\0" not in source.read(4096)
             if (
-                path.suffix.casefold() in AUTOMATION_IMPLEMENTATION_SUFFIXES
+                (
+                    path.suffix.casefold() in AUTOMATION_IMPLEMENTATION_SUFFIXES
+                    or path.name.casefold() in AUTOMATION_IMPLEMENTATION_FILENAMES
+                    or executable_text
+                )
                 and relative not in POLICY_IMPLEMENTATION_EXCLUSIONS
             ):
                 paths.add(path)
