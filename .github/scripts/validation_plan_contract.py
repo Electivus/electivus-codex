@@ -79,6 +79,7 @@ EVIDENCE_FAMILIES = (
 )
 KNOWN_EVIDENCE_FAMILIES = frozenset(EVIDENCE_FAMILIES)
 DISPOSITIONS = frozenset({"required", "not-required"})
+STAGES = frozenset({"preflight", "merge", "integrated", "release", "surveillance"})
 RETENTION_CLASSES = frozenset(
     {
         "intra-run",
@@ -121,6 +122,8 @@ def validate_requirement(requirement: EvidenceRequirement) -> None:
     if requirement.family not in KNOWN_EVIDENCE_FAMILIES:
         raise ContractError("requirement.family is unsupported")
     _text(requirement.stage, "requirement.stage")
+    if requirement.stage not in STAGES:
+        raise ContractError("requirement.stage is unsupported")
     if not isinstance(requirement.selected, bool):
         raise ContractError("requirement.selected must be boolean")
     _text(requirement.disposition, "requirement.disposition")
@@ -313,12 +316,17 @@ def validate_plan(plan: ValidationPlan) -> None:
         raise ContractError("plan.evidence must be an array")
     if not plan.requirements or len(plan.requirements) > MAX_EVIDENCE:
         raise ContractError("plan.evidence has an invalid size")
-    families: set[str] = set()
     for requirement in plan.requirements:
         validate_requirement(requirement)
-        if requirement.family in families:
-            raise ContractError("plan.evidence contains a duplicate family")
-        families.add(requirement.family)
+    if tuple(item.family for item in plan.requirements) != EVIDENCE_FAMILIES:
+        raise ContractError("plan.evidence must be the complete canonical ledger")
+    if ("unknown" in risk_modifiers or plan.policy_errors) and (
+        plan.profile != "certification-required"
+        or not all(item.selected for item in plan.requirements)
+    ):
+        raise ContractError(
+            "uncertain plans require certification-required and complete evidence"
+        )
     if not isinstance(plan.fingerprint, ValidationFingerprint):
         raise ContractError("plan.fingerprint has an invalid structure")
     validate_fingerprint(plan.fingerprint)
