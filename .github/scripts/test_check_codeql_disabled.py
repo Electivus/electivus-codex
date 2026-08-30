@@ -15,6 +15,14 @@ class DisabledCodeScanningPolicyTests(unittest.TestCase):
                 },
             ),
             (
+                "CodeQL action",
+                {
+                    ".github/workflows/example.yml": (
+                        'uses: "github/codeq\\\n  l-action/analyze@v3"\n'
+                    )
+                },
+            ),
+            (
                 "security-events permission",
                 {".github/workflows/example.yml": "security-events: write\n"},
             ),
@@ -25,6 +33,10 @@ class DisabledCodeScanningPolicyTests(unittest.TestCase):
                         "permissions: {contents: read, security-events: write}\n"
                     )
                 },
+            ),
+            (
+                "write-all permission",
+                {".github/workflows/example.yml": "permissions: write-all\n"},
             ),
             (
                 "code-scanning authority",
