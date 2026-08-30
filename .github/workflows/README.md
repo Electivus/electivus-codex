@@ -138,6 +138,20 @@ Windows output together with Linux assets in one release.
 
 ## Merge Gate
 
+### Temporary Shadow delivery classification
+
+Until the replacement Validation graph receives authority through #191, files
+owned exclusively by its non-authoritative `validation-*` scripts, tests, and
+workflows are explicitly irrelevant to the legacy Deep Linux and V8 product
+matrices. Pull requests that change only those paths still run the legacy
+metadata, repository, syntax, and policy checks, but do not compile product
+code through those two Change-triggered validators.
+
+The exemption does not include `blocking-ci.yml`, `repo-checks.yml`, either
+legacy selector or its tests, shared CI actions, product code, or unknown
+paths. Comparison and classifier failures remain fail-closed. The exemption is
+temporary migration infrastructure and must be removed during #191 cutover.
+
 - `blocking-ci.yml` owns the version-controlled list of merge-blocking child
   workflows. After Stability certification, the active `main` ruleset requires
   only its aggregate `CI required` job and enforces strict base freshness.

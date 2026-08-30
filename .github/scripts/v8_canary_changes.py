@@ -48,11 +48,22 @@ CANARY_PATH_PATTERNS = {
     "patches/v8_*.patch",
     "third_party/v8/**",
 }
+TEMPORARY_SHADOW_VALIDATION_PATH_PATTERNS = {
+    ".github/scripts/validation_*.py",
+    ".github/scripts/test_validation*.py",
+    ".github/scripts/check_validation_*.py",
+    ".github/scripts/test_check_validation_*.py",
+    ".github/scripts/legacy_validation_observation.py",
+    ".github/workflows/validation-*.yml",
+    ".github/workflows/validation-*.yaml",
+}
 KNOWN_IRRELEVANT_PATH_PATTERNS = {
     "*.md",
     "codex-rs/**",
     "docs/**",
-}
+} | TEMPORARY_SHADOW_VALIDATION_PATH_PATTERNS
+# The replacement paths above cannot alter product behavior while the graph is
+# non-authoritative. Remove this temporary exemption during #191 cutover.
 # Keep Unix installer exceptions literal. Package assembly also owns V8 packaging,
 # so a directory-level pattern here would weaken the fail-closed boundary.
 EXACT_V8_IRRELEVANT_PATHS = {

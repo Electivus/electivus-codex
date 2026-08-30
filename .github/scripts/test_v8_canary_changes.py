@@ -17,6 +17,26 @@ from v8_canary_changes import windows_source_required
 
 
 class V8CanaryChangesTest(unittest.TestCase):
+    def test_non_authoritative_shadow_validation_paths_are_irrelevant(self) -> None:
+        paths = {
+            ".github/scripts/validation_contracts.py",
+            ".github/scripts/test_validation.py",
+            ".github/scripts/test_validation_contracts.py",
+            ".github/scripts/check_validation_topology.py",
+            ".github/scripts/test_check_validation_topology.py",
+            ".github/scripts/legacy_validation_observation.py",
+            ".github/workflows/validation-shadow.yml",
+            ".github/workflows/validation-integrated.yaml",
+        }
+
+        self.assertEqual(
+            CanaryDecision(
+                False,
+                "all 8 changed paths are explicitly V8-irrelevant",
+            ),
+            classify_changed_files(paths, "149.2.0", "149.2.0"),
+        )
+
     def test_exact_installer_and_version_paths_are_irrelevant(self) -> None:
         expected_paths = {
             "scripts/codex_package/test_version.py",
@@ -43,8 +63,12 @@ class V8CanaryChangesTest(unittest.TestCase):
     def test_nearby_installer_and_package_paths_remain_fail_closed(self) -> None:
         relevant_paths = (
             ".github/scripts/check_installer_v2_topology.py",
+            ".github/scripts/validation.py",
+            ".github/scripts/validation_contracts.py.backup",
             ".github/workflows/electivus-release.yml",
             ".github/workflows/installer-v2-release.yml",
+            ".github/workflows/validation.yml",
+            ".github/workflows/validation-shadow.yml.backup",
             "scripts/build_codex_package.py",
             "scripts/codex_package/cargo.py",
             "scripts/codex_package/test_cargo.py",
