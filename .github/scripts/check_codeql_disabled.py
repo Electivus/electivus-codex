@@ -150,7 +150,7 @@ def load_automation_sources(repo: Path) -> dict[str, str]:
             path = Path(directory) / filename
             relative = path.relative_to(repo).as_posix()
             executable_text = False
-            if not path.suffix and path.stat().st_mode & 0o111:
+            if path.stat().st_mode & 0o111:
                 with path.open("rb") as source:
                     executable_text = b"\0" not in source.read(4096)
             if (

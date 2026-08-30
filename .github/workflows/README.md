@@ -22,9 +22,9 @@ prevents workflow manifests, local actions, and repository-owned scripts from
 reintroducing CodeQL actions, `security-events` permission (including
 `write-all`), or code-scanning authority implicitly. The guard evaluates
 parsed YAML scalar values, build/task recipes, and repository-wide automation
-implementations (including text executables without extensions) so equivalent
-quoted, multiline, delegated, shell quote-concatenation, shell-continuation,
-and Windows batch forms cannot bypass the policy.
+implementations (including text executables with or without extensions) so
+equivalent quoted, multiline, delegated, shell quote-concatenation,
+shell-continuation, and Windows batch forms cannot bypass the policy.
 
 Re-enabling CodeQL requires a new explicit specification revision and separate
 authorization for the corresponding ruleset mutation.
