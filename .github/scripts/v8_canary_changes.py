@@ -48,11 +48,22 @@ CANARY_PATH_PATTERNS = {
     "patches/v8_*.patch",
     "third_party/v8/**",
 }
+TEMPORARY_SHADOW_VALIDATION_PATH_PATTERNS = {
+    ".github/scripts/validation_*.py",
+    ".github/scripts/test_validation*.py",
+    ".github/scripts/check_validation_*.py",
+    ".github/scripts/test_check_validation_*.py",
+    ".github/scripts/legacy_validation_observation.py",
+    ".github/workflows/validation-*.yml",
+    ".github/workflows/validation-*.yaml",
+}
 KNOWN_IRRELEVANT_PATH_PATTERNS = {
     "*.md",
     "codex-rs/**",
     "docs/**",
-}
+} | TEMPORARY_SHADOW_VALIDATION_PATH_PATTERNS
+# The replacement paths above cannot alter product behavior while the graph is
+# non-authoritative. Remove this temporary exemption during #191 cutover.
 # Keep Unix installer exceptions literal. Package assembly also owns V8 packaging,
 # so a directory-level pattern here would weaken the fail-closed boundary.
 EXACT_V8_IRRELEVANT_PATHS = {
@@ -127,7 +138,9 @@ def classify_changed_files(
         )
     matched = sorted(matching_canary_paths(changed_files))
     if matched:
-        return CanaryDecision(True, _bounded_reason("V8 canary path changed: ", matched))
+        return CanaryDecision(
+            True, _bounded_reason("V8 canary path changed: ", matched)
+        )
     if not changed_files:
         return CanaryDecision(True, "comparison returned no changed paths")
     unknown = sorted(
@@ -274,10 +287,7 @@ def main() -> None:
     metadata = metadata_for_revisions(args.base, args.head, force=args.force)
     print(f"canary_required={str(metadata.canary.required).lower()}")
     print(f"canary_reason={metadata.canary.reason}")
-    print(
-        "windows_source_required="
-        f"{str(metadata.windows_source_required).lower()}"
-    )
+    print(f"windows_source_required={str(metadata.windows_source_required).lower()}")
 
 
 if __name__ == "__main__":
