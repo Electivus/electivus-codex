@@ -155,6 +155,20 @@ Windows output together with Linux assets in one release.
   are explicitly irrelevant to Deep Linux. All other paths, including unknown
   paths, are eligible.
 
+## Code-scanning boundary
+
+CodeQL default setup is disabled for this fork, and the active `Protect-Main`
+ruleset has no code-scanning or CodeQL requirement. The decision follows the
+observed 51m02s Rust analysis on PR #193 and accepts the tradeoff that the
+existing CodeQL alerts remain historical diagnostics rather than being marked
+resolved or remediated.
+
+The independent code-quality gate remains active. The repository check
+`check_codeql_policy.py` rejects CodeQL actions, CodeQL jobs or steps, and
+`security-events: write` in active top-level workflows. Re-enabling CodeQL
+requires a new specification revision and separate explicit ruleset
+authorization; it must not happen implicitly through workflow changes.
+
 ## Extended Validation
 
 - A normal push to `main` enters only `postmerge-ci.yml`, which calls

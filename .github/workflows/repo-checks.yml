@@ -70,6 +70,9 @@ jobs:
       - name: Verify postmerge scope topology
         run: python3 .github/scripts/check_postmerge_scope_topology.py
 
+      - name: Verify code-scanning removal policy
+        run: python3 .github/scripts/check_codeql_policy.py
+
       - name: Verify Electivus release topology
         run: python3 .github/scripts/check_electivus_release_topology.py
 
