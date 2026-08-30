@@ -15,6 +15,7 @@ jobs:
     uses: ./.github/workflows/bazel.yml
     with:
       validation_scope: essential
+      validation_candidate: ${{ github.sha }}
     secrets: inherit
 
   blob-size-policy:
@@ -40,11 +41,15 @@ jobs:
   rust-ci:
     name: rust-ci
     uses: ./.github/workflows/rust-ci.yml
+    with:
+      validation_candidate: ${{ github.sha }}
     secrets: inherit
 
   sdk:
     name: sdk
     uses: ./.github/workflows/sdk.yml
+    with:
+      validation_candidate: ${{ github.sha }}
     secrets: inherit
 
   v8-canary:
@@ -53,6 +58,8 @@ jobs:
       contents: read
       actions: read
     uses: ./.github/workflows/v8-canary.yml
+    with:
+      validation_candidate: ${{ github.sha }}
     secrets: inherit
 
   deep-linux-eligibility:
@@ -119,6 +126,7 @@ jobs:
     uses: ./.github/workflows/bazel.yml
     with:
       validation_scope: release-only
+      validation_candidate: ${{ github.sha }}
     secrets: inherit
 
   deep-linux-bazel-release-result:
@@ -151,6 +159,7 @@ jobs:
     uses: ./.github/workflows/rust-ci-full.yml
     with:
       validation_scope: merge-gate
+      validation_candidate: ${{ github.sha }}
     secrets: inherit
 
   deep-linux-cargo-result:
@@ -176,6 +185,162 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/deep_linux_result.py | tee -a "$GITHUB_STEP_SUMMARY"
 
+  certification-lock:
+    name: Validation certification lock
+    # Admission checks are serialized across pull requests. The current main
+    # SHA is read inside the critical section, so a missing or failed
+    # Integrated certification blocks every ordinary admission until main is
+    # conclusively certified again.
+    concurrency:
+      group: validation-certification-lock-main
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout the exact candidate implementation
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read the live main certification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main --depth=1
+          if ! git cat-file -e origin/main:.github/workflows/validation-integrated.yml 2>/dev/null; then
+            {
+              echo "## Validation certification lock"
+              echo
+              echo "- Replacement Integrated certification is not yet published on main."
+              echo "- Legacy CI required remains authoritative during bootstrap."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          current_main="$(git rev-parse origin/main)"
+          run_id="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow validation-integrated.yml \
+            --branch main \
+            --limit 100 \
+            --json databaseId,headSha,status \
+            --jq "[.[] | select(.headSha == \"$current_main\" and .status == \"completed\")][0].databaseId // empty")"
+          if [[ -z "$run_id" ]]; then
+            echo "No completed Integrated certification exists for $current_main" >&2
+            exit 1
+          fi
+          integrated_dir="$RUNNER_TEMP/current-main-integrated"
+          mkdir -p "$integrated_dir"
+          gh run download "$run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "validation-integrated-certification-${run_id}" \
+            --dir "$integrated_dir"
+          mapfile -t manifests < <(find "$integrated_dir" -type f -name integrated.json -print)
+          if [[ ${#manifests[@]} -ne 1 ]]; then
+            echo "Integrated certification artifact must contain exactly one authority manifest" >&2
+            exit 1
+          fi
+          manifest="${manifests[0]}"
+          python3 .github/scripts/validation_admission.py \
+            --manifest "$manifest" \
+            --current-main-sha "$current_main" \
+            --output "$RUNNER_TEMP/validation-admission.json" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload the admission decision
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: validation-admission-${{ github.run_id }}
+          path: ${{ runner.temp }}/validation-admission.json
+          retention-days: 1
+          if-no-files-found: warn
+
+  # This snapshot is deliberately outside the required aggregate. It gives the
+  # replacement graph an exact legacy comparison input without changing which
+  # check blocks admission.
+  legacy-observation:
+    name: Legacy validation observation
+    needs:
+      - bazel
+      - blob-size-policy
+      - cargo-deny
+      - codespell
+      - deep-linux-bazel-release-result
+      - deep-linux-cargo-result
+      - deep-linux-eligibility
+      - repo-checks
+      - rust-ci
+      - sdk
+      - v8-canary
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Emit the legacy comparison plan
+        env:
+          pr_base_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+          pr_head_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
+        shell: bash
+        continue-on-error: true
+        run: |
+          set +e
+          base_sha="$pr_base_sha"
+          head_sha="$pr_head_sha"
+          if [[ -z "$base_sha" ]]; then base_sha="$(git rev-parse HEAD^)"; fi
+          if [[ -z "$head_sha" ]]; then head_sha="$GITHUB_SHA"; fi
+          python3 .github/scripts/validation_entrypoint.py \
+            --root "$GITHUB_WORKSPACE" \
+            --output-dir "$RUNNER_TEMP/legacy-validation" \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --repository "$GITHUB_REPOSITORY" \
+            --default-branch "${GITHUB_BASE_REF:-main}" \
+            --candidate "$GITHUB_SHA" \
+            --base "$base_sha" \
+            --head "$head_sha" \
+            --branch "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" \
+            --kind pull-request \
+            --now "$(date +%s)" \
+            --preflight-only
+      - name: Capture legacy dependency conclusions
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$NEEDS" "$RUNNER_TEMP/legacy-needs.json" <<'PY'
+          import sys
+          from pathlib import Path
+
+          Path(sys.argv[2]).write_text(sys.argv[1] + "\n", encoding="utf-8")
+          PY
+      - name: Emit the legacy comparison observation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/legacy_validation_observation.py \
+            --plan "$RUNNER_TEMP/legacy-validation/validation-plan.json" \
+            --needs "$RUNNER_TEMP/legacy-needs.json" \
+            --output "$RUNNER_TEMP/legacy-observation.json"
+      - name: Upload the non-authoritative legacy observation
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: validation-legacy-observation-${{ github.run_id }}
+          path: ${{ runner.temp }}/legacy-observation.json
+          retention-days: 7
+          if-no-files-found: warn
+
   required:
     name: CI required
     # Without `always()`, GitHub skips this job after a failed dependency and a
@@ -189,6 +354,7 @@ jobs:
       - deep-linux-bazel-release-result
       - deep-linux-cargo-result
       - deep-linux-eligibility
+      - certification-lock
       - repo-checks
       - rust-ci
       - sdk

@@ -61,7 +61,7 @@ class PostmergeScopeTopologyTests(unittest.TestCase):
             ("inventory executable binding", 0, rust.replace("uses: ./.github/actions/run-argument-comment-lint", "uses: ./.github/actions/setup-ci")),
             ("inventory executable binding", 8, platform.replace("shard: [1, 2, 3, 4]", "shard: [1, 2, 3]")),
             ("inventory executable binding", 0, rust.replace("uses: ./.github/workflows/rust-ci-full-nextest-platform.yml", "uses: ./missing-nextest.yml", 1)),
-            ("inventory executable binding", 0, rust.replace("      use_sccache: true\n    secrets: inherit\n\n  # --- Gatherer", "      use_sccache: true\n      postgres_contracts: true\n    secrets: inherit\n\n  # --- Gatherer")),
+            ("inventory executable binding", 0, rust.replace("      use_sccache: true\n      validation_candidate: ${{ inputs.validation_candidate }}\n      cache_fallback: ${{ inputs.cache_fallback }}\n    secrets: inherit\n\n  # --- Gatherer", "      use_sccache: true\n      validation_candidate: ${{ inputs.validation_candidate }}\n      cache_fallback: ${{ inputs.cache_fallback }}\n      postgres_contracts: true\n    secrets: inherit\n\n  # --- Gatherer")),
             ("full result fail closed", 0, rust.replace("PLAN_RESULT: ${{ needs.plan.result }}", "PLAN_RESULT: success")),
             ("result helper exact states", 5, result.replace("actual != wanted", "actual == wanted")),
             ("postmerge only Extended Rust", 1, postmerge.replace("validation_scope: extended", "validation_scope: full")),

@@ -1,0 +1,225 @@
+name: Validation Stability Certification
+
+# Stability is a finite, manually admitted checkpoint. Until it passes, the
+# legacy required check remains authoritative and no cutover is attempted.
+# Every input below identifies a retained GitHub Actions artifact; the
+# certification job derives records and samples from those bytes.
+on:
+  workflow_dispatch:
+    inputs:
+      ordinary_run_ids:
+        description: JSON array of 20-50 exact Shadow run IDs for ordinary candidates
+        required: true
+        type: string
+      certification_run_id:
+        description: Exact Shadow run ID for the Certification-required candidate
+        required: true
+        type: string
+      cache_disabled_run_id:
+        description: Exact Shadow run ID that records disabled-reconstruction
+        required: true
+        type: string
+      integrated_run_id:
+        description: Exact Integrated run ID for the resulting main commit
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: validation-stability-${{ inputs.integrated_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  certify:
+    name: Evaluate Stability certification
+    if: github.repository == 'Electivus/electivus-codex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout the exact Stability implementation
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Download the identified Shadow and Integrated artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORDINARY_RUN_IDS: ${{ inputs.ordinary_run_ids }}
+          CERTIFICATION_RUN_ID: ${{ inputs.certification_run_id }}
+          CACHE_DISABLED_RUN_ID: ${{ inputs.cache_disabled_run_id }}
+          INTEGRATED_RUN_ID: ${{ inputs.integrated_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          def run_id(value, name):
+              if isinstance(value, int) and not isinstance(value, bool):
+                  value = str(value)
+              if not isinstance(value, str) or not value.isdigit() or int(value) <= 0:
+                  raise SystemExit(f"{name} must be a positive numeric GitHub run ID")
+              return value
+
+          ordinary = json.loads(os.environ["ORDINARY_RUN_IDS"])
+          if not isinstance(ordinary, list) or not 20 <= len(ordinary) <= 50:
+              raise SystemExit("ordinary_run_ids must contain 20-50 run IDs")
+          ordinary = [run_id(value, "ordinary_run_ids") for value in ordinary]
+          if ordinary != sorted(ordinary, key=int):
+              raise SystemExit("ordinary_run_ids must be ordered from oldest to newest")
+          special = {
+              "certification": run_id(os.environ["CERTIFICATION_RUN_ID"], "certification_run_id"),
+              "cache-disabled": run_id(os.environ["CACHE_DISABLED_RUN_ID"], "cache_disabled_run_id"),
+              "integrated": run_id(os.environ["INTEGRATED_RUN_ID"], "integrated_run_id"),
+          }
+          all_ids = ordinary + list(special.values())
+          if len(set(all_ids)) != len(all_ids):
+              raise SystemExit("Stability artifact run IDs must be distinct")
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          root = Path("stability-input")
+          ordinary_root = root / "ordinary"
+          ordinary_root.mkdir(parents=True, exist_ok=True)
+          report_paths = root / "ordinary-report-paths.txt"
+
+          def download(run, artifact, target, expected_workflow):
+              metadata = json.loads(
+                  subprocess.check_output(
+                      [
+                          "gh",
+                          "run",
+                          "view",
+                          run,
+                          "--repo",
+                          repository,
+                          "--json",
+                          "databaseId,workflowName,event,status,conclusion,headSha,headBranch",
+                      ],
+                      text=True,
+                  )
+              )
+              if str(metadata.get("databaseId")) != run:
+                  raise SystemExit(f"{artifact} resolved to a different run ID")
+              if metadata.get("workflowName") != expected_workflow:
+                  raise SystemExit(
+                      f"{artifact} was produced by {metadata.get('workflowName')!r}, "
+                      f"expected {expected_workflow!r}"
+                  )
+              if metadata.get("status") != "completed":
+                  raise SystemExit(f"{artifact} comes from a non-terminal run")
+              if expected_workflow == "Validation Integrated":
+                  if metadata.get("headBranch") != "main":
+                      raise SystemExit(f"{artifact} is not a main-branch run")
+                  if metadata.get("conclusion") != "success":
+                      raise SystemExit(f"{artifact} is not a successful Integrated run")
+              elif metadata.get("conclusion") not in {"success", "failure"}:
+                  raise SystemExit(f"{artifact} has an unsupported terminal conclusion")
+              target.mkdir(parents=True, exist_ok=True)
+              subprocess.run(
+                  [
+                      "gh",
+                      "run",
+                      "download",
+                      run,
+                      "--repo",
+                      repository,
+                      "--name",
+                      artifact,
+                      "--dir",
+                      str(target),
+                  ],
+                  check=True,
+              )
+              reports = sorted(target.rglob("validation-report.json"))
+              if len(reports) != 1:
+                  raise SystemExit(
+                      f"{artifact} must contain exactly one Validation report, found {len(reports)}"
+                  )
+              report = json.loads(reports[0].read_text(encoding="utf-8"))
+              candidate_sha = report.get("identity", {}).get("candidateSha")
+              if candidate_sha != metadata.get("headSha"):
+                  raise SystemExit(
+                      f"{artifact} report identity does not match its workflow head SHA"
+                  )
+              return reports[0]
+
+          with report_paths.open("w", encoding="utf-8") as stream:
+              for index, run in enumerate(ordinary):
+                  report = download(
+                  run,
+                  f"validation-shadow-report-{run}",
+                  ordinary_root / str(index),
+                  "Validation Shadow",
+                  )
+                  stream.write(f"{report}\n")
+          download(
+              special["certification"],
+              f"validation-shadow-report-{special['certification']}",
+              root / "certification",
+              "Validation Shadow",
+          )
+          download(
+              special["cache-disabled"],
+              f"validation-shadow-report-{special['cache-disabled']}",
+              root / "cache-disabled",
+              "Validation Shadow",
+          )
+          download(
+              special["integrated"],
+              f"validation-integrated-certification-{special['integrated']}",
+              root / "integrated",
+              "Validation Integrated",
+          )
+          PY
+      - name: Derive bounded Stability input from the retained reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t ordinary_reports < stability-input/ordinary-report-paths.txt
+          command=(
+            python3 .github/scripts/validation_stability_input.py
+            --certification-dir stability-input/certification
+            --cache-disabled-dir stability-input/cache-disabled
+            --integrated-dir stability-input/integrated
+            --records-output stability-records.json
+            --samples-output stability-samples.json
+            --resulting-main-sha-output resulting-main-sha
+          )
+          for report in "${ordinary_reports[@]}"; do command+=(--ordinary-report "$report"); done
+          "${command[@]}"
+      - name: Confirm the resulting main identity is current
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main --depth=1
+          test "$(cat resulting-main-sha)" = "$(git rev-parse origin/main)"
+      - name: Run finite Stability certification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/validation_stability_cli.py \
+            --records stability-records.json \
+            --samples stability-samples.json \
+            --resulting-main-sha "$(cat resulting-main-sha)" \
+            --output validation-stability.json \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload Stability decision and derived inputs
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: validation-stability-${{ github.run_id }}
+          path: |
+            validation-stability.json
+            stability-records.json
+            stability-samples.json
+            resulting-main-sha
+          retention-days: 30
+          if-no-files-found: warn

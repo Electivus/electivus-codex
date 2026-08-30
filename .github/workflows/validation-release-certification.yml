@@ -1,0 +1,318 @@
+name: Validation Release Certification
+
+# Release certification is a manually admitted, immutable promotion boundary.
+# It builds each Product platform once, records the bytes and provenance, and
+# keeps public promotion behind a separate protected environment.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact Integrated main SHA to certify
+        required: true
+        type: string
+      integrated_run_id:
+        description: Run containing the exact Integrated certification manifest
+        required: true
+        type: string
+      public_authorized:
+        description: Separate authorization to promote certified bytes publicly
+        required: true
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: validation-release-certification-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build certified bytes - ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - platform: windows-x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - platform: windows-arm64
+            runner:
+              group: ${{ github.event.repository.name }}-runners
+              labels: ${{ github.event.repository.name }}-windows-arm64
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Verify the exact Integrated source checkout
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+      - uses: ./.github/actions/setup-ci
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      - name: Configure Windows target
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: ${{ matrix.target }}
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+      - name: Build the release binary exactly once
+        shell: bash
+        working-directory: codex-rs
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --target "$TARGET" --bin codex
+      - name: Sign Linux release binary
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/linux-code-sign
+        with:
+          target: ${{ matrix.target }}
+          artifacts-dir: ${{ github.workspace }}/codex-rs/target/${{ matrix.target }}/release
+          binaries: codex
+      - name: Smoke test the exact release binary
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          binary="codex-rs/target/$TARGET/release/codex"
+          if [[ "$PLATFORM" == windows-* ]]; then binary+=".exe"; fi
+          test -x "$binary" || test -f "$binary"
+          "$binary" --help >/dev/null
+      - name: Package and attest the immutable bytes
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          TARGET: ${{ matrix.target }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/codex-$PLATFORM"
+          if [[ "$PLATFORM" == windows-* ]]; then
+            archive="$output.zip"
+            7z a -tzip "$archive" "codex-rs/target/$TARGET/release/codex.exe" >/dev/null
+            signature_digest=not-applicable
+          else
+            archive="$output.tar.gz"
+            tar -czf "$archive" -C "codex-rs/target/$TARGET/release" codex codex.sigstore
+            signature_digest="$(sha256sum "codex-rs/target/$TARGET/release/codex.sigstore" | awk '{ print $1 }')"
+          fi
+          if [[ "$PLATFORM" == windows-* ]]; then
+            7z t "$archive" >/dev/null
+          else
+            tar -tzf "$archive" | grep -Fx codex
+            tar -tzf "$archive" | grep -Fx codex.sigstore
+          fi
+          digest="$(sha256sum "$archive" | awk '{ print $1 }')"
+          printf '%s\n' \
+            '{' \
+            "  \"sourceSha\": \"$SOURCE_SHA\"," \
+            "  \"archive\": \"$(basename "$archive")\"," \
+            "  \"archiveSha256\": \"$digest\"," \
+            "  \"signatureSha256\": \"$signature_digest\"," \
+            "  \"builder\": \"$RUNNER_OS/$RUNNER_ARCH\"," \
+            "  \"command\": \"cargo build --release --target $TARGET --bin codex\"," \
+            '  "provenance": "source,toolchain,package,checksum recorded in this run",' \
+            '  "signatureBoundary": "release-certification"' \
+            '}' > "$RUNNER_TEMP/provenance-$PLATFORM.json"
+          provenance_digest="$(sha256sum "$RUNNER_TEMP/provenance-$PLATFORM.json" | awk '{ print $1 }')"
+          python3 - "$RUNNER_TEMP/release-artifact-$PLATFORM.json" "$PLATFORM" "$archive" "$digest" "$provenance_digest" "$signature_digest" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          output, platform, archive, digest, provenance_digest, signature_digest = sys.argv[1:]
+          packaging = "zip" if platform.startswith("windows") else "tar.gz"
+          Path(output).write_text(
+              json.dumps(
+                  {
+                      "name": Path(archive).name,
+                      "digest": digest,
+                      "platform": platform,
+                      "packaging": packaging,
+                      "producer": "release-build",
+                      "provenanceDigest": provenance_digest,
+                      "signatureDigest": None if signature_digest == "not-applicable" else signature_digest,
+                  },
+                  indent=2,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Upload one platform artifact and provenance
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: validation-release-${{ github.run_id }}-${{ matrix.platform }}
+          path: |
+            ${{ runner.temp }}/codex-${{ matrix.platform }}.*
+            ${{ runner.temp }}/release-artifact-${{ matrix.platform }}.json
+            ${{ runner.temp }}/provenance-${{ matrix.platform }}.json
+          retention-days: 30
+          if-no-files-found: error
+
+  certify:
+    name: Certify one immutable artifact set
+    needs: build
+    if: ${{ always() && needs.build.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout the exact release implementation
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Download the exact Integrated certification
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: validation-integrated-certification-${{ inputs.integrated_run_id }}
+          run-id: ${{ inputs.integrated_run_id }}
+          github-token: ${{ github.token }}
+          path: integrated-input
+      - name: Download all platform bytes from this certification run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: validation-release-${{ github.run_id }}-*
+          path: release-input
+          merge-multiple: true
+      - name: Build the bounded artifact input
+        shell: bash
+        run: |
+          set -euo pipefail
+          find integrated-input -name integrated.json -type f -print -quit > integrated-manifest.path
+          test -s integrated-manifest.path
+          python3 - release-input artifacts.json <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          directory, output = map(Path, sys.argv[1:])
+          paths = sorted(directory.glob("release-artifact-*.json"))
+          if len(paths) != 4:
+              raise SystemExit(f"expected four platform artifact records, found {len(paths)}")
+          artifacts = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+          Path(output).write_text(json.dumps({"artifacts": artifacts}, indent=2) + "\n", encoding="utf-8")
+          PY
+      - name: Certify package, smoke, checksum, provenance, and signature boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/validation_release_cli.py certify \
+            --integrated-manifest "$(cat integrated-manifest.path)" \
+            --source-sha "${{ inputs.source_sha }}" \
+            --artifacts artifacts.json \
+            --artifact-dir release-input \
+            --output certified-set.json \
+            --evidence-output release-evidence.json \
+            --now "$(date +%s)" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          mkdir -p certification-output
+          cp certified-set.json release-evidence.json certification-output/
+          state_path="$(find integrated-input -name validation-state.json -type f -print -quit)"
+          if [[ -n "$state_path" ]]; then cp "$state_path" certification-output/; fi
+      - name: Upload 30-day unpublished certification record
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: validation-release-certification-${{ github.run_id }}
+          path: certification-output
+          retention-days: 30
+
+  promote:
+    name: Verify public promotion of certified bytes
+    needs: certify
+    if: ${{ inputs.public_authorized == true && needs.certify.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: release-public
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout the exact release implementation
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Download the certified set
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: validation-release-certification-${{ github.run_id }}
+          path: certification-input
+      - name: Download the certified platform bytes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: validation-release-${{ github.run_id }}-*
+          path: release-input
+          merge-multiple: true
+      - name: Create the explicit no-rebuild publication request
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - certification-input/certified-set.json publication-request.json <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          certified_path, request_path = map(Path, sys.argv[1:])
+          certified = json.loads(certified_path.read_text(encoding="utf-8"))
+          request_path.write_text(
+              json.dumps(
+                  {
+                      "sourceSha": certified["sourceSha"],
+                      "certificationManifestId": certified["certificationManifestId"],
+                      "artifacts": certified["artifacts"],
+                      "rebuild": False,
+                      "repackage": False,
+                      "resign": False,
+                      "publicAuthorized": True,
+                  },
+                  indent=2,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+          state="clean"
+          if [[ -f certification-input/validation-state.json ]]; then
+            state="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"])' certification-input/validation-state.json)"
+          fi
+          python3 .github/scripts/validation_release_cli.py promote \
+            --certified-set certification-input/certified-set.json \
+            --request publication-request.json \
+            --artifact-dir release-input \
+            --state "$state" \
+            --output promotion-record.json \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload immutable promotion record
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: validation-release-promotion-${{ github.run_id }}
+          path: promotion-record.json
+          retention-days: 30

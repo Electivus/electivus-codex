@@ -7,7 +7,21 @@ on:
         required: false
         default: ""
         type: string
+      validation_candidate:
+        description: Optional immutable candidate namespace for validation caches.
+        required: false
+        default: ""
+        type: string
+      cache_fallback:
+        description: Cache disposition for validation reconstruction.
+        required: false
+        default: not-applicable
+        type: string
   workflow_dispatch:
+
+env:
+  VALIDATION_CACHE_PREFIX: ${{ inputs.validation_candidate != '' && format('validation-{0}-', inputs.validation_candidate) || '' }}
+  VALIDATION_CACHE_FALLBACK: ${{ inputs.cache_fallback || 'not-applicable' }}
 
 jobs:
   postgres-contracts:
@@ -69,7 +83,7 @@ jobs:
           for attempt in {1..30}; do docker exec "${container}" pg_isready -U codex -d codex_runtime_state_test && break; [[ "${attempt}" == 30 ]] && exit 1; sleep 1; done
 
       - name: Compute lockfile hash
-        if: ${{ inputs.artifact_id == '' }}
+        if: ${{ inputs.artifact_id == '' && inputs.cache_fallback != 'disabled-reconstruction' }}
         id: lockhash
         shell: bash
         run: |
@@ -78,7 +92,7 @@ jobs:
           echo "toolchain_hash=$(sha256sum rust-toolchain.toml | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Restore cargo home cache
-        if: ${{ inputs.artifact_id == '' }}
+        if: ${{ inputs.artifact_id == '' && inputs.cache_fallback != 'disabled-reconstruction' }}
         id: cache_cargo_home_restore
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
@@ -87,19 +101,19 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
+          key: ${{ env.VALIDATION_CACHE_PREFIX }}cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
           restore-keys: |
-            cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-
+            ${{ env.VALIDATION_CACHE_PREFIX }}cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-
 
       - name: Install sccache
-        if: ${{ inputs.artifact_id == '' }}
+        if: ${{ inputs.artifact_id == '' && inputs.cache_fallback != 'disabled-reconstruction' }}
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
           tool: sccache
           version: 0.7.5
 
       - name: Configure sccache backend
-        if: ${{ inputs.artifact_id == '' }}
+        if: ${{ inputs.artifact_id == '' && inputs.cache_fallback != 'disabled-reconstruction' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -113,7 +127,7 @@ jobs:
           fi
 
       - name: Enable sccache wrapper
-        if: ${{ inputs.artifact_id == '' }}
+        if: ${{ inputs.artifact_id == '' && inputs.cache_fallback != 'disabled-reconstruction' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -122,15 +136,15 @@ jobs:
           echo "CARGO_BUILD_RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
 
       - name: Restore sccache cache (fallback)
-        if: ${{ inputs.artifact_id == '' && env.SCCACHE_GHA_ENABLED != 'true' }}
+        if: ${{ inputs.artifact_id == '' && inputs.cache_fallback != 'disabled-reconstruction' && env.SCCACHE_GHA_ENABLED != 'true' }}
         id: cache_sccache_restore
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ env.SCCACHE_DIR }}
-          key: sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
+          key: ${{ env.VALIDATION_CACHE_PREFIX }}sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
           restore-keys: |
-            sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-
-            sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-
+            ${{ env.VALIDATION_CACHE_PREFIX }}sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-
+            ${{ env.VALIDATION_CACHE_PREFIX }}sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-
 
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         if: ${{ inputs.artifact_id == '' }}
@@ -300,7 +314,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
       - name: Save cargo home cache
-        if: always() && !cancelled() && inputs.artifact_id == '' && steps.cache_cargo_home_restore.outputs.cache-hit != 'true'
+        if: always() && !cancelled() && inputs.artifact_id == '' && inputs.cache_fallback != 'disabled-reconstruction' && steps.cache_cargo_home_restore.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
@@ -309,23 +323,23 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
+          key: ${{ env.VALIDATION_CACHE_PREFIX }}cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
 
       - name: Save sccache cache (fallback)
-        if: always() && !cancelled() && inputs.artifact_id == '' && env.SCCACHE_GHA_ENABLED != 'true'
+        if: always() && !cancelled() && inputs.artifact_id == '' && inputs.cache_fallback != 'disabled-reconstruction' && env.SCCACHE_GHA_ENABLED != 'true'
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ env.SCCACHE_DIR }}
-          key: sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
+          key: ${{ env.VALIDATION_CACHE_PREFIX }}sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
 
       - name: sccache stats
-        if: always() && inputs.artifact_id == ''
+        if: always() && inputs.artifact_id == '' && inputs.cache_fallback != 'disabled-reconstruction'
         continue-on-error: true
         run: sccache --show-stats || true
 
       - name: sccache summary
-        if: always() && inputs.artifact_id == ''
+        if: always() && inputs.artifact_id == '' && inputs.cache_fallback != 'disabled-reconstruction'
         shell: bash
         run: |
           {

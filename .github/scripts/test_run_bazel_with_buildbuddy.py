@@ -48,6 +48,42 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
             ["build", "--", "//codex-rs/cli:codex"],
         )
 
+    def test_cache_disabled_reconstruction_drops_all_cache_configuration(self) -> None:
+        env = {
+            "BUILDBUDDY_API_KEY": "token",
+            "VALIDATION_CACHE_FALLBACK": "disabled-reconstruction",
+            "BAZEL_REPO_CONTENTS_CACHE": "/tmp/repo-contents",
+            "BAZEL_REPOSITORY_CACHE": "/tmp/repository",
+        }
+
+        self.assertIsNone(
+            run_bazel_with_buildbuddy.remote_config(
+                ["build", "--config=ci-linux"], env
+            )
+        )
+        self.assertEqual(
+            run_bazel_with_buildbuddy.bazel_args_with_remote_config(
+                [
+                    "build",
+                    "--config=ci-linux",
+                    "--repo_contents_cache=/tmp/old",
+                    "--",
+                    "//codex-rs/cli:codex",
+                ],
+                env,
+            ),
+            [
+                "build",
+                "--disk_cache=",
+                "--repo_contents_cache=",
+                "--repository_cache=",
+                "--remote_cache=",
+                "--experimental_remote_downloader=",
+                "--",
+                "//codex-rs/cli:codex",
+            ],
+        )
+
     def test_program_arguments_after_separator_do_not_select_or_lose_rbe(self) -> None:
         args = ["run", "//codex-rs/cli:codex", "--", "--config=remote"]
 

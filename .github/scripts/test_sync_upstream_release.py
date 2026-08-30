@@ -1973,12 +1973,14 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
             '--release-tag "$RELEASE_TAG"',
         ):
             self.assertIn(contract, workflow)
-        permissions = workflow.split("permissions:\n", 1)[1].split("\nconcurrency:", 1)[
-            0
-        ]
-        self.assertEqual(
-            permissions,
-            "  contents: write\n  pull-requests: write\n",
+        self.assertIn("permissions: {}\n\nconcurrency:", workflow)
+        self.assertIn(
+            "    permissions:\n      contents: write\n      pull-requests: write\n",
+            workflow,
+        )
+        self.assertIn(
+            "    permissions:\n      contents: read\n      pull-requests: read\n",
+            workflow,
         )
         run = workflow.split("        run: |\n", 1)[1]
         self.assertEqual(run.count("sync_upstream_release.py"), 1)

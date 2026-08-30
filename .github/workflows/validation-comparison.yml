@@ -1,0 +1,71 @@
+name: Validation Comparison
+
+# This is a non-authoritative, exact-run comparison surface for a draft
+# Validation PR. Run IDs are explicit so a later workflow cannot silently
+# replace either side of the comparison while it is being reviewed.
+on:
+  workflow_dispatch:
+    inputs:
+      legacy_run_id:
+        description: Blocking CI run containing the legacy observation
+        required: true
+        type: string
+      replacement_run_id:
+        description: Validation Shadow run containing the replacement report
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: validation-comparison-${{ inputs.legacy_run_id }}-${{ inputs.replacement_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  compare:
+    name: Compare exact legacy and replacement candidates
+    if: github.repository == 'Electivus/electivus-codex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Download the exact legacy observation
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: validation-legacy-observation-${{ inputs.legacy_run_id }}
+          run-id: ${{ inputs.legacy_run_id }}
+          github-token: ${{ github.token }}
+          path: legacy-input
+      - name: Download the exact replacement observation
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: validation-shadow-report-${{ inputs.replacement_run_id }}
+          run-id: ${{ inputs.replacement_run_id }}
+          github-token: ${{ github.token }}
+          path: replacement-input
+      - name: Compare plans, evidence, outcomes, names, and latency
+        shell: bash
+        run: |
+          set -euo pipefail
+          legacy="$(find legacy-input -name legacy-observation.json -type f -print -quit)"
+          replacement="$(find replacement-input -name replacement-observation.json -type f -print -quit)"
+          test -n "$legacy"
+          test -n "$replacement"
+          python3 .github/scripts/validation_comparison.py \
+            --legacy "$legacy" \
+            --replacement "$replacement" \
+            --output validation-comparison.json \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload the non-authoritative comparison
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: validation-comparison-${{ github.run_id }}
+          path: validation-comparison.json
+          retention-days: 90
+          if-no-files-found: warn

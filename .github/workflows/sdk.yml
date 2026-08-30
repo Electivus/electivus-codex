@@ -2,6 +2,21 @@ name: sdk
 
 on:
   workflow_call:
+    inputs:
+      validation_candidate:
+        description: Optional immutable candidate namespace for validation caches.
+        required: false
+        default: ""
+        type: string
+      cache_fallback:
+        description: Cache disposition for validation reconstruction.
+        required: false
+        default: not-applicable
+        type: string
+
+env:
+  VALIDATION_CACHE_PREFIX: ${{ inputs.validation_candidate != '' && format('validation-{0}-', inputs.validation_candidate) || '' }}
+  VALIDATION_CACHE_FALLBACK: ${{ inputs.cache_fallback || 'not-applicable' }}
 
 jobs:
   python-sdk:
@@ -45,7 +60,6 @@ jobs:
     timeout-minutes: 90
     environment:
       name: bazel
-      deployment: false
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -64,11 +78,17 @@ jobs:
         with:
           run_install: false
 
-      - name: Setup Node.js
+      - name: Setup Node.js with package cache
+        if: ${{ inputs.cache_fallback != 'disabled-reconstruction' }}
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version: 22
           cache: pnpm
+      - name: Setup Node.js without package cache
+        if: ${{ inputs.cache_fallback == 'disabled-reconstruction' }}
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 22
 
       - name: Set up Bazel CI
         id: setup_bazel
@@ -176,12 +196,12 @@ jobs:
         run: pnpm -r --filter ./sdk/typescript run test
 
       - name: Save bazel repository cache
-        if: always() && !cancelled() && steps.setup_bazel.outputs.cache-hit != 'true'
+        if: always() && !cancelled() && inputs.cache_fallback != 'disabled-reconstruction'
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ steps.setup_bazel.outputs.repository-cache-path }}
-          key: bazel-cache-x86_64-unknown-linux-gnu-${{ hashFiles('MODULE.bazel', 'codex-rs/Cargo.lock', 'codex-rs/Cargo.toml') }}
+          key: ${{ env.VALIDATION_CACHE_PREFIX }}bazel-cache-x86_64-unknown-linux-gnu-${{ hashFiles('MODULE.bazel', 'codex-rs/Cargo.lock', 'codex-rs/Cargo.toml') }}
 
       - name: Check for a clean worktree
         if: always() && !cancelled()

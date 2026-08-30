@@ -1,5 +1,51 @@
 # Workflow Strategy
 
+## Staged Validation architecture (#180)
+
+The fork-owned replacement graph is implemented by the versioned seam in
+`.github/scripts/validation_entrypoint.py` and is intentionally Shadow-only
+until the Stability checkpoint and the separately authorized no-gap cutover.
+The plan is additive across Change surfaces and Risk modifiers; every evidence
+family is serialized as `required` or `not-required`, and every producer is
+bound to the candidate SHA, merge base, toolchain, command, platform, and
+Validation fingerprint. The common Preflight path is repository-only and does
+not compile Product code.
+
+The staged workflows map to the specification subissues:
+
+- `validation-shadow.yml` (#181-#185, #190) runs latest-wins Pull request
+  feedback, Linux x64 Essential evidence, targeted Runtime State/V8/platform
+  evidence, and parallel advanced CodeQL with `upload: never`.
+- `validation-integrated.yml` (#186-#187) serializes exact `main` commits,
+  emits Integrated authority evidence, and derives Clean, Certification lock,
+  Recovery, or Degraded state without automatic history mutation.
+- `validation-release-certification.yml` (#188) builds one artifact per Linux
+  x64/ARM64 and Windows x64/ARM64 platform, records checksums and provenance,
+  and verifies promotion without rebuild, repackage, or resign.
+- `upstream-release-sync.yml` and the immutable manifest chain (#189) retain
+  frozen release/fork baselines and route Synchronization PRs through the
+  `certification-required` profile.
+- `validation-surveillance.yml` (#190), `validation-stability.yml` (#191),
+  `validation-comparison.yml` and `validation-cutover.yml` (#191), and
+  `validation-retirement.yml` (#192)
+  provide bounded SLO/retention/quarantine observation, finite stability
+  evidence, an exact-run legacy/replacement comparison, an auditable no-gap
+  authority checklist, and the 30-day/20-run retirement gate. Legacy workflows
+  remain manually runnable until that gate.
+
+`check_validation_topology.py` is part of `repo-checks`; it fails closed on
+unpinned actions, missing stages, authority gaps, accidental CodeQL upload,
+release rebuilds, or retirement that omits the superseded issue backlinks.
+
+Stability certification is dispatched with `ordinary_run_ids` containing 20 to
+50 ascending Shadow run IDs, plus one exact run ID each for the
+Certification-required candidate, the cache-disabled reconstruction, and the
+Integrated certification. The workflow downloads those named artifacts with
+`actions: read`, verifies their report and Integrated-manifest identities, and
+derives the bounded records and latency samples itself; callers cannot submit
+replacement JSON. The resulting Integrated SHA must still equal the live
+`main` tip when the finite certification runs.
+
 The workflows in this directory implement Sustainable fork CI as a compatibility
 patch over the inherited validation suite. Correctness depends only on standard
 GitHub-hosted Linux runners. BuildBuddy can accelerate Bazel work when its
@@ -13,12 +59,13 @@ remain the fallback.
   conflicts before they reach the branch.
 - Native Linux x64 on `ubuntu-24.04` is the current Essential platform.
 - Linux ARM64 on `ubuntu-24.04-arm` and remaining build variants are Extended
-  validation. Promoted release, x64 test, and V8 lanes are not repeated after
-  merge.
-- macOS and Windows remain Codex product platforms, but this fork does not
-  select them in active validation matrices. They can return by restoring
-  inherited jobs and widening matrices after their standard-runner paths are
-  certified.
+  validation for Pull requests; Integrated reruns the exact full profile before
+  a change becomes authoritative on `main`.
+- Windows x64 is selected in Shadow when the plan identifies a platform,
+  package, release, or unknown risk and is always selected for Integrated;
+  Windows ARM64 joins the exact Integrated and Release Certification sets.
+- macOS remains outside the staged product matrix until its standard-runner
+  path receives an explicit certification profile.
 
 ## Electivus Linux And Windows Release
 

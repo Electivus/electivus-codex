@@ -1,0 +1,116 @@
+name: Validation Recovery
+
+# Recovery is deliberately manual and audit-bound. It never reverts, rewrites
+# history, or bypasses review; it only validates the authorization for a
+# correction or an explicitly approved revert.
+on:
+  workflow_dispatch:
+    inputs:
+      authorization:
+        description: JSON Recovery authorization issued for this exact failure
+        required: true
+        type: string
+      failed_integrated_sha:
+        description: Exact Integrated commit in Recovery
+        required: true
+        type: string
+      candidate_head_sha:
+        description: Exact correction or revert candidate head
+        required: true
+        type: string
+      current_base_sha:
+        description: Exact current base for the candidate
+        required: true
+        type: string
+      pull_request_number:
+        description: Exact Recovery correction or revert pull request number
+        required: true
+        type: string
+      validation_fingerprint:
+        description: Exact Validation fingerprint authorized for this Recovery change
+        required: true
+        type: string
+      action_type:
+        description: Authorized action
+        required: true
+        type: choice
+        options:
+          - correction
+          - revert
+      merge_gate_passed:
+        description: Set only after the ordinary Merge gate passed
+        required: true
+        default: false
+        type: boolean
+      review_passed:
+        description: Set only after review passed for the exact candidate
+        required: true
+        default: false
+        type: boolean
+      consume:
+        description: Consume the single-use authorization after verification
+        required: true
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: validation-recovery-${{ inputs.failed_integrated_sha }}
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    name: Validate Recovery authorization
+    if: github.repository == 'Electivus/electivus-codex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Write authorization in the ephemeral runner
+        env:
+          AUTHORIZATION: ${{ inputs.authorization }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c 'import os; from pathlib import Path; Path(os.environ["RUNNER_TEMP"], "recovery-authorization.json").write_text(os.environ["AUTHORIZATION"] + "\n", encoding="utf-8")'
+      - name: Validate exact Recovery identity and normal gates
+        env:
+          FAILED_INTEGRATED_SHA: ${{ inputs.failed_integrated_sha }}
+          CANDIDATE_HEAD_SHA: ${{ inputs.candidate_head_sha }}
+          CURRENT_BASE_SHA: ${{ inputs.current_base_sha }}
+          PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          VALIDATION_FINGERPRINT: ${{ inputs.validation_fingerprint }}
+          ACTION_TYPE: ${{ inputs.action_type }}
+          MERGE_GATE_PASSED: ${{ inputs.merge_gate_passed }}
+          REVIEW_PASSED: ${{ inputs.review_passed }}
+          CONSUME: ${{ inputs.consume }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          command=(
+            python3 .github/scripts/validation_recovery.py
+            --authorization "$RUNNER_TEMP/recovery-authorization.json"
+            --failed-integrated-sha "$FAILED_INTEGRATED_SHA"
+            --candidate-head-sha "$CANDIDATE_HEAD_SHA"
+            --current-base-sha "$CURRENT_BASE_SHA"
+            --action-type "$ACTION_TYPE"
+            --pull-request-number "$PULL_REQUEST_NUMBER"
+            --validation-fingerprint "$VALIDATION_FINGERPRINT"
+            --output "$RUNNER_TEMP/recovery-result.json"
+          )
+          [[ "$MERGE_GATE_PASSED" == "true" ]] && command+=(--merge-gate-passed)
+          [[ "$REVIEW_PASSED" == "true" ]] && command+=(--review-passed)
+          [[ "$CONSUME" == "true" ]] && command+=(--consume)
+          "${command[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload auditable Recovery decision
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: validation-recovery-${{ github.run_id }}
+          path: ${{ runner.temp }}/recovery-result.json
+          retention-days: 30

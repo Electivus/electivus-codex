@@ -60,4 +60,10 @@ if ((Test-Path "D:\") -and (Test-DevDrive "D:")) {
     }
 }
 
-"CI_BUILD_ROOT=$Drive" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+$buildRoot = $Drive
+if ($env:VALIDATION_CACHE_FALLBACK -eq "disabled-reconstruction") {
+    $buildRoot = Join-Path $Drive "codex-cache-disabled-$env:GITHUB_RUN_ID"
+    New-Item -ItemType Directory -Path $buildRoot -Force | Out-Null
+}
+
+"CI_BUILD_ROOT=$buildRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append

@@ -1,0 +1,106 @@
+name: Validation Surveillance
+
+# Surveillance observes the replacement graph and external assumptions. It
+# carries no candidate evidence and may cancel an older run only within the
+# same surveillance profile.
+on:
+  schedule:
+    - cron: "43 6 * * *"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Surveillance profile
+        required: true
+        default: ordinary
+        type: choice
+        options:
+          - ordinary
+          - certification-required
+          - integrated
+          - release
+
+permissions: {}
+
+concurrency:
+  group: validation-surveillance-${{ inputs.profile || 'ordinary' }}
+  cancel-in-progress: true
+
+jobs:
+  observe:
+    name: Observe Validation SLOs and drift
+    if: github.repository == 'Electivus/electivus-codex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Collect recent Shadow reports without candidate reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow validation-shadow.yml \
+            --limit 50 \
+            --json databaseId \
+            --jq '.[].databaseId' > "$RUNNER_TEMP/shadow-runs"
+          while IFS= read -r run_id; do
+            [[ "$run_id" =~ ^[0-9]+$ ]] || continue
+            mkdir -p "reports/$run_id"
+            gh run download "$run_id" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "validation-shadow-report-$run_id" \
+              --dir "reports/$run_id" \
+              || rm -rf "reports/$run_id"
+          done < "$RUNNER_TEMP/shadow-runs"
+      - name: Compute bounded SLO and reliability report
+        env:
+          PROFILE: ${{ inputs.profile || 'ordinary' }}
+        shell: bash
+        run: |
+          set +e
+          previous_run=""
+          while IFS= read -r run_id; do
+            if [[ "$run_id" =~ ^[0-9]+$ && "$run_id" != "$GITHUB_RUN_ID" ]]; then
+              previous_run="$run_id"
+              break
+            fi
+          done < <(gh run list --repo "$GITHUB_REPOSITORY" --workflow validation-surveillance.yml --limit 3 --json databaseId --jq '.[].databaseId')
+          previous_path=""
+          if [[ -n "$previous_run" ]]; then
+            rm -rf previous-surveillance
+            if gh run download "$previous_run" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "validation-surveillance-$previous_run" \
+              --dir previous-surveillance; then
+              previous_path="$(find previous-surveillance -name validation-slo.json -type f -print -quit)"
+            fi
+          fi
+          command=(python3 .github/scripts/validation_observability_cli.py \
+            --reports-dir reports \
+            --output validation-slo.json \
+            --markdown validation-slo.md \
+            --profile "$PROFILE" \
+            --fail-on-breach)
+          if [[ -n "$previous_path" ]]; then command+=(--previous "$previous_path"); fi
+          "${command[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          status=${PIPESTATUS[0]}
+          exit "$status"
+      - name: Upload 30-day Surveillance record
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: validation-surveillance-${{ github.run_id }}
+          path: |
+            validation-slo.json
+            validation-slo.md
+          retention-days: 30
+          if-no-files-found: warn
