@@ -11,6 +11,7 @@ from validation_reports import report_to_dict
 from validation_contracts import serialize_plan
 from validation_contracts import validate_manifest
 from validation_entrypoint import main as entrypoint_main
+from validation_emit_results import _outcome
 from validation_codeql import CodeqlLanguageResult
 from validation_codeql import aggregate_codeql
 from validation_comparison import ValidationObservation
@@ -71,6 +72,10 @@ class ValidationTests(unittest.TestCase):
             manifest_for_requirement(plan, requirement, **kwargs)
             for requirement in plan.requirements
         )
+
+    def test_workflow_failures_remain_infrastructure_outcomes(self):
+        self.assertEqual("infrastructure-failure", _outcome("failure"))
+        self.assertEqual("product-failure", _outcome("product-failure"))
 
     def test_repository_only_plan_is_exact_and_has_all_dispositions(self):
         plan = build_plan(self.candidate, ["README.md", "docs/guide.md"])

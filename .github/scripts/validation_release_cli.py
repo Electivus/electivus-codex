@@ -15,6 +15,7 @@ from validation_release import artifact_set_from_dict
 from validation_release import artifact_set_to_dict
 from validation_release import certify_artifacts
 from validation_release import release_evidence_manifest
+from validation_release_files import verify_release_files
 from validation_release import verify_promotion
 
 
@@ -35,11 +36,22 @@ def _artifacts(payload: object) -> tuple[ReleaseArtifact, ...]:
 
 def certify(args: argparse.Namespace) -> int:
     integrated = parse_manifest(args.integrated_manifest.read_text(encoding="utf-8"))
-    if args.source_sha is not None and integrated.candidate.candidate_sha != args.source_sha:
-        raise ContractError("Integrated manifest is not bound to the requested release SHA")
+    if (
+        args.source_sha is not None
+        and integrated.candidate.candidate_sha != args.source_sha
+    ):
+        raise ContractError(
+            "Integrated manifest is not bound to the requested release SHA"
+        )
+    artifacts = _artifacts(_read_json(args.artifacts))
+    verify_release_files(
+        args.artifact_dir,
+        artifacts,
+        source_sha=integrated.candidate.candidate_sha,
+    )
     artifact_set = certify_artifacts(
         integrated,
-        _artifacts(_read_json(args.artifacts)),
+        artifacts,
         certification_manifest_id=args.certification_manifest_id,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -70,7 +82,12 @@ def _request(payload: object) -> PublicationRequest:
         "publicAuthorized",
     }:
         raise ContractError("publication request has invalid fields")
-    flags = (payload["rebuild"], payload["repackage"], payload["resign"], payload["publicAuthorized"])
+    flags = (
+        payload["rebuild"],
+        payload["repackage"],
+        payload["resign"],
+        payload["publicAuthorized"],
+    )
     if not all(isinstance(flag, bool) for flag in flags):
         raise ContractError("publication request flags must be boolean")
     return PublicationRequest(
@@ -96,7 +113,8 @@ def promote(args: argparse.Namespace) -> int:
                     "sourceSha": artifact_set.source_sha,
                     "certificationManifestId": artifact_set.certification_manifest_id,
                     "promotedArtifactDigests": [
-                        [artifact.name, artifact.digest] for artifact in artifact_set.artifacts
+                        [artifact.name, artifact.digest]
+                        for artifact in artifact_set.artifacts
                     ],
                     "rebuild": False,
                     "repackage": False,
@@ -117,10 +135,13 @@ def parser() -> argparse.ArgumentParser:
     certify_command = subcommands.add_parser("certify")
     certify_command.add_argument("--integrated-manifest", type=Path, required=True)
     certify_command.add_argument("--artifacts", type=Path, required=True)
+    certify_command.add_argument("--artifact-dir", type=Path, required=True)
     certify_command.add_argument("--output", type=Path, required=True)
     certify_command.add_argument("--source-sha")
     certify_command.add_argument("--evidence-output", type=Path)
-    certify_command.add_argument("--certification-manifest-id", default="release-certification")
+    certify_command.add_argument(
+        "--certification-manifest-id", default="release-certification"
+    )
     certify_command.add_argument("--duration-seconds", type=float, default=0)
     certify_command.add_argument("--now", type=int, default=0)
     certify_command.set_defaults(handler=certify)

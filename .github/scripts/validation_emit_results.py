@@ -19,9 +19,11 @@ from validation_result import write_manifest
 def _outcome(result: str) -> str:
     return {
         "success": "passed",
-        "failure": "product-failure",
+        "failure": "infrastructure-failure",
         "cancelled": "stale",
         "skipped": "indeterminate",
+        "product-failure": "product-failure",
+        "infrastructure-failure": "infrastructure-failure",
     }.get(result, "indeterminate")
 
 

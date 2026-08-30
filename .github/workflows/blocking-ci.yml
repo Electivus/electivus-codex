@@ -185,6 +185,72 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/deep_linux_result.py | tee -a "$GITHUB_STEP_SUMMARY"
 
+  certification-lock:
+    name: Validation certification lock
+    # Admission checks are serialized across pull requests. The current main
+    # SHA is read inside the critical section, so a missing or failed
+    # Integrated certification blocks every ordinary admission until main is
+    # conclusively certified again.
+    concurrency:
+      group: validation-certification-lock-main
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout the exact candidate implementation
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read the live main certification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main --depth=1
+          current_main="$(git rev-parse origin/main)"
+          run_id="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow validation-integrated.yml \
+            --branch main \
+            --limit 100 \
+            --json databaseId,headSha,status \
+            --jq "[.[] | select(.headSha == \"$current_main\" and .status == \"completed\")][0].databaseId // empty")"
+          if [[ -z "$run_id" ]]; then
+            echo "No completed Integrated certification exists for $current_main" >&2
+            exit 1
+          fi
+          integrated_dir="$RUNNER_TEMP/current-main-integrated"
+          mkdir -p "$integrated_dir"
+          gh run download "$run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "validation-integrated-certification-${run_id}" \
+            --dir "$integrated_dir"
+          mapfile -t manifests < <(find "$integrated_dir" -type f -name integrated.json -print)
+          if [[ ${#manifests[@]} -ne 1 ]]; then
+            echo "Integrated certification artifact must contain exactly one authority manifest" >&2
+            exit 1
+          fi
+          manifest="${manifests[0]}"
+          python3 .github/scripts/validation_admission.py \
+            --manifest "$manifest" \
+            --current-main-sha "$current_main" \
+            --output "$RUNNER_TEMP/validation-admission.json" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload the admission decision
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: validation-admission-${{ github.run_id }}
+          path: ${{ runner.temp }}/validation-admission.json
+          retention-days: 1
+          if-no-files-found: warn
+
   # This snapshot is deliberately outside the required aggregate. It gives the
   # replacement graph an exact legacy comparison input without changing which
   # check blocks admission.
@@ -279,6 +345,7 @@ jobs:
       - deep-linux-bazel-release-result
       - deep-linux-cargo-result
       - deep-linux-eligibility
+      - certification-lock
       - repo-checks
       - rust-ci
       - sdk

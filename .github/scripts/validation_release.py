@@ -83,7 +83,10 @@ def validate_artifact(artifact: ReleaseArtifact) -> None:
             artifact.producer,
             artifact.provenance_digest,
         )
-    ) or (artifact.signature_digest is not None and not isinstance(artifact.signature_digest, str)):
+    ) or (
+        artifact.signature_digest is not None
+        and not isinstance(artifact.signature_digest, str)
+    ):
         raise ContractError("release artifact fields must be strings")
     if (
         not artifact.name
@@ -99,7 +102,10 @@ def validate_artifact(artifact: ReleaseArtifact) -> None:
         raise ContractError("release artifact digest must be a lowercase SHA-256")
     if SHA256_PATTERN.fullmatch(artifact.provenance_digest) is None:
         raise ContractError("release provenance digest must be a lowercase SHA-256")
-    if artifact.signature_digest is not None and SHA256_PATTERN.fullmatch(artifact.signature_digest) is None:
+    if (
+        artifact.signature_digest is not None
+        and SHA256_PATTERN.fullmatch(artifact.signature_digest) is None
+    ):
         raise ContractError("release signature digest must be a lowercase SHA-256")
     expected_packaging = "zip" if artifact.platform.startswith("windows-") else "tar.gz"
     if artifact.packaging != expected_packaging:
@@ -119,9 +125,15 @@ class CertifiedArtifactSet:
 
 
 def validate_artifact_set(artifact_set: CertifiedArtifactSet) -> None:
-    if not isinstance(artifact_set.source_sha, str) or SHA1_PATTERN.fullmatch(artifact_set.source_sha) is None:
+    if (
+        not isinstance(artifact_set.source_sha, str)
+        or SHA1_PATTERN.fullmatch(artifact_set.source_sha) is None
+    ):
         raise ContractError("release source must be a lowercase 40-character SHA")
-    if not isinstance(artifact_set.certification_manifest_id, str) or not artifact_set.certification_manifest_id:
+    if (
+        not isinstance(artifact_set.certification_manifest_id, str)
+        or not artifact_set.certification_manifest_id
+    ):
         raise ContractError("release certification manifest identity is required")
     if artifact_set.retention_class not in {RELEASE_RETENTION, PUBLISHED_RETENTION}:
         raise ContractError("release artifact retention class is unsupported")
@@ -129,7 +141,9 @@ def validate_artifact_set(artifact_set: CertifiedArtifactSet) -> None:
     if isinstance(artifact_set.build_count, bool) or artifact_set.build_count != 1:
         raise ContractError("Release certification must build one final artifact set")
     if len(artifact_set.artifacts) != len(PRODUCT_PLATFORMS):
-        raise ContractError("release artifact set must contain exactly four Product artifacts")
+        raise ContractError(
+            "release artifact set must contain exactly four Product artifacts"
+        )
     names = set()
     for artifact in artifact_set.artifacts:
         validate_artifact(artifact)
@@ -139,7 +153,9 @@ def validate_artifact_set(artifact_set: CertifiedArtifactSet) -> None:
     platforms = {artifact.platform for artifact in artifact_set.artifacts}
     if platforms != PRODUCT_PLATFORMS:
         missing = sorted(PRODUCT_PLATFORMS - platforms)
-        raise ContractError(f"release artifact set is missing Product platforms: {missing}")
+        raise ContractError(
+            f"release artifact set is missing Product platforms: {missing}"
+        )
     if len(platforms) != len(artifact_set.artifacts):
         raise ContractError("release artifact set contains duplicate Product platforms")
     source = dict(artifact_set.plan_fingerprint.source)
@@ -152,7 +168,9 @@ def artifact_set_to_dict(artifact_set: CertifiedArtifactSet) -> dict[str, object
     return {
         "sourceSha": artifact_set.source_sha,
         "planFingerprint": fingerprint_to_dict(artifact_set.plan_fingerprint),
-        "artifacts": [artifact_to_dict(artifact) for artifact in artifact_set.artifacts],
+        "artifacts": [
+            artifact_to_dict(artifact) for artifact in artifact_set.artifacts
+        ],
         "certificationManifestId": artifact_set.certification_manifest_id,
         "retentionClass": artifact_set.retention_class,
         "buildCount": artifact_set.build_count,
@@ -207,8 +225,13 @@ def certify_artifacts(
         or integrated_manifest.candidate.kind != "integrated"
     ):
         raise ContractError("Release certification requires passed Integrated evidence")
-    if plan_fingerprint is not None and plan_fingerprint != integrated_manifest.fingerprint:
-        raise ContractError("Release certification fingerprint differs from Integrated evidence")
+    if (
+        plan_fingerprint is not None
+        and plan_fingerprint != integrated_manifest.fingerprint
+    ):
+        raise ContractError(
+            "Release certification fingerprint differs from Integrated evidence"
+        )
     artifact_set = CertifiedArtifactSet(
         source_sha=integrated_manifest.candidate.candidate_sha,
         plan_fingerprint=plan_fingerprint or integrated_manifest.fingerprint,
@@ -254,13 +277,17 @@ def verify_promotion(
     if state in {"recovery", "degraded", "certification-lock"}:
         raise ContractError(f"publication is forbidden in {state} state")
     if not request.public_authorized:
-        raise ContractError("public publication requires separate explicit authorization")
+        raise ContractError(
+            "public publication requires separate explicit authorization"
+        )
     if request.source_sha != artifact_set.source_sha:
         raise ContractError("publication source changed after Release certification")
     if request.certification_manifest_id != artifact_set.certification_manifest_id:
         raise ContractError("publication certification manifest changed")
     if request.rebuild or request.repackage or request.resign:
-        raise ContractError("publication cannot rebuild, repackage, or resign certified bytes")
+        raise ContractError(
+            "publication cannot rebuild, repackage, or resign certified bytes"
+        )
     if request.artifacts != artifact_set.artifacts:
         raise ContractError("publication artifact digests or metadata changed")
 
