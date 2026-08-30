@@ -20,11 +20,6 @@ POLICY_CHECK_COMMAND = (
 POLICY_CHECK_LINE = f"run: {POLICY_CHECK_COMMAND}"
 CODE_SCANNING_AUTHORITY = re.compile(r"code[_ -]?scanning", re.IGNORECASE)
 SHELL_LINE_CONTINUATION = re.compile(r"\\\r?\n")
-AUTOMATION_IMPLEMENTATION_ROOTS = (
-    ".github/actions",
-    ".github/scripts",
-    "scripts",
-)
 AUTOMATION_IMPLEMENTATION_SUFFIXES = {
     ".cjs",
     ".js",
@@ -34,7 +29,14 @@ AUTOMATION_IMPLEMENTATION_SUFFIXES = {
     ".sh",
     ".ts",
 }
-IGNORED_IMPLEMENTATION_DIRECTORIES = {".venv", "__pycache__"}
+IGNORED_IMPLEMENTATION_DIRECTORIES = {
+    ".babysit-pr",
+    ".git",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "target",
+}
 POLICY_IMPLEMENTATION_EXCLUSIONS = {
     ".github/scripts/check_codeql_disabled.py",
     ".github/scripts/test_check_codeql_disabled.py",
@@ -119,24 +121,20 @@ def load_automation_sources(repo: Path) -> dict[str, str]:
         *action_dir.glob("**/action.yml"),
         *action_dir.glob("**/action.yaml"),
     }
-    for relative_root in AUTOMATION_IMPLEMENTATION_ROOTS:
-        implementation_root = repo / relative_root
-        if not implementation_root.is_dir():
-            continue
-        for directory, child_directories, filenames in os.walk(implementation_root):
-            child_directories[:] = sorted(
-                name
-                for name in child_directories
-                if name not in IGNORED_IMPLEMENTATION_DIRECTORIES
-            )
-            for filename in filenames:
-                path = Path(directory) / filename
-                relative = path.relative_to(repo).as_posix()
-                if (
-                    path.suffix.casefold() in AUTOMATION_IMPLEMENTATION_SUFFIXES
-                    and relative not in POLICY_IMPLEMENTATION_EXCLUSIONS
-                ):
-                    paths.add(path)
+    for directory, child_directories, filenames in os.walk(repo):
+        child_directories[:] = sorted(
+            name
+            for name in child_directories
+            if name not in IGNORED_IMPLEMENTATION_DIRECTORIES
+        )
+        for filename in filenames:
+            path = Path(directory) / filename
+            relative = path.relative_to(repo).as_posix()
+            if (
+                path.suffix.casefold() in AUTOMATION_IMPLEMENTATION_SUFFIXES
+                and relative not in POLICY_IMPLEMENTATION_EXCLUSIONS
+            ):
+                paths.add(path)
     return {
         path.relative_to(repo).as_posix(): path.read_text(encoding="utf-8")
         for path in sorted(paths)

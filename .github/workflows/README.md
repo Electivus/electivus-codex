@@ -18,11 +18,12 @@ The repository default setup is `not-configured`, and the active
 `Protect-Main` ruleset has no `code_scanning` rule or CodeQL status
 requirement. The independent errors-threshold code-quality gate and
 `CI required` remain enforced. `.github/scripts/check_codeql_disabled.py`
-prevents active root workflows and local action manifests from reintroducing
-CodeQL actions, `security-events` permission (including `write-all`), or
-code-scanning authority implicitly. The guard evaluates parsed YAML scalar
-values and repository automation implementations so equivalent quoted,
-multiline, delegated, and shell-continuation forms cannot bypass the policy.
+prevents workflow manifests, local actions, and repository-owned scripts from
+reintroducing CodeQL actions, `security-events` permission (including
+`write-all`), or code-scanning authority implicitly. The guard evaluates
+parsed YAML scalar values and repository-wide automation implementations so
+equivalent quoted, multiline, delegated, and shell-continuation forms cannot
+bypass the policy.
 
 Re-enabling CodeQL requires a new explicit specification revision and separate
 authorization for the corresponding ruleset mutation.

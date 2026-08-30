@@ -91,24 +91,45 @@ class DisabledCodeScanningPolicyTests(unittest.TestCase):
     def test_codeql_authority_cannot_be_delegated_to_repository_scripts(
         self,
     ) -> None:
-        with TemporaryDirectory() as temp_dir:
-            repo = Path(temp_dir)
-            workflow = repo / ".github/workflows/example.yml"
-            script = repo / ".github/scripts/analyze.py"
-            workflow.parent.mkdir(parents=True)
-            script.parent.mkdir(parents=True)
-            workflow.write_text(
-                "run: python3 .github/scripts/analyze.py\n", encoding="utf-8"
-            )
-            script.write_text(
-                'subprocess.run(["codeql", "database", "analyze"])\n',
-                encoding="utf-8",
-            )
+        for script_path in (".github/scripts/analyze.py", "tools/analyze.py"):
+            with self.subTest(script_path=script_path), TemporaryDirectory() as temp_dir:
+                repo = Path(temp_dir)
+                workflow = repo / ".github/workflows/example.yml"
+                script = repo / script_path
+                workflow.parent.mkdir(parents=True)
+                script.parent.mkdir(parents=True)
+                workflow.write_text(
+                    f"run: python3 {script_path}\n", encoding="utf-8"
+                )
+                script.write_text(
+                    'subprocess.run(["codeql", "database", "analyze"])\n',
+                    encoding="utf-8",
+                )
 
-            self.assertEqual(
-                ["CodeQL reference: .github/scripts/analyze.py"],
-                policy.validate_workflows(policy.load_automation_sources(repo)),
+                self.assertEqual(
+                    [f"CodeQL reference: {script_path}"],
+                    policy.validate_workflows(policy.load_automation_sources(repo)),
+                )
+
+    def test_every_helper_test_consumer_uses_the_scripts_environment(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        helper_test_command = (
+            "uv run --project scripts --python python3 just test-github-scripts"
+        )
+        consumers = []
+        for workflow in sorted((repo / ".github/workflows").glob("*.yml")):
+            source = workflow.read_text(encoding="utf-8")
+            if "just test-github-scripts" not in source:
+                continue
+            consumers.append(workflow.name)
+            self.assertIn("uses: astral-sh/setup-uv@", source)
+            self.assertNotIn(
+                "\n          just test-github-scripts\n",
+                source,
             )
+            self.assertIn(helper_test_command, source)
+
+        self.assertTrue(consumers)
 
     def test_repository_checks_enforce_the_disabled_policy(self) -> None:
         repo = Path(__file__).resolve().parents[2]
