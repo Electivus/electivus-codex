@@ -1,5 +1,5 @@
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 import check_upstream_sync_gate_topology as topology
 
@@ -17,6 +17,14 @@ class UpstreamSyncGateTopologyTests(unittest.TestCase):
 
     def test_wiring_mutations_fail_closed(self) -> None:
         blocking, repo_checks, checker, tests = self.sources
+        required_start = blocking.index("\n  required:\n")
+        required_without_always = blocking[:required_start] + blocking[
+            required_start:
+        ].replace(
+            "if: ${{ always() }}",
+            "if: ${{ !cancelled() }}",
+            1,
+        )
         cases = (
             (
                 "real head checkout",
@@ -59,6 +67,11 @@ class UpstreamSyncGateTopologyTests(unittest.TestCase):
                     "- missing-synchronization-topology",
                     1,
                 ),
+            ),
+            (
+                "required aggregate",
+                0,
+                required_without_always,
             ),
             (
                 "repository wiring test",

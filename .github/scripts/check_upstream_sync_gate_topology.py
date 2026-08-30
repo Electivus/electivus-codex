@@ -2,12 +2,11 @@
 """Fail closed when the Synchronization Merge gate wiring drifts."""
 
 import argparse
-from pathlib import Path
 import sys
+from pathlib import Path
 
 from check_postgres_archive_topology import _job
 from check_rust_test_policy import _workflow_jobs
-
 
 SOURCES = (
     ".github/workflows/blocking-ci.yml",
@@ -70,7 +69,8 @@ def validate_topology(
         (
             "required aggregate",
             "- synchronization-topology" in required
-            and "name: CI required" in required,
+            and "name: CI required" in required
+            and "if: ${{ always() }}" in required,
         ),
         (
             "repository wiring test",
