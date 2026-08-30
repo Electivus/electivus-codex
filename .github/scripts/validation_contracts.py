@@ -12,7 +12,6 @@ SCHEMA_VERSION = 1
 VALIDATION_IMPLEMENTATION = "electivus-validation-v1"
 MAX_ITEMS = 2_000
 MAX_TEXT_BYTES = 4_096
-MAX_SERIALIZED_BYTES = 256_000
 
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -105,42 +104,8 @@ def _keys(value: dict[str, Any], expected: set[str], name: str) -> None:
         )
 
 
-def _reject_duplicate(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ContractError(f"duplicate JSON field: {key}")
-        result[key] = value
-    return result
-
-
-def _reject_constant(value: str) -> Any:
-    raise ContractError(f"invalid JSON constant: {value}")
-
-
-def _load(text: str, name: str) -> dict[str, Any]:
-    if len(text.encode()) > MAX_SERIALIZED_BYTES:
-        raise ContractError(f"{name} exceeds its serialized byte budget")
-    try:
-        value = json.loads(
-            text,
-            object_pairs_hook=_reject_duplicate,
-            parse_constant=_reject_constant,
-        )
-    except json.JSONDecodeError as error:
-        raise ContractError(f"invalid {name} JSON: {error}") from error
-    return _object(value, name)
-
-
 def canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _serialized(value: object, name: str) -> str:
-    text = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
-    if len(text.encode()) > MAX_SERIALIZED_BYTES:
-        raise ContractError(f"{name} exceeds its serialized byte budget")
-    return text
 
 
 @dataclass(frozen=True)

@@ -1,27 +1,28 @@
-import json
 from dataclasses import replace
 import unittest
 
+from validation_contracts import MAX_ITEMS
+from validation_contracts import VALIDATION_IMPLEMENTATION
 from validation_contracts import CandidateIdentity
 from validation_contracts import ContractError
-from validation_contracts import SCHEMA_VERSION
-from validation_contracts import VALIDATION_IMPLEMENTATION
 from validation_contracts import ValidationFingerprint
-from validation_plan_contract import EvidenceRequirement
-from validation_plan_contract import ValidationPlan
-from validation_plan_contract import parse_plan
-from validation_plan_contract import plan_to_dict
-from validation_plan_contract import serialize_plan
+from validation_contracts import candidate_from_dict
+from validation_contracts import candidate_to_dict
+from validation_contracts import fingerprint_from_dict
+from validation_contracts import fingerprint_to_dict
+from validation_contracts import validate_candidate
+from validation_contracts import validate_fingerprint
 
 
 CANDIDATE_SHA = "a" * 40
 BASE_SHA = "b" * 40
 HEAD_SHA = "c" * 40
 CHANGED_FILES_DIGEST = "d" * 64
+FINGERPRINT_DIGEST = "71166692cad302a26273dd968e584da3eeb05cf6a288a76bc8db7199ef29da56"
 
 
-def repository_only_plan() -> ValidationPlan:
-    candidate = CandidateIdentity(
+def pull_request_candidate() -> CandidateIdentity:
+    return CandidateIdentity(
         event_name="pull_request",
         repository="Electivus/electivus-codex",
         default_branch="main",
@@ -32,25 +33,10 @@ def repository_only_plan() -> ValidationPlan:
         pull_request_number=198,
         branch="codex/issue-181-contracts-plan",
     )
-    requirements = (
-        EvidenceRequirement(
-            family="repository-policy",
-            stage="preflight",
-            selected=True,
-            disposition="required",
-            reason="repository changes always require policy validation",
-            retention_class="ordinary-pull-request",
-        ),
-        EvidenceRequirement(
-            family="linux-x64-bazel",
-            stage="merge",
-            selected=False,
-            disposition="not-required",
-            reason="repository-only changes do not compile product code",
-            retention_class="ordinary-pull-request",
-        ),
-    )
-    fingerprint = ValidationFingerprint(
+
+
+def validation_fingerprint() -> ValidationFingerprint:
+    return ValidationFingerprint(
         source=(
             ("candidateSha", CANDIDATE_SHA),
             ("baseSha", BASE_SHA),
@@ -58,103 +44,68 @@ def repository_only_plan() -> ValidationPlan:
         ),
         validation_implementation=VALIDATION_IMPLEMENTATION,
         dependencies=(
-            ("schemaVersion", str(SCHEMA_VERSION)),
+            ("schemaVersion", "1"),
             ("selectedEvidence", "repository-policy"),
         ),
         toolchains=(("python", "3.11"),),
-        commands=(("validation:repository-policy"),),
-        platforms=(("linux-x64"),),
+        commands=("validation:repository-policy",),
+        platforms=("linux-x64",),
         profile="ordinary",
         parameters=(
-            ("changeSurfaces", "repository"),
-            ("riskModifiers", ""),
-            ("policyErrors", ""),
+            ("changeSurfaces", '["repository"]'),
+            ("riskModifiers", "[]"),
+            ("policyErrors", "[]"),
         ),
         inputs=(("changedFilesDigest", CHANGED_FILES_DIGEST),),
-    )
-    return ValidationPlan(
-        schema_version=SCHEMA_VERSION,
-        validation_implementation=VALIDATION_IMPLEMENTATION,
-        candidate=candidate,
-        surfaces=("repository",),
-        risk_modifiers=(),
-        profile="ordinary",
-        requirements=requirements,
-        fingerprint=fingerprint,
     )
 
 
 class ValidationContractTests(unittest.TestCase):
-    def test_repository_only_plan_round_trips_as_one_exact_object(self) -> None:
-        plan = repository_only_plan()
+    def test_candidate_and_fingerprint_have_exact_versioned_objects(self) -> None:
+        candidate = pull_request_candidate()
+        fingerprint = validation_fingerprint()
+        expected_candidate = {
+            "eventName": "pull_request",
+            "repository": "Electivus/electivus-codex",
+            "defaultBranch": "main",
+            "candidateSha": CANDIDATE_SHA,
+            "baseSha": BASE_SHA,
+            "headSha": HEAD_SHA,
+            "kind": "pull-request",
+            "pullRequestNumber": 198,
+            "branch": "codex/issue-181-contracts-plan",
+        }
+        expected_fingerprint = {
+            "source": [
+                ["candidateSha", CANDIDATE_SHA],
+                ["baseSha", BASE_SHA],
+                ["headSha", HEAD_SHA],
+            ],
+            "validationImplementation": "electivus-validation-v1",
+            "dependencies": [
+                ["schemaVersion", "1"],
+                ["selectedEvidence", "repository-policy"],
+            ],
+            "toolchains": [["python", "3.11"]],
+            "commands": ["validation:repository-policy"],
+            "platforms": ["linux-x64"],
+            "profile": "ordinary",
+            "parameters": [
+                ["changeSurfaces", '["repository"]'],
+                ["riskModifiers", "[]"],
+                ["policyErrors", "[]"],
+            ],
+            "inputs": [["changedFilesDigest", CHANGED_FILES_DIGEST]],
+            "digest": FINGERPRINT_DIGEST,
+        }
 
-        self.assertEqual(plan, parse_plan(serialize_plan(plan)))
-        self.assertEqual(
-            {
-                "schemaVersion": 1,
-                "validationImplementation": "electivus-validation-v1",
-                "candidate": {
-                    "eventName": "pull_request",
-                    "repository": "Electivus/electivus-codex",
-                    "defaultBranch": "main",
-                    "candidateSha": CANDIDATE_SHA,
-                    "baseSha": BASE_SHA,
-                    "headSha": HEAD_SHA,
-                    "kind": "pull-request",
-                    "pullRequestNumber": 198,
-                    "branch": "codex/issue-181-contracts-plan",
-                },
-                "changeSurfaces": ["repository"],
-                "riskModifiers": [],
-                "profile": "ordinary",
-                "evidence": [
-                    {
-                        "family": "repository-policy",
-                        "stage": "preflight",
-                        "selected": True,
-                        "disposition": "required",
-                        "reason": "repository changes always require policy validation",
-                        "retentionClass": "ordinary-pull-request",
-                    },
-                    {
-                        "family": "linux-x64-bazel",
-                        "stage": "merge",
-                        "selected": False,
-                        "disposition": "not-required",
-                        "reason": "repository-only changes do not compile product code",
-                        "retentionClass": "ordinary-pull-request",
-                    },
-                ],
-                "fingerprint": {
-                    "source": [
-                        ["candidateSha", CANDIDATE_SHA],
-                        ["baseSha", BASE_SHA],
-                        ["headSha", HEAD_SHA],
-                    ],
-                    "validationImplementation": "electivus-validation-v1",
-                    "dependencies": [
-                        ["schemaVersion", "1"],
-                        ["selectedEvidence", "repository-policy"],
-                    ],
-                    "toolchains": [["python", "3.11"]],
-                    "commands": ["validation:repository-policy"],
-                    "platforms": ["linux-x64"],
-                    "profile": "ordinary",
-                    "parameters": [
-                        ["changeSurfaces", "repository"],
-                        ["riskModifiers", ""],
-                        ["policyErrors", ""],
-                    ],
-                    "inputs": [["changedFilesDigest", CHANGED_FILES_DIGEST]],
-                    "digest": plan.fingerprint.digest,
-                },
-                "policyErrors": [],
-            },
-            plan_to_dict(plan),
-        )
+        self.assertEqual(expected_candidate, candidate_to_dict(candidate))
+        self.assertEqual(candidate, candidate_from_dict(expected_candidate))
+        self.assertEqual(expected_fingerprint, fingerprint_to_dict(fingerprint))
+        self.assertEqual(fingerprint, fingerprint_from_dict(expected_fingerprint))
 
-    def test_every_fingerprint_dimension_changes_the_digest(self) -> None:
-        fingerprint = repository_only_plan().fingerprint
+    def test_every_fingerprint_dimension_changes_the_pinned_digest(self) -> None:
+        fingerprint = validation_fingerprint()
         mutations = (
             replace(fingerprint, source=fingerprint.source + (("tree", "e" * 40),)),
             replace(fingerprint, validation_implementation="electivus-validation-v2"),
@@ -171,51 +122,64 @@ class ValidationContractTests(unittest.TestCase):
             replace(fingerprint, inputs=(("changedFilesDigest", "e" * 64),)),
         )
 
+        self.assertEqual(FINGERPRINT_DIGEST, fingerprint.digest)
         self.assertEqual(len(mutations), len({item.digest for item in mutations}))
-        self.assertNotIn(fingerprint.digest, {item.digest for item in mutations})
+        self.assertNotIn(FINGERPRINT_DIGEST, {item.digest for item in mutations})
 
-    def test_mutated_plan_boundaries_fail_closed(self) -> None:
-        payload = plan_to_dict(repository_only_plan())
-        mutations = []
-        for mutate in (
-            lambda item: item.update(schemaVersion=2),
-            lambda item: item["candidate"].update(candidateSha="f" * 40),
-            lambda item: item["fingerprint"].update(digest="0" * 64),
-            lambda item: item["fingerprint"]["dependencies"][1].__setitem__(1, ""),
-            lambda item: item["evidence"][0].update(selected=False),
-            lambda item: item.update(unexpected=True),
-        ):
-            mutated = json.loads(json.dumps(payload))
-            mutate(mutated)
-            mutations.append(mutated)
-
-        for mutated in mutations:
-            with self.subTest(mutated=mutated), self.assertRaises(ContractError):
-                parse_plan(json.dumps(mutated))
-
-    def test_malformed_candidate_json_and_oversized_output_fail_closed(self) -> None:
-        plan = repository_only_plan()
-        duplicate_version = serialize_plan(plan).replace(
-            '  "schemaVersion": 1,',
-            '  "schemaVersion": 1,\n  "schemaVersion": 1,',
-            1,
+    def test_candidate_identity_guards_are_reached_directly(self) -> None:
+        candidate = pull_request_candidate()
+        invalid_candidates = (
+            replace(candidate, candidate_sha="A" * 40),
+            replace(candidate, candidate_sha="a" * 39),
+            replace(candidate, repository="x" * 4_097),
+            replace(candidate, pull_request_number=0),
+            replace(candidate, pull_request_number=True),
+            replace(candidate, kind="unknown"),
+            replace(candidate, head_sha=None),
+            replace(candidate, kind="integrated"),
         )
-        invalid_candidate = replace(
-            plan,
-            candidate=replace(plan.candidate, head_sha=None),
+
+        for invalid in invalid_candidates:
+            with self.subTest(invalid=invalid), self.assertRaises(ContractError):
+                validate_candidate(invalid)
+
+    def test_fingerprint_guards_reject_versions_digests_and_duplicate_keys(
+        self,
+    ) -> None:
+        fingerprint = validation_fingerprint()
+        unsupported = replace(
+            fingerprint,
+            validation_implementation="electivus-validation-v2",
         )
-        oversized = replace(
-            plan,
-            policy_errors=("x" * 300_000,),
+        wrong_digest = fingerprint_to_dict(fingerprint)
+        wrong_digest["digest"] = "0" * 64
+        duplicate_source = replace(
+            fingerprint,
+            source=fingerprint.source + (("candidateSha", "e" * 40),),
         )
 
         for operation in (
-            lambda: parse_plan(duplicate_version),
-            lambda: serialize_plan(invalid_candidate),
-            lambda: serialize_plan(oversized),
+            lambda: fingerprint_from_dict(fingerprint_to_dict(unsupported)),
+            lambda: fingerprint_from_dict(wrong_digest),
+            lambda: validate_fingerprint(duplicate_source),
         ):
             with self.subTest(operation=operation), self.assertRaises(ContractError):
                 operation()
+
+    def test_fingerprint_item_budget_accepts_limit_and_rejects_over_limit(self) -> None:
+        fingerprint = validation_fingerprint()
+        at_limit = replace(
+            fingerprint,
+            inputs=tuple((f"input-{index}", "") for index in range(MAX_ITEMS)),
+        )
+        over_limit = replace(
+            fingerprint,
+            inputs=at_limit.inputs + (("one-too-many", ""),),
+        )
+
+        validate_fingerprint(at_limit)
+        with self.assertRaises(ContractError):
+            validate_fingerprint(over_limit)
 
 
 if __name__ == "__main__":
