@@ -2,6 +2,7 @@
 """Fail closed when the Synchronization Merge gate wiring drifts."""
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -29,6 +30,10 @@ REAL_HEAD_ENV = (
 REAL_BRANCH_ENV = (
     "PR_HEAD_BRANCH: ${{ github.event_name == 'pull_request' && "
     "github.event.pull_request.head.ref || '' }}"
+)
+REQUIRED_ALWAYS = re.compile(
+    r"^    if:\s*\$\{\{\s*always\(\)\s*\}\}\s*(?:#.*)?$",
+    re.MULTILINE,
 )
 
 
@@ -70,7 +75,7 @@ def validate_topology(
             "required aggregate",
             "- synchronization-topology" in required
             and "name: CI required" in required
-            and "if: ${{ always() }}" in required,
+            and REQUIRED_ALWAYS.search(required) is not None,
         ),
         (
             "repository wiring test",

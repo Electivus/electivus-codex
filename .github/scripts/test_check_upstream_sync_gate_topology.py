@@ -25,6 +25,18 @@ class UpstreamSyncGateTopologyTests(unittest.TestCase):
             "if: ${{ !cancelled() }}",
             1,
         )
+        required_without_job_if = blocking[:required_start] + blocking[
+            required_start:
+        ].replace(
+            "    if: ${{ always() }}\n",
+            "",
+            1,
+        ).replace(
+            "      - name: Require successful dependencies\n",
+            "      - name: Require successful dependencies\n"
+            "        if: ${{ always() }}\n",
+            1,
+        )
         cases = (
             (
                 "real head checkout",
@@ -72,6 +84,11 @@ class UpstreamSyncGateTopologyTests(unittest.TestCase):
                 "required aggregate",
                 0,
                 required_without_always,
+            ),
+            (
+                "required aggregate",
+                0,
+                required_without_job_if,
             ),
             (
                 "repository wiring test",
