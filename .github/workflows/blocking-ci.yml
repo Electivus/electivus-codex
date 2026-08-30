@@ -213,6 +213,15 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags origin main --depth=1
+          if ! git cat-file -e origin/main:.github/workflows/validation-integrated.yml 2>/dev/null; then
+            {
+              echo "## Validation certification lock"
+              echo
+              echo '- Replacement Integrated certification is not yet published on `main`.'
+              echo '- Legacy `CI required` remains authoritative during bootstrap.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           current_main="$(git rev-parse origin/main)"
           run_id="$(gh run list \
             --repo "$GITHUB_REPOSITORY" \
