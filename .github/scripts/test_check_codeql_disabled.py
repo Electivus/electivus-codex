@@ -31,6 +31,14 @@ class DisabledCodeScanningPolicyTests(unittest.TestCase):
                 },
             ),
             (
+                "CodeQL reference",
+                {
+                    ".github/workflows/example.yml": (
+                        "run: co'de'ql database analyze\n"
+                    )
+                },
+            ),
+            (
                 "security-events permission",
                 {".github/workflows/example.yml": "security-events: write\n"},
             ),
@@ -94,6 +102,8 @@ class DisabledCodeScanningPolicyTests(unittest.TestCase):
         cases = (
             (".github/scripts/analyze.py", "python3 .github/scripts/analyze.py", None),
             ("tools/analyze.py", "python3 tools/analyze.py", None),
+            ("tools/analyze.bat", "tools\\analyze.bat", None),
+            ("tools/analyze.cmd", "tools\\analyze.cmd", None),
             ("tools/analyze", "./tools/analyze", 0o755),
             ("justfile", "just analyze", None),
             ("tools/BUILD", "bazel run //tools:analyze", None),

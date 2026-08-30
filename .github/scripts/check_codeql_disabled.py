@@ -20,10 +20,13 @@ POLICY_CHECK_COMMAND = (
 POLICY_CHECK_LINE = f"run: {POLICY_CHECK_COMMAND}"
 CODE_SCANNING_AUTHORITY = re.compile(r"code[_ -]?scanning", re.IGNORECASE)
 SHELL_LINE_CONTINUATION = re.compile(r"\\\r?\n")
+SHELL_QUOTE_TRANSLATION = str.maketrans("", "", "'\"")
 AUTOMATION_IMPLEMENTATION_SUFFIXES = {
+    ".bat",
     ".bazel",
     ".bzl",
     ".cjs",
+    ".cmd",
     ".js",
     ".mk",
     ".mjs",
@@ -73,6 +76,12 @@ def _walk_yaml(root: Node | None) -> list[Node]:
     return nodes
 
 
+def _normalize_automation_text(source: str) -> str:
+    return SHELL_LINE_CONTINUATION.sub("", source.casefold()).translate(
+        SHELL_QUOTE_TRANSLATION
+    )
+
+
 def validate_workflows(sources: dict[str, str]) -> list[str]:
     issues = []
     for path, source in sorted(sources.items()):
@@ -82,7 +91,7 @@ def validate_workflows(sources: dict[str, str]) -> list[str]:
             for line in source.splitlines()
         )
         if Path(path).suffix.casefold() not in {".yaml", ".yml"}:
-            normalized = SHELL_LINE_CONTINUATION.sub("", policy_source.casefold())
+            normalized = _normalize_automation_text(policy_source)
             if "github/codeql-action/" in normalized:
                 issues.append(f"CodeQL action: {path}")
             elif "codeql" in normalized:
@@ -96,9 +105,7 @@ def validate_workflows(sources: dict[str, str]) -> list[str]:
             issues.append(f"invalid YAML: {path}")
             continue
         scalars = [node.value for node in nodes if isinstance(node, ScalarNode)]
-        normalized_scalars = [
-            SHELL_LINE_CONTINUATION.sub("", scalar.casefold()) for scalar in scalars
-        ]
+        normalized_scalars = [_normalize_automation_text(scalar) for scalar in scalars]
         mapping_scalars = [
             (key.value.casefold(), value.value.casefold())
             for node in nodes
