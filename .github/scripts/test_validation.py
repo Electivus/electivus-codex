@@ -12,6 +12,8 @@ from validation_contracts import serialize_plan
 from validation_contracts import validate_manifest
 from validation_entrypoint import main as entrypoint_main
 from validation_emit_results import _outcome
+from validation_emit_results import _workflow_result
+from validation_emit_results import emit
 from validation_codeql import CodeqlLanguageResult
 from validation_codeql import aggregate_codeql
 from validation_comparison import ValidationObservation
@@ -76,6 +78,64 @@ class ValidationTests(unittest.TestCase):
     def test_workflow_failures_remain_infrastructure_outcomes(self):
         self.assertEqual("infrastructure-failure", _outcome("failure"))
         self.assertEqual("product-failure", _outcome("product-failure"))
+
+    def test_only_a_producer_attributed_failure_becomes_product_failure(self):
+        self.assertEqual(
+            ("targeted", "product-failure"),
+            _workflow_result(
+                {
+                    "targeted": {
+                        "result": "failure",
+                        "outputs": {"validation_outcome": "product-failure"},
+                    }
+                },
+                "release-packaging",
+            ),
+        )
+        self.assertEqual(
+            ("targeted", "failure"),
+            _workflow_result(
+                {"targeted": {"result": "failure"}}, "release-packaging"
+            ),
+        )
+
+    def test_emission_records_attempt_and_one_cache_disabled_reconstruction(self):
+        plan = build_plan(self.candidate, ["codex-rs/core/src/lib.rs"])
+        results = {
+            "preflight": {"result": "success"},
+            "linux-x64-bazel": {"result": "success"},
+            "codeql-result": {"result": "success"},
+            "targeted": {
+                "result": "success",
+                "outputs": {"validation_outcome": "passed"},
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_path = root / "validation-plan.json"
+            results_path = root / "needs.json"
+            output = root / "output"
+            plan_path.write_text(serialize_plan(plan), encoding="utf-8")
+            results_path.write_text(json.dumps(results), encoding="utf-8")
+
+            self.assertEqual(
+                0,
+                emit(
+                    plan_path,
+                    results_path,
+                    output,
+                    current_base=self.candidate.base_sha,
+                    now=100,
+                    cache_fallback="disabled-reconstruction",
+                    attempt=2,
+                ),
+            )
+            report = json.loads(
+                (output / "validation-report.json").read_text(encoding="utf-8")
+            )
+            required = [item for item in report["evidence"] if item["disposition"] == "required"]
+            self.assertEqual(1, sum(item["cacheMode"] == "disabled-reconstruction" for item in required))
+            self.assertTrue(all(item["attempt"] == 2 for item in required))
 
     def test_repository_only_plan_is_exact_and_has_all_dispositions(self):
         plan = build_plan(self.candidate, ["README.md", "docs/guide.md"])

@@ -189,6 +189,8 @@ jobs:
     if: ${{ needs.preflight.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    outputs:
+      validation_outcome: ${{ steps.validation_outcome.outputs.validation_outcome }}
     permissions:
       contents: read
     steps:
@@ -197,6 +199,8 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
       - name: Run targeted contract families
+        id: product
+        continue-on-error: true
         env:
           SELECTED: ${{ needs.preflight.outputs.selected_evidence }}
         shell: bash
@@ -212,6 +216,25 @@ jobs:
             python3 -m unittest .github/scripts/test_upstream_sync_manifest.py
             python3 -m unittest .github/scripts/test_sync_upstream_release.py
           fi
+      - name: Attribute targeted validation outcome
+        id: validation_outcome
+        if: always()
+        env:
+          PRODUCT_OUTCOME: ${{ steps.product.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          outcome=infrastructure-failure
+          case "$PRODUCT_OUTCOME" in
+            success) outcome=passed ;;
+            failure) outcome=product-failure ;;
+            cancelled) outcome=stale ;;
+            skipped) outcome=indeterminate ;;
+          esac
+          echo "validation_outcome=$outcome" >> "$GITHUB_OUTPUT"
+      - name: Fail after recording targeted product outcome
+        if: ${{ steps.product.outcome == 'failure' }}
+        run: exit 1
 
   sdk:
     name: Integrated SDK contracts
@@ -267,6 +290,8 @@ jobs:
           PY
       - name: Emit complete report and Integrated authority manifest
         shell: bash
+        env:
+          ATTEMPT: ${{ github.run_attempt }}
         run: |
           set +e
           now="$(date +%s)"
@@ -281,6 +306,7 @@ jobs:
             --output validation-output \
             --now "$now" \
             --duration-seconds "$elapsed" \
+            --attempt "$ATTEMPT" \
             | tee -a "$GITHUB_STEP_SUMMARY"
           report_status=${PIPESTATUS[0]}
           python3 .github/scripts/validation_integrated.py \

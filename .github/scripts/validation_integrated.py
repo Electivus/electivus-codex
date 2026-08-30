@@ -44,6 +44,14 @@ def _integrated_manifest(report: ValidationReport):
         reason="exact main commit was evaluated by the complete Validation graph",
         retention_class="integrated-certification",
     )
+    attempt = max(
+        (
+            manifest.attempt
+            for manifest in report.evidence
+            if manifest.disposition == "required"
+        ),
+        default=1,
+    )
     return manifest_for_requirement(
         plan,
         requirement,
@@ -58,6 +66,7 @@ def _integrated_manifest(report: ValidationReport):
         critical_path_seconds=float(duration),
         candidate=candidate,
         fingerprint=plan.fingerprint,
+        attempt=attempt,
     )
 
 

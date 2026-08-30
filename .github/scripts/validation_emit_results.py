@@ -51,6 +51,13 @@ def _workflow_result(results: dict[str, object], family: str) -> tuple[str, str]
         if isinstance(value, dict):
             result = value.get("result")
             if isinstance(result, str):
+                outputs = value.get("outputs")
+                if (
+                    result == "failure"
+                    and isinstance(outputs, dict)
+                    and outputs.get("validation_outcome") == "product-failure"
+                ):
+                    return workflow_name, "product-failure"
                 return workflow_name, result
     return "missing", "missing"
 
@@ -64,6 +71,7 @@ def emit(
     now: int = 0,
     duration_seconds: float = 0,
     cache_fallback: str = "not-applicable",
+    attempt: int = 1,
 ) -> int:
     plan = parse_plan(plan_path.read_text(encoding="utf-8"))
     results = json.loads(results_path.read_text(encoding="utf-8"))
@@ -72,6 +80,16 @@ def emit(
     evidence_dir = output_dir / "evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
     existing = {manifest.family: manifest for manifest in load_manifests(evidence_dir)}
+    reconstruction_family = None
+    if cache_fallback == "disabled-reconstruction":
+        reconstruction_family = next(
+            (requirement.family for requirement in plan.requirements if requirement.selected),
+            None,
+        )
+        if reconstruction_family is None:
+            raise ContractError(
+                "cache-disabled reconstruction requires selected evidence"
+            )
     manifests = []
     for requirement in plan.requirements:
         if not requirement.selected:
@@ -79,6 +97,10 @@ def emit(
             continue
         existing_manifest = existing.get(requirement.family)
         if existing_manifest is not None:
+            if requirement.family == reconstruction_family:
+                existing_manifest = replace(
+                    existing_manifest, cache_mode="disabled-reconstruction"
+                )
             manifests.append(existing_manifest)
             continue
         workflow_name, result = _workflow_result(results, requirement.family)
@@ -90,6 +112,12 @@ def emit(
             reason=f"workflow conclusion: {result}",
             duration_seconds=duration_seconds,
             critical_path_seconds=duration_seconds,
+            attempt=attempt,
+            cache_mode=(
+                "disabled-reconstruction"
+                if requirement.family == reconstruction_family
+                else "not-used"
+            ),
             created_at=now,
         )
         manifests.append(manifest)
@@ -138,6 +166,7 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--current-base")
     command.add_argument("--now", type=int, default=0)
     command.add_argument("--duration-seconds", type=float, default=0)
+    command.add_argument("--attempt", type=int, default=1)
     command.add_argument(
         "--cache-fallback",
         choices=("not-applicable", "not-used", "disabled-reconstruction"),
@@ -157,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
             now=args.now,
             duration_seconds=args.duration_seconds,
             cache_fallback=args.cache_fallback,
+            attempt=args.attempt,
         )
     except (ContractError, OSError, ValueError) as error:
         print(f"Validation result emission failed: {error}")
