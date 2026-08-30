@@ -382,6 +382,9 @@ Synchronizes the published Codex CLI release [rust-v1.2.3]({manifest.release.url
 - Selection (`selectionMode`): `automatic`
 - Preparation (`preparationMode`): `clean`
 - Manifest: `{manifest_path(manifest.release.commit)}`
+- Validation profile: `certification-required`
+- Validation plan: `.github/scripts/validation_entrypoint.py`
+- Required topology evidence: frozen release and fork baselines, then explicit Semantic reconciliation when conflicts exist
 
 Next action: Review the Baseline reconciliation and approve its workflow runs.
 """
@@ -416,6 +419,9 @@ Synchronizes the published Codex CLI release [rust-v1.2.3]({manifest.release.url
 - Selection (`selectionMode`): `manual`
 - Preparation (`preparationMode`): `conflicting`
 - Manifest: `{manifest_path(manifest.release.commit)}`
+- Validation profile: `certification-required`
+- Validation plan: `.github/scripts/validation_entrypoint.py`
+- Required topology evidence: frozen release and fork baselines, then explicit Semantic reconciliation when conflicts exist
 
 Next action: Perform explicit Semantic reconciliation, then mark this PR ready for review.
 

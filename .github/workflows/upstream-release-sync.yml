@@ -10,9 +10,7 @@ on:
         required: false
         type: string
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 concurrency:
   group: upstream-release-sync
@@ -23,6 +21,11 @@ jobs:
     if: ${{ github.event_name != 'schedule' || github.repository == 'Electivus/electivus-codex' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      pr_number: ${{ steps.synchronize.outputs.pr_number }}
     steps:
       - name: Checkout fork history
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -41,3 +44,69 @@ jobs:
             --release-tag "$RELEASE_TAG" \
             --output "$GITHUB_OUTPUT" \
             --summary "$GITHUB_STEP_SUMMARY"
+  validate:
+    name: Validate frozen Synchronization candidate
+    needs: synchronize
+    if: ${{ needs.synchronize.outputs.pr_number != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout fork history for candidate discovery
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Run the central Validation plan for the frozen Synchronization candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.synchronize.outputs.pr_number }}
+        shell: bash
+        run: |
+          set +e
+          mapfile -t pr_identity < <(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json baseRefOid,headRefName,headRefOid --jq '[.baseRefOid, .headRefName, .headRefOid] | .[]')
+          base_sha="${pr_identity[0]:-}"
+          branch="${pr_identity[1]:-}"
+          head_sha="${pr_identity[2]:-}"
+          mkdir -p "$RUNNER_TEMP/synchronization-validation"
+          if [[ "$base_sha" =~ ^[0-9a-f]{40}$ && "$head_sha" =~ ^[0-9a-f]{40}$ && "$branch" == automation/upstream-sync/* ]]; then
+            git fetch --no-tags origin "$head_sha"
+            mapfile -t changed_files < <(git diff --name-only --no-renames "$base_sha...$head_sha")
+            worktree="$RUNNER_TEMP/synchronization-candidate"
+            git worktree add --detach "$worktree" "$head_sha"
+            command=(
+              python3 "$worktree/.github/scripts/validation_entrypoint.py"
+              --root "$worktree"
+              --output-dir "$RUNNER_TEMP/synchronization-validation"
+              --event-name pull_request
+              --repository "$GITHUB_REPOSITORY"
+              --default-branch main
+              --candidate "$head_sha"
+              --base "$base_sha"
+              --head "$head_sha"
+              --branch "$branch"
+              --pull-request "$PR_NUMBER"
+              --kind pull-request
+              --now "$(date +%s)"
+            )
+            for path in "${changed_files[@]}"; do command+=(--changed-file "$path"); done
+            "${command[@]}"
+            status=$?
+            git worktree remove --force "$worktree"
+          else
+            echo "Synchronization PR identity is malformed; central Validation is indeterminate." >&2
+            status=1
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/synchronization-validation"
+          cp -R "$RUNNER_TEMP/synchronization-validation/." "$GITHUB_WORKSPACE/synchronization-validation/" 2>/dev/null || true
+          exit "$status"
+      - name: Upload Synchronization Validation evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: synchronization-validation-${{ github.run_id }}
+          path: synchronization-validation
+          retention-days: 30
+          if-no-files-found: warn

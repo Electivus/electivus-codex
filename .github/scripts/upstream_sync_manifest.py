@@ -251,6 +251,9 @@ Synchronizes the published Codex CLI release [{manifest.release.tag}]({manifest.
 - Selection (`selectionMode`): `{manifest.selection_mode}`
 - Preparation (`preparationMode`): `{manifest.preparation_mode}`
 - Manifest: `{manifest_location}`
+- Validation profile: `certification-required`
+- Validation plan: `.github/scripts/validation_entrypoint.py`
+- Required topology evidence: frozen release and fork baselines, then explicit Semantic reconciliation when conflicts exist
 
 Next action: {next_action}
 """

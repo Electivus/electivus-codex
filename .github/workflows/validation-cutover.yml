@@ -1,0 +1,103 @@
+name: Validation Authority Cutover
+
+# This workflow is an auditable no-gap checklist. Repository ruleset mutation
+# remains a separately authorized administrative operation and is never
+# inferred from a successful code change.
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact main candidate at the cutover checkpoint
+        required: true
+        type: string
+      authorization_id:
+        description: Fresh administrative authorization identifier
+        required: true
+        type: string
+      authorized_by:
+        description: Audited operator or change record
+        required: true
+        type: string
+      default_codeql_authoritative:
+        description: Existing default CodeQL authority has been verified
+        required: true
+        type: boolean
+      advanced_codeql_ready:
+        description: Advanced CodeQL has completed no-gap readiness
+        required: true
+        type: boolean
+      code_quality_authoritative:
+        description: Independent code-quality gate has been verified
+        required: true
+        type: boolean
+      stability_passed:
+        description: Stability certification has passed
+        required: true
+        type: boolean
+      fresh_authorization:
+        description: Authorization was issued for this exact checkpoint
+        required: true
+        type: boolean
+      old_authoritative:
+        description: Legacy CI required remains enabled during transfer
+        required: true
+        type: boolean
+      new_authoritative:
+        description: Replacement CI required is ready for transfer
+        required: true
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: validation-cutover-${{ inputs.candidate_sha }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Validate no-gap authority transfer
+    if: github.repository == 'Electivus/electivus-codex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Validate atomic cutover contract
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          AUTHORIZATION_ID: ${{ inputs.authorization_id }}
+          AUTHORIZED_BY: ${{ inputs.authorized_by }}
+          DEFAULT_CODEQL: ${{ inputs.default_codeql_authoritative }}
+          ADVANCED_CODEQL: ${{ inputs.advanced_codeql_ready }}
+          CODE_QUALITY: ${{ inputs.code_quality_authoritative }}
+          STABILITY: ${{ inputs.stability_passed }}
+          FRESH: ${{ inputs.fresh_authorization }}
+          OLD_AUTHORITY: ${{ inputs.old_authoritative }}
+          NEW_AUTHORITY: ${{ inputs.new_authoritative }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/validation_cutover_cli.py \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --authorization-id "$AUTHORIZATION_ID" \
+            --authorized-by "$AUTHORIZED_BY" \
+            --default-codeql-authoritative "$DEFAULT_CODEQL" \
+            --advanced-codeql-ready "$ADVANCED_CODEQL" \
+            --code-quality-authoritative "$CODE_QUALITY" \
+            --stability-passed "$STABILITY" \
+            --fresh-authorization "$FRESH" \
+            --old-authoritative "$OLD_AUTHORITY" \
+            --new-authoritative "$NEW_AUTHORITY" \
+            --output "$RUNNER_TEMP/validation-cutover.json" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload cutover decision
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: validation-cutover-${{ github.run_id }}
+          path: ${{ runner.temp }}/validation-cutover.json
+          retention-days: 90
+          if-no-files-found: warn

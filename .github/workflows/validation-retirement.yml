@@ -1,0 +1,77 @@
+name: Validation Legacy Retirement
+
+# Retirement is intentionally a manual, evidence-only decision. The legacy
+# workflows remain runnable and this job never deletes files or closes issues.
+on:
+  workflow_dispatch:
+    inputs:
+      cutover_at:
+        description: Unix timestamp of the atomic authority cutover
+        required: true
+        type: string
+      eligible_merge_runs:
+        description: Count of eligible replacement Merge gate runs
+        required: true
+        type: string
+      release_certification_passed:
+        description: Replacement Release certification passed
+        required: true
+        type: boolean
+      protection_gap:
+        description: Any required-check protection gap observed
+        required: true
+        type: boolean
+      state_authority_ambiguous:
+        description: Whether state authority was ambiguous
+        required: true
+        type: boolean
+      rollback_required:
+        description: Whether rollback is still required
+        required: true
+        type: boolean
+      legacy_manually_runnable:
+        description: Legacy graph remains manually runnable
+        required: true
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: validation-retirement
+  cancel-in-progress: false
+
+jobs:
+  decide:
+    name: Evaluate legacy retirement evidence
+    if: github.repository == 'Electivus/electivus-codex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Evaluate the 30-day and 20-run gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/validation_retirement_cli.py \
+            --cutover-at "${{ inputs.cutover_at }}" \
+            --now "$(date +%s)" \
+            --eligible-merge-runs "${{ inputs.eligible_merge_runs }}" \
+            --release-certification-passed "${{ inputs.release_certification_passed }}" \
+            --protection-gap "${{ inputs.protection_gap }}" \
+            --state-authority-ambiguous "${{ inputs.state_authority_ambiguous }}" \
+            --rollback-required "${{ inputs.rollback_required }}" \
+            --legacy-manually-runnable "${{ inputs.legacy_manually_runnable }}" \
+            --output "$RUNNER_TEMP/validation-retirement.json" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload retirement decision and required backlinks
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: validation-retirement-${{ github.run_id }}
+          path: ${{ runner.temp }}/validation-retirement.json
+          retention-days: 90
+          if-no-files-found: warn

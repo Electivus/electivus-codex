@@ -5,7 +5,16 @@ name: v8-canary
 # the single source of truth for relevant paths.
 on:
   workflow_call:
+    inputs:
+      validation_candidate:
+        description: Optional immutable candidate namespace for validation caches.
+        required: false
+        default: ""
+        type: string
   workflow_dispatch:
+
+env:
+  VALIDATION_CACHE_PREFIX: ${{ inputs.validation_candidate != '' && format('validation-{0}-', inputs.validation_candidate) || '' }}
 
 concurrency:
   group: ${{ github.workflow }}::${{ github.event.pull_request.number > 0 && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
@@ -135,7 +144,6 @@ jobs:
       actions: read
     environment:
       name: bazel
-      deployment: false
     strategy:
       fail-fast: false
       matrix:
@@ -395,9 +403,9 @@ jobs:
           path: |
             ${{ steps.setup_ci.outputs.cargo-target-dir }}/sccache
             ${{ steps.setup_ci.outputs.cargo-target-dir }}/${{ matrix.target }}/release/gn_out
-          key: rusty-v8-source-${{ matrix.target }}-${{ matrix.runner }}-sandbox-${{ hashFiles('upstream-rusty-v8/Cargo.lock', 'upstream-rusty-v8/build.rs', 'upstream-rusty-v8/git_submodule_status.txt') }}
+          key: ${{ env.VALIDATION_CACHE_PREFIX }}rusty-v8-source-${{ matrix.target }}-${{ matrix.runner }}-sandbox-${{ hashFiles('upstream-rusty-v8/Cargo.lock', 'upstream-rusty-v8/build.rs', 'upstream-rusty-v8/git_submodule_status.txt') }}
           restore-keys: |
-            rusty-v8-source-${{ matrix.target }}-${{ matrix.runner }}-sandbox-
+            ${{ env.VALIDATION_CACHE_PREFIX }}rusty-v8-source-${{ matrix.target }}-${{ matrix.runner }}-sandbox-
 
       - name: Install and start sccache
         shell: pwsh

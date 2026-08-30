@@ -7,7 +7,15 @@ on:
         required: false
         default: ""
         type: string
+      validation_candidate:
+        description: Optional immutable candidate namespace for validation caches.
+        required: false
+        default: ""
+        type: string
   workflow_dispatch:
+
+env:
+  VALIDATION_CACHE_PREFIX: ${{ inputs.validation_candidate != '' && format('validation-{0}-', inputs.validation_candidate) || '' }}
 
 jobs:
   postgres-contracts:
@@ -87,9 +95,9 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
+          key: ${{ env.VALIDATION_CACHE_PREFIX }}cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
           restore-keys: |
-            cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-
+            ${{ env.VALIDATION_CACHE_PREFIX }}cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-
 
       - name: Install sccache
         if: ${{ inputs.artifact_id == '' }}
@@ -127,10 +135,10 @@ jobs:
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ env.SCCACHE_DIR }}
-          key: sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
+          key: ${{ env.VALIDATION_CACHE_PREFIX }}sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
           restore-keys: |
-            sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-
-            sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-
+            ${{ env.VALIDATION_CACHE_PREFIX }}sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-
+            ${{ env.VALIDATION_CACHE_PREFIX }}sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-
 
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         if: ${{ inputs.artifact_id == '' }}
@@ -309,7 +317,7 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
+          key: ${{ env.VALIDATION_CACHE_PREFIX }}cargo-home-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
 
       - name: Save sccache cache (fallback)
         if: always() && !cancelled() && inputs.artifact_id == '' && env.SCCACHE_GHA_ENABLED != 'true'
@@ -317,7 +325,7 @@ jobs:
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ env.SCCACHE_DIR }}
-          key: sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
+          key: ${{ env.VALIDATION_CACHE_PREFIX }}sccache-ubuntu-24.04-x86_64-unknown-linux-gnu-ci-test-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
 
       - name: sccache stats
         if: always() && inputs.artifact_id == ''

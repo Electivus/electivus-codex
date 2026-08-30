@@ -7,6 +7,11 @@ on:
         required: false
         default: full
         type: string
+      validation_candidate:
+        description: Optional immutable candidate namespace for validation caches.
+        required: false
+        default: ""
+        type: string
     outputs:
       resolved_scope:
         description: Planner-resolved validation scope.
@@ -30,6 +35,9 @@ on:
           - merge-gate
           - extended
           - full
+
+env:
+  VALIDATION_CACHE_PREFIX: ${{ inputs.validation_candidate != '' && format('validation-{0}-', inputs.validation_candidate) || '' }}
 
 jobs:
   plan:
@@ -123,7 +131,7 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: argument-comment-lint-${{ runner.os }}-${{ env.CARGO_DYLINT_VERSION }}-${{ env.DYLINT_LINK_VERSION }}-${{ hashFiles('tools/argument-comment-lint/Cargo.lock', 'tools/argument-comment-lint/rust-toolchain', '.github/workflows/rust-ci.yml', '.github/workflows/rust-ci-full.yml') }}
+          key: ${{ env.VALIDATION_CACHE_PREFIX }}argument-comment-lint-${{ runner.os }}-${{ env.CARGO_DYLINT_VERSION }}-${{ env.DYLINT_LINK_VERSION }}-${{ hashFiles('tools/argument-comment-lint/Cargo.lock', 'tools/argument-comment-lint/rust-toolchain', '.github/workflows/rust-ci.yml', '.github/workflows/rust-ci-full.yml') }}
       - name: Install cargo-dylint tooling
         if: ${{ steps.cargo_dylint_cache.outputs.cache-hit != 'true' }}
         shell: bash
@@ -148,7 +156,6 @@ jobs:
     timeout-minutes: 60
     environment:
       name: bazel
-      deployment: false
     strategy:
       fail-fast: false
       matrix:
@@ -239,9 +246,9 @@ jobs:
             ${{ github.workspace }}/.cargo-home/registry/index/
             ${{ github.workspace }}/.cargo-home/registry/cache/
             ${{ github.workspace }}/.cargo-home/git/db/
-          key: cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
+          key: ${{ env.VALIDATION_CACHE_PREFIX }}cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
           restore-keys: |
-            cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-
+            ${{ env.VALIDATION_CACHE_PREFIX }}cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-
 
       # Install and restore sccache cache
       - name: Install sccache
@@ -276,10 +283,10 @@ jobs:
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ github.workspace }}/.sccache/
-          key: sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
+          key: ${{ env.VALIDATION_CACHE_PREFIX }}sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
           restore-keys: |
-            sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-
-            sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-
+            ${{ env.VALIDATION_CACHE_PREFIX }}sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-
+            ${{ env.VALIDATION_CACHE_PREFIX }}sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-
 
       - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
         name: Prepare APT cache directories (musl)
@@ -296,7 +303,7 @@ jobs:
         with:
           path: |
             /var/cache/apt
-          key: apt-${{ matrix.runner }}-${{ matrix.target }}-v1
+          key: ${{ env.VALIDATION_CACHE_PREFIX }}apt-${{ matrix.runner }}-${{ matrix.target }}-v1
 
       - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
         name: Install Zig
@@ -379,7 +386,7 @@ jobs:
             ${{ github.workspace }}/.cargo-home/registry/index/
             ${{ github.workspace }}/.cargo-home/registry/cache/
             ${{ github.workspace }}/.cargo-home/git/db/
-          key: cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
+          key: ${{ env.VALIDATION_CACHE_PREFIX }}cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
 
       - name: Save sccache cache (fallback)
         if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
@@ -387,7 +394,7 @@ jobs:
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ github.workspace }}/.sccache/
-          key: sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
+          key: ${{ env.VALIDATION_CACHE_PREFIX }}sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
 
       - name: sccache stats
         if: always() && env.USE_SCCACHE == 'true'
@@ -413,7 +420,7 @@ jobs:
         with:
           path: |
             /var/cache/apt
-          key: apt-${{ matrix.runner }}-${{ matrix.target }}-v1
+          key: ${{ env.VALIDATION_CACHE_PREFIX }}apt-${{ matrix.runner }}-${{ matrix.target }}-v1
 
   tests_linux_x64:
     name: Tests — ubuntu-24.04 - x86_64-unknown-linux-gnu
@@ -429,6 +436,7 @@ jobs:
       test_threads: 1
       use_sccache: true
       postgres_contracts: true
+      validation_candidate: ${{ inputs.validation_candidate }}
     secrets: inherit
 
   tests_linux_arm64:
@@ -444,6 +452,7 @@ jobs:
       # The per-test /tmp cleanup runner requires serial execution within each shard.
       test_threads: 1
       use_sccache: true
+      validation_candidate: ${{ inputs.validation_candidate }}
     secrets: inherit
 
   # --- Gatherer job for the full post-merge workflow --------------------------

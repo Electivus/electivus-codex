@@ -1,0 +1,69 @@
+name: Validation Stability Certification
+
+# Stability is a finite, manually admitted checkpoint. Until it passes, the
+# legacy required check remains authoritative and no cutover is attempted.
+on:
+  workflow_dispatch:
+    inputs:
+      resulting_main_sha:
+        description: Exact main SHA at the observed checkpoint
+        required: true
+        type: string
+      records_json:
+        description: JSON array of ordinary, Certification-required, cache-disabled, and Integrated records
+        required: true
+        type: string
+      samples_json:
+        description: JSON array of ordinary latency samples
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: validation-stability-${{ inputs.resulting_main_sha }}
+  cancel-in-progress: false
+
+jobs:
+  certify:
+    name: Evaluate Stability certification
+    if: github.repository == 'Electivus/electivus-codex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Materialize bounded Stability input
+        env:
+          RECORDS: ${{ inputs.records_json }}
+          SAMPLES: ${{ inputs.samples_json }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          Path("stability-records.json").write_text(os.environ["RECORDS"] + "\n", encoding="utf-8")
+          Path("stability-samples.json").write_text(os.environ["SAMPLES"] + "\n", encoding="utf-8")
+          PY
+      - name: Run finite Stability certification
+        shell: bash
+        run: |
+          python3 .github/scripts/validation_stability_cli.py \
+            --records stability-records.json \
+            --samples stability-samples.json \
+            --resulting-main-sha "${{ inputs.resulting_main_sha }}" \
+            --output validation-stability.json \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload Stability decision
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: validation-stability-${{ github.run_id }}
+          path: validation-stability.json
+          retention-days: 90
+          if-no-files-found: warn
