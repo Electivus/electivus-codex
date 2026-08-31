@@ -36,7 +36,10 @@ def _text(value: object, name: str, *, allow_empty: bool = False) -> str:
         raise ContractError(f"{name} must be valid UTF-8") from error
     if len(encoded) > MAX_TEXT_BYTES:
         raise ContractError(f"{name} exceeds its byte budget")
-    if any(ord(character) < 32 and character != "\t" for character in value):
+    if any(
+        (ord(character) < 32 and character != "\t") or 0x7F <= ord(character) <= 0x9F
+        for character in value
+    ):
         raise ContractError(f"{name} contains a control character")
     return value
 

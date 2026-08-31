@@ -8,6 +8,7 @@ from validation_evidence_contract import (
     MAX_ARTIFACTS_PER_MANIFEST,
     MAX_ATTEMPT,
     MAX_DURATION_SECONDS,
+    MAX_SERIALIZED_BYTES,
     EvidenceManifest,
     manifest_for_requirement,
     manifest_from_dict,
@@ -163,6 +164,51 @@ class EvidenceManifestContractTests(unittest.TestCase):
         )
         with self.assertRaises(ContractError):
             parse_manifest(canonical, plan)
+
+    def test_requirement_binding_cannot_be_overridden(self):
+        plan, manifest = fixture()
+        requirement = plan.requirements[1]
+        mutations = (
+            replace(
+                requirement,
+                family="repository",
+                stage="preflight",
+                selected=True,
+                disposition="required",
+            ),
+            replace(requirement, stage="merge"),
+            replace(requirement, selected=False, disposition="not-required"),
+            replace(requirement, retention_class="integrated-certification"),
+        )
+
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), self.assertRaises(ContractError):
+                manifest_for_requirement(plan, mutation)
+
+        overridden = EvidenceManifest(
+            plan=plan,
+            requirement=requirement,
+            schema_version=manifest.schema_version,
+            evidence_id=manifest.evidence_id,
+            family=manifest.family,
+            stage=manifest.stage,
+            candidate=manifest.candidate,
+            producer=manifest.producer,
+            outcome=manifest.outcome,
+            disposition=manifest.disposition,
+            fingerprint=manifest.fingerprint,
+            artifact_digests=manifest.artifact_digests,
+            retention_class="integrated-certification",
+            duration_seconds=manifest.duration_seconds,
+            critical_path_seconds=manifest.critical_path_seconds,
+            reason=manifest.reason,
+            attempt=manifest.attempt,
+            cache_mode=manifest.cache_mode,
+            created_at=manifest.created_at,
+            expires_at=manifest.expires_at,
+        )
+        with self.assertRaises(ContractError):
+            validate_manifest_against_plan(overridden, plan)
 
     def test_outcomes_sentinels_and_provenance(self):
         plan, manifest = fixture()
@@ -332,6 +378,59 @@ class EvidenceManifestContractTests(unittest.TestCase):
         )
         with self.assertRaises(ContractError):
             serialize_manifest(oversized, plan)
+
+    def test_serialized_manifest_limit_is_exact_for_input_and_output(self):
+        plan, manifest = fixture()
+        artifacts = tuple(
+            (f"{index:02d}-" + "x" * 3_797, DIGEST)
+            for index in range(MAX_ARTIFACTS_PER_MANIFEST)
+        )
+        at_limit = replace(
+            manifest,
+            artifact_digests=artifacts,
+            producer="p" * 4_096,
+            reason="r" * 36,
+        )
+        serialized = serialize_manifest(at_limit, plan)
+        self.assertEqual(MAX_SERIALIZED_BYTES, len(serialized.encode("utf-8")))
+        self.assertEqual(at_limit, parse_manifest(serialized, plan))
+        self.assertEqual(at_limit, parse_manifest(serialized.encode("utf-8"), plan))
+
+        over_limit = replace(at_limit, reason="r" * 37)
+        oversized = (
+            json.dumps(
+                manifest_to_dict(over_limit, plan),
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n"
+        )
+        self.assertEqual(MAX_SERIALIZED_BYTES + 1, len(oversized.encode("utf-8")))
+        with self.assertRaises(ContractError):
+            serialize_manifest(over_limit, plan)
+        with self.assertRaises(ContractError):
+            manifest_from_dict(manifest_to_dict(over_limit, plan), plan)
+        with self.assertRaises(ContractError):
+            parse_manifest(oversized, plan)
+
+    def test_parser_converts_deep_json_recursion_to_contract_error(self):
+        plan, _ = fixture()
+        deeply_nested = "[" * 2_000 + "]" * 2_000
+
+        with self.assertRaises(ContractError):
+            parse_manifest(deeply_nested, plan)
+
+    def test_controls_reject_del_and_c1_but_preserve_tabs(self):
+        plan, manifest = fixture()
+        for code_point in range(0x7F, 0xA0):
+            with self.subTest(code_point=code_point), self.assertRaises(ContractError):
+                validate_manifest(replace(manifest, reason=f"bad{chr(code_point)}text"))
+
+        tabbed = replace(manifest, reason="line\twith tab")
+        validate_manifest_against_plan(tabbed, plan)
+        self.assertEqual(tabbed, parse_manifest(serialize_manifest(tabbed, plan), plan))
 
 
 if __name__ == "__main__":
