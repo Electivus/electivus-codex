@@ -38,12 +38,8 @@ MAX_EVIDENCE = MAX_OUTCOMES = MAX_FINGERPRINTS = MAX_DURATIONS = MAX_ERRORS = 64
 MAX_ARTIFACTS_PER_REPORT = 256
 MAX_SERIALIZED_BYTES = 256_000
 MAX_DURATION_SECONDS = 604_800
-OUTCOME_PRIORITY = (
-    "infrastructure-failure indeterminate product-failure stale passed".split()
-)
-REPORT_FIELDS = frozenset(
-    "schemaVersion candidate plan evidence outcome outcomes durations fingerprints artifacts errors".split()
-)
+OUTCOME_PRIORITY = "infrastructure-failure indeterminate product-failure stale passed".split()
+REPORT_FIELDS = frozenset("schemaVersion candidate plan evidence outcome outcomes durations fingerprints artifacts errors".split())
 ARTIFACT_FIELDS = frozenset({"family", "name", "digest"})
 DURATION_FIELDS = frozenset({"durationSeconds", "criticalPathSeconds"})
 
