@@ -2,7 +2,6 @@
 """Strict, bounded Validation plan contracts for the repository-owned seam."""
 
 from dataclasses import dataclass
-import json
 from typing import Any
 
 from validation_contracts import MAX_ITEMS, PROFILES, SCHEMA_VERSION
@@ -65,6 +64,31 @@ FAMILY_STAGES = {
 }
 EVIDENCE_FAMILIES = tuple(FAMILY_STAGES)
 KNOWN_EVIDENCE_FAMILIES = frozenset(EVIDENCE_FAMILIES)
+
+# These are the only platform labels owned by the fork validation contract.
+# ``linux-musl`` represents the supported musl release variants; the concrete
+# architecture is part of the producer matrix rather than a second plan label.
+PLATFORM_ORDER = ("linux-x64", "linux-arm64", "linux-musl", "windows-x64")
+KNOWN_PLATFORMS = frozenset(PLATFORM_ORDER)
+FAMILY_PLATFORMS = {
+    "repository": frozenset({"linux-x64"}),
+    "repository-policy": frozenset({"linux-x64"}),
+    "repository-hygiene": frozenset({"linux-x64"}),
+    "rust-fast": frozenset({"linux-x64"}),
+    "linux-x64-bazel": frozenset({"linux-x64"}),
+    "api-protocol-sdk": frozenset({"linux-x64"}),
+    "postgresql": frozenset({"linux-x64"}),
+    "v8": frozenset({"linux-x64"}),
+    "windows-x64": frozenset({"windows-x64"}),
+    "code-quality": frozenset({"linux-x64"}),
+    "linux-x64-cargo": frozenset({"linux-x64"}),
+    "linux-arm64": frozenset({"linux-arm64"}),
+    "linux-musl": frozenset({"linux-musl"}),
+    "release-packaging": frozenset(KNOWN_PLATFORMS),
+    "synchronization-topology": frozenset({"linux-x64"}),
+}
+CERTIFICATION_REQUIRED_STAGES = frozenset({"integrated", "release", "synchronization"})
+CERTIFICATION_REQUIRED_CANDIDATE_KINDS = CERTIFICATION_REQUIRED_STAGES
 DISPOSITIONS = frozenset({"required", "not-required"})
 STAGES = frozenset(FAMILY_STAGES.values()) | {"surveillance"}
 RETENTION_CLASSES = frozenset(
@@ -77,6 +101,44 @@ RETENTION_CLASSES = frozenset(
         "unpublished-release-candidate",
         "published-release",
         "surveillance",
+    }
+)
+RETENTION_DAYS: dict[str, int | None] = {
+    "intra-run": 1,
+    "ordinary-pull-request": 7,
+    "certification-required-pull-request": 30,
+    "integrated-certification": 90,
+    "test-reactivation-certification": 90,
+    "unpublished-release-candidate": 30,
+    "published-release": None,
+    "surveillance": 30,
+}
+RETENTION_BY_PROFILE_STAGE = {
+    ("ordinary", "preflight"): "ordinary-pull-request",
+    ("ordinary", "merge"): "ordinary-pull-request",
+    ("ordinary", "integrated"): "integrated-certification",
+    ("ordinary", "release"): "unpublished-release-candidate",
+    ("ordinary", "synchronization"): "certification-required-pull-request",
+    ("ordinary", "surveillance"): "surveillance",
+    ("certification-required", "preflight"): "certification-required-pull-request",
+    ("certification-required", "merge"): "certification-required-pull-request",
+    ("certification-required", "integrated"): "integrated-certification",
+    ("certification-required", "release"): "unpublished-release-candidate",
+    (
+        "certification-required",
+        "synchronization",
+    ): "certification-required-pull-request",
+    ("certification-required", "surveillance"): "surveillance",
+}
+CERTIFICATION_RISK_MODIFIERS = frozenset(
+    {
+        "security",
+        "breaking",
+        "migration",
+        "publication",
+        "validation-authority",
+        "synchronization",
+        "unknown",
     }
 )
 
@@ -172,31 +234,62 @@ def plan_to_dict(plan: ValidationPlan) -> dict[str, object]:
     )
 
 
-def _canonical_array_parameter(
+def _expected_array_parameter(
     values: dict[str, str],
     section: str,
     name: str,
-    *,
-    allowed: frozenset[str] | None = None,
+    expected: tuple[str, ...],
 ) -> tuple[str, ...]:
     path = f"fingerprint.{section}.{name}"
     encoded = values.get(name)
     if encoded is None:
         raise ContractError(f"{path} is missing")
-    try:
-        value = json.loads(encoded, parse_constant=_reject_constant)
-    except (json.JSONDecodeError, ContractError, TypeError) as error:
-        raise ContractError(f"{path} must be a JSON array") from error
-    if not isinstance(value, list):
-        raise ContractError(f"{path} must be a JSON array")
-    result = tuple(_text(item, path) for item in value)
-    if len(set(result)) != len(result):
-        raise ContractError(f"{path} must not contain duplicates")
-    if allowed is not None and any(item not in allowed for item in result):
-        raise ContractError(f"{path} contains an unsupported value")
-    if canonical_json(list(result)) != encoded:
-        raise ContractError(f"{path} is not canonical")
-    return result
+    if canonical_json(list(expected)) != encoded:
+        raise ContractError(f"{path} does not match the plan")
+    return expected
+
+
+def _expected_platforms(plan: ValidationPlan) -> tuple[str, ...]:
+    selected_families = (item.family for item in plan.requirements if item.selected)
+    selected_platforms = frozenset(
+        platform
+        for family in selected_families
+        for platform in FAMILY_PLATFORMS[family]
+    )
+    return tuple(
+        platform for platform in PLATFORM_ORDER if platform in selected_platforms
+    )
+
+
+def _validate_fingerprint_platform_binding(plan: ValidationPlan) -> None:
+    platforms = _strings(plan.fingerprint.platforms, "fingerprint.platforms")
+    if any(platform not in KNOWN_PLATFORMS for platform in platforms):
+        raise ContractError("fingerprint.platforms contains an unsupported value")
+    if platforms != _expected_platforms(plan):
+        raise ContractError("plan fingerprint platforms do not match the plan evidence")
+
+
+def _validate_retention(plan: ValidationPlan) -> None:
+    for requirement in plan.requirements:
+        expected = RETENTION_BY_PROFILE_STAGE[(plan.profile, requirement.stage)]
+        if requirement.retention_class == expected:
+            continue
+        if (
+            requirement.retention_class == "test-reactivation-certification"
+            and requirement.stage == "integrated"
+        ):
+            continue
+        if (
+            requirement.retention_class == "published-release"
+            and plan.candidate.kind == "release"
+            and requirement.selected
+            and requirement.stage == "release"
+        ):
+            continue
+        raise ContractError(
+            "requirement.retentionClass is inconsistent with "
+            f"{plan.profile}/{requirement.stage}"
+        )
 
 
 def _validate_fingerprint_binding(plan: ValidationPlan) -> None:
@@ -205,6 +298,7 @@ def _validate_fingerprint_binding(plan: ValidationPlan) -> None:
         raise ContractError("plan and fingerprint implementations disagree")
     if fingerprint.profile != plan.profile:
         raise ContractError("plan profile and fingerprint profile disagree")
+    _validate_fingerprint_platform_binding(plan)
 
     candidate = candidate_to_dict(plan.candidate)
     expected_source = tuple(
@@ -216,34 +310,38 @@ def _validate_fingerprint_binding(plan: ValidationPlan) -> None:
     dependencies = dict(fingerprint.dependencies)
     if dependencies.get("schemaVersion") != str(SCHEMA_VERSION):
         raise ContractError("plan fingerprint has an inconsistent schema version")
-    selected = _canonical_array_parameter(
-        dependencies, "dependencies", "selectedEvidence"
-    )
     expected_selected = tuple(
         item.family for item in plan.requirements if item.selected
     )
-    if selected != expected_selected:
+    if (
+        _expected_array_parameter(
+            dependencies, "dependencies", "selectedEvidence", expected_selected
+        )
+        != expected_selected
+    ):
         raise ContractError(
             "plan fingerprint selected evidence does not match the plan"
         )
 
     parameters = dict(fingerprint.parameters)
     if (
-        _canonical_array_parameter(
-            parameters, "parameters", "changeSurfaces", allowed=SURFACES
+        _expected_array_parameter(
+            parameters, "parameters", "changeSurfaces", plan.surfaces
         )
         != plan.surfaces
     ):
         raise ContractError("plan fingerprint surfaces do not match the plan")
     if (
-        _canonical_array_parameter(
-            parameters, "parameters", "riskModifiers", allowed=KNOWN_RISK_MODIFIERS
+        _expected_array_parameter(
+            parameters, "parameters", "riskModifiers", plan.risk_modifiers
         )
         != plan.risk_modifiers
     ):
         raise ContractError("plan fingerprint risk modifiers do not match the plan")
     if (
-        _canonical_array_parameter(parameters, "parameters", "policyErrors")
+        _expected_array_parameter(
+            parameters, "parameters", "policyErrors", plan.policy_errors
+        )
         != plan.policy_errors
     ):
         raise ContractError("plan fingerprint policy errors do not match the plan")
@@ -274,6 +372,19 @@ def _item_and_text_budget(value: object) -> tuple[int, int]:
 
     visit(value)
     return items, text_bytes
+
+
+def _validate_plan_budgets(plan: ValidationPlan) -> None:
+    try:
+        items, text_bytes = _item_and_text_budget(plan_to_dict(plan))
+    except RecursionError as error:
+        raise ContractError(
+            "Validation plan exceeds its aggregate item budget"
+        ) from error
+    if items > MAX_PLAN_ITEMS:
+        raise ContractError("Validation plan exceeds its aggregate item budget")
+    if text_bytes > MAX_PLAN_TEXT_BYTES:
+        raise ContractError("Validation plan exceeds its aggregate text budget")
 
 
 def validate_plan(plan: ValidationPlan) -> None:
@@ -307,22 +418,32 @@ def validate_plan(plan: ValidationPlan) -> None:
         validate_requirement(requirement)
     if tuple(item.family for item in plan.requirements) != EVIDENCE_FAMILIES:
         raise ContractError("plan.evidence must be the complete canonical ledger")
-    if ("unknown" in risk_modifiers or plan.policy_errors) and (
+    if not any(item.selected for item in plan.requirements):
+        raise ContractError("plan.evidence must select at least one requirement")
+    if (
+        plan.candidate.kind in CERTIFICATION_REQUIRED_CANDIDATE_KINDS
+        or any(
+            item.selected and item.stage in CERTIFICATION_REQUIRED_STAGES
+            for item in plan.requirements
+        )
+    ) and plan.profile != "certification-required":
+        raise ContractError(
+            "integrated, release, and synchronization evidence require "
+            "certification-required"
+        )
+    if (set(risk_modifiers) & CERTIFICATION_RISK_MODIFIERS or plan.policy_errors) and (
         plan.profile != "certification-required"
         or not all(item.selected for item in plan.requirements)
     ):
         raise ContractError(
             "uncertain plans require certification-required and complete evidence"
         )
+    _validate_retention(plan)
     if not isinstance(plan.fingerprint, ValidationFingerprint):
         raise ContractError("plan.fingerprint has an invalid structure")
     validate_fingerprint(plan.fingerprint)
     _validate_fingerprint_binding(plan)
-    items, text_bytes = _item_and_text_budget(plan_to_dict(plan))
-    if items > MAX_PLAN_ITEMS:
-        raise ContractError("Validation plan exceeds its aggregate item budget")
-    if text_bytes > MAX_PLAN_TEXT_BYTES:
-        raise ContractError("Validation plan exceeds its aggregate text budget")
+    _validate_plan_budgets(plan)
 
 
 def plan_from_dict(value: object) -> ValidationPlan:
@@ -362,31 +483,6 @@ def plan_from_dict(value: object) -> ValidationPlan:
     return plan
 
 
-def _serialize_payload(payload: dict[str, object], name: str) -> str:
-    try:
-        text = (
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-                allow_nan=False,
-                sort_keys=True,
-                indent=2,
-            )
-            + "\n"
-        )
-        size = len(text.encode("utf-8"))
-    except (TypeError, UnicodeEncodeError, ValueError) as error:
-        raise ContractError(f"{name} cannot be canonically serialized") from error
-    if size > MAX_PLAN_OUTPUT_BYTES:
-        raise ContractError(f"{name} exceeds its serialized byte budget")
-    return text
-
-
-def serialize_plan(plan: ValidationPlan) -> str:
-    validate_plan(plan)
-    return _serialize_payload(plan_to_dict(plan), "Validation plan")
-
-
 def _reject_duplicate(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -400,38 +496,13 @@ def _reject_constant(value: str) -> Any:
     raise ContractError(f"invalid JSON constant: {value}")
 
 
-def _input_text(value: object) -> str:
-    if isinstance(value, bytes):
-        try:
-            text = value.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise ContractError("Validation plan JSON must be valid UTF-8") from error
-    elif isinstance(value, str):
-        text = value
-    else:
-        raise ContractError("Validation plan JSON must be text or UTF-8 bytes")
-    try:
-        size = len(text.encode("utf-8"))
-    except UnicodeEncodeError as error:
-        raise ContractError("Validation plan JSON must be valid UTF-8") from error
-    if size > MAX_PLAN_INPUT_BYTES:
-        raise ContractError("Validation plan exceeds its input byte budget")
-    return text
+def serialize_plan(plan: ValidationPlan) -> str:
+    from validation_plan_codec import serialize_plan as encode_plan
+
+    return encode_plan(plan)
 
 
 def parse_plan(value: object) -> ValidationPlan:
-    text = _input_text(value)
-    try:
-        payload = json.loads(
-            text,
-            object_pairs_hook=_reject_duplicate,
-            parse_constant=_reject_constant,
-        )
-    except ContractError:
-        raise
-    except (json.JSONDecodeError, TypeError, UnicodeDecodeError, ValueError) as error:
-        raise ContractError(f"invalid Validation plan JSON: {error}") from error
-    plan = plan_from_dict(payload)
-    if serialize_plan(plan) != text:
-        raise ContractError("Validation plan is not canonically serialized")
-    return plan
+    from validation_plan_codec import parse_plan as decode_plan
+
+    return decode_plan(value)
