@@ -6,7 +6,12 @@ import json
 import ntpath
 import re
 
-from validation_contracts import CandidateIdentity, ContractError, ValidationFingerprint
+from validation_contracts import (
+    CandidateIdentity,
+    ContractError,
+    MAX_JSON_INTEGER,
+    ValidationFingerprint,
+)
 from validation_contracts import (
     _keys,
     _object,
@@ -18,17 +23,12 @@ from validation_contracts import fingerprint_from_dict, fingerprint_to_dict
 from validation_contracts import validate_candidate, validate_fingerprint
 from validation_plan_contract import DISPOSITIONS, FAMILY_STAGES, RETENTION_CLASSES
 from validation_plan_contract import EvidenceRequirement, ValidationPlan
-from validation_plan_contract import (
-    _reject_constant,
-    _reject_duplicate,
-)
 from validation_plan_contract import validate_plan, validate_requirement
 
 
 MAX_ARTIFACTS_PER_MANIFEST = MAX_ATTEMPT = 64
 MAX_SERIALIZED_BYTES = 256_000
 MAX_DURATION_SECONDS = 604_800
-MAX_JSON_INTEGER = 2**63 - 1
 OUTCOMES = frozenset(
     "passed product-failure infrastructure-failure indeterminate stale not-required".split()
 )
@@ -60,6 +60,19 @@ SENTINEL_FIELDS = (
 def _invalid(condition: bool, message: str) -> None:
     if condition:
         raise ContractError(message)
+
+
+def _reject_duplicate(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ContractError(f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_constant(value: str) -> object:
+    raise ContractError(f"invalid JSON constant: {value}")
 
 
 def _wire_name(name: str) -> str:
@@ -169,7 +182,7 @@ def _serialize_manifest_payload(payload: dict[str, object]) -> str:
             + "\n"
         )
         size = len(text.encode("utf-8"))
-    except (TypeError, UnicodeEncodeError, ValueError) as error:
+    except (RecursionError, TypeError, UnicodeEncodeError, ValueError) as error:
         raise ContractError(
             "Evidence manifest cannot be canonically serialized"
         ) from error
@@ -207,12 +220,16 @@ def _validate_timestamps(manifest: EvidenceManifest) -> None:
     )
 
 
-def _validate_manifest_binding(manifest: EvidenceManifest) -> None:
+def _validate_manifest_binding(
+    manifest: EvidenceManifest, plan: ValidationPlan
+) -> None:
     if not isinstance(manifest.plan, ValidationPlan):
         raise ContractError("manifest.plan has an invalid structure")
     if not isinstance(manifest.requirement, EvidenceRequirement):
         raise ContractError("manifest.requirement has an invalid structure")
-    validate_plan(manifest.plan)
+    validate_plan(plan)
+    if manifest.plan != plan:
+        raise ContractError("manifest is bound to a different Validation plan")
     validate_requirement(manifest.requirement)
     expected = next(
         (item for item in manifest.plan.requirements if item.family == manifest.family),
@@ -240,7 +257,11 @@ def _validate_manifest_binding(manifest: EvidenceManifest) -> None:
         raise ContractError("not-required manifest reason disagrees with its plan")
 
 
-def validate_manifest(manifest: EvidenceManifest) -> None:
+def validate_manifest(
+    manifest: EvidenceManifest, plan: ValidationPlan | None = None
+) -> None:
+    if plan is None:
+        raise ContractError("Evidence manifest validation requires a Validation plan")
     if not isinstance(manifest, EvidenceManifest):
         raise ContractError("Evidence manifest has an invalid structure")
     if type(manifest.schema_version) is not int or manifest.schema_version != 1:
@@ -293,16 +314,13 @@ def validate_manifest(manifest: EvidenceManifest) -> None:
     )
     if manifest.evidence_id != expected_id:
         raise ContractError("manifest.evidenceId does not match its identity")
-    _validate_manifest_binding(manifest)
+    _validate_manifest_binding(manifest, plan)
 
 
 def validate_manifest_against_plan(
     manifest: EvidenceManifest, plan: ValidationPlan
 ) -> None:
-    validate_manifest(manifest)
-    validate_plan(plan)
-    if manifest.plan != plan:
-        raise ContractError("manifest is bound to a different Validation plan")
+    validate_manifest(manifest, plan)
 
 
 def manifest_for_requirement(
@@ -412,6 +430,7 @@ def manifest_from_dict(value: object, plan: ValidationPlan) -> EvidenceManifest:
     validate_plan(plan)
     payload = _object(value, "manifest")
     _keys(payload, MANIFEST_FIELDS, "manifest")
+    _serialize_manifest_payload(payload)
     values = {
         re.sub(r"(?<!^)(?=[A-Z])", "_", key).lower(): item
         for key, item in payload.items()

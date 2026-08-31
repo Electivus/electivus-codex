@@ -3,7 +3,7 @@ import json
 import unittest
 
 from test_validation_plan_contract import repository_only_plan
-from validation_contracts import ContractError
+from validation_contracts import ContractError, candidate_to_dict
 from validation_evidence_contract import (
     MAX_ARTIFACTS_PER_MANIFEST,
     MAX_ATTEMPT,
@@ -25,10 +25,11 @@ DIGEST = "b" * 64
 
 def fixture() -> tuple[object, EvidenceManifest]:
     plan = repository_only_plan()
+    requirement = next(item for item in plan.requirements if item.selected)
     return plan, manifest_for_requirement(
         plan,
-        plan.requirements[1],
-        producer="repository-policy",
+        requirement,
+        producer="repository-hygiene",
         artifact_digests=(("report.json", DIGEST),),
         duration_seconds=8,
         critical_path_seconds=5,
@@ -46,6 +47,8 @@ class EvidenceManifestContractTests(unittest.TestCase):
     def test_round_trip_and_whole_object_projection(self):
         plan, manifest = fixture()
         payload = manifest_to_dict(manifest, plan)
+        with self.assertRaises(ContractError):
+            validate_manifest(manifest)
         self.assertEqual(manifest, manifest_from_dict(payload, plan))
         self.assertEqual(
             manifest, parse_manifest(serialize_manifest(manifest, plan), plan)
@@ -53,7 +56,7 @@ class EvidenceManifestContractTests(unittest.TestCase):
         self.assertEqual(plan.candidate, manifest.candidate)
         self.assertEqual(plan.fingerprint, manifest.fingerprint)
         self.assertEqual(
-            {"family": "repository-policy", "name": "report.json", "digest": DIGEST},
+            {"family": manifest.family, "name": "report.json", "digest": DIGEST},
             payload["artifactDigests"]
             and {
                 "family": manifest.family,
@@ -119,7 +122,7 @@ class EvidenceManifestContractTests(unittest.TestCase):
             *(replace(manifest, fingerprint=value) for value in fingerprint_changes),
         )
 
-        requirement = plan.requirements[1]
+        requirement = manifest.requirement
         self.assertEqual(
             (
                 requirement.family,
@@ -167,7 +170,7 @@ class EvidenceManifestContractTests(unittest.TestCase):
 
     def test_requirement_binding_cannot_be_overridden(self):
         plan, manifest = fixture()
-        requirement = plan.requirements[1]
+        requirement = manifest.requirement
         mutations = (
             replace(
                 requirement,
@@ -221,12 +224,12 @@ class EvidenceManifestContractTests(unittest.TestCase):
             "stale",
         ):
             validate_manifest_against_plan(
-                manifest_for_requirement(plan, plan.requirements[1], outcome=outcome),
+                manifest_for_requirement(plan, manifest.requirement, outcome=outcome),
                 plan,
             )
         invalid(
             self,
-            validate_manifest,
+            lambda value: validate_manifest(value, plan),
             replace(manifest, outcome="not-required"),
             replace(manifest, outcome="unknown"),
             replace(manifest, family="unknown"),
@@ -236,7 +239,9 @@ class EvidenceManifestContractTests(unittest.TestCase):
             replace(manifest, cache_mode="cache-only"),
         )
 
-        sentinel = manifest_for_requirement(plan, plan.requirements[0])
+        sentinel = manifest_for_requirement(
+            plan, next(item for item in plan.requirements if not item.selected)
+        )
 
         def against_plan(value):
             validate_manifest_against_plan(value, plan)
@@ -266,7 +271,7 @@ class EvidenceManifestContractTests(unittest.TestCase):
         ):
             cached = manifest_for_requirement(
                 plan,
-                plan.requirements[1],
+                manifest.requirement,
                 cache_mode=cache_mode,
                 outcome="indeterminate" if cache_mode == "cache-only" else "passed",
             )
@@ -279,10 +284,14 @@ class EvidenceManifestContractTests(unittest.TestCase):
         plan, manifest = fixture()
         invalid(
             self,
-            validate_manifest,
+            lambda value: validate_manifest(value, plan),
             replace(manifest, artifact_digests=(("x", "bad"),)),
             replace(manifest, artifact_digests=(("x", DIGEST), ("x", DIGEST))),
             replace(manifest, artifact_digests=(("C:secret", DIGEST),)),
+            replace(manifest, artifact_digests=(("C:/secret", DIGEST),)),
+            replace(manifest, artifact_digests=((r"C:\\secret", DIGEST),)),
+            replace(manifest, artifact_digests=((r"\\server\\share", DIGEST),)),
+            replace(manifest, artifact_digests=(("//server/share", DIGEST),)),
             replace(manifest, artifact_digests=(("/absolute", DIGEST),)),
             replace(manifest, artifact_digests=(("..\\secret", DIGEST),)),
             replace(manifest, artifact_digests=(("a\x00b", DIGEST),)),
@@ -301,24 +310,58 @@ class EvidenceManifestContractTests(unittest.TestCase):
             (f"artifact-{index}", DIGEST) for index in range(MAX_ARTIFACTS_PER_MANIFEST)
         )
         bounded = replace(manifest, artifact_digests=artifacts)
-        validate_manifest(bounded)
+        validate_manifest(bounded, plan)
         self.assertEqual(MAX_ARTIFACTS_PER_MANIFEST, len(bounded.artifact_digests))
         invalid(
             self,
-            validate_manifest,
+            lambda value: validate_manifest(value, plan),
             replace(manifest, artifact_digests=(*artifacts, ("too-many", DIGEST))),
         )
 
+        release_plan = repository_only_plan(
+            plan_profile="certification-required",
+            selected_families=("release-packaging",),
+        )
+        release_candidate = replace(
+            release_plan.candidate,
+            event_name="push",
+            base_sha=None,
+            head_sha=None,
+            kind="release",
+            pull_request_number=None,
+        )
+        candidate_source = tuple(
+            (name, "" if value is None else str(value))
+            for name, value in candidate_to_dict(release_candidate).items()
+        )
         published_requirements = tuple(
             replace(item, retention_class="published-release")
-            if item.family == manifest.family
+            if item.family == "release-packaging"
             else item
-            for item in plan.requirements
+            for item in release_plan.requirements
         )
-        published_plan = replace(plan, requirements=published_requirements)
-        published = manifest_for_requirement(published_plan, published_requirements[1])
+        release_plan = replace(
+            release_plan,
+            candidate=release_candidate,
+            requirements=published_requirements,
+            fingerprint=replace(
+                release_plan.fingerprint,
+                profile="certification-required",
+                source=candidate_source,
+            ),
+        )
+        published_requirement = next(
+            item
+            for item in published_requirements
+            if item.family == "release-packaging"
+        )
+        published = manifest_for_requirement(release_plan, published_requirement)
         self.assertIsNone(published.expires_at)
-        invalid(self, validate_manifest, replace(published, expires_at=1))
+        invalid(
+            self,
+            lambda value: validate_manifest(value, release_plan),
+            replace(published, expires_at=1),
+        )
 
     def test_strict_json_and_caps_before_conversion(self):
         plan, manifest = fixture()
@@ -358,6 +401,18 @@ class EvidenceManifestContractTests(unittest.TestCase):
             text.replace("{\n", "{ \n", 1),
             b"\xff",
         )
+        oversized_invalid_utf8 = b"\xff" * (MAX_SERIALIZED_BYTES + 1)
+        with self.assertRaisesRegex(ContractError, "input byte budget"):
+            parse(oversized_invalid_utf8)
+        giant_integer = text.replace(
+            '"pullRequestNumber": 181',
+            '"pullRequestNumber": ' + "9" * 5_000,
+            1,
+        )
+        with self.assertRaisesRegex(
+            ContractError, "JSON integer exceeds its bounded range"
+        ):
+            parse(giant_integer)
         invalid(
             self,
             from_dict,
@@ -370,6 +425,10 @@ class EvidenceManifestContractTests(unittest.TestCase):
                 ],
             },
         )
+        oversized_payload = dict(payload)
+        oversized_payload["candidate"] = "x" * MAX_SERIALIZED_BYTES
+        with self.assertRaisesRegex(ContractError, "serialized byte budget"):
+            from_dict(oversized_payload)
         oversized = replace(
             manifest,
             fingerprint=replace(
@@ -386,18 +445,23 @@ class EvidenceManifestContractTests(unittest.TestCase):
             (f"{index:02d}-" + "x" * 3_797, DIGEST)
             for index in range(MAX_ARTIFACTS_PER_MANIFEST)
         )
-        at_limit = replace(
+        base = replace(
             manifest,
             artifact_digests=artifacts,
             producer="p" * 4_096,
-            reason="r" * 36,
+            reason="r",
         )
+        base_serialized = serialize_manifest(base, plan)
+        reason_length = MAX_SERIALIZED_BYTES - len(base_serialized.encode()) + 1
+        self.assertGreaterEqual(reason_length, 1)
+        self.assertLessEqual(reason_length, 4_096)
+        at_limit = replace(base, reason="r" * reason_length)
         serialized = serialize_manifest(at_limit, plan)
         self.assertEqual(MAX_SERIALIZED_BYTES, len(serialized.encode("utf-8")))
         self.assertEqual(at_limit, parse_manifest(serialized, plan))
         self.assertEqual(at_limit, parse_manifest(serialized.encode("utf-8"), plan))
 
-        over_limit = replace(at_limit, reason="r" * 37)
+        over_limit = replace(at_limit, reason="r" * (reason_length + 1))
         oversized = (
             json.dumps(
                 manifest_to_dict(over_limit, plan),
@@ -427,7 +491,9 @@ class EvidenceManifestContractTests(unittest.TestCase):
         plan, manifest = fixture()
         for code_point in range(0x7F, 0xA0):
             with self.subTest(code_point=code_point), self.assertRaises(ContractError):
-                validate_manifest(replace(manifest, reason=f"bad{chr(code_point)}text"))
+                validate_manifest(
+                    replace(manifest, reason=f"bad{chr(code_point)}text"), plan
+                )
 
         tabbed = replace(manifest, reason="line\twith tab")
         validate_manifest_against_plan(tabbed, plan)
