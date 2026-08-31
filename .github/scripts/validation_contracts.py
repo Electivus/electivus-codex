@@ -12,6 +12,7 @@ SCHEMA_VERSION = 1
 VALIDATION_IMPLEMENTATION = "electivus-validation-v1"
 MAX_ITEMS = 2_000
 MAX_TEXT_BYTES = 4_096
+MAX_JSON_INTEGER = 2**63 - 1
 
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -36,7 +37,10 @@ def _text(value: object, name: str, *, allow_empty: bool = False) -> str:
         raise ContractError(f"{name} must be valid UTF-8") from error
     if len(encoded) > MAX_TEXT_BYTES:
         raise ContractError(f"{name} exceeds its byte budget")
-    if any(ord(character) < 32 and character != "\t" for character in value):
+    if any(
+        (ord(character) < 32 and character != "\t") or 0x7F <= ord(character) <= 0x9F
+        for character in value
+    ):
         raise ContractError(f"{name} contains a control character")
     return value
 
@@ -55,9 +59,17 @@ def _sha256(value: object, name: str) -> str:
     return value
 
 
-def _integer(value: object, name: str, *, minimum: int = 0) -> int:
+def _integer(
+    value: object,
+    name: str,
+    *,
+    minimum: int = 0,
+    maximum: int | None = None,
+) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ContractError(f"{name} must be an integer of at least {minimum}")
+    if maximum is not None and value > maximum:
+        raise ContractError(f"{name} exceeds its bounded range")
     return value
 
 
@@ -156,6 +168,7 @@ def validate_candidate(candidate: CandidateIdentity) -> None:
             candidate.pull_request_number,
             "candidate.pullRequestNumber",
             minimum=1,
+            maximum=MAX_JSON_INTEGER,
         )
     if candidate.kind == "pull-request" and (
         candidate.base_sha is None
@@ -194,6 +207,7 @@ def candidate_from_dict(value: object) -> CandidateIdentity:
             pull_request_number,
             "candidate.pullRequestNumber",
             minimum=1,
+            maximum=MAX_JSON_INTEGER,
         )
     candidate = CandidateIdentity(
         event_name=_text(payload["eventName"], "candidate.eventName"),
