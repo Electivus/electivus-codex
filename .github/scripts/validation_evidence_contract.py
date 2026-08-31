@@ -3,6 +3,7 @@
 
 from dataclasses import dataclass, field
 import json
+import ntpath
 import re
 
 from validation_contracts import CandidateIdentity, ContractError, ValidationFingerprint
@@ -94,7 +95,7 @@ def _artifact_pairs(value: object, name: str) -> tuple[tuple[str, str], ...]:
         _invalid(
             artifact_name.startswith(("/", "\\"))
             or "\x00" in artifact_name
-            or re.match(r"^[A-Za-z]:[\\/]", artifact_name)
+            or ntpath.splitdrive(artifact_name)[0]
             or ".." in artifact_name.replace("\\", "/").split("/"),
             f"{name}.name contains an invalid path",
         )

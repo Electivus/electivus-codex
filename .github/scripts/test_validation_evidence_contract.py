@@ -282,6 +282,7 @@ class EvidenceManifestContractTests(unittest.TestCase):
             validate_manifest,
             replace(manifest, artifact_digests=(("x", "bad"),)),
             replace(manifest, artifact_digests=(("x", DIGEST), ("x", DIGEST))),
+            replace(manifest, artifact_digests=(("C:secret", DIGEST),)),
             replace(manifest, artifact_digests=(("/absolute", DIGEST),)),
             replace(manifest, artifact_digests=(("..\\secret", DIGEST),)),
             replace(manifest, artifact_digests=(("a\x00b", DIGEST),)),
