@@ -1,4 +1,5 @@
 from dataclasses import replace
+import json
 import unittest
 
 from test_validation_plan_contract import repository_only_plan
@@ -44,8 +45,10 @@ class EvidenceManifestContractTests(unittest.TestCase):
     def test_round_trip_and_whole_object_projection(self):
         plan, manifest = fixture()
         payload = manifest_to_dict(manifest)
-        self.assertEqual(manifest, manifest_from_dict(payload))
-        self.assertEqual(manifest, parse_manifest(serialize_manifest(manifest)))
+        self.assertEqual(manifest, manifest_from_dict(payload, plan))
+        self.assertEqual(
+            manifest, parse_manifest(serialize_manifest(manifest, plan), plan)
+        )
         self.assertEqual(plan.candidate, manifest.candidate)
         self.assertEqual(plan.fingerprint, manifest.fingerprint)
         self.assertEqual(
@@ -138,6 +141,28 @@ class EvidenceManifestContractTests(unittest.TestCase):
             replace(manifest, retention_class="integrated-certification"),
             replace(manifest, evidence_id="tampered"),
         )
+        changed_candidate = replace(manifest.candidate, candidate_sha="d" * 40)
+        recomputed = replace(
+            manifest,
+            candidate=changed_candidate,
+            evidence_id=(
+                f"{changed_candidate.candidate_sha}:{manifest.family}:{manifest.stage}:"
+                f"{manifest.fingerprint.digest}"
+            ),
+        )
+        self.assertEqual(manifest.fingerprint, recomputed.fingerprint)
+        canonical = (
+            json.dumps(
+                manifest_to_dict(recomputed),
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n"
+        )
+        with self.assertRaises(ContractError):
+            parse_manifest(canonical, plan)
 
     def test_outcomes_sentinels_and_provenance(self):
         plan, manifest = fixture()
@@ -200,7 +225,9 @@ class EvidenceManifestContractTests(unittest.TestCase):
                 outcome="indeterminate" if cache_mode == "cache-only" else "passed",
             )
             validate_manifest_against_plan(cached, plan)
-            self.assertEqual(cached, parse_manifest(serialize_manifest(cached)))
+            self.assertEqual(
+                cached, parse_manifest(serialize_manifest(cached, plan), plan)
+            )
 
     def test_artifacts_durations_retention_and_attempt_bounds(self):
         plan, manifest = fixture()
@@ -247,14 +274,21 @@ class EvidenceManifestContractTests(unittest.TestCase):
         invalid(self, validate_manifest, replace(published, expires_at=1))
 
     def test_strict_json_and_caps_before_conversion(self):
-        _, manifest = fixture()
-        text = serialize_manifest(manifest)
+        plan, manifest = fixture()
+        text = serialize_manifest(manifest, plan)
         payload = manifest_to_dict(manifest)
+
+        def from_dict(value):
+            return manifest_from_dict(value, plan)
+
+        def parse(value):
+            return parse_manifest(value, plan)
+
         missing = dict(payload)
         missing.pop("reason")
         invalid(
             self,
-            manifest_from_dict,
+            from_dict,
             [],
             missing,
             {**payload, "unexpected": 1},
@@ -263,7 +297,7 @@ class EvidenceManifestContractTests(unittest.TestCase):
         )
         invalid(
             self,
-            parse_manifest,
+            parse,
             text.replace('"schemaVersion": 1,', '"schemaVersion": NaN,', 1),
             text.replace(
                 '"schemaVersion": 1,', '"schemaVersion": 1,\n  "schemaVersion": 1,', 1
@@ -279,7 +313,7 @@ class EvidenceManifestContractTests(unittest.TestCase):
         )
         invalid(
             self,
-            manifest_from_dict,
+            from_dict,
             {**payload, "reason": "bad\nreason"},
             {
                 **payload,
@@ -297,7 +331,7 @@ class EvidenceManifestContractTests(unittest.TestCase):
             ),
         )
         with self.assertRaises(ContractError):
-            serialize_manifest(oversized)
+            serialize_manifest(oversized, plan)
 
 
 if __name__ == "__main__":

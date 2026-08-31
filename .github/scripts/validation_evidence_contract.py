@@ -316,12 +316,12 @@ def manifest_for_requirement(
     return manifest
 
 
-def serialize_manifest(manifest: EvidenceManifest) -> str:
-    validate_manifest(manifest)
+def serialize_manifest(manifest: EvidenceManifest, plan: ValidationPlan) -> str:
+    validate_manifest_against_plan(manifest, plan)
     return _serialize_payload(manifest_to_dict(manifest), "Evidence manifest")
 
 
-def manifest_from_dict(value: object) -> EvidenceManifest:
+def manifest_from_dict(value: object, plan: ValidationPlan) -> EvidenceManifest:
     payload = _object(value, "manifest")
     _keys(payload, MANIFEST_FIELDS, "manifest")
     values = {
@@ -334,7 +334,7 @@ def manifest_from_dict(value: object) -> EvidenceManifest:
         payload["artifactDigests"], "manifest.artifactDigests"
     )
     manifest = EvidenceManifest(**values)
-    validate_manifest(manifest)
+    validate_manifest_against_plan(manifest, plan)
     return manifest
 
 
@@ -346,7 +346,7 @@ def _parse_int(value: str) -> int:
     return int(value)
 
 
-def parse_manifest(value: object) -> EvidenceManifest:
+def parse_manifest(value: object, plan: ValidationPlan) -> EvidenceManifest:
     text = _input_text(value)
     try:
         payload = json.loads(
@@ -359,7 +359,7 @@ def parse_manifest(value: object) -> EvidenceManifest:
         raise
     except (json.JSONDecodeError, TypeError, ValueError) as error:
         raise ContractError(f"invalid Evidence manifest JSON: {error}") from error
-    manifest = manifest_from_dict(payload)
-    if serialize_manifest(manifest) != text:
+    manifest = manifest_from_dict(payload, plan)
+    if serialize_manifest(manifest, plan) != text:
         raise ContractError("Evidence manifest is not canonically serialized")
     return manifest
