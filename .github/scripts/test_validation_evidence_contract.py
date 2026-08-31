@@ -87,6 +87,31 @@ class EvidenceManifestContractTests(unittest.TestCase):
         self.assertEqual(before, serialize_manifest(manifest, plan))
         self.assertEqual(manifest, parse_manifest(before, plan))
 
+    def test_plan_snapshot_rejects_mutation_of_external_requirements(self):
+        plan = repository_only_plan()
+        requirements = list(plan.requirements)
+        mutable_plan = replace(plan, requirements=requirements)
+        selected = next(item for item in requirements if item.selected)
+        manifest = manifest_for_requirement(mutable_plan, selected)
+        before = serialize_manifest(manifest, mutable_plan)
+
+        unselected_index = next(
+            index for index, item in enumerate(requirements) if not item.selected
+        )
+        requirements[unselected_index] = replace(
+            requirements[unselected_index], reason="tampered"
+        )
+
+        self.assertEqual(
+            plan.requirements[unselected_index],
+            manifest.plan.requirements[unselected_index],
+        )
+        with self.assertRaises(ContractError):
+            validate_manifest_against_plan(manifest, mutable_plan)
+        with self.assertRaises(ContractError):
+            serialize_manifest(manifest, mutable_plan)
+        self.assertEqual(before, serialize_manifest(manifest, plan))
+
     def test_plan_and_deep_identity_bindings_fail_closed(self):
         plan, manifest = fixture()
         payload = manifest_to_dict(manifest, plan)

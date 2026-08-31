@@ -123,6 +123,85 @@ def _artifact_pairs(value: object, name: str) -> tuple[tuple[str, str], ...]:
     return tuple(result)
 
 
+def _snapshot_sequence(value: object, name: str) -> tuple[object, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ContractError(f"{name} has an invalid structure")
+    return tuple(value)
+
+
+def _snapshot_pairs(value: object, name: str) -> tuple[tuple[object, object], ...]:
+    result = []
+    for pair in _snapshot_sequence(value, name):
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            raise ContractError(f"{name} has an invalid pair")
+        result.append((pair[0], pair[1]))
+    return tuple(result)
+
+
+def _snapshot_candidate(candidate: object) -> object:
+    if not isinstance(candidate, CandidateIdentity):
+        return candidate
+    return CandidateIdentity(
+        event_name=candidate.event_name,
+        repository=candidate.repository,
+        default_branch=candidate.default_branch,
+        candidate_sha=candidate.candidate_sha,
+        base_sha=candidate.base_sha,
+        head_sha=candidate.head_sha,
+        kind=candidate.kind,
+        pull_request_number=candidate.pull_request_number,
+        branch=candidate.branch,
+    )
+
+
+def _snapshot_requirement(requirement: object) -> object:
+    if not isinstance(requirement, EvidenceRequirement):
+        return requirement
+    return EvidenceRequirement(
+        family=requirement.family,
+        stage=requirement.stage,
+        selected=requirement.selected,
+        disposition=requirement.disposition,
+        reason=requirement.reason,
+        retention_class=requirement.retention_class,
+    )
+
+
+def _snapshot_fingerprint(fingerprint: object) -> object:
+    if not isinstance(fingerprint, ValidationFingerprint):
+        return fingerprint
+    return ValidationFingerprint(
+        source=_snapshot_pairs(fingerprint.source, "plan.fingerprint.source"),
+        validation_implementation=fingerprint.validation_implementation,
+        dependencies=_snapshot_pairs(
+            fingerprint.dependencies, "plan.fingerprint.dependencies"
+        ),
+        toolchains=_snapshot_pairs(fingerprint.toolchains, "plan.fingerprint.toolchains"),
+        commands=_snapshot_sequence(fingerprint.commands, "plan.fingerprint.commands"),
+        platforms=_snapshot_sequence(fingerprint.platforms, "plan.fingerprint.platforms"),
+        profile=fingerprint.profile,
+        parameters=_snapshot_pairs(fingerprint.parameters, "plan.fingerprint.parameters"),
+        inputs=_snapshot_pairs(fingerprint.inputs, "plan.fingerprint.inputs"),
+    )
+
+
+def _snapshot_plan(plan: object) -> object:
+    if not isinstance(plan, ValidationPlan):
+        return plan
+    requirements = _snapshot_sequence(plan.requirements, "plan.requirements")
+    return ValidationPlan(
+        schema_version=plan.schema_version,
+        validation_implementation=plan.validation_implementation,
+        candidate=_snapshot_candidate(plan.candidate),
+        surfaces=_snapshot_sequence(plan.surfaces, "plan.changeSurfaces"),
+        risk_modifiers=_snapshot_sequence(plan.risk_modifiers, "plan.riskModifiers"),
+        profile=plan.profile,
+        requirements=tuple(_snapshot_requirement(item) for item in requirements),
+        fingerprint=_snapshot_fingerprint(plan.fingerprint),
+        policy_errors=_snapshot_sequence(plan.policy_errors, "plan.policyErrors"),
+    )
+
+
 @dataclass(frozen=True)
 class EvidenceManifest:
     # These bindings are construction-only metadata and are not part of the wire shape.
@@ -148,6 +227,10 @@ class EvidenceManifest:
     expires_at: int | None = None
 
     def __post_init__(self) -> None:
+        if isinstance(self.plan, ValidationPlan):
+            object.__setattr__(self, "plan", _snapshot_plan(self.plan))
+        if isinstance(self.requirement, EvidenceRequirement):
+            object.__setattr__(self, "requirement", _snapshot_requirement(self.requirement))
         if type(self.artifact_digests) is not tuple:
             raise ContractError("manifest.artifactDigests must be a tuple")
         if any(type(pair) is not tuple for pair in self.artifact_digests):
@@ -234,7 +317,7 @@ def _validate_manifest_binding(
     if not isinstance(manifest.requirement, EvidenceRequirement):
         raise ContractError("manifest.requirement has an invalid structure")
     validate_plan(plan)
-    if manifest.plan != plan:
+    if manifest.plan != _snapshot_plan(plan):
         raise ContractError("manifest is bound to a different Validation plan")
     validate_requirement(manifest.requirement)
     expected = next(
