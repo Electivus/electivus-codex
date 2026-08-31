@@ -44,7 +44,7 @@ def invalid(test, function, *values):
 class EvidenceManifestContractTests(unittest.TestCase):
     def test_round_trip_and_whole_object_projection(self):
         plan, manifest = fixture()
-        payload = manifest_to_dict(manifest)
+        payload = manifest_to_dict(manifest, plan)
         self.assertEqual(manifest, manifest_from_dict(payload, plan))
         self.assertEqual(
             manifest, parse_manifest(serialize_manifest(manifest, plan), plan)
@@ -63,6 +63,7 @@ class EvidenceManifestContractTests(unittest.TestCase):
 
     def test_plan_and_deep_identity_bindings_fail_closed(self):
         plan, manifest = fixture()
+        payload = manifest_to_dict(manifest, plan)
 
         def against_plan(value):
             validate_manifest_against_plan(value, plan)
@@ -141,19 +142,18 @@ class EvidenceManifestContractTests(unittest.TestCase):
             replace(manifest, retention_class="integrated-certification"),
             replace(manifest, evidence_id="tampered"),
         )
-        changed_candidate = replace(manifest.candidate, candidate_sha="d" * 40)
-        recomputed = replace(
-            manifest,
-            candidate=changed_candidate,
-            evidence_id=(
-                f"{changed_candidate.candidate_sha}:{manifest.family}:{manifest.stage}:"
-                f"{manifest.fingerprint.digest}"
-            ),
+        changed_candidate = dict(payload["candidate"])
+        changed_candidate["candidateSha"] = "d" * 40
+        recomputed = dict(payload)
+        recomputed["candidate"] = changed_candidate
+        recomputed["evidenceId"] = (
+            f"{changed_candidate['candidateSha']}:{manifest.family}:{manifest.stage}:"
+            f"{manifest.fingerprint.digest}"
         )
-        self.assertEqual(manifest.fingerprint, recomputed.fingerprint)
+        self.assertEqual(payload["fingerprint"], recomputed["fingerprint"])
         canonical = (
             json.dumps(
-                manifest_to_dict(recomputed),
+                recomputed,
                 ensure_ascii=False,
                 allow_nan=False,
                 sort_keys=True,
@@ -276,7 +276,7 @@ class EvidenceManifestContractTests(unittest.TestCase):
     def test_strict_json_and_caps_before_conversion(self):
         plan, manifest = fixture()
         text = serialize_manifest(manifest, plan)
-        payload = manifest_to_dict(manifest)
+        payload = manifest_to_dict(manifest, plan)
 
         def from_dict(value):
             return manifest_from_dict(value, plan)

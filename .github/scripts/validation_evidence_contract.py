@@ -132,7 +132,7 @@ class EvidenceManifest:
     expires_at: int | None = None
 
 
-def manifest_to_dict(manifest: EvidenceManifest) -> dict[str, object]:
+def _manifest_payload(manifest: EvidenceManifest) -> dict[str, object]:
     payload = {_wire_name(key): value for key, value in vars(manifest).items()}
     payload["candidate"] = candidate_to_dict(manifest.candidate)
     payload["fingerprint"] = fingerprint_to_dict(manifest.fingerprint)
@@ -316,9 +316,15 @@ def manifest_for_requirement(
     return manifest
 
 
-def serialize_manifest(manifest: EvidenceManifest, plan: ValidationPlan) -> str:
+def manifest_to_dict(
+    manifest: EvidenceManifest, plan: ValidationPlan
+) -> dict[str, object]:
     validate_manifest_against_plan(manifest, plan)
-    return _serialize_payload(manifest_to_dict(manifest), "Evidence manifest")
+    return _manifest_payload(manifest)
+
+
+def serialize_manifest(manifest: EvidenceManifest, plan: ValidationPlan) -> str:
+    return _serialize_payload(manifest_to_dict(manifest, plan), "Evidence manifest")
 
 
 def manifest_from_dict(value: object, plan: ValidationPlan) -> EvidenceManifest:
