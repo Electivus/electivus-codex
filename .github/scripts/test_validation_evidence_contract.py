@@ -162,6 +162,7 @@ class EvidenceManifestContractTests(unittest.TestCase):
             replace(manifest, disposition="optional"),
             replace(manifest, retention_class="unknown"),
             replace(manifest, cache_mode="unknown"),
+            replace(manifest, cache_mode="cache-only"),
         )
 
         sentinel = manifest_for_requirement(plan, plan.requirements[0])
@@ -193,7 +194,10 @@ class EvidenceManifestContractTests(unittest.TestCase):
             "cache-only",
         ):
             cached = manifest_for_requirement(
-                plan, plan.requirements[1], cache_mode=cache_mode
+                plan,
+                plan.requirements[1],
+                cache_mode=cache_mode,
+                outcome="indeterminate" if cache_mode == "cache-only" else "passed",
             )
             validate_manifest_against_plan(cached, plan)
             self.assertEqual(cached, parse_manifest(serialize_manifest(cached)))
@@ -222,10 +226,9 @@ class EvidenceManifestContractTests(unittest.TestCase):
         artifacts = tuple(
             (f"artifact-{index}", DIGEST) for index in range(MAX_ARTIFACTS_PER_MANIFEST)
         )
-        self.assertEqual(
-            MAX_ARTIFACTS_PER_MANIFEST,
-            len(replace(manifest, artifact_digests=artifacts).artifact_digests),
-        )
+        bounded = replace(manifest, artifact_digests=artifacts)
+        validate_manifest(bounded)
+        self.assertEqual(MAX_ARTIFACTS_PER_MANIFEST, len(bounded.artifact_digests))
         invalid(
             self,
             validate_manifest,

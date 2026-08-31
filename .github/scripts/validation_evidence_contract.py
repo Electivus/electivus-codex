@@ -26,8 +26,7 @@ from validation_plan_contract import (
 from validation_plan_contract import validate_plan, validate_requirement
 
 
-MAX_EVIDENCE = MAX_ARTIFACTS_PER_MANIFEST = MAX_ATTEMPT = 64
-MAX_SERIALIZED_BYTES = 256_000
+MAX_ARTIFACTS_PER_MANIFEST = MAX_ATTEMPT = 64
 MAX_DURATION_SECONDS = 604_800
 MAX_JSON_INTEGER = 2**63 - 1
 OUTCOMES = frozenset(
@@ -66,10 +65,6 @@ def _invalid(condition: bool, message: str) -> None:
 def _wire_name(name: str) -> str:
     head, *tail = name.split("_")
     return head + "".join(part.title() for part in tail)
-
-
-def _python_name(name: str) -> str:
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
 def _integer(value: object, name: str, *, minimum: int, maximum: int) -> int:
@@ -174,9 +169,7 @@ def _validate_timestamps(manifest: EvidenceManifest) -> None:
     )
 
 
-def validate_manifest(
-    manifest: EvidenceManifest, plan: ValidationPlan | None = None
-) -> None:
+def validate_manifest(manifest: EvidenceManifest) -> None:
     if not isinstance(manifest, EvidenceManifest):
         raise ContractError("Evidence manifest has an invalid structure")
     if type(manifest.schema_version) is not int or manifest.schema_version != 1:
@@ -203,6 +196,8 @@ def validate_manifest(
     if manifest.disposition == "required":
         if manifest.outcome == "not-required" or manifest.producer is None:
             raise ContractError("required evidence needs a producer and a real outcome")
+        if manifest.cache_mode == "cache-only" and manifest.outcome != "indeterminate":
+            raise ContractError("cache-only evidence must be indeterminate")
     elif any(
         getattr(manifest, field) != expected for field, expected in SENTINEL_FIELDS
     ):
@@ -227,34 +222,28 @@ def validate_manifest(
     if manifest.evidence_id != expected_id:
         raise ContractError("manifest.evidenceId does not match its identity")
 
-    if plan is not None:
-        validate_plan(plan)
-        requirement = {item.family: item for item in plan.requirements}.get(
-            manifest.family
-        )
-        if requirement is None:
-            raise ContractError("manifest family is absent from the plan")
-        if (
-            manifest.candidate != plan.candidate
-            or manifest.fingerprint != plan.fingerprint
-        ):
-            raise ContractError(
-                "manifest is bound to a different candidate or fingerprint"
-            )
-        if (manifest.stage, manifest.disposition, manifest.retention_class) != (
-            requirement.stage,
-            requirement.disposition,
-            requirement.retention_class,
-        ):
-            raise ContractError("manifest disagrees with its plan requirement")
-        if (
-            requirement.disposition == "not-required"
-            and manifest.reason != requirement.reason
-        ):
-            raise ContractError("not-required manifest reason disagrees with its plan")
 
-
-validate_manifest_against_plan = validate_manifest
+def validate_manifest_against_plan(
+    manifest: EvidenceManifest, plan: ValidationPlan
+) -> None:
+    validate_manifest(manifest)
+    validate_plan(plan)
+    requirement = {item.family: item for item in plan.requirements}.get(manifest.family)
+    if requirement is None:
+        raise ContractError("manifest family is absent from the plan")
+    if manifest.candidate != plan.candidate or manifest.fingerprint != plan.fingerprint:
+        raise ContractError("manifest is bound to a different candidate or fingerprint")
+    if (manifest.stage, manifest.disposition, manifest.retention_class) != (
+        requirement.stage,
+        requirement.disposition,
+        requirement.retention_class,
+    ):
+        raise ContractError("manifest disagrees with its plan requirement")
+    if (
+        requirement.disposition == "not-required"
+        and manifest.reason != requirement.reason
+    ):
+        raise ContractError("not-required manifest reason disagrees with its plan")
 
 
 def manifest_for_requirement(
@@ -323,7 +312,7 @@ def manifest_for_requirement(
         created_at=created,
         expires_at=None if days is None or not created else created + days * 86_400,
     )
-    validate_manifest(manifest, plan)
+    validate_manifest_against_plan(manifest, plan)
     return manifest
 
 
@@ -335,7 +324,10 @@ def serialize_manifest(manifest: EvidenceManifest) -> str:
 def manifest_from_dict(value: object) -> EvidenceManifest:
     payload = _object(value, "manifest")
     _keys(payload, MANIFEST_FIELDS, "manifest")
-    values = {_python_name(key): item for key, item in payload.items()}
+    values = {
+        re.sub(r"(?<!^)(?=[A-Z])", "_", key).lower(): item
+        for key, item in payload.items()
+    }
     values["candidate"] = candidate_from_dict(payload["candidate"])
     values["fingerprint"] = fingerprint_from_dict(payload["fingerprint"])
     values["artifact_digests"] = _artifact_pairs(
@@ -354,7 +346,7 @@ def _parse_int(value: str) -> int:
     return int(value)
 
 
-def _parse_payload(value: object, name: str) -> tuple[object, str]:
+def parse_manifest(value: object) -> EvidenceManifest:
     text = _input_text(value)
     try:
         payload = json.loads(
@@ -366,12 +358,7 @@ def _parse_payload(value: object, name: str) -> tuple[object, str]:
     except ContractError:
         raise
     except (json.JSONDecodeError, TypeError, ValueError) as error:
-        raise ContractError(f"invalid {name} JSON: {error}") from error
-    return payload, text
-
-
-def parse_manifest(value: object) -> EvidenceManifest:
-    payload, text = _parse_payload(value, "Evidence manifest")
+        raise ContractError(f"invalid Evidence manifest JSON: {error}") from error
     manifest = manifest_from_dict(payload)
     if serialize_manifest(manifest) != text:
         raise ContractError("Evidence manifest is not canonically serialized")
