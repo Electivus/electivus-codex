@@ -84,6 +84,7 @@ FAMILY_PLATFORMS = {
     "synchronization-topology": frozenset({"linux-x64"}),
 }
 CERTIFICATION_REQUIRED_STAGES = frozenset({"integrated", "release", "synchronization"})
+CERTIFICATION_REQUIRED_CANDIDATE_KINDS = CERTIFICATION_REQUIRED_STAGES
 DISPOSITIONS = frozenset({"required", "not-required"})
 STAGES = frozenset(FAMILY_STAGES.values()) | {"surveillance"}
 RETENTION_CLASSES = frozenset(
@@ -274,18 +275,13 @@ def _validate_retention(plan: ValidationPlan) -> None:
             and requirement.stage == "integrated"
         ):
             continue
-        if requirement.retention_class == "published-release":
-            # Publication may carry the terminal, lifetime retention class. The
-            # pull-request case preserves #202's manifest API, which uses a
-            # plan override to exercise that terminal class.
-            if requirement.selected and (
-                requirement.stage == "release"
-                or (
-                    plan.candidate.kind == "pull-request"
-                    and requirement.stage in {"preflight", "merge"}
-                )
-            ):
-                continue
+        if (
+            requirement.retention_class == "published-release"
+            and plan.candidate.kind == "release"
+            and requirement.selected
+            and requirement.stage == "release"
+        ):
+            continue
         raise ContractError(
             "requirement.retentionClass is inconsistent with "
             f"{plan.profile}/{requirement.stage}"
@@ -385,12 +381,12 @@ def validate_plan(plan: ValidationPlan) -> None:
     if not any(item.selected for item in plan.requirements):
         raise ContractError("plan.evidence must select at least one requirement")
     if (
-        any(
+        plan.candidate.kind in CERTIFICATION_REQUIRED_CANDIDATE_KINDS
+        or any(
             item.selected and item.stage in CERTIFICATION_REQUIRED_STAGES
             for item in plan.requirements
         )
-        and plan.profile != "certification-required"
-    ):
+    ) and plan.profile != "certification-required":
         raise ContractError(
             "integrated, release, and synchronization evidence require "
             "certification-required"

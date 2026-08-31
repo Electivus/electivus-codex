@@ -291,18 +291,22 @@ class ValidationPlanContractTests(unittest.TestCase):
         )
         ordinary = repository_only_plan()
         invalid = replace(ordinary.requirements[1], retention_class="intra-run")
-        assert_invalid(
-            self,
-            validate_plan,
-            replace(
-                ordinary,
-                requirements=(
-                    *ordinary.requirements[:1],
-                    invalid,
-                    *ordinary.requirements[2:],
-                ),
-            ),
+        published = replace(
+            ordinary.requirements[1], retention_class="published-release"
         )
+        for invalid_requirement in (invalid, published):
+            assert_invalid(
+                self,
+                validate_plan,
+                replace(
+                    ordinary,
+                    requirements=(
+                        *ordinary.requirements[:1],
+                        invalid_requirement,
+                        *ordinary.requirements[2:],
+                    ),
+                ),
+            )
 
     def test_fingerprint_binding_is_bidirectional_and_canonical(self) -> None:
         plan = repository_only_plan()
