@@ -1,11 +1,13 @@
 ---
 name: code-review-change-size
-description: Change size guidance (800 lines)
+description: Review change cohesion and identify real staging boundaries without numeric diff-size limits.
 ---
 
-Unless the change is mechanical the total number of changed lines should not exceed 800 lines.
-For complex logic changes the size should be under 500 lines.
+Do not impose a numeric changed-line limit or treat total diff size as a finding
+by itself. Review the actual diff, dependencies, affected call sites, risk, and
+whether the behavior can be understood and validated as one coherent unit.
 
-If the change is larger, explain whether it can be split into reviewable stages and identify the smallest coherent stage to land first.
-Base the staging suggestion on the actual diff, dependencies, and affected call sites.
-
+Recommend dependent stages only when they form independently useful and
+verifiable boundaries. Do not request an artificial split solely to reduce a
+line count. If a cohesive change is large, focus the review on its highest-risk
+interfaces and invariants instead of reporting size as a blocker.
