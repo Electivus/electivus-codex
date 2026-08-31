@@ -47,6 +47,33 @@ jobs:
     uses: ./.github/workflows/sdk.yml
     secrets: inherit
 
+  synchronization-topology:
+    name: Synchronization topology
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # The synthetic merge ref is intentionally not used by this checker.
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate Synchronization topology
+        env:
+          PR_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+          PR_HEAD_BRANCH: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || '' }}
+          PR_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/check_upstream_sync_topology.py \
+            --base "${PR_BASE_SHA}" \
+            --head "${PR_HEAD_SHA}" \
+            --head-branch "${PR_HEAD_BRANCH}" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
   v8-canary:
     name: v8-canary
     permissions:
@@ -192,6 +219,7 @@ jobs:
       - repo-checks
       - rust-ci
       - sdk
+      - synchronization-topology
       - v8-canary
     runs-on: ubuntu-24.04
     steps:
