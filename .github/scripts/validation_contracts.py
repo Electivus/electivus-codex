@@ -176,7 +176,9 @@ def decode_json_input(value: object, *, maximum_bytes: int, label: str) -> str:
     return value
 
 
-def serialize_json(payload: dict[str, object], *, maximum_bytes: int, label: str) -> str:
+def serialize_json(
+    payload: dict[str, object], *, maximum_bytes: int, label: str
+) -> str:
     try:
         text = (
             json.dumps(

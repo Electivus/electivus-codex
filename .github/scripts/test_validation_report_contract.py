@@ -68,6 +68,7 @@ class ValidationReportContractTests(unittest.TestCase):
             },
             set(payload),
         )
+
     def test_outcome_priority_explicit_errors_and_policy_errors_fail_closed(self):
         selected = ("repository-policy", "repository-hygiene", "rust-fast")
         for outcome, expected in (
@@ -77,19 +78,27 @@ class ValidationReportContractTests(unittest.TestCase):
             ("indeterminate", "indeterminate"),
             ("infrastructure-failure", "infrastructure-failure"),
         ):
-            report = fixture(selected_families=selected, outcomes={selected[-1]: outcome})[2]
+            report = fixture(
+                selected_families=selected, outcomes={selected[-1]: outcome}
+            )[2]
             self.assertEqual(expected, report.outcome)
 
         report = fixture(
             selected_families=selected,
             outcomes={selected[0]: "infrastructure-failure", selected[1]: "passed"},
         )[2]
-        report = replace(report, errors=("aggregation inconsistency",), outcome="indeterminate")
+        report = replace(
+            report, errors=("aggregation inconsistency",), outcome="indeterminate"
+        )
         validate_report(report)
-        invalid(self, validate_report, replace(report, outcome="infrastructure-failure"))
+        invalid(
+            self, validate_report, replace(report, outcome="infrastructure-failure")
+        )
 
         plan = certified_plan(policy_errors=("policy classifier uncertainty",))
-        manifests = tuple(manifest_for_requirement(plan, item) for item in plan.requirements)
+        manifests = tuple(
+            manifest_for_requirement(plan, item) for item in plan.requirements
+        )
         report = report_for_evidence(plan, manifests)
         self.assertEqual(("policy classifier uncertainty",), report.errors)
         self.assertEqual("indeterminate", report.outcome)
@@ -110,19 +119,32 @@ class ValidationReportContractTests(unittest.TestCase):
             replace(candidate, pull_request_number=182),
             replace(candidate, branch="other-branch"),
         )
-        invalid(self, validate_report, *(replace(report, candidate=item) for item in candidate_changes))
+        invalid(
+            self,
+            validate_report,
+            *(replace(report, candidate=item) for item in candidate_changes),
+        )
         invalid(
             self,
             validate_report,
             replace(report, plan=replace(plan, candidate=candidate_changes[0])),
-            replace(report, evidence=(manifests[0], replace(manifests[1], candidate=candidate_changes[1]), *manifests[2:])),
+            replace(
+                report,
+                evidence=(
+                    manifests[0],
+                    replace(manifests[1], candidate=candidate_changes[1]),
+                    *manifests[2:],
+                ),
+            ),
             replace(
                 report,
                 evidence=(
                     manifests[0],
                     replace(
                         manifests[1],
-                        fingerprint=replace(manifests[1].fingerprint, toolchains=(("python", "3.12"),)),
+                        fingerprint=replace(
+                            manifests[1].fingerprint, toolchains=(("python", "3.12"),)
+                        ),
                     ),
                     *manifests[2:],
                 ),
@@ -136,7 +158,10 @@ class ValidationReportContractTests(unittest.TestCase):
             validate_report,
             replace(report, evidence=(*manifests[1:], manifests[0])),
             replace(report, evidence=(*manifests[:-1], manifests[-1], manifests[-1])),
-            replace(report, evidence=(*manifests[:-1], replace(manifests[-1], family="unknown"))),
+            replace(
+                report,
+                evidence=(*manifests[:-1], replace(manifests[-1], family="unknown")),
+            ),
             replace(report, evidence=manifests[:-1]),
         )
 
@@ -149,7 +174,17 @@ class ValidationReportContractTests(unittest.TestCase):
             {**payload, "outcomes": {**payload["outcomes"], "extra": "passed"}},
             {**payload, "fingerprints": [report.plan.fingerprint.digest]},
             {**payload, "durations": {"repository-policy": 8}},
-            {**payload, "artifacts": [{"family": "repository-policy", "name": "report.json", "digest": DIGEST}] * 2},
+            {
+                **payload,
+                "artifacts": [
+                    {
+                        "family": "repository-policy",
+                        "name": "report.json",
+                        "digest": DIGEST,
+                    }
+                ]
+                * 2,
+            },
             {**payload, "errors": ["same", "same"]},
         )
         payload = report_to_dict(report)
@@ -181,7 +216,12 @@ class ValidationReportContractTests(unittest.TestCase):
             fixture(artifacts=(("x" * 4_097, DIGEST),))
 
     def test_report_artifact_projection_and_error_caps(self):
-        selected = ("repository-policy", "repository-hygiene", "rust-fast", "linux-x64-bazel")
+        selected = (
+            "repository-policy",
+            "repository-hygiene",
+            "rust-fast",
+            "linux-x64-bazel",
+        )
         artifacts = tuple((f"artifact-{index}", DIGEST) for index in range(64))
         report = fixture(selected_families=selected, artifacts=artifacts)[2]
         self.assertEqual(MAX_ARTIFACTS_PER_REPORT, len(report.artifacts))
@@ -215,7 +255,9 @@ class ValidationReportContractTests(unittest.TestCase):
             self,
             parse_report,
             text.replace('"schemaVersion": 1,', '"schemaVersion": NaN,', 1),
-            text.replace('"schemaVersion": 1,', '"schemaVersion": 1,\n  "schemaVersion": 1,', 1),
+            text.replace(
+                '"schemaVersion": 1,', '"schemaVersion": 1,\n  "schemaVersion": 1,', 1
+            ),
             text.replace("Electivus/electivus-codex", r"\ud800", 1),
             text.replace("{\n", "{ \n", 1),
             b"\xff",
@@ -233,11 +275,7 @@ class ValidationReportContractTests(unittest.TestCase):
         plan, manifests, _ = fixture()
         errors = tuple(
             f"error-{index}-"
-            + (
-                "é" * 2044
-                if index == 0
-                else "x" * (3100 + (270 if index == 1 else 0))
-            )
+            + ("é" * 2044 if index == 0 else "x" * (3100 + (270 if index == 1 else 0)))
             for index in range(MAX_ERRORS)
         )
         report = report_for_evidence(plan, manifests, errors=errors)
@@ -248,7 +286,9 @@ class ValidationReportContractTests(unittest.TestCase):
         payload = report_to_dict(report)
         payload["errors"][1] += "x"
         oversized = (
-            json.dumps(payload, ensure_ascii=False, allow_nan=False, sort_keys=True, indent=2)
+            json.dumps(
+                payload, ensure_ascii=False, allow_nan=False, sort_keys=True, indent=2
+            )
             + "\n"
         )
         self.assertEqual(MAX_SERIALIZED_BYTES + 1, len(oversized.encode("utf-8")))
