@@ -5,6 +5,7 @@ import unittest
 from test_validation_plan_contract import (
     assert_invalid,
     candidate,
+    certified_plan,
     repository_only_plan,
     with_fingerprint,
 )
@@ -13,6 +14,7 @@ from validation_contracts import (
     MAX_JSON_INTEGER,
     candidate_from_dict,
     candidate_to_dict,
+    canonical_json,
 )
 from validation_plan_codec import (
     MAX_PLAN_INPUT_BYTES,
@@ -67,8 +69,11 @@ class ValidationPlanCodecTests(unittest.TestCase):
                     candidate_kind_plan(kind, profile="certification-required")
                 )
 
-    def test_candidate_identity_and_family_mutations_fail_closed(self) -> None:
+    def test_candidate_identity_mutations_keep_original_fingerprint_and_fail(
+        self,
+    ) -> None:
         plan = repository_only_plan()
+        original_fingerprint = plan.fingerprint
         candidate_changes = (
             ("event_name", "workflow_dispatch"),
             ("repository", "Other/repo"),
@@ -81,11 +86,27 @@ class ValidationPlanCodecTests(unittest.TestCase):
             ("branch", "other-branch"),
         )
         for field, value in candidate_changes:
-            assert_invalid(
-                self,
-                validate_plan_budgets,
-                replace(plan, candidate=replace(plan.candidate, **{field: value})),
-            )
+            mutated = replace(plan, candidate=replace(plan.candidate, **{field: value}))
+            self.assertIs(mutated.fingerprint, original_fingerprint)
+            assert_invalid(self, validate_plan_budgets, mutated)
+
+    def test_multiple_surfaces_and_modifiers_round_trip_with_fingerprint(self) -> None:
+        plan = certified_plan(risk_modifiers=("security", "publication"))
+        surfaces = ("repository", "documentation", "rust")
+        fingerprint = replace(
+            plan.fingerprint,
+            parameters=(
+                ("changeSurfaces", canonical_json(list(surfaces))),
+                *plan.fingerprint.parameters[1:],
+            ),
+        )
+        multi_surface_plan = replace(plan, surfaces=surfaces, fingerprint=fingerprint)
+
+        validate_plan_budgets(multi_surface_plan)
+        self.assertEqual(
+            multi_surface_plan,
+            parse_plan(serialize_plan(multi_surface_plan)),
+        )
 
         for index, item in enumerate(plan.requirements):
             requirements = list(plan.requirements)
