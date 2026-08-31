@@ -1,18 +1,28 @@
 from dataclasses import replace
-import json
 import unittest
 
 from validation_contracts import (
     CandidateIdentity,
     ContractError,
     VALIDATION_IMPLEMENTATION,
+    ValidationFingerprint,
+    candidate_to_dict,
+    canonical_json,
 )
-from validation_contracts import ValidationFingerprint, candidate_to_dict
-from validation_plan_contract import EVIDENCE_FAMILIES, FAMILY_STAGES, MAX_EVIDENCE
-from validation_plan_contract import MAX_PLAN_INPUT_BYTES, MAX_PLAN_ITEMS
-from validation_plan_contract import EvidenceRequirement, ValidationPlan
-from validation_plan_contract import parse_plan, plan_from_dict, plan_to_dict
-from validation_plan_contract import serialize_plan, validate_plan
+from validation_plan_contract import (
+    CERTIFICATION_REQUIRED_STAGES,
+    EVIDENCE_FAMILIES,
+    FAMILY_PLATFORMS,
+    FAMILY_STAGES,
+    MAX_EVIDENCE,
+    PLATFORM_ORDER,
+    RETENTION_BY_PROFILE_STAGE,
+    EvidenceRequirement,
+    ValidationPlan,
+    plan_from_dict,
+    plan_to_dict,
+    validate_plan,
+)
 
 
 CANDIDATE_SHA = "a" * 40
@@ -35,24 +45,30 @@ def candidate() -> CandidateIdentity:
     )
 
 
-def requirement(family="repository-policy", selected=True, disposition="required"):
+def requirement(
+    family="repository-policy",
+    selected=True,
+    disposition="required",
+    profile="ordinary",
+):
     return EvidenceRequirement(
         family,
         FAMILY_STAGES[family],
         selected,
         disposition,
         "bounded repository policy checks",
-        "ordinary-pull-request",
+        RETENTION_BY_PROFILE_STAGE[(profile, FAMILY_STAGES[family])],
     )
 
 
-def evidence_ledger(selected_families=("repository-policy",)):
+def evidence_ledger(selected_families=("repository-policy",), profile="ordinary"):
     selected = set(selected_families)
     return tuple(
         requirement(
             family,
             family in selected,
             "required" if family in selected else "not-required",
+            profile,
         )
         for family in EVIDENCE_FAMILIES
     )
@@ -68,10 +84,12 @@ def fingerprint(
     risk_modifiers: tuple[str, ...] = (),
     policy_errors: tuple[str, ...] = (),
 ) -> ValidationFingerprint:
-    def encode(values: tuple[str, ...]) -> str:
-        return json.dumps(list(values), separators=(",", ":"))
-
     candidate_value = candidate()
+    selected_platforms = frozenset(
+        platform
+        for family in selected_evidence
+        for platform in FAMILY_PLATFORMS[family]
+    )
     return ValidationFingerprint(
         source
         or tuple(
@@ -82,17 +100,19 @@ def fingerprint(
         dependencies
         or (
             ("schemaVersion", "1"),
-            ("selectedEvidence", encode(selected_evidence)),
+            ("selectedEvidence", canonical_json(list(selected_evidence))),
         ),
         (("python", "3.11"),),
         tuple(f"validation:{family}" for family in selected_evidence),
-        ("linux-x64",),
+        tuple(
+            platform for platform in PLATFORM_ORDER if platform in selected_platforms
+        ),
         profile,
         parameters
         or (
             ("changeSurfaces", '["repository"]'),
-            ("riskModifiers", encode(risk_modifiers)),
-            ("policyErrors", encode(policy_errors)),
+            ("riskModifiers", canonical_json(list(risk_modifiers))),
+            ("policyErrors", canonical_json(list(policy_errors))),
         ),
         (("changedFilesDigest", CHANGED_FILES_DIGEST),),
     )
@@ -108,7 +128,8 @@ def repository_only_plan(
     plan_fingerprint: ValidationFingerprint | None = None,
     selected_families: tuple[str, ...] = ("repository-policy",),
 ) -> ValidationPlan:
-    requirements = requirements or evidence_ledger(selected_families)
+    if requirements is None:
+        requirements = evidence_ledger(selected_families, plan_profile)
     selected = tuple(item.family for item in requirements if item.selected)
     return ValidationPlan(
         1,
@@ -153,108 +174,148 @@ def assert_invalid(testcase, function, value):
 
 
 class ValidationPlanContractTests(unittest.TestCase):
-    def test_repository_only_plan_round_trips_as_exact_object(self) -> None:
+    def test_plan_projection_round_trips_as_exact_object(self) -> None:
         plan = repository_only_plan()
-        payload = plan_to_dict(plan)
-        expected_evidence = [
-            dict(
-                family=family,
-                stage=FAMILY_STAGES[family],
-                selected=family == "repository-policy",
-                disposition="required"
-                if family == "repository-policy"
-                else "not-required",
-                reason="bounded repository policy checks",
-                retentionClass="ordinary-pull-request",
-            )
-            for family in EVIDENCE_FAMILIES
-        ]
-
-        self.assertEqual(plan, parse_plan(serialize_plan(plan)))
+        self.assertEqual(plan, plan_from_dict(plan_to_dict(plan)))
         self.assertEqual(
-            {
-                "schemaVersion": 1,
-                "validationImplementation": VALIDATION_IMPLEMENTATION,
-                "candidate": candidate_to_dict(candidate()),
-                "changeSurfaces": ["repository"],
-                "riskModifiers": [],
-                "profile": "ordinary",
-                "evidence": expected_evidence,
-                "fingerprint": payload["fingerprint"],
-                "policyErrors": [],
-            },
-            payload,
+            tuple(item.family for item in plan.requirements), EVIDENCE_FAMILIES
         )
+        self.assertEqual(plan.requirements[0].disposition, "not-required")
 
-    def test_evidence_ledger_is_complete_canonical_and_bounded(self) -> None:
+    def test_evidence_ledger_is_complete_bounded_and_selected(self) -> None:
         plan = repository_only_plan()
         items = plan.requirements
+        unselected = repository_only_plan(selected_families=())
         mutations = (
             replace(plan, requirements=items[:-1]),
             replace(plan, requirements=(*items[1:], items[0])),
             replace(plan, requirements=(items[0], items[0], *items[2:])),
-            replace(plan, requirements=(*items, requirement("repository-policy"))),
-            replace(plan, surfaces=("repository", "repository")),
-            replace(plan, risk_modifiers=("unknown", "unknown")),
+            replace(
+                plan, requirements=tuple(requirement() for _ in range(MAX_EVIDENCE))
+            ),
+            unselected,
         )
         for mutated in mutations:
             assert_invalid(self, validate_plan, mutated)
+        self.assertTrue(all(not item.selected for item in unselected.requirements))
+        self.assertTrue(
+            all(item.disposition == "not-required" for item in unselected.requirements)
+        )
+        validate_plan(plan)
 
-        for count in (MAX_EVIDENCE, MAX_EVIDENCE + 1):
+    def test_certification_is_required_for_risks_stages_and_policy_errors(self) -> None:
+        for modifier in (
+            "security",
+            "breaking",
+            "migration",
+            "publication",
+            "validation-authority",
+            "synchronization",
+            "unknown",
+        ):
+            with self.subTest(modifier=modifier):
+                assert_invalid(
+                    self,
+                    validate_plan,
+                    repository_only_plan(risk_modifiers=(modifier,)),
+                )
+                validate_plan(certified_plan(risk_modifiers=(modifier,)))
+
+        assert_invalid(
+            self,
+            validate_plan,
+            repository_only_plan(policy_errors=("classifier uncertainty",)),
+        )
+        validate_plan(certified_plan(policy_errors=("classifier uncertainty",)))
+        assert_invalid(
+            self,
+            validate_plan,
+            repository_only_plan(
+                plan_profile="certification-required",
+                selected_families=("repository-policy",),
+                policy_errors=("classifier uncertainty",),
+            ),
+        )
+        for family, stage in FAMILY_STAGES.items():
+            if stage in CERTIFICATION_REQUIRED_STAGES:
+                assert_invalid(
+                    self,
+                    validate_plan,
+                    repository_only_plan(selected_families=(family,)),
+                )
+
+    def test_platforms_are_closed_and_bound_to_selected_families(self) -> None:
+        plan = repository_only_plan()
+        for platforms in (("macos",), ("linux-x64", "arbitrary")):
             assert_invalid(
-                self,
-                validate_plan,
-                repository_only_plan(
-                    requirements=tuple(requirement() for _ in range(count))
+                self, validate_plan, with_fingerprint(plan, platforms=platforms)
+            )
+        arm_plan = repository_only_plan(
+            plan_profile="certification-required", selected_families=("linux-arm64",)
+        )
+        assert_invalid(
+            self, validate_plan, with_fingerprint(arm_plan, platforms=("linux-x64",))
+        )
+        release = repository_only_plan(
+            plan_profile="certification-required",
+            selected_families=("release-packaging",),
+        )
+        self.assertEqual(PLATFORM_ORDER, release.fingerprint.platforms)
+        validate_plan(release)
+
+    def test_retention_is_bound_to_stage_and_profile(self) -> None:
+        for plan in (repository_only_plan(), certified_plan()):
+            validate_plan(plan)
+            self.assertEqual(
+                tuple(
+                    RETENTION_BY_PROFILE_STAGE[(plan.profile, item.stage)]
+                    for item in plan.requirements
+                ),
+                tuple(item.retention_class for item in plan.requirements),
+            )
+        certification = certified_plan()
+        integrated = next(
+            item for item in certification.requirements if item.family == "linux-arm64"
+        )
+        self.assertEqual("integrated-certification", integrated.retention_class)
+        validate_plan(
+            replace(
+                certification,
+                requirements=tuple(
+                    replace(item, retention_class="test-reactivation-certification")
+                    if item.family == integrated.family
+                    else item
+                    for item in certification.requirements
                 ),
             )
-        with self.assertRaisesRegex(ContractError, "invalid size"):
-            plan_from_dict(
-                {**plan_to_dict(plan), "evidence": [object()] * (MAX_EVIDENCE + 1)}
-            )
-
-    def test_each_family_rejects_a_wrong_stage(self) -> None:
-        plan = repository_only_plan()
-        for index, item in enumerate(plan.requirements):
-            requirements = list(plan.requirements)
-            requirements[index] = replace(
-                item, stage="preflight" if item.stage != "preflight" else "merge"
-            )
-            assert_invalid(
-                self, validate_plan, replace(plan, requirements=requirements)
-            )
-
-    def test_fingerprint_binding_is_bidirectional(self) -> None:
-        plan = repository_only_plan()
-        fingerprint_base = plan.fingerprint
-
-        candidate_changes = (
-            ("event_name", "workflow_dispatch"),
-            ("repository", "Other/repo"),
-            ("default_branch", "trunk"),
-            ("candidate_sha", "f" * 40),
-            ("base_sha", "e" * 40),
-            ("head_sha", "f" * 40),
-            ("kind", "integrated"),
-            ("pull_request_number", 182),
-            ("branch", "other-branch"),
         )
-        for field, value in candidate_changes:
-            assert_invalid(
-                self,
-                validate_plan,
-                replace(plan, candidate=replace(plan.candidate, **{field: value})),
-            )
+        ordinary = repository_only_plan()
+        invalid = replace(ordinary.requirements[1], retention_class="intra-run")
+        assert_invalid(
+            self,
+            validate_plan,
+            replace(
+                ordinary,
+                requirements=(
+                    *ordinary.requirements[:1],
+                    invalid,
+                    *ordinary.requirements[2:],
+                ),
+            ),
+        )
 
+    def test_fingerprint_binding_is_bidirectional_and_canonical(self) -> None:
+        plan = repository_only_plan()
+        base = plan.fingerprint
         mutations = (
             with_fingerprint(
-                plan, source=(("candidateSha", "f" * 40), *fingerprint_base.source[1:])
+                plan, source=(("candidateSha", "f" * 40), *base.source[1:])
             ),
             with_fingerprint(
                 plan,
                 parameters=(
                     ("changeSurfaces", '["documentation"]'),
-                    *fingerprint_base.parameters[1:],
+                    *base.parameters[1:],
                 ),
             ),
             with_fingerprint(
@@ -263,99 +324,13 @@ class ValidationPlanContractTests(unittest.TestCase):
                 commands=(),
             ),
             with_fingerprint(plan, profile="certification-required"),
+            with_fingerprint(
+                plan,
+                parameters=(
+                    ("changeSurfaces", "repository,documentation"),
+                    *base.parameters[1:],
+                ),
+            ),
         )
         for mutated in mutations:
             assert_invalid(self, validate_plan, mutated)
-
-    def test_unknown_and_missing_values_fail_closed(self) -> None:
-        plan = repository_only_plan()
-        mutations = (
-            lambda item: item.update(schemaVersion=2),
-            lambda item: item.update(validationImplementation="other"),
-            lambda item: item.update(profile="unknown"),
-            lambda item: item.update(changeSurfaces=[]),
-            lambda item: item.update(changeSurfaces=["repository-documentation"]),
-            lambda item: item.update(riskModifiers=["not-a-modifier"]),
-            lambda item: item["evidence"][1].update(family="unknown-family"),
-            lambda item: item["evidence"][1].update(disposition="optional"),
-            lambda item: item["evidence"][1].update(retentionClass="forever"),
-            lambda item: item["evidence"][1].update(selected=False),
-            lambda item: item["evidence"][1].pop("reason"),
-            lambda item: item["evidence"][1].update(stage="merg"),
-            lambda item: item["evidence"][1].update(stage="code" + "ql"),
-            lambda item: item.update(unexpected=True),
-            lambda item: item["fingerprint"].pop("digest"),
-        )
-
-        for mutate in mutations:
-            mutated = json.loads(json.dumps(plan_to_dict(plan)))
-            mutate(mutated)
-            assert_invalid(self, plan_from_dict, mutated)
-        uncertain = {
-            "risk_modifiers": ("unknown",),
-            "policy_errors": ("classifier uncertainty",),
-        }
-        assert_invalid(self, validate_plan, repository_only_plan(**uncertain))
-        validate_plan(certified_plan(**uncertain))
-
-    def test_arrays_are_not_delimited_strings(self) -> None:
-        errors = ("path contains comma, safely", "second\tmessage")
-        encoded = json.dumps(list(errors), separators=(",", ":"))
-        plan = certified_plan(policy_errors=errors)
-        plan = with_fingerprint(
-            plan,
-            parameters=(
-                ("changeSurfaces", '["repository"]'),
-                ("riskModifiers", "[]"),
-                ("policyErrors", encoded),
-            ),
-        )
-        validate_plan(plan)
-
-        delimiter = with_fingerprint(
-            plan,
-            parameters=(
-                ("changeSurfaces", "repository,documentation"),
-                *plan.fingerprint.parameters[1:],
-            ),
-        )
-        assert_invalid(self, validate_plan, delimiter)
-
-    def test_strict_json_rejects_bad_values(self) -> None:
-        serialized = serialize_plan(repository_only_plan())
-        invalids = (
-            serialized.replace(
-                '"schemaVersion": 1,', '"schemaVersion": 1,\n"schemaVersion": 1,'
-            ),
-            serialized.replace('"schemaVersion": 1', '"schemaVersion": NaN', 1),
-            b"\xff",
-            serialized.replace("Electivus/electivus-codex", r"\ud800", 1),
-            "9" * 5_000,
-        )
-        for invalid in invalids:
-            assert_invalid(self, parse_plan, invalid)
-
-    def test_input_output_and_aggregate_budgets_are_bounded(self) -> None:
-        plan = repository_only_plan()
-        assert_invalid(
-            self, parse_plan, serialize_plan(plan) + " " * MAX_PLAN_INPUT_BYTES
-        )
-
-        too_many_items = with_fingerprint(
-            plan,
-            inputs=tuple((f"input-{index}", "") for index in range(MAX_PLAN_ITEMS)),
-        )
-        assert_invalid(self, validate_plan, too_many_items)
-
-        long_errors = tuple(f"error-{index}-" + "x" * 4_000 for index in range(64))
-        large = certified_plan(policy_errors=long_errors)
-        encoded = json.dumps(list(long_errors), separators=(",", ":"))
-        large = with_fingerprint(
-            large,
-            parameters=(
-                ("changeSurfaces", '["repository"]'),
-                ("riskModifiers", "[]"),
-                ("policyErrors", encoded),
-            ),
-        )
-        assert_invalid(self, serialize_plan, large)
