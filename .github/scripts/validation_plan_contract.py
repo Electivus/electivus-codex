@@ -453,3 +453,15 @@ def _reject_duplicate(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _reject_constant(value: str) -> Any:
     raise ContractError(f"invalid JSON constant: {value}")
+
+
+def serialize_plan(plan: ValidationPlan) -> str:
+    from validation_plan_codec import serialize_plan as encode_plan
+
+    return encode_plan(plan)
+
+
+def parse_plan(value: object) -> ValidationPlan:
+    from validation_plan_codec import parse_plan as decode_plan
+
+    return decode_plan(value)
