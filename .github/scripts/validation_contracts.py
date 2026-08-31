@@ -111,6 +111,8 @@ def _object(value: object, name: str) -> dict[str, Any]:
 
 
 def _keys(value: dict[str, Any], expected: set[str], name: str) -> None:
+    if any(not isinstance(key, str) for key in value):
+        raise ContractError(f"{name} has invalid fields (keys must be strings)")
     actual = set(value)
     if actual != expected:
         missing = ",".join(sorted(expected - actual))

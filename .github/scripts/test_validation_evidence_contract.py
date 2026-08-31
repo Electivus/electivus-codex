@@ -65,6 +65,28 @@ class EvidenceManifestContractTests(unittest.TestCase):
             },
         )
 
+    def test_artifact_digests_are_immutable_at_dataclass_boundary(self):
+        plan, manifest = fixture()
+
+        with self.assertRaisesRegex(
+            ContractError, "manifest.artifactDigests must be a tuple"
+        ):
+            replace(manifest, artifact_digests=list(manifest.artifact_digests))
+        with self.assertRaisesRegex(
+            ContractError, "manifest.artifactDigests pairs must be tuples"
+        ):
+            replace(
+                manifest,
+                artifact_digests=(list(manifest.artifact_digests[0]),),
+            )
+
+        before = serialize_manifest(manifest, plan)
+        validate_manifest_against_plan(manifest, plan)
+        with self.assertRaises(TypeError):
+            manifest.artifact_digests[0][0] = "tampered"
+        self.assertEqual(before, serialize_manifest(manifest, plan))
+        self.assertEqual(manifest, parse_manifest(before, plan))
+
     def test_plan_and_deep_identity_bindings_fail_closed(self):
         plan, manifest = fixture()
         payload = manifest_to_dict(manifest, plan)
@@ -439,6 +461,19 @@ class EvidenceManifestContractTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             serialize_manifest(oversized, plan)
 
+        oversized_artifacts = replace(
+            manifest,
+            artifact_digests=tuple(
+                (f"{index:02d}" + "x" * 4_088, DIGEST)
+                for index in range(MAX_ARTIFACTS_PER_MANIFEST)
+            ),
+        )
+        with self.assertRaisesRegex(ContractError, "serialized byte budget"):
+            manifest_to_dict(oversized_artifacts, plan)
+
+        with self.assertRaisesRegex(ContractError, "keys must be strings"):
+            manifest_from_dict({1: "invalid"}, plan)
+
     def test_serialized_manifest_limit_is_exact_for_input_and_output(self):
         plan, manifest = fixture()
         artifacts = tuple(
@@ -462,9 +497,11 @@ class EvidenceManifestContractTests(unittest.TestCase):
         self.assertEqual(at_limit, parse_manifest(serialized.encode("utf-8"), plan))
 
         over_limit = replace(at_limit, reason="r" * (reason_length + 1))
+        oversized_payload = dict(manifest_to_dict(at_limit, plan))
+        oversized_payload["reason"] = over_limit.reason
         oversized = (
             json.dumps(
-                manifest_to_dict(over_limit, plan),
+                oversized_payload,
                 ensure_ascii=False,
                 allow_nan=False,
                 sort_keys=True,

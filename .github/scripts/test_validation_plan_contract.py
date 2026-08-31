@@ -80,7 +80,7 @@ def fingerprint(
     dependencies: tuple[tuple[str, str], ...] | None = None,
     parameters: tuple[tuple[str, str], ...] | None = None,
     profile: str = "ordinary",
-    selected_evidence: tuple[str, ...] = ("repository-policy",),
+    selected_evidence: tuple[str, ...] = ("repository-hygiene",),
     risk_modifiers: tuple[str, ...] = (),
     policy_errors: tuple[str, ...] = (),
 ) -> ValidationFingerprint:

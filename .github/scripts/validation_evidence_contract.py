@@ -147,6 +147,12 @@ class EvidenceManifest:
     created_at: int = 0
     expires_at: int | None = None
 
+    def __post_init__(self) -> None:
+        if type(self.artifact_digests) is not tuple:
+            raise ContractError("manifest.artifactDigests must be a tuple")
+        if any(type(pair) is not tuple for pair in self.artifact_digests):
+            raise ContractError("manifest.artifactDigests pairs must be tuples")
+
 
 def _manifest_input_text(value: object) -> str:
     if isinstance(value, bytes):
@@ -400,7 +406,7 @@ def manifest_to_dict(
     manifest: EvidenceManifest, plan: ValidationPlan
 ) -> dict[str, object]:
     validate_manifest_against_plan(manifest, plan)
-    return {
+    payload = {
         "schemaVersion": manifest.schema_version,
         "evidenceId": manifest.evidence_id,
         "family": manifest.family,
@@ -420,6 +426,8 @@ def manifest_to_dict(
         "createdAt": manifest.created_at,
         "expiresAt": manifest.expires_at,
     }
+    _serialize_manifest_payload(payload)
+    return payload
 
 
 def serialize_manifest(manifest: EvidenceManifest, plan: ValidationPlan) -> str:
