@@ -4,6 +4,7 @@ import unittest
 
 from test_validation_plan_contract import repository_only_plan
 from validation_contracts import ContractError, candidate_to_dict
+from validation_plan_contract import validate_plan
 from validation_evidence_contract import (
     MAX_ARTIFACTS_PER_MANIFEST,
     MAX_ATTEMPT,
@@ -111,6 +112,47 @@ class EvidenceManifestContractTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             serialize_manifest(manifest, mutable_plan)
         self.assertEqual(before, serialize_manifest(manifest, plan))
+
+    def test_manifest_snapshots_mutable_fingerprint_collections(self):
+        plan = repository_only_plan()
+        collection_names = (
+            "dependencies",
+            "toolchains",
+            "platforms",
+            "parameters",
+            "inputs",
+        )
+
+        for name in collection_names:
+            with self.subTest(name=name):
+                original = getattr(plan.fingerprint, name)
+                mutable = (
+                    list(original)
+                    if name == "platforms"
+                    else [list(pair) for pair in original]
+                )
+                fingerprint = replace(plan.fingerprint, **{name: mutable})
+                mutable_plan = replace(plan, fingerprint=fingerprint)
+                validate_plan(mutable_plan)
+                requirement = next(
+                    item for item in mutable_plan.requirements if item.selected
+                )
+
+                manifest = manifest_for_requirement(mutable_plan, requirement)
+                self.assertEqual(plan.candidate, manifest.candidate)
+                self.assertEqual(plan.fingerprint, manifest.fingerprint)
+                self.assertIsNot(mutable_plan.candidate, manifest.candidate)
+                self.assertIsNot(mutable_plan.fingerprint, manifest.fingerprint)
+
+                before = serialize_manifest(manifest, plan)
+                if name == "platforms":
+                    mutable.clear()
+                else:
+                    mutable[0][1] = "tampered"
+                    mutable.clear()
+
+                self.assertEqual(before, serialize_manifest(manifest, plan))
+                self.assertEqual(plan.fingerprint, manifest.fingerprint)
 
     def test_plan_and_deep_identity_bindings_fail_closed(self):
         plan, manifest = fixture()

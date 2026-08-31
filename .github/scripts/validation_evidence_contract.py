@@ -231,6 +231,10 @@ class EvidenceManifest:
             object.__setattr__(self, "plan", _snapshot_plan(self.plan))
         if isinstance(self.requirement, EvidenceRequirement):
             object.__setattr__(self, "requirement", _snapshot_requirement(self.requirement))
+        if isinstance(self.candidate, CandidateIdentity):
+            object.__setattr__(self, "candidate", _snapshot_candidate(self.candidate))
+        if isinstance(self.fingerprint, ValidationFingerprint):
+            object.__setattr__(self, "fingerprint", _snapshot_fingerprint(self.fingerprint))
         if type(self.artifact_digests) is not tuple:
             raise ContractError("manifest.artifactDigests must be a tuple")
         if any(type(pair) is not tuple for pair in self.artifact_digests):
