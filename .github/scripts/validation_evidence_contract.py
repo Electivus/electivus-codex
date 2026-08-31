@@ -132,14 +132,6 @@ class EvidenceManifest:
     expires_at: int | None = None
 
 
-def _manifest_payload(manifest: EvidenceManifest) -> dict[str, object]:
-    payload = {_wire_name(key): value for key, value in vars(manifest).items()}
-    payload["candidate"] = candidate_to_dict(manifest.candidate)
-    payload["fingerprint"] = fingerprint_to_dict(manifest.fingerprint)
-    payload["artifactDigests"] = [list(pair) for pair in manifest.artifact_digests]
-    return payload
-
-
 def _validate_timestamps(manifest: EvidenceManifest) -> None:
     _integer(
         manifest.created_at, "manifest.createdAt", minimum=0, maximum=MAX_JSON_INTEGER
@@ -320,7 +312,11 @@ def manifest_to_dict(
     manifest: EvidenceManifest, plan: ValidationPlan
 ) -> dict[str, object]:
     validate_manifest_against_plan(manifest, plan)
-    return _manifest_payload(manifest)
+    payload = {_wire_name(key): value for key, value in vars(manifest).items()}
+    payload["candidate"] = candidate_to_dict(manifest.candidate)
+    payload["fingerprint"] = fingerprint_to_dict(manifest.fingerprint)
+    payload["artifactDigests"] = [list(pair) for pair in manifest.artifact_digests]
+    return payload
 
 
 def serialize_manifest(manifest: EvidenceManifest, plan: ValidationPlan) -> str:
