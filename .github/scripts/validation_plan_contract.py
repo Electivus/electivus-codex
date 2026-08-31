@@ -4,7 +4,7 @@
 from dataclasses import dataclass
 from typing import Any
 
-from validation_contracts import PROFILES, SCHEMA_VERSION
+from validation_contracts import MAX_ITEMS, PROFILES, SCHEMA_VERSION
 from validation_contracts import VALIDATION_IMPLEMENTATION
 from validation_contracts import CandidateIdentity, ContractError, ValidationFingerprint
 from validation_contracts import _array, _keys, _object, _strings, _text
@@ -14,6 +14,10 @@ from validation_contracts import validate_candidate, validate_fingerprint
 
 
 MAX_EVIDENCE = 64
+MAX_PLAN_ITEMS = MAX_ITEMS
+MAX_PLAN_TEXT_BYTES = 64_000
+MAX_PLAN_INPUT_BYTES = 256_000
+MAX_PLAN_OUTPUT_BYTES = 256_000
 
 CHANGE_SURFACES = (
     "repository",
@@ -347,6 +351,42 @@ def _validate_fingerprint_binding(plan: ValidationPlan) -> None:
         raise ContractError("plan fingerprint commands do not match the plan")
 
 
+def _item_and_text_budget(value: object) -> tuple[int, int]:
+    items = 0
+    text_bytes = 0
+
+    def visit(item: object) -> None:
+        nonlocal items, text_bytes
+        if isinstance(item, list):
+            items += len(item)
+            for child in item:
+                visit(child)
+        elif isinstance(item, str):
+            try:
+                text_bytes += len(item.encode("utf-8"))
+            except UnicodeEncodeError as error:
+                raise ContractError("Validation plan contains invalid UTF-8") from error
+        elif isinstance(item, dict):
+            for child in item.values():
+                visit(child)
+
+    visit(value)
+    return items, text_bytes
+
+
+def _validate_plan_budgets(plan: ValidationPlan) -> None:
+    try:
+        items, text_bytes = _item_and_text_budget(plan_to_dict(plan))
+    except RecursionError as error:
+        raise ContractError(
+            "Validation plan exceeds its aggregate item budget"
+        ) from error
+    if items > MAX_PLAN_ITEMS:
+        raise ContractError("Validation plan exceeds its aggregate item budget")
+    if text_bytes > MAX_PLAN_TEXT_BYTES:
+        raise ContractError("Validation plan exceeds its aggregate text budget")
+
+
 def validate_plan(plan: ValidationPlan) -> None:
     if not isinstance(plan, ValidationPlan):
         raise ContractError("Validation plan has an invalid structure")
@@ -403,6 +443,7 @@ def validate_plan(plan: ValidationPlan) -> None:
         raise ContractError("plan.fingerprint has an invalid structure")
     validate_fingerprint(plan.fingerprint)
     _validate_fingerprint_binding(plan)
+    _validate_plan_budgets(plan)
 
 
 def plan_from_dict(value: object) -> ValidationPlan:

@@ -23,13 +23,111 @@ from validation_plan_codec import (
     validate_plan_budgets,
 )
 from validation_plan_contract import (
+    validate_plan,
     parse_plan as legacy_parse_plan,
     plan_to_dict,
     serialize_plan as legacy_serialize_plan,
 )
 
 
+def candidate_kind_plan(
+    kind: str,
+    *,
+    profile: str = "ordinary",
+    selected_families: tuple[str, ...] = ("repository-policy",),
+):
+    plan = repository_only_plan(
+        plan_profile=profile, selected_families=selected_families
+    )
+    candidate_value = replace(
+        plan.candidate,
+        event_name="push",
+        base_sha=None,
+        head_sha=None,
+        kind=kind,
+        pull_request_number=None,
+    )
+    source = tuple(
+        (name, "" if value is None else str(value))
+        for name, value in candidate_to_dict(candidate_value).items()
+    )
+    return replace(
+        plan,
+        candidate=candidate_value,
+        fingerprint=replace(plan.fingerprint, profile=profile, source=source),
+    )
+
+
 class ValidationPlanCodecTests(unittest.TestCase):
+    def test_candidate_kinds_require_certification_profile(self) -> None:
+        for kind in ("integrated", "release", "synchronization"):
+            with self.subTest(kind=kind):
+                assert_invalid(self, validate_plan_budgets, candidate_kind_plan(kind))
+                validate_plan_budgets(
+                    candidate_kind_plan(kind, profile="certification-required")
+                )
+
+    def test_candidate_identity_and_family_mutations_fail_closed(self) -> None:
+        plan = repository_only_plan()
+        candidate_changes = (
+            ("event_name", "workflow_dispatch"),
+            ("repository", "Other/repo"),
+            ("default_branch", "trunk"),
+            ("candidate_sha", "f" * 40),
+            ("base_sha", "e" * 40),
+            ("head_sha", "f" * 40),
+            ("kind", "integrated"),
+            ("pull_request_number", 182),
+            ("branch", "other-branch"),
+        )
+        for field, value in candidate_changes:
+            assert_invalid(
+                self,
+                validate_plan_budgets,
+                replace(plan, candidate=replace(plan.candidate, **{field: value})),
+            )
+
+        for index, item in enumerate(plan.requirements):
+            requirements = list(plan.requirements)
+            requirements[index] = replace(
+                item, stage="merge" if item.stage == "preflight" else "preflight"
+            )
+            assert_invalid(
+                self, validate_plan_budgets, replace(plan, requirements=requirements)
+            )
+
+    def test_published_retention_requires_a_release_candidate(self) -> None:
+        def published(plan):
+            return replace(
+                plan,
+                requirements=tuple(
+                    replace(item, retention_class="published-release")
+                    if item.family == "release-packaging"
+                    else item
+                    for item in plan.requirements
+                ),
+            )
+
+        validate_plan_budgets(
+            published(
+                candidate_kind_plan(
+                    "release",
+                    profile="certification-required",
+                    selected_families=("release-packaging",),
+                )
+            )
+        )
+        assert_invalid(
+            self,
+            validate_plan_budgets,
+            published(
+                repository_only_plan(
+                    plan_profile="certification-required",
+                    selected_families=("release-packaging",),
+                )
+            ),
+        )
+
     def test_canonical_json_round_trips_as_exact_object(self) -> None:
         plan = repository_only_plan()
         self.assertEqual(plan, parse_plan(serialize_plan(plan)))
@@ -123,7 +221,7 @@ class ValidationPlanCodecTests(unittest.TestCase):
             inputs=tuple((f"input-{index}", "") for index in range(MAX_PLAN_ITEMS)),
         )
         with self.assertRaisesRegex(ContractError, "aggregate item budget"):
-            validate_plan_budgets(too_many_items)
+            validate_plan(too_many_items)
 
         long_inputs = tuple((f"input-{index}", "x" * 1_000) for index in range(100))
         large = with_fingerprint(plan, inputs=long_inputs)
