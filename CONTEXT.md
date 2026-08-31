@@ -135,6 +135,14 @@ retained unchanged through retries and an open Synchronization PR. Closing witho
 that attempt; automation preserves it as history and does not reopen it.
 _Avoid_: Rolling release target, latest available release, automatic retry
 
+**Synchronization topology check**:
+The Merge-gate evidence that reads the real Synchronization PR head and base with complete Git
+history, verifies the immutable manifest chain, and accepts only the required Baseline and
+Catch-up parent relationships and merge tree. It rejects additional single-parent commits after
+the active manifest introduction. Conflict resolutions may differ from Git's automatic merge tree
+only at paths Git reports as conflicted.
+_Avoid_: Semantic reconciliation, synthetic merge validation, ruleset mutation
+
 **Validation PR**:
 A draft pull request used to prove a compatibility patch on real fork infrastructure before its
 merge gate is activated in repository rules.

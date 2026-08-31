@@ -1,0 +1,171 @@
+import unittest
+from pathlib import Path
+
+import check_upstream_sync_gate_topology as topology
+
+
+class UpstreamSyncGateTopologyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.repo = Path(__file__).resolve().parents[2]
+        cls.sources = tuple(
+            (cls.repo / path).read_text(encoding="utf-8") for path in topology.SOURCES
+        )
+
+    def test_current_wiring_is_complete(self) -> None:
+        self.assertEqual([], topology.validate_topology(*self.sources))
+
+    def test_wiring_mutations_fail_closed(self) -> None:
+        blocking, repo_checks, checker, tests = self.sources
+        required_start = blocking.index("\n  required:\n")
+        required_without_always = blocking[:required_start] + blocking[
+            required_start:
+        ].replace(
+            "if: ${{ always() }}",
+            "if: ${{ !cancelled() }}",
+            1,
+        )
+        required_without_job_if = blocking[:required_start] + blocking[
+            required_start:
+        ].replace(
+            "    if: ${{ always() }}\n",
+            "",
+            1,
+        ).replace(
+            "      - name: Require successful dependencies\n",
+            "      - name: Require successful dependencies\n"
+            "        if: ${{ always() }}\n",
+            1,
+        )
+        required_with_multiline_if = blocking[:required_start] + blocking[
+            required_start:
+        ].replace(
+            "    if: ${{ always() }}",
+            "    if:\n      ${{ always() }}",
+            1,
+        )
+        required_without_enforcement = blocking[:required_start] + blocking[
+            required_start:
+        ].replace(
+            "        run: python3 .github/scripts/check_ci_results.py\n",
+            "",
+            1,
+        )
+        required_with_replaced_enforcement = blocking[:required_start] + blocking[
+            required_start:
+        ].replace(
+            "        run: python3 .github/scripts/check_ci_results.py\n",
+            "        run: python3 .github/scripts/check_ci_results_legacy.py\n",
+            1,
+        )
+        required_with_replaced_needs = blocking[:required_start] + blocking[
+            required_start:
+        ].replace(
+            "          NEEDS: ${{ toJSON(needs) }}\n",
+            "          NEEDS: '{}'\n",
+            1,
+        )
+        cases = (
+            (
+                "real head checkout",
+                0,
+                blocking.replace("fetch-depth: 0", "fetch-depth: 1", 1),
+            ),
+            (
+                "real head checkout",
+                0,
+                blocking.replace("pull_request.head.sha", "pull_request.base.sha", 1),
+            ),
+            (
+                "real PR identity",
+                0,
+                blocking.replace("PR_BASE_SHA:", "WRONG_BASE_SHA:", 1),
+            ),
+            (
+                "checker invocation",
+                0,
+                blocking.replace(
+                    "check_upstream_sync_topology.py",
+                    "missing_sync_topology.py",
+                    1,
+                ),
+            ),
+            (
+                "checker invocation",
+                0,
+                blocking.replace(
+                    'tee -a "$GITHUB_STEP_SUMMARY"',
+                    'tee "$GITHUB_STEP_SUMMARY"',
+                    1,
+                ),
+            ),
+            (
+                "required aggregate",
+                0,
+                blocking.replace(
+                    "- synchronization-topology",
+                    "- missing-synchronization-topology",
+                    1,
+                ),
+            ),
+            (
+                "required aggregate",
+                0,
+                required_without_always,
+            ),
+            (
+                "required aggregate",
+                0,
+                required_without_job_if,
+            ),
+            (
+                "required aggregate",
+                0,
+                required_with_multiline_if,
+            ),
+            (
+                "required aggregate enforcement",
+                0,
+                required_without_enforcement,
+            ),
+            (
+                "required aggregate enforcement",
+                0,
+                required_with_replaced_enforcement,
+            ),
+            (
+                "required aggregate enforcement",
+                0,
+                required_with_replaced_needs,
+            ),
+            (
+                "repository wiring test",
+                1,
+                repo_checks.replace(
+                    "check_upstream_sync_gate_topology.py",
+                    "missing_gate_topology.py",
+                ),
+            ),
+            (
+                "repository wiring test",
+                2,
+                checker.replace("validate_topology", "missing_checker"),
+            ),
+            (
+                "repository wiring test",
+                3,
+                tests.replace("TopologyEvidence", "MissingEvidence"),
+            ),
+        )
+        for expected, index, changed in cases:
+            mutated = list(self.sources)
+            mutated[index] = changed
+            with self.subTest(expected=expected):
+                self.assertIn(
+                    expected,
+                    "\n".join(topology.validate_topology(*mutated)),
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()
