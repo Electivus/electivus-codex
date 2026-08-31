@@ -3,15 +3,27 @@
 
 from dataclasses import dataclass
 import json
-import math
 import ntpath
 from itertools import islice
 from typing import Any, Iterable
 
-from validation_contracts import CandidateIdentity, ContractError
-from validation_contracts import _keys, _object, _sha256, _text
-from validation_contracts import candidate_from_dict, candidate_to_dict
-from validation_contracts import validate_candidate
+from validation_contracts import (
+    CandidateIdentity,
+    ContractError,
+    candidate_from_dict,
+    candidate_to_dict,
+    decode_json_input,
+    parse_json_integer,
+    reject_json_constant,
+    reject_json_duplicate,
+    require_keys,
+    require_object,
+    serialize_json,
+    validate_candidate,
+    validate_non_negative_number,
+    validate_sha256,
+    validate_text,
+)
 from validation_evidence_contract import EvidenceManifest, manifest_from_dict
 from validation_evidence_contract import (
     OUTCOMES,
@@ -19,28 +31,15 @@ from validation_evidence_contract import (
     validate_manifest_against_plan,
 )
 from validation_plan_contract import ValidationPlan, plan_from_dict, plan_to_dict
-from validation_plan_contract import _reject_constant, _reject_duplicate, validate_plan
+from validation_plan_contract import validate_plan
 
 
-MAX_EVIDENCE = 64
+MAX_EVIDENCE = MAX_OUTCOMES = MAX_FINGERPRINTS = MAX_DURATIONS = MAX_ERRORS = 64
 MAX_ARTIFACTS_PER_REPORT = 256
-MAX_OUTCOMES = 64
-MAX_FINGERPRINTS = 64
-MAX_DURATIONS = 64
-MAX_ERRORS = 64
 MAX_SERIALIZED_BYTES = 256_000
 MAX_DURATION_SECONDS = 604_800
-MAX_JSON_INTEGER = 2**63 - 1
-OUTCOME_PRIORITY = (
-    "infrastructure-failure",
-    "indeterminate",
-    "product-failure",
-    "stale",
-    "passed",
-)
-REPORT_FIELDS = frozenset(
-    "schemaVersion candidate plan evidence outcome outcomes durations fingerprints artifacts errors".split()
-)
+OUTCOME_PRIORITY = "infrastructure-failure indeterminate product-failure stale passed".split()
+REPORT_FIELDS = frozenset("schemaVersion candidate plan evidence outcome outcomes durations fingerprints artifacts errors".split())
 ARTIFACT_FIELDS = frozenset({"family", "name", "digest"})
 DURATION_FIELDS = frozenset({"durationSeconds", "criticalPathSeconds"})
 
@@ -53,27 +52,15 @@ def _array(value: object, name: str, maximum: int) -> list[Any] | tuple[Any, ...
     return value
 
 
-def _number(value: object, name: str) -> int | float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or (isinstance(value, float) and not math.isfinite(value))
-        or value < 0
-        or value > MAX_DURATION_SECONDS
-    ):
-        raise ContractError(f"{name} is out of range")
-    return value
-
-
 def _unique_texts(value: object, name: str, maximum: int) -> tuple[str, ...]:
-    result = tuple(_text(item, name) for item in _array(value, name, maximum))
+    result = tuple(validate_text(item, name) for item in _array(value, name, maximum))
     if len(set(result)) != len(result):
         raise ContractError(f"{name} must not contain duplicates")
     return result
 
 
 def _path_name(value: object, name: str) -> str:
-    artifact_name = _text(value, name)
+    artifact_name = validate_text(value, name)
     if (
         artifact_name.startswith(("/", "\\"))
         or ntpath.splitdrive(artifact_name)[0]
@@ -84,12 +71,12 @@ def _path_name(value: object, name: str) -> str:
 
 
 def _artifact_record(value: object, name: str) -> tuple[str, str, str]:
-    payload = _object(value, name)
-    _keys(payload, ARTIFACT_FIELDS, name)
+    payload = require_object(value, name)
+    require_keys(payload, ARTIFACT_FIELDS, name)
     return (
-        _text(payload["family"], f"{name}.family"),
+        validate_text(payload["family"], f"{name}.family"),
         _path_name(payload["name"], f"{name}.name"),
-        _sha256(payload["digest"], f"{name}.digest"),
+        validate_sha256(payload["digest"], f"{name}.digest"),
     )
 
 
@@ -103,7 +90,7 @@ def _projection_pairs(
     for pair in _array(value, name, maximum):
         if not isinstance(pair, tuple) or len(pair) != 2:
             raise ContractError(f"{name} must contain key/value pairs")
-        key = _text(pair[0], f"{name}.name")
+        key = validate_text(pair[0], f"{name}.name")
         result.append((key, parse_value(pair[1], f"{name}.{key}")))
     if len({key for key, _ in result}) != len(result):
         raise ContractError(f"{name} must not contain duplicate keys")
@@ -111,7 +98,7 @@ def _projection_pairs(
 
 
 def _outcome(value: object, name: str) -> str:
-    value = _text(value, name)
+    value = validate_text(value, name)
     if value not in OUTCOMES:
         raise ContractError(f"{name} is unsupported")
     return value
@@ -119,15 +106,19 @@ def _outcome(value: object, name: str) -> str:
 
 def _duration(value: object, name: str) -> tuple[int | float, int | float]:
     if isinstance(value, dict):
-        _keys(value, DURATION_FIELDS, name)
+        require_keys(value, DURATION_FIELDS, name)
         duration_value = value["durationSeconds"]
         critical_value = value["criticalPathSeconds"]
     elif isinstance(value, tuple) and len(value) == 2:
         duration_value, critical_value = value
     else:
         raise ContractError(f"{name} must contain duration and critical path")
-    duration = _number(duration_value, f"{name}.durationSeconds")
-    critical = _number(critical_value, f"{name}.criticalPathSeconds")
+    duration = validate_non_negative_number(
+        duration_value, f"{name}.durationSeconds", maximum=MAX_DURATION_SECONDS
+    )
+    critical = validate_non_negative_number(
+        critical_value, f"{name}.criticalPathSeconds", maximum=MAX_DURATION_SECONDS
+    )
     if critical > duration:
         raise ContractError(f"{name}.criticalPathSeconds cannot exceed durationSeconds")
     return duration, critical
@@ -140,11 +131,11 @@ def _projection_from_dict(
     maximum: int,
     parse_value,
 ) -> tuple[tuple[str, Any], ...]:
-    payload = _object(value, name)
+    payload = require_object(value, name)
     if len(payload) > maximum:
         raise ContractError(f"{name} exceeds its item budget")
     parsed = {
-        _text(key, f"{name}.name"): parse_value(item, f"{name}.{key}")
+        validate_text(key, f"{name}.name"): parse_value(item, f"{name}.{key}")
         for key, item in payload.items()
     }
     if set(parsed) != set(families):
@@ -163,49 +154,6 @@ def _validate_projection(
         raise ContractError(f"{name} must be an immutable tuple")
     if _projection_pairs(value, name, maximum, parse_value) != expected:
         raise ContractError(f"{name} does not match its Evidence manifests")
-
-
-def _input_text(value: object) -> str:
-    if isinstance(value, bytes):
-        if len(value) > MAX_SERIALIZED_BYTES:
-            raise ContractError("Validation report exceeds its input byte budget")
-        try:
-            text = value.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise ContractError("Validation report JSON must be valid UTF-8") from error
-    elif isinstance(value, str):
-        text = value
-    else:
-        raise ContractError("Validation report JSON must be text or UTF-8 bytes")
-    try:
-        size = len(text.encode("utf-8"))
-    except UnicodeEncodeError as error:
-        raise ContractError("Validation report JSON must be valid UTF-8") from error
-    if size > MAX_SERIALIZED_BYTES:
-        raise ContractError("Validation report exceeds its input byte budget")
-    return text
-
-
-def _serialize_payload(payload: dict[str, object]) -> str:
-    try:
-        text = (
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-                allow_nan=False,
-                sort_keys=True,
-                indent=2,
-            )
-            + "\n"
-        )
-        size = len(text.encode("utf-8"))
-    except (TypeError, UnicodeEncodeError, ValueError) as error:
-        raise ContractError(
-            "Validation report cannot be canonically serialized"
-        ) from error
-    if size > MAX_SERIALIZED_BYTES:
-        raise ContractError("Validation report exceeds its serialized byte budget")
-    return text
 
 
 @dataclass(frozen=True)
@@ -281,8 +229,6 @@ def _validate_artifacts(report: ValidationReport, families: tuple[str, ...]) -> 
         for family, manifest in zip(families, report.evidence)
         for name, digest in manifest.artifact_digests
     )
-    if len(expected) > MAX_ARTIFACTS_PER_REPORT:
-        raise ContractError("report.artifacts exceeds its item budget")
     if tuple(actual) != expected:
         raise ContractError("report.artifacts do not match its Evidence manifests")
 
@@ -311,6 +257,14 @@ def _report_payload(report: ValidationReport) -> dict[str, object]:
     }
 
 
+def _serialize_report(report: ValidationReport) -> str:
+    return serialize_json(
+        _report_payload(report),
+        maximum_bytes=MAX_SERIALIZED_BYTES,
+        label="Validation report",
+    )
+
+
 def validate_report(report: ValidationReport) -> None:
     if not isinstance(report, ValidationReport):
         raise ContractError("Validation report has an invalid structure")
@@ -328,7 +282,7 @@ def validate_report(report: ValidationReport) -> None:
     if not isinstance(report.errors, tuple):
         raise ContractError("report.errors must be an immutable tuple")
     errors = _unique_texts(report.errors, "report.errors", MAX_ERRORS)
-    report_outcome = _text(report.outcome, "report.outcome")
+    report_outcome = validate_text(report.outcome, "report.outcome")
     if report_outcome not in OUTCOMES:
         raise ContractError("report.outcome is unsupported")
     _validate_projection(
@@ -356,12 +310,14 @@ def validate_report(report: ValidationReport) -> None:
         "report.fingerprints",
         MAX_FINGERPRINTS,
         tuple((family, expected_digest) for family in families),
-        _sha256,
+        validate_sha256,
     )
     _validate_artifacts(report, families)
+    if not set(report.plan.policy_errors).issubset(errors):
+        raise ContractError("report.errors must include plan policy errors")
     if report_outcome != _aggregate_outcome(report.evidence, errors):
         raise ContractError("report.outcome does not match its Evidence collection")
-    _serialize_payload(_report_payload(report))
+    _serialize_report(report)
 
 
 def report_for_evidence(
@@ -389,7 +345,9 @@ def report_for_evidence(
         errors_tuple = tuple(islice(errors, MAX_ERRORS + 1))
     except TypeError as error:
         raise ContractError("report.errors must be an iterable of strings") from error
-    errors_tuple = _unique_texts(errors_tuple, "report.errors", MAX_ERRORS)
+    errors_tuple = _unique_texts(
+        (*plan.policy_errors, *errors_tuple), "report.errors", MAX_ERRORS
+    )
     for manifest in evidence_tuple:
         if not isinstance(manifest, EvidenceManifest):
             raise ContractError("report.evidence contains an invalid manifest")
@@ -419,25 +377,14 @@ def report_for_evidence(
     return report
 
 
-report_for_plan = report_for_evidence
-aggregate_report = report_for_evidence
-
-
 def report_to_dict(report: ValidationReport) -> dict[str, object]:
     validate_report(report)
     return _report_payload(report)
 
 
-def _parse_int(value: str) -> int:
-    parsed = int(value)
-    if not -MAX_JSON_INTEGER <= parsed <= MAX_JSON_INTEGER:
-        raise ContractError("JSON integer exceeds its bounded range")
-    return parsed
-
-
 def report_from_dict(value: object) -> ValidationReport:
-    payload = _object(value, "report")
-    _keys(payload, REPORT_FIELDS, "report")
+    payload = require_object(value, "report")
+    require_keys(payload, REPORT_FIELDS, "report")
     plan = plan_from_dict(payload["plan"])
     families = tuple(item.family for item in plan.requirements)
     evidence_payload = _array(payload["evidence"], "report.evidence", MAX_EVIDENCE)
@@ -447,7 +394,7 @@ def report_from_dict(value: object) -> ValidationReport:
         candidate=candidate_from_dict(payload["candidate"]),
         plan=plan,
         evidence=evidence,
-        outcome=_text(payload["outcome"], "report.outcome"),
+        outcome=validate_text(payload["outcome"], "report.outcome"),
         outcomes=_projection_from_dict(
             payload["outcomes"], "report.outcomes", families, MAX_OUTCOMES, _outcome
         ),
@@ -463,7 +410,7 @@ def report_from_dict(value: object) -> ValidationReport:
             "report.fingerprints",
             families,
             MAX_FINGERPRINTS,
-            _sha256,
+            validate_sha256,
         ),
         artifacts=tuple(
             _artifact_record(item, "report.artifacts")
@@ -478,13 +425,15 @@ def report_from_dict(value: object) -> ValidationReport:
 
 
 def parse_report(value: object) -> ValidationReport:
-    text = _input_text(value)
+    text = decode_json_input(
+        value, maximum_bytes=MAX_SERIALIZED_BYTES, label="Validation report"
+    )
     try:
         payload = json.loads(
             text,
-            object_pairs_hook=_reject_duplicate,
-            parse_constant=_reject_constant,
-            parse_int=_parse_int,
+            object_pairs_hook=reject_json_duplicate,
+            parse_constant=reject_json_constant,
+            parse_int=parse_json_integer,
         )
     except ContractError:
         raise
@@ -497,11 +446,11 @@ def parse_report(value: object) -> ValidationReport:
     ) as error:
         raise ContractError(f"invalid Validation report JSON: {error}") from error
     report = report_from_dict(payload)
-    if _serialize_payload(_report_payload(report)) != text:
+    if _serialize_report(report) != text:
         raise ContractError("Validation report is not canonically serialized")
     return report
 
 
 def serialize_report(report: ValidationReport) -> str:
     validate_report(report)
-    return _serialize_payload(_report_payload(report))
+    return _serialize_report(report)
