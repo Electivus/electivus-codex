@@ -42,6 +42,11 @@ RETENTION_DAYS: dict[str, int | None] = dict(
     )
 )
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+WINDOWS_RESERVED_NAMES = frozenset(
+    {"aux", "con", "conin$", "conout$", "nul", "prn"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+)
 KNOWN_FAMILIES = frozenset(FAMILY_STAGES)
 MANIFEST_FIELDS = frozenset(
     "schemaVersion evidenceId family stage candidate producer outcome disposition fingerprint artifactDigests retentionClass durationSeconds criticalPathSeconds reason attempt cacheMode createdAt expiresAt".split()
@@ -99,27 +104,38 @@ def _artifact_pairs(value: object, name: str) -> tuple[tuple[str, str], ...]:
     _invalid(not isinstance(value, (list, tuple)), f"{name} must be an array")
     _invalid(len(value) > MAX_ARTIFACTS_PER_MANIFEST, f"{name} exceeds its item budget")
     result = []
+    canonical_names: set[str] = set()
     for pair in value:
         _invalid(
             not isinstance(pair, (list, tuple)) or len(pair) != 2,
             f"{name} has an invalid pair",
         )
         artifact_name = _text(pair[0], f"{name}.name")
+        segments = artifact_name.split("/")
         _invalid(
-            artifact_name.startswith(("/", "\\"))
-            or "\x00" in artifact_name
+            "\\" in artifact_name
+            or any(segment in ("", ".", "..") for segment in segments)
+            or any(segment.endswith((".", " ")) for segment in segments)
+            or any(character in '<>:"|?*' for character in artifact_name)
+            or any(
+                segment.partition(".")[0].casefold() in WINDOWS_RESERVED_NAMES
+                for segment in segments
+            )
             or ntpath.splitdrive(artifact_name)[0]
-            or ".." in artifact_name.replace("\\", "/").split("/"),
+            or "\x00" in artifact_name,
             f"{name}.name contains an invalid path",
         )
         digest = _text(pair[1], f"{name}.digest")
         _invalid(
             SHA256_PATTERN.fullmatch(digest) is None, f"{name}.digest is not SHA-256"
         )
+        canonical_name = ntpath.normcase(ntpath.normpath(artifact_name))
+        _invalid(
+            canonical_name in canonical_names,
+            f"{name} has duplicate names",
+        )
+        canonical_names.add(canonical_name)
         result.append((artifact_name, digest))
-    _invalid(
-        len({item[0] for item in result}) != len(result), f"{name} has duplicate names"
-    )
     return tuple(result)
 
 
@@ -176,11 +192,17 @@ def _snapshot_fingerprint(fingerprint: object) -> object:
         dependencies=_snapshot_pairs(
             fingerprint.dependencies, "plan.fingerprint.dependencies"
         ),
-        toolchains=_snapshot_pairs(fingerprint.toolchains, "plan.fingerprint.toolchains"),
+        toolchains=_snapshot_pairs(
+            fingerprint.toolchains, "plan.fingerprint.toolchains"
+        ),
         commands=_snapshot_sequence(fingerprint.commands, "plan.fingerprint.commands"),
-        platforms=_snapshot_sequence(fingerprint.platforms, "plan.fingerprint.platforms"),
+        platforms=_snapshot_sequence(
+            fingerprint.platforms, "plan.fingerprint.platforms"
+        ),
         profile=fingerprint.profile,
-        parameters=_snapshot_pairs(fingerprint.parameters, "plan.fingerprint.parameters"),
+        parameters=_snapshot_pairs(
+            fingerprint.parameters, "plan.fingerprint.parameters"
+        ),
         inputs=_snapshot_pairs(fingerprint.inputs, "plan.fingerprint.inputs"),
     )
 
@@ -230,11 +252,15 @@ class EvidenceManifest:
         if isinstance(self.plan, ValidationPlan):
             object.__setattr__(self, "plan", _snapshot_plan(self.plan))
         if isinstance(self.requirement, EvidenceRequirement):
-            object.__setattr__(self, "requirement", _snapshot_requirement(self.requirement))
+            object.__setattr__(
+                self, "requirement", _snapshot_requirement(self.requirement)
+            )
         if isinstance(self.candidate, CandidateIdentity):
             object.__setattr__(self, "candidate", _snapshot_candidate(self.candidate))
         if isinstance(self.fingerprint, ValidationFingerprint):
-            object.__setattr__(self, "fingerprint", _snapshot_fingerprint(self.fingerprint))
+            object.__setattr__(
+                self, "fingerprint", _snapshot_fingerprint(self.fingerprint)
+            )
         if type(self.artifact_digests) is not tuple:
             raise ContractError("manifest.artifactDigests must be a tuple")
         if any(type(pair) is not tuple for pair in self.artifact_digests):
@@ -320,6 +346,7 @@ def _validate_manifest_binding(
         raise ContractError("manifest.plan has an invalid structure")
     if not isinstance(manifest.requirement, EvidenceRequirement):
         raise ContractError("manifest.requirement has an invalid structure")
+    validate_plan(manifest.plan)
     validate_plan(plan)
     if manifest.plan != _snapshot_plan(plan):
         raise ContractError("manifest is bound to a different Validation plan")

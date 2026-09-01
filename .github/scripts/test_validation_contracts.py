@@ -143,6 +143,18 @@ class ValidationContractTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ContractError):
                 validate_candidate(invalid)
 
+    def test_unhashable_candidate_kind_and_fingerprint_profile_fail_closed(
+        self,
+    ) -> None:
+        candidate = pull_request_candidate()
+        fingerprint = validation_fingerprint()
+
+        for value in ([], {}):
+            with self.subTest(kind=value), self.assertRaises(ContractError):
+                validate_candidate(replace(candidate, kind=value))
+            with self.subTest(profile=value), self.assertRaises(ContractError):
+                validate_fingerprint(replace(fingerprint, profile=value))
+
     def test_text_rejects_lone_surrogates_as_contract_errors(self) -> None:
         invalid = replace(pull_request_candidate(), repository="\ud800")
 

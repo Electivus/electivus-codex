@@ -113,6 +113,19 @@ class EvidenceManifestContractTests(unittest.TestCase):
             serialize_manifest(manifest, mutable_plan)
         self.assertEqual(before, serialize_manifest(manifest, plan))
 
+    def test_bound_plan_snapshot_is_validated_before_comparison(self):
+        plan, manifest = fixture()
+        forged_plans = (
+            replace(manifest.plan, schema_version=True),
+            replace(manifest.plan, schema_version=1.0),
+        )
+
+        invalid(
+            self,
+            lambda value: validate_manifest_against_plan(value, plan),
+            *(replace(manifest, plan=forged_plan) for forged_plan in forged_plans),
+        )
+
     def test_manifest_snapshots_mutable_fingerprint_collections(self):
         plan = repository_only_plan()
         collection_names = (
@@ -451,6 +464,76 @@ class EvidenceManifestContractTests(unittest.TestCase):
             lambda value: validate_manifest(value, release_plan),
             replace(published, expires_at=1),
         )
+
+    def test_malformed_identity_scalars_fail_closed(self):
+        plan, manifest = fixture()
+        invalid(
+            self,
+            lambda value: validate_manifest(value, plan),
+            replace(manifest, candidate=replace(manifest.candidate, kind=[])),
+            replace(manifest, candidate=replace(manifest.candidate, kind={})),
+            replace(manifest, fingerprint=replace(manifest.fingerprint, profile=[])),
+            replace(manifest, fingerprint=replace(manifest.fingerprint, profile={})),
+        )
+
+    def test_artifact_names_are_portable_and_unambiguous(self):
+        plan, manifest = fixture()
+
+        # These checks use Windows path semantics even on Linux so the wire
+        # contract has one portable interpretation on every supported runner.
+        invalid_names = (
+            "a\\b",
+            "a//b",
+            "a/./b",
+            "a/../b",
+            "a/b.",
+            "a/b ",
+            "a:b",
+            "a?b",
+            "CON",
+            "reports/NUL.txt",
+        )
+        invalid(
+            self,
+            lambda value: validate_manifest(value, plan),
+            *(
+                replace(manifest, artifact_digests=((name, DIGEST),))
+                for name in invalid_names
+            ),
+        )
+
+        for names in (
+            ("a/b", "A/B"),
+            ("A/B", "a/b"),
+            ("README", "readme"),
+        ):
+            with self.subTest(names=names), self.assertRaises(ContractError):
+                validate_manifest(
+                    replace(
+                        manifest,
+                        artifact_digests=tuple((name, DIGEST) for name in names),
+                    ),
+                    plan,
+                )
+
+        with self.assertRaises(ContractError):
+            validate_manifest(
+                replace(
+                    manifest,
+                    artifact_digests=(
+                        ("a/b", DIGEST),
+                        (r"a\b", DIGEST),
+                    ),
+                ),
+                plan,
+            )
+
+        valid = replace(
+            manifest,
+            artifact_digests=(("reports/summary.json", DIGEST),),
+        )
+        validate_manifest(valid, plan)
+        self.assertEqual(valid, parse_manifest(serialize_manifest(valid, plan), plan))
 
     def test_strict_json_and_caps_before_conversion(self):
         plan, manifest = fixture()

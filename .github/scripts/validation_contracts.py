@@ -154,6 +154,8 @@ def candidate_to_dict(candidate: CandidateIdentity) -> dict[str, object]:
 
 
 def validate_candidate(candidate: CandidateIdentity) -> None:
+    if not isinstance(candidate, CandidateIdentity):
+        raise ContractError("candidate has an invalid structure")
     _text(candidate.event_name, "candidate.eventName")
     _text(candidate.repository, "candidate.repository")
     _text(candidate.default_branch, "candidate.defaultBranch")
@@ -162,6 +164,7 @@ def validate_candidate(candidate: CandidateIdentity) -> None:
         _sha(candidate.base_sha, "candidate.baseSha")
     if candidate.head_sha is not None:
         _sha(candidate.head_sha, "candidate.headSha")
+    _text(candidate.kind, "candidate.kind")
     if candidate.kind not in CANDIDATE_KINDS:
         raise ContractError("candidate.kind is unsupported")
     _text(candidate.branch, "candidate.branch", allow_empty=True)
@@ -272,6 +275,8 @@ def fingerprint_to_dict(fingerprint: ValidationFingerprint) -> dict[str, object]
 
 
 def validate_fingerprint(fingerprint: ValidationFingerprint) -> None:
+    if not isinstance(fingerprint, ValidationFingerprint):
+        raise ContractError("fingerprint has an invalid structure")
     for name, values in (
         ("fingerprint.source", fingerprint.source),
         ("fingerprint.dependencies", fingerprint.dependencies),
@@ -280,10 +285,15 @@ def validate_fingerprint(fingerprint: ValidationFingerprint) -> None:
         ("fingerprint.inputs", fingerprint.inputs),
     ):
         _pairs(values, name)
+    _text(
+        fingerprint.validation_implementation,
+        "fingerprint.validationImplementation",
+    )
     if fingerprint.validation_implementation != VALIDATION_IMPLEMENTATION:
         raise ContractError("fingerprint.validationImplementation is unsupported")
     _strings(fingerprint.commands, "fingerprint.commands")
     _strings(fingerprint.platforms, "fingerprint.platforms")
+    _text(fingerprint.profile, "fingerprint.profile")
     if fingerprint.profile not in PROFILES:
         raise ContractError("fingerprint.profile is unsupported")
 
