@@ -16,7 +16,13 @@ from test_sync_upstream_release import (
     RecordingPullRequests,
 )
 from upstream_sync_attempt import PreparedAttempt, prepare_attempt
-from upstream_sync_manifest import ReleaseIdentity, canonical_release_url
+from upstream_sync_manifest import (
+    ReleaseIdentity,
+    SynchronizationManifest,
+    canonical_release_url,
+    manifest_path,
+    serialize_manifest,
+)
 
 
 class UpstreamSyncTopologyTests(unittest.TestCase):
@@ -107,6 +113,61 @@ class UpstreamSyncTopologyTests(unittest.TestCase):
                     catch_up_merge=None,
                 ),
             )
+
+    def test_same_source_sibling_release_topology_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            first = fixture.snapshot_release(
+                "rust-v1.0.0", "1.0.0", "first source"
+            )
+            first_prepared = self._prepare_release(
+                fixture, first, fixture.remote_branch_head("main") or ""
+            )
+            fixture.integrate_branch(first_prepared.branch)
+            fork_base = fixture.remote_branch_head("main") or ""
+            first_parent = fixture.git_at(
+                fixture.upstream, "rev-parse", f"{first.commit}^"
+            )
+            same_source = fixture.snapshot_release_from(
+                first_parent,
+                "rust-v2.0.0",
+                "2.0.0",
+                "same source",
+            )
+            fixture.git("fetch", str(fixture.upstream), f"refs/tags/{same_source.tag}")
+            manifest = SynchronizationManifest(
+                1,
+                ReleaseIdentity(
+                    same_source.tag,
+                    same_source.commit,
+                    canonical_release_url(same_source.tag),
+                ),
+                fork_base,
+                first.commit,
+                "manual",
+                "clean",
+                (),
+            )
+            fixture.git("switch", "--detach", fork_base)
+            path = fixture.fork / manifest_path(same_source.commit)
+            path.write_text(serialize_manifest(manifest))
+            fixture.git("add", str(path.relative_to(fixture.fork)))
+            fixture.git(
+                "commit", "-m", f"Record Synchronization manifest for {same_source.tag}"
+            )
+            head = fixture.git("rev-parse", "HEAD")
+            branch = f"automation/upstream-sync/{same_source.commit}"
+
+            with self.assertRaisesRegex(
+                TopologyError, "manifest release does not advance from its predecessor"
+            ):
+                validate_topology(
+                    fixture.fork,
+                    head,
+                    fork_base,
+                    branch,
+                    seed_commit=fixture.seed_commit,
+                )
 
     def test_clean_advanced_base_requires_and_accepts_catch_up(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -612,6 +612,7 @@ def _release_lineage_advances(repo: Path, predecessor: str, release: str) -> boo
     return (
         len(predecessor_parents) == 1
         and len(release_parents) == 1
+        and predecessor_parents[0] != release_parents[0]
         and _is_ancestor(repo, predecessor_parents[0], release_parents[0])
     )
 

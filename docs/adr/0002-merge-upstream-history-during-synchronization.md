@@ -24,5 +24,5 @@ only when their title, branch, and body identify one release unambiguously.
 Published Codex Release commits are snapshots and do not necessarily descend from the preceding
 tagged Release commit. The manifest predecessor therefore forms a logical immutable chain. Git
 progression accepts direct Release-commit ancestry or, for two single-parent snapshot commits, an
-upstream source parent that descends from the predecessor's source parent. Reversed, unrelated, or
-ambiguous snapshot lineage fails closed in both preparation and topology validation.
+upstream source parent that strictly descends from the predecessor's source parent. Reversed,
+unrelated, or ambiguous snapshot lineage fails closed in both preparation and topology validation.
