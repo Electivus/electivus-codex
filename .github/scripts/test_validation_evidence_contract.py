@@ -3,10 +3,17 @@ import json
 import unittest
 
 from test_validation_plan_contract import repository_only_plan
-from validation_contracts import ContractError, candidate_to_dict
+from validation_contracts import (
+    MAX_ITEMS,
+    MAX_JSON_INTEGER,
+    MAX_TEXT_BYTES,
+    ContractError,
+    candidate_to_dict,
+)
 from validation_plan_contract import validate_plan
 from validation_evidence_contract import (
     MAX_ARTIFACTS_PER_MANIFEST,
+    MAX_ARTIFACT_COMPONENT_BYTES,
     MAX_ATTEMPT,
     MAX_DURATION_SECONDS,
     MAX_SERIALIZED_BYTES,
@@ -22,6 +29,17 @@ from validation_evidence_contract import (
 
 
 DIGEST = "b" * 64
+
+
+def long_artifact_name(index: int, length: int) -> str:
+    prefix = f"{index:02d}"
+    components = [prefix + "x" * (MAX_ARTIFACT_COMPONENT_BYTES - len(prefix))]
+    remaining = length - len(components[0])
+    while remaining > 0:
+        component_length = min(MAX_ARTIFACT_COMPONENT_BYTES, remaining - 1)
+        components.append("x" * component_length)
+        remaining -= 1 + component_length
+    return "/".join(components)
 
 
 def fixture() -> tuple[object, EvidenceManifest]:
@@ -465,6 +483,84 @@ class EvidenceManifestContractTests(unittest.TestCase):
             replace(published, expires_at=1),
         )
 
+    def test_artifact_component_byte_budget_is_utf8_and_exact(self):
+        plan, manifest = fixture()
+
+        at_limit = "a" * MAX_ARTIFACT_COMPONENT_BYTES
+        validate_manifest(
+            replace(manifest, artifact_digests=((at_limit, DIGEST),)), plan
+        )
+        with self.assertRaisesRegex(ContractError, "component exceeds its byte budget"):
+            validate_manifest(
+                replace(
+                    manifest,
+                    artifact_digests=(
+                        ("a" * (MAX_ARTIFACT_COMPONENT_BYTES + 1), DIGEST),
+                    ),
+                ),
+                plan,
+            )
+
+        utf8_at_limit = "é" * 127 + "a"
+        self.assertEqual(MAX_ARTIFACT_COMPONENT_BYTES, len(utf8_at_limit.encode()))
+        validate_manifest(
+            replace(manifest, artifact_digests=((utf8_at_limit, DIGEST),)), plan
+        )
+        utf8_over_limit = "é" * 128
+        self.assertEqual(MAX_ARTIFACT_COMPONENT_BYTES + 1, len(utf8_over_limit.encode()))
+        with self.assertRaisesRegex(ContractError, "component exceeds its byte budget"):
+            validate_manifest(
+                replace(manifest, artifact_digests=((utf8_over_limit, DIGEST),)),
+                plan,
+            )
+
+    def test_artifact_names_reject_controls_and_require_nfc(self):
+        plan, manifest = fixture()
+        for code_point in (*range(0x20), *range(0x7F, 0xA0)):
+            with self.subTest(code_point=code_point), self.assertRaisesRegex(
+                ContractError, "artifactDigests.name"
+            ):
+                validate_manifest(
+                    replace(
+                        manifest,
+                        artifact_digests=((f"artifact{chr(code_point)}name", DIGEST),),
+                    ),
+                    plan,
+                )
+
+        nfc = "café"
+        nfd = "cafe\u0301"
+        self.assertNotEqual(nfc, nfd)
+        validate_manifest(
+            replace(manifest, artifact_digests=((nfc, DIGEST),)), plan
+        )
+        with self.assertRaisesRegex(ContractError, "must use NFC"):
+            validate_manifest(
+                replace(manifest, artifact_digests=((nfd, DIGEST),)), plan
+            )
+
+    def test_artifact_names_dedupe_with_unicode_casefold(self):
+        plan, manifest = fixture()
+
+        with self.assertRaisesRegex(ContractError, "duplicate names"):
+            validate_manifest(
+                replace(
+                    manifest,
+                    artifact_digests=(("S", DIGEST), ("ſ", DIGEST)),
+                ),
+                plan,
+            )
+
+        canonical = replace(
+            manifest,
+            artifact_digests=(("reports/Summary.json", DIGEST),),
+        )
+        validate_manifest(canonical, plan)
+        self.assertEqual(
+            "reports/Summary.json",
+            manifest_to_dict(canonical, plan)["artifactDigests"][0][0],
+        )
+
     def test_malformed_identity_scalars_fail_closed(self):
         plan, manifest = fixture()
         invalid(
@@ -491,6 +587,16 @@ class EvidenceManifestContractTests(unittest.TestCase):
             "a:b",
             "a?b",
             "CON",
+            "CON .txt",
+            "CON...txt",
+            "COM¹",
+            "reports/COM².log",
+            "LPT¹",
+            "reports/LPT³.log",
+            "reports/CLOCK$.txt",
+            "reports/CONIN$.txt",
+            "reports/CONOUT$.txt",
+            "a\tb",
             "reports/NUL.txt",
         )
         invalid(
@@ -534,6 +640,25 @@ class EvidenceManifestContractTests(unittest.TestCase):
         )
         validate_manifest(valid, plan)
         self.assertEqual(valid, parse_manifest(serialize_manifest(valid, plan), plan))
+
+    def test_factory_validates_created_at_before_expiry_arithmetic(self):
+        plan, manifest = fixture()
+        for created_at in ("x", True, -1, MAX_JSON_INTEGER + 1):
+            with self.subTest(created_at=created_at), self.assertRaises(ContractError):
+                manifest_for_requirement(
+                    plan, manifest.requirement, created_at=created_at
+                )
+
+        retention_seconds = manifest.expires_at - manifest.created_at
+        at_limit = MAX_JSON_INTEGER - retention_seconds
+        bounded = manifest_for_requirement(
+            plan, manifest.requirement, created_at=at_limit
+        )
+        self.assertEqual(MAX_JSON_INTEGER, bounded.expires_at)
+        with self.assertRaises(ContractError):
+            manifest_for_requirement(
+                plan, manifest.requirement, created_at=at_limit + 1
+            )
 
     def test_strict_json_and_caps_before_conversion(self):
         plan, manifest = fixture()
@@ -599,8 +724,28 @@ class EvidenceManifestContractTests(unittest.TestCase):
         )
         oversized_payload = dict(payload)
         oversized_payload["candidate"] = "x" * MAX_SERIALIZED_BYTES
-        with self.assertRaisesRegex(ContractError, "serialized byte budget"):
+        with self.assertRaisesRegex(ContractError, "candidate must be an object"):
             from_dict(oversized_payload)
+
+        too_many_artifacts = dict(payload)
+        too_many_artifacts["artifactDigests"] = [
+            ["x" * MAX_TEXT_BYTES, DIGEST]
+            for _ in range(MAX_ARTIFACTS_PER_MANIFEST + 1)
+        ]
+        with self.assertRaisesRegex(
+            ContractError, "artifactDigests exceeds its item budget"
+        ):
+            from_dict(too_many_artifacts)
+
+        too_many_platforms = dict(payload)
+        too_many_platforms["fingerprint"] = {
+            **payload["fingerprint"],
+            "platforms": ["x" * MAX_TEXT_BYTES] * (MAX_ITEMS + 1),
+        }
+        with self.assertRaisesRegex(
+            ContractError, "fingerprint.platforms exceeds its item budget"
+        ):
+            from_dict(too_many_platforms)
         oversized = replace(
             manifest,
             fingerprint=replace(
@@ -614,7 +759,7 @@ class EvidenceManifestContractTests(unittest.TestCase):
         oversized_artifacts = replace(
             manifest,
             artifact_digests=tuple(
-                (f"{index:02d}" + "x" * 4_088, DIGEST)
+                (long_artifact_name(index, 4_090), DIGEST)
                 for index in range(MAX_ARTIFACTS_PER_MANIFEST)
             ),
         )
@@ -627,7 +772,7 @@ class EvidenceManifestContractTests(unittest.TestCase):
     def test_serialized_manifest_limit_is_exact_for_input_and_output(self):
         plan, manifest = fixture()
         artifacts = tuple(
-            (f"{index:02d}-" + "x" * 3_797, DIGEST)
+            (long_artifact_name(index, 3_800), DIGEST)
             for index in range(MAX_ARTIFACTS_PER_MANIFEST)
         )
         base = replace(

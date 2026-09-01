@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import json
 import ntpath
 import re
+import unicodedata
 
 from validation_contracts import (
     CandidateIdentity,
@@ -27,6 +28,7 @@ from validation_plan_contract import validate_plan, validate_requirement
 
 
 MAX_ARTIFACTS_PER_MANIFEST = MAX_ATTEMPT = 64
+MAX_ARTIFACT_COMPONENT_BYTES = 255
 MAX_SERIALIZED_BYTES = 256_000
 MAX_DURATION_SECONDS = 604_800
 OUTCOMES = frozenset(
@@ -43,10 +45,15 @@ RETENTION_DAYS: dict[str, int | None] = dict(
 )
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 WINDOWS_RESERVED_NAMES = frozenset(
-    {"aux", "con", "conin$", "conout$", "nul", "prn"}
+    {"aux", "clock$", "con", "conin$", "conout$", "nul", "prn"}
     | {f"com{index}" for index in range(1, 10)}
+    | {f"com{suffix}" for suffix in "¹²³"}
     | {f"lpt{index}" for index in range(1, 10)}
+    | {f"lpt{suffix}" for suffix in "¹²³"}
 )
+WINDOWS_RESERVED_CHARACTERS = frozenset('<>:"|?*') | {
+    chr(code_point) for code_point in range(32)
+}
 KNOWN_FAMILIES = frozenset(FAMILY_STAGES)
 MANIFEST_FIELDS = frozenset(
     "schemaVersion evidenceId family stage candidate producer outcome disposition fingerprint artifactDigests retentionClass durationSeconds criticalPathSeconds reason attempt cacheMode createdAt expiresAt".split()
@@ -100,6 +107,17 @@ def _number(value: object, name: str) -> int | float:
     return value
 
 
+def _is_reserved_windows_segment(segment: str) -> bool:
+    if segment[-1:] in (".", " "):
+        return True
+    if WINDOWS_RESERVED_CHARACTERS.intersection(segment):
+        return True
+    return (
+        segment.partition(".")[0].rstrip(" ").casefold()
+        in WINDOWS_RESERVED_NAMES
+    )
+
+
 def _artifact_pairs(value: object, name: str) -> tuple[tuple[str, str], ...]:
     _invalid(not isinstance(value, (list, tuple)), f"{name} must be an array")
     _invalid(len(value) > MAX_ARTIFACTS_PER_MANIFEST, f"{name} exceeds its item budget")
@@ -113,14 +131,27 @@ def _artifact_pairs(value: object, name: str) -> tuple[tuple[str, str], ...]:
         artifact_name = _text(pair[0], f"{name}.name")
         segments = artifact_name.split("/")
         _invalid(
+            any(
+                len(segment.encode("utf-8")) > MAX_ARTIFACT_COMPONENT_BYTES
+                for segment in segments
+            ),
+            f"{name}.name component exceeds its byte budget",
+        )
+        _invalid(
+            any(
+                ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F
+                for character in artifact_name
+            ),
+            f"{name}.name contains a control character",
+        )
+        _invalid(
+            unicodedata.normalize("NFC", artifact_name) != artifact_name,
+            f"{name}.name must use NFC",
+        )
+        _invalid(
             "\\" in artifact_name
             or any(segment in ("", ".", "..") for segment in segments)
-            or any(segment.endswith((".", " ")) for segment in segments)
-            or any(character in '<>:"|?*' for character in artifact_name)
-            or any(
-                segment.partition(".")[0].casefold() in WINDOWS_RESERVED_NAMES
-                for segment in segments
-            )
+            or any(_is_reserved_windows_segment(segment) for segment in segments)
             or ntpath.splitdrive(artifact_name)[0]
             or "\x00" in artifact_name,
             f"{name}.name contains an invalid path",
@@ -129,7 +160,7 @@ def _artifact_pairs(value: object, name: str) -> tuple[tuple[str, str], ...]:
         _invalid(
             SHA256_PATTERN.fullmatch(digest) is None, f"{name}.digest is not SHA-256"
         )
-        canonical_name = ntpath.normcase(ntpath.normpath(artifact_name))
+        canonical_name = unicodedata.normalize("NFC", artifact_name).casefold()
         _invalid(
             canonical_name in canonical_names,
             f"{name} has duplicate names",
@@ -471,7 +502,9 @@ def manifest_for_requirement(
         attempt_value, cache_value, created, manifest_reason = (
             attempt,
             cache_mode,
-            created_at,
+            _integer(
+                created_at, "manifest.createdAt", minimum=0, maximum=MAX_JSON_INTEGER
+            ),
             reason,
         )
     else:
@@ -487,6 +520,12 @@ def manifest_for_requirement(
         critical = duration
     artifacts = _artifact_pairs(artifacts, "manifest.artifactDigests")
     days = RETENTION_DAYS[requirement.retention_class]
+    expires_at = None
+    if days is not None and created:
+        retention_seconds = days * 86_400
+        if created > MAX_JSON_INTEGER - retention_seconds:
+            raise ContractError("manifest expiry exceeds its bounded range")
+        expires_at = created + retention_seconds
     manifest = EvidenceManifest(
         plan=plan,
         requirement=requirement,
@@ -510,7 +549,7 @@ def manifest_for_requirement(
         attempt=attempt_value,
         cache_mode=cache_value,
         created_at=created,
-        expires_at=None if days is None or not created else created + days * 86_400,
+        expires_at=expires_at,
     )
     validate_manifest_against_plan(manifest, plan)
     return manifest
@@ -552,7 +591,6 @@ def manifest_from_dict(value: object, plan: ValidationPlan) -> EvidenceManifest:
     validate_plan(plan)
     payload = _object(value, "manifest")
     _keys(payload, MANIFEST_FIELDS, "manifest")
-    _serialize_manifest_payload(payload)
     values = {
         re.sub(r"(?<!^)(?=[A-Z])", "_", key).lower(): item
         for key, item in payload.items()
