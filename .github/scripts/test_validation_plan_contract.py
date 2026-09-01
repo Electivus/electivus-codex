@@ -80,7 +80,7 @@ def fingerprint(
     dependencies: tuple[tuple[str, str], ...] | None = None,
     parameters: tuple[tuple[str, str], ...] | None = None,
     profile: str = "ordinary",
-    selected_evidence: tuple[str, ...] = ("repository-policy",),
+    selected_evidence: tuple[str, ...] = ("repository-hygiene",),
     risk_modifiers: tuple[str, ...] = (),
     policy_errors: tuple[str, ...] = (),
 ) -> ValidationFingerprint:
@@ -126,7 +126,7 @@ def repository_only_plan(
     policy_errors: tuple[str, ...] = (),
     plan_profile: str = "ordinary",
     plan_fingerprint: ValidationFingerprint | None = None,
-    selected_families: tuple[str, ...] = ("repository-policy",),
+    selected_families: tuple[str, ...] = ("repository-hygiene",),
 ) -> ValidationPlan:
     if requirements is None:
         requirements = evidence_ledger(selected_families, plan_profile)
@@ -180,7 +180,10 @@ class ValidationPlanContractTests(unittest.TestCase):
         self.assertEqual(
             tuple(item.family for item in plan.requirements), EVIDENCE_FAMILIES
         )
-        self.assertEqual(plan.requirements[0].disposition, "not-required")
+        self.assertEqual(
+            tuple(item.family for item in plan.requirements if item.selected),
+            ("repository-hygiene",),
+        )
 
     def test_evidence_ledger_is_complete_bounded_and_selected(self) -> None:
         plan = repository_only_plan()
