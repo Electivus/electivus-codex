@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import re
 from typing import Any
 
@@ -120,6 +121,89 @@ def _keys(value: dict[str, Any], expected: set[str], name: str) -> None:
         raise ContractError(
             f"{name} has invalid fields (missing={missing}; unexpected={unexpected})"
         )
+
+
+MAX_JSON_INTEGER = 2**63 - 1
+
+
+# Public codec primitives keep consumers independent from the implementation helpers above.
+# They provide bounded text/digest/object checks and strict JSON hooks/codecs.
+validate_text = _text
+validate_sha256 = _sha256
+require_object = _object
+require_keys = _keys
+
+
+def reject_json_duplicate(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ContractError(f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
+def reject_json_constant(value: str) -> Any:
+    raise ContractError(f"invalid JSON constant: {value}")
+
+
+def parse_json_integer(value: str) -> int:
+    parsed = int(value)
+    if not -MAX_JSON_INTEGER <= parsed <= MAX_JSON_INTEGER:
+        raise ContractError("JSON integer exceeds its bounded range")
+    return parsed
+
+
+def validate_non_negative_number(
+    value: object, name: str, *, maximum: int | float
+) -> int | float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or (isinstance(value, float) and not math.isfinite(value))
+        or value < 0
+        or value > maximum
+    ):
+        raise ContractError(f"{name} is out of range")
+    return value
+
+
+def decode_json_input(value: object, *, maximum_bytes: int, label: str) -> str:
+    if isinstance(value, bytes):
+        if len(value) > maximum_bytes:
+            raise ContractError(f"{label} exceeds its input byte budget")
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ContractError(f"{label} JSON must be valid UTF-8") from error
+    if not isinstance(value, str):
+        raise ContractError(f"{label} JSON must be text or UTF-8 bytes")
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise ContractError(f"{label} JSON must be valid UTF-8") from error
+    if size > maximum_bytes:
+        raise ContractError(f"{label} exceeds its input byte budget")
+    return value
+
+
+def serialize_json(payload: dict[str, object], *, maximum_bytes: int, label: str) -> str:
+    try:
+        text = (
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n"
+        )
+    except (TypeError, UnicodeEncodeError, ValueError) as error:
+        raise ContractError(f"{label} cannot be canonically serialized") from error
+    if len(text.encode("utf-8")) > maximum_bytes:
+        raise ContractError(f"{label} exceeds its serialized byte budget")
+    return text
 
 
 def canonical_json(value: object) -> str:
