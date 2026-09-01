@@ -996,6 +996,134 @@ class SyncUpstreamReleaseTest(unittest.TestCase):
                     fixture.config(), FailingReleases(), RecordingPullRequests([reverted])
                 )
 
+    def test_later_sibling_release_uses_advancing_source_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            first = fixture.snapshot_release(
+                "rust-v1.0.0", "1.0.0", "first source"
+            )
+            pull_requests = RecordingPullRequests()
+            first_result = synchronize(
+                fixture.config(),
+                FixtureReleases.published(first),
+                pull_requests,
+            )
+            fixture.integrate_branch(first_result.branch)
+            pull_requests.pull_requests.append(
+                PullRequest(
+                    number=1,
+                    url=first_result.pr_url,
+                    state="closed",
+                    merged=True,
+                    head=first_result.branch,
+                    head_sha=fixture.remote_branch_head(first_result.branch) or "",
+                    title=f"Synchronize openai/codex {first.tag}",
+                    body=f"- Immutable commit: `{first.commit}`",
+                    head_repository="Electivus/electivus-codex",
+                )
+            )
+            later = fixture.snapshot_release(
+                "rust-v2.0.0", "2.0.0", "later source"
+            )
+            first_parent = fixture.git_at(
+                fixture.upstream, "rev-parse", f"{first.commit}^"
+            )
+            later_parent = fixture.git_at(
+                fixture.upstream, "rev-parse", f"{later.commit}^"
+            )
+
+            self.assertNotEqual(first_parent, later_parent)
+            self.assertFalse(
+                fixture.is_ancestor(fixture.upstream, first.commit, later.commit)
+            )
+            self.assertTrue(
+                fixture.is_ancestor(fixture.upstream, first_parent, later_parent)
+            )
+
+            result = synchronize(
+                fixture.config(),
+                FixtureReleases.published(first, later),
+                pull_requests,
+            )
+
+            self.assertEqual(result.outcome, "pr-created-clean")
+            manifest_text = fixture.git(
+                "show", f"origin/{result.branch}:{result.manifest_path}"
+            )
+            manifest = parse_manifest(f"{manifest_text}\n")
+            self.assertEqual(manifest.previous_release_commit, first.commit)
+
+    def test_nonadvancing_sibling_release_lineages_are_rejected(self) -> None:
+        for topology in ("ambiguous", "reversed", "unrelated"):
+            with self.subTest(topology=topology), tempfile.TemporaryDirectory() as temp_dir:
+                fixture = GitFixture(Path(temp_dir))
+                first = fixture.snapshot_release(
+                    "rust-v1.0.0", "1.0.0", "first source"
+                )
+                pull_requests = RecordingPullRequests()
+                first_result = synchronize(
+                    fixture.config(),
+                    FixtureReleases.published(first),
+                    pull_requests,
+                )
+                fixture.integrate_branch(first_result.branch)
+                pull_requests.pull_requests.append(
+                    PullRequest(
+                        number=1,
+                        url=first_result.pr_url,
+                        state="closed",
+                        merged=True,
+                        head=first_result.branch,
+                        head_sha=fixture.remote_branch_head(first_result.branch) or "",
+                        title=f"Synchronize openai/codex {first.tag}",
+                        body=f"- Immutable commit: `{first.commit}`",
+                        head_repository="Electivus/electivus-codex",
+                    )
+                )
+                later = fixture.snapshot_release(
+                    "rust-v2.0.0", "2.0.0", "later source"
+                )
+                later_tree = fixture.git_at(
+                    fixture.upstream, "rev-parse", f"{later.commit}^{{tree}}"
+                )
+                later_parent = fixture.git_at(
+                    fixture.upstream, "rev-parse", f"{later.commit}^"
+                )
+                commit_tree_args = ["commit-tree", later_tree]
+                if topology == "ambiguous":
+                    side = fixture.git_at(
+                        fixture.upstream,
+                        "commit-tree",
+                        f"{fixture.seed_commit}^{{tree}}",
+                        "-p",
+                        fixture.seed_commit,
+                        "-m",
+                        "ambiguous release side",
+                    )
+                    commit_tree_args.extend(["-p", later_parent, "-p", side])
+                elif topology == "reversed":
+                    commit_tree_args.extend(["-p", fixture.seed_commit])
+                candidate_commit = fixture.git_at(
+                    fixture.upstream,
+                    *commit_tree_args,
+                    "-m",
+                    f"{topology} release",
+                )
+                fixture.git_at(
+                    fixture.upstream, "tag", "--force", later.tag, candidate_commit
+                )
+                candidate = replace(later, commit=candidate_commit)
+
+                with self.assertRaisesRegex(
+                    SyncError,
+                    "selected release does not descend from the manifest predecessor",
+                ):
+                    synchronize(
+                        fixture.config(),
+                        FixtureReleases.published(first, candidate),
+                        pull_requests,
+                    )
+
     def test_integrated_manifest_history_and_mode_are_immutable(self) -> None:
         for tamper, error in (
             ("rewrite", "history changed after introduction"),
@@ -2141,6 +2269,23 @@ class GitFixture:
             url=f"https://example.test/releases/{tag}",
         )
 
+    def snapshot_release(
+        self, tag: str, version: str, contents: str, *, path: str = "upstream.txt"
+    ) -> CreatedRelease:
+        (self.upstream / path).write_text(f"{contents}\n")
+        self.commit(self.upstream, f"source for {tag}")
+        self.git_at(self.upstream, "switch", "--detach", "HEAD")
+        self.write_workspace(self.upstream, version)
+        self.commit(self.upstream, f"release {tag}")
+        self.git_at(self.upstream, "tag", tag)
+        release = CreatedRelease(
+            tag=tag,
+            commit=self.git_at(self.upstream, "rev-parse", "HEAD"),
+            url=f"https://example.test/releases/{tag}",
+        )
+        self.git_at(self.upstream, "switch", "main")
+        return release
+
     def release_with_manifest(self, tag: str, manifest: str) -> CreatedRelease:
         (self.upstream / "codex-rs" / "Cargo.toml").write_text(manifest)
         self.commit(self.upstream, f"release {tag}")
@@ -2156,6 +2301,15 @@ class GitFixture:
         self.commit(self.fork, f"fork changes {path}")
         self.git("push", "origin", "main")
         self.fork_head = self.git("rev-parse", "HEAD")
+
+    @staticmethod
+    def is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+        return subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+            cwd=repo,
+            capture_output=True,
+            check=False,
+        ).returncode == 0
 
     def many_conflicts(self, count: int) -> CreatedRelease:
         for index in range(count):

@@ -60,6 +60,54 @@ class UpstreamSyncTopologyTests(unittest.TestCase):
                 ),
             )
 
+    def test_sibling_release_topology_passes_when_source_lineage_advances(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = GitFixture(Path(temp_dir))
+            first = fixture.snapshot_release(
+                "rust-v1.0.0", "1.0.0", "first source"
+            )
+            first_prepared = self._prepare_release(
+                fixture, first, fixture.remote_branch_head("main") or ""
+            )
+            fixture.integrate_branch(first_prepared.branch)
+            later = fixture.snapshot_release(
+                "rust-v2.0.0", "2.0.0", "later source"
+            )
+            fork_base = fixture.remote_branch_head("main") or ""
+            later_prepared = self._prepare_release(fixture, later, fork_base)
+            head = fixture.remote_branch_head(later_prepared.branch) or ""
+
+            evidence = validate_topology(
+                fixture.fork,
+                head,
+                fork_base,
+                later_prepared.branch,
+                seed_commit=fixture.seed_commit,
+            )
+
+            self.assertEqual(
+                evidence,
+                TopologyEvidence(
+                    head_sha=head,
+                    base_sha=fork_base,
+                    branch=later_prepared.branch,
+                    fork_base_sha=fork_base,
+                    release_commit=later.commit,
+                    manifest_introduction=fixture.git(
+                        "log",
+                        "--first-parent",
+                        "--reverse",
+                        "--format=%H",
+                        head,
+                        "--",
+                        f".github/upstream-sync-manifests/{later.commit}.json",
+                    ),
+                    preparation_mode="clean",
+                    baseline_reconciliation=fixture.git("rev-parse", f"{head}^^"),
+                    catch_up_merge=None,
+                ),
+            )
+
     def test_clean_advanced_base_requires_and_accepts_catch_up(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             fixture = GitFixture(Path(temp_dir))

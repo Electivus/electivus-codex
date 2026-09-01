@@ -75,7 +75,9 @@ def prepare_attempt(
     _, fork_chain, predecessor = _read_chain_at(
         repo, fork_base_sha, seed_commit=seed_commit
     )
-    if not _is_ancestor(repo, predecessor.release.commit, release.commit):
+    if not _release_lineage_advances(
+        repo, predecessor.release.commit, release.commit
+    ):
         raise SyncError(
             "selected release does not descend from the manifest predecessor"
         )
@@ -600,6 +602,18 @@ def synchronization_release_commit(branch: str) -> str:
 
 def _parents(repo: Path, commit: str) -> list[str]:
     return _git(repo, "show", "-s", "--format=%P", commit).split()
+
+
+def _release_lineage_advances(repo: Path, predecessor: str, release: str) -> bool:
+    if _is_ancestor(repo, predecessor, release):
+        return True
+    predecessor_parents = _parents(repo, predecessor)
+    release_parents = _parents(repo, release)
+    return (
+        len(predecessor_parents) == 1
+        and len(release_parents) == 1
+        and _is_ancestor(repo, predecessor_parents[0], release_parents[0])
+    )
 
 
 def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
