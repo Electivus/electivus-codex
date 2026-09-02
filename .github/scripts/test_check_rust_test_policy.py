@@ -81,6 +81,39 @@ async fn conditional_test() {}
         )
         self.assertIn("unclassified", "\n".join(policy.validate_ignore_policy([occurrence], {"ignores": {}})))
 
+    def test_pending_upstream_ignore_classifies_absent_and_imported_test(self) -> None:
+        occurrence = policy.IgnoreOccurrence(
+            "src/upstream.rs", "helper_child", 'ignore="invoked by parent"'
+        )
+        manifest = {
+            "ignores": {},
+            "pending_upstream_ignores": {
+                occurrence.identity: "helper-process|https://github.com/Electivus/electivus-codex/pull/207"
+            },
+        }
+        self.assertEqual([], policy.validate_ignore_policy([], manifest))
+        self.assertEqual([], policy.validate_ignore_policy([occurrence], manifest))
+
+    def test_pending_upstream_ignore_requires_tracking_and_unique_identity(self) -> None:
+        occurrence = policy.IgnoreOccurrence(
+            "src/upstream.rs", "helper_child", 'ignore="invoked by parent"'
+        )
+        manifest = {
+            "ignores": {occurrence.identity: "helper-process"},
+            "pending_upstream_ignores": {
+                occurrence.identity: "made-up|not-a-tracking-url",
+                "src/future.rs::future::ignore": "temporary-certification|https://github.com/Electivus/electivus-codex/issues/208",
+            },
+        }
+        issues = "\n".join(policy.validate_ignore_policy([occurrence], manifest))
+        for expected in (
+            "duplicate active and pending",
+            "unknown pending upstream category",
+            "requires a GitHub issue or pull request URL",
+            "cannot be temporary-certification",
+        ):
+            self.assertIn(expected, issues)
+
 
 class QuarantinePolicyTests(unittest.TestCase):
     def setUp(self) -> None:

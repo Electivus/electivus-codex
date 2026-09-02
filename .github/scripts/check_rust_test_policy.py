@@ -229,6 +229,9 @@ def validate_ignore_policy(
     records = policy.get("ignores")
     if not isinstance(records, dict):
         return ["rust test policy field 'ignores' must be a table"]
+    pending_records = policy.get("pending_upstream_ignores", {})
+    if not isinstance(pending_records, dict):
+        return ["rust test policy field 'pending_upstream_ignores' must be a table"]
     counts = Counter(occurrence.identity for occurrence in occurrences)
     inventory = {occurrence.identity: occurrence for occurrence in occurrences}
     issues = [f"duplicate Rust ignore occurrence: {identity}" for identity, count in counts.items() if count > 1]
@@ -250,7 +253,26 @@ def validate_ignore_policy(
                 issues.append(f"{identity}: temporary-certification must track #89")
         elif occurrence.test in TEMPORARY_CERTIFICATION_TESTS:
             issues.append(f"{identity}: inherited flaky test must be temporary-certification")
-    issues.extend(f"unclassified Rust ignore: {identity}" for identity in inventory.keys() - records.keys())
+    for identity, classification in pending_records.items():
+        if not isinstance(identity, str) or not isinstance(classification, str):
+            issues.append("pending upstream ignore identities and classifications must be strings")
+            continue
+        if identity in records:
+            issues.append(f"duplicate active and pending Rust ignore classification: {identity}")
+        category, separator, tracking = classification.partition("|")
+        if category not in ALLOWED_CATEGORIES:
+            issues.append(f"{identity}: unknown pending upstream category {category!r}")
+        if category == "temporary-certification":
+            issues.append(f"{identity}: pending upstream ignores cannot be temporary-certification")
+        if not separator or GITHUB_TRACKING_RE.fullmatch(tracking) is None:
+            issues.append(
+                f"{identity}: pending upstream ignore requires a GitHub issue or pull request URL"
+            )
+    classified = records.keys() | pending_records.keys()
+    issues.extend(
+        f"unclassified Rust ignore: {identity}"
+        for identity in inventory.keys() - classified
+    )
     return issues
 
 
