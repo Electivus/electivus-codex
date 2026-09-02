@@ -1,0 +1,16 @@
+# Exact before/after digests for generated references staged ahead of PR #207.
+# Once the upstream source arrives, normal byte-for-byte equality takes precedence.
+[pending_upstream_references.config]
+generated_sha256 = "1e63dd577280fe91e717c64a24cd8d6c697a4d7cb2e5628289bfac383263a46a"
+committed_sha256 = "3583ee1a8d51790091776279eae8e856fd63e85fe18a60f1553e5d58356b20ab"
+tracking = "https://github.com/Electivus/electivus-codex/issues/210"
+
+[pending_upstream_references.hooks]
+generated_sha256 = "49f4934681b9959814e5b3379e02a2fe848e3471e4a3976a14bfbdc7e239858a"
+committed_sha256 = "2933c4a2615f5f5cba734248ba961a420b55c06b101fc10cd2d4834339d0ba55"
+tracking = "https://github.com/Electivus/electivus-codex/issues/210"
+
+[pending_upstream_references.tool]
+generated_sha256 = "8191478571fc8051a97a922a0ffc601d2750bb32aae040a557702eec14b60a98"
+committed_sha256 = "0f7e2812f6ce9694b61c50310c0668c704074ac1bb884505f76c27195c5999c5"
+tracking = "https://github.com/Electivus/electivus-codex/issues/210"

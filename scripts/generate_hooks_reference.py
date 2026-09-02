@@ -216,6 +216,22 @@ EVENTS = (
             "Blocking prompts retain per-hook attribution and may spill before model injection.",
         ),
     ),
+    EventMetadata(
+        "Interrupt",
+        "interrupt",
+        "Right before an explicitly interrupted turn is aborted.",
+        "Ignored; every handler for the event runs.",
+        "turn",
+        "Invalid; successful output must be JSON or empty.",
+        "Failure; no special exit-code-2 behavior.",
+        "Every matched process is awaited; output cannot prevent interruption.",
+        "codex-rs/hooks/src/events/interrupt.rs",
+        (
+            "A non-empty successful output may contain only the optional `systemMessage` warning.",
+            "Hook failures are reported through lifecycle events but do not cancel the interruption.",
+            "Command hooks default to a 1-second timeout and are capped at 3 seconds; executor-scoped hooks run asynchronously.",
+        ),
+    ),
 )
 
 
@@ -343,7 +359,14 @@ def configured_handler_types(repo_root: Path = REPO_ROOT) -> tuple[str, ...]:
 
 
 def load_hook_schemas(schema_dir: Path = DEFAULT_SCHEMA_DIR) -> list[HookSchemas]:
-    by_slug = {event.slug: HookSchemas(event) for event in EVENTS}
+    registered = set(registered_hook_event_names())
+    metadata_names = {event.name for event in EVENTS}
+    if missing_metadata := registered - metadata_names:
+        raise ValueError(
+            "registered events without metadata: " + ", ".join(sorted(missing_metadata))
+        )
+    active_events = tuple(event for event in EVENTS if event.name in registered)
+    by_slug = {event.slug: HookSchemas(event) for event in active_events}
     seen_files = 0
     for path in sorted(schema_dir.glob("*.schema.json")):
         match = SCHEMA_FILE_RE.match(path.name)
@@ -367,11 +390,13 @@ def load_hook_schemas(schema_dir: Path = DEFAULT_SCHEMA_DIR) -> list[HookSchemas
     if seen_files == 0:
         raise ValueError(f"no hook schemas found in {schema_dir}")
     missing_inputs = [
-        event.name for event in by_slug.values() if event.input_schema is None
+        schemas.metadata.name
+        for schemas in by_slug.values()
+        if schemas.input_schema is None
     ]
     if missing_inputs:
         raise ValueError(f"events without input schemas: {', '.join(missing_inputs)}")
-    return [by_slug[event.slug] for event in EVENTS]
+    return [by_slug[event.slug] for event in active_events]
 
 
 def _reference_target(root: JsonObject, reference: str) -> JsonObject | None:
@@ -550,6 +575,34 @@ def _configuration_section(
     facts: RuntimeFacts, handler_types: tuple[str, ...]
 ) -> list[str]:
     handlers = ", ".join(f"`{handler}`" for handler in handler_types)
+    if "mcp_tool" in handler_types:
+        handler_summary = (
+            f"Configured handler variants are {handlers}. `command` and `mcp_tool` execute today; "
+            "`prompt` and `agent` parse successfully but discovery skips them with warnings. Empty "
+            "commands are also skipped. `commandWindows` overrides `command` only on Windows."
+        )
+        timeout_summary = (
+            f"| `timeout` | Seconds; defaults to {facts.default_timeout_sec}, is normalized to at least 1, "
+            "with stricter SessionEnd and Interrupt rules below. |"
+        )
+        async_summary = (
+            "| `async` | When true, schedules a command hook without waiting for its result or applying "
+            "control effects. SessionEnd emits a warning and still runs synchronously. |"
+        )
+    else:
+        handler_summary = (
+            f"Configured handler variants are {handlers}. Only `command` executes today; `prompt` "
+            "and `agent` parse successfully but discovery skips them with warnings. Empty commands "
+            "are also skipped. `commandWindows` overrides `command` only on Windows."
+        )
+        timeout_summary = (
+            f"| `timeout` | Seconds; defaults to {facts.default_timeout_sec}, is normalized to at least 1, "
+            "with a stricter SessionEnd rule below. |"
+        )
+        async_summary = (
+            "| `async` | Unsupported. Non-SessionEnd async hooks are skipped; SessionEnd emits a warning "
+            "and still runs synchronously. |"
+        )
     return [
         "## Availability and configuration",
         "",
@@ -582,17 +635,15 @@ def _configuration_section(
         'trusted_hash = "<hash returned by hooks/list>"',
         "```",
         "",
-        f"Configured handler variants are {handlers}. Only `command` executes today; `prompt` "
-        "and `agent` parse successfully but discovery skips them with warnings. Empty commands "
-        "are also skipped. `commandWindows` overrides `command` only on Windows.",
+        handler_summary,
         "",
         "<!-- prettier-ignore -->",
         "| Command field | Meaning |",
         "| --- | --- |",
         "| `command` | Shell command used on non-Windows platforms and as the Windows fallback. |",
         "| `commandWindows` | Optional Windows-only command override; `command_windows` is accepted as an alias. |",
-        f"| `timeout` | Seconds; defaults to {facts.default_timeout_sec}, is normalized to at least 1, with a stricter SessionEnd rule below. |",
-        "| `async` | Unsupported. Non-SessionEnd async hooks are skipped; SessionEnd emits a warning and still runs synchronously. |",
+        timeout_summary,
+        async_summary,
         "| `statusMessage` | Optional UI text carried in running/completed summaries. |",
         f"| `additionalContextLimit` | Approximate per-handler token spill threshold; absent uses {facts.additional_context_token_limit:,}, `0` disables spilling. Valid only for context-producing events. |",
         "",
@@ -603,7 +654,15 @@ def _configuration_section(
     ]
 
 
-def _runtime_section(facts: RuntimeFacts) -> list[str]:
+def _runtime_section(facts: RuntimeFacts, event_names: frozenset[str]) -> list[str]:
+    matcher_agnostic_events = (
+        "`UserPromptSubmit`, `Stop`, and `Interrupt`"
+        if "Interrupt" in event_names
+        else "`UserPromptSubmit` and `Stop`"
+    )
+    bounded_timeout_events = (
+        "`SessionEnd` and `Interrupt`" if "Interrupt" in event_names else "`SessionEnd`"
+    )
     return [
         "## Discovery, trust, matching, and execution",
         "",
@@ -630,7 +689,7 @@ def _runtime_section(facts: RuntimeFacts) -> list[str]:
         'An omitted matcher, `""`, or `"*"` matches all. A pattern containing only ASCII '
         "letters, digits, `_`, and `|` is an exact-name list; other patterns compile as Rust "
         "regular expressions. Invalid regexes skip the entire matcher group with a warning. "
-        "`UserPromptSubmit` and `Stop` discard configured matchers. Tool events also test internal "
+        f"{matcher_agnostic_events} discard configured matchers. Tool events also test internal "
         "compatibility aliases, but each handler runs at most once and stdin always retains the "
         "canonical tool name (`apply_patch` also matches `Write`/`Edit`; `spawn_agent` also matches "
         "`Agent`).",
@@ -652,7 +711,7 @@ def _runtime_section(facts: RuntimeFacts) -> list[str]:
         "| Timeout class | Default | Bound |",
         "| --- | ---: | ---: |",
         f"| Most command hooks | {facts.default_timeout_sec}s | minimum 1s; no explicit maximum |",
-        f"| `SessionEnd` | {facts.session_end_default_timeout_sec}s | 1–{facts.session_end_max_timeout_sec}s |",
+        f"| {bounded_timeout_events} | {facts.session_end_default_timeout_sec}s | 1–{facts.session_end_max_timeout_sec}s |",
         "",
         "Spawn, stdin-write, wait, timeout, missing-exit-code, serialization, and nonzero-exit errors "
         "are recorded as failed hook runs; they do not by themselves abort unrelated matching "
@@ -663,7 +722,7 @@ def _runtime_section(facts: RuntimeFacts) -> list[str]:
     ]
 
 
-def _output_section(facts: RuntimeFacts) -> list[str]:
+def _output_section(facts: RuntimeFacts, event_count: int) -> list[str]:
     return [
         "## Output protocol, context limits, and observability",
         "",
@@ -692,7 +751,7 @@ def _output_section(facts: RuntimeFacts) -> list[str]:
         "",
         "### Legacy `notify` hook",
         "",
-        "Top-level `notify = [program, args...]` is separate from the 11 configurable command "
+        f"Top-level `notify = [program, args...]` is separate from the {event_count} configurable hook "
         "events. After an agent turn, Codex appends one kebab-case JSON argument with type "
         "`agent-turn-complete`, thread/turn IDs, cwd, optional client, input messages, and the last "
         "assistant message. It uses null stdio, does not wait for completion, and a spawn failure is "
@@ -780,6 +839,7 @@ def render_markdown(
     *,
     title: str = DEFAULT_TITLE,
 ) -> str:
+    event_names = frozenset(item.metadata.name for item in schemas)
     fixture_count = sum(item.input_path is not None for item in schemas) + sum(
         item.output_path is not None for item in schemas
     )
@@ -798,8 +858,8 @@ def render_markdown(
         "",
         *_event_catalog(schemas),
         *_configuration_section(facts, handler_types),
-        *_runtime_section(facts),
-        *_output_section(facts),
+        *_runtime_section(facts, event_names),
+        *_output_section(facts, len(schemas)),
     ]
     for item in schemas:
         lines.extend(_event_details(item))
