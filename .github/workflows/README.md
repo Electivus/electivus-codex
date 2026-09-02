@@ -325,6 +325,11 @@ The allowed ignore categories have these narrow boundaries:
 | `pending-behavior-change`  | Only two inherited compaction follow-up expectations.        |
 | `temporary-certification`  | Only the two #89 tests named in `rust-test-policy.toml`.     |
 
+`pending_upstream_ignores` preclassifies exact ignore identities that are expected from an
+in-flight upstream Synchronization but do not exist on the frozen fork baseline yet. Each value
+uses `<category>|<GitHub issue or pull request URL>`. Pending entries classify the ignore when it
+arrives, must use an ordinary allowed category, and cannot duplicate an active `ignores` entry.
+
 `quarantined-checks.toml` starts empty. Each record needs an exact `check_identity`, narrow `scope`, evidence,
 justification, an existing workflow and top-level job, an exact GitHub issue or pull-request URL, and TOML dates.
 Repository checks install pinned actionlint first; quarantine validation requires it to accept the exact workflow
