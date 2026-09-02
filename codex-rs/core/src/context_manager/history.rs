@@ -5,6 +5,7 @@ use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::normalize;
 use crate::context_manager::replay::MAX_REPLAY_HISTORY_BYTES;
 use crate::context_manager::replay::MAX_REPLAY_HISTORY_ITEMS;
+use crate::context_manager::replay::process_replayed_annotated_item;
 use crate::context_manager::replay::process_replayed_item;
 use crate::context_manager::replay::truncate_output_item;
 use crate::event_mapping::has_non_contextual_dev_message_content;
@@ -356,10 +357,11 @@ impl ContextManager {
             .iter()
             .filter(|envelope| is_api_message(&envelope.item))
             .filter_map(|envelope| {
-                process_replayed_item(&envelope.item, policy).map(|item| ResponseItemEnvelope {
-                    item,
-                    metadata: envelope.metadata.clone(),
-                })
+                process_replayed_annotated_item(&envelope.item, envelope.metadata.as_ref(), policy)
+                    .map(|item| ResponseItemEnvelope {
+                        item,
+                        metadata: envelope.metadata.clone(),
+                    })
             })
             .collect();
         self.replace_annotated(processed);
@@ -393,10 +395,11 @@ impl ContextManager {
             .iter()
             .filter(|envelope| is_api_message(&envelope.item))
             .filter_map(|envelope| {
-                process_replayed_item(&envelope.item, policy).map(|item| ResponseItemEnvelope {
-                    item,
-                    metadata: envelope.metadata.clone(),
-                })
+                process_replayed_annotated_item(&envelope.item, envelope.metadata.as_ref(), policy)
+                    .map(|item| ResponseItemEnvelope {
+                        item,
+                        metadata: envelope.metadata.clone(),
+                    })
             })
             .take(remaining);
         Arc::make_mut(&mut self.items).extend(processed_items);

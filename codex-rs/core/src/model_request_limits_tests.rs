@@ -13,6 +13,10 @@ use codex_tools::ResponsesApiTool;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 
+#[allow(
+    clippy::needless_update,
+    reason = "the upstream request type adds fields during synchronization"
+)]
 fn request(
     input: Vec<ResponseItem>,
     instructions: &str,
@@ -34,6 +38,7 @@ fn request(
         prompt_cache_key: None,
         text,
         client_metadata: None,
+        ..Default::default()
     }
 }
 
@@ -487,6 +492,115 @@ fn splits_non_replayed_agent_messages_without_losing_text() {
         })
         .collect::<Vec<_>>();
     assert_eq!(provenance, expected);
+}
+
+#[test]
+fn omits_oversized_tool_call_pairs_at_request_boundary() {
+    let oversized_pairs = vec![
+        ResponseItem::FunctionCall {
+            id: Some(ResponseItemId::with_suffix("fc", "oversized")),
+            name: "echo".to_string(),
+            namespace: Some("mcp".to_string()),
+            arguments: serde_json::json!({ "message": "a".repeat(150_000) }).to_string(),
+            encrypted_function_args: Some(vec!["encrypted".repeat(20_000)]),
+            call_id: "function-call".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("function-call".to_string()),
+            name: Some("echo".to_string()),
+            namespace: Some("mcp".to_string()),
+            output: FunctionCallOutputPayload::from_text("function output".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::CustomToolCall {
+            id: Some(ResponseItemId::with_suffix("ctc", "oversized")),
+            status: Some("completed".to_string()),
+            call_id: "custom-call".to_string(),
+            name: "custom".to_string(),
+            namespace: Some("tools".to_string()),
+            input: "custom input".repeat(20_000),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::CustomToolCallOutput {
+            id: None,
+            call_id: "custom-call".to_string(),
+            name: Some("custom".to_string()),
+            output: FunctionCallOutputPayload::from_text("custom output".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+    assert!(
+        oversized_pairs
+            .iter()
+            .filter(|item| matches!(
+                item,
+                ResponseItem::FunctionCall { .. } | ResponseItem::CustomToolCall { .. }
+            ))
+            .all(|item| estimate_item_token_count(item) > MAX_MODEL_REQUEST_ITEM_TOKENS as i64)
+    );
+    let retained = message("retained context".to_string());
+    let mut input = oversized_pairs;
+    input.push(retained.clone());
+    let mut request = request(input, "", /*text*/ None);
+
+    split_model_request_messages(&mut request, &[])
+        .expect("paired oversized tool calls should be omitted atomically");
+
+    assert_eq!(request.input, vec![retained]);
+}
+
+#[test]
+fn preserves_bounded_tool_call_inputs() {
+    let sources = vec![
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "echo".to_string(),
+            namespace: None,
+            arguments: r#"{"message":"hello"}"#.to_string(),
+            encrypted_function_args: None,
+            call_id: "function-call".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::CustomToolCall {
+            id: None,
+            status: None,
+            call_id: "custom-call".to_string(),
+            name: "custom".to_string(),
+            namespace: None,
+            input: "hello".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+    let mut request = request(sources.clone(), "", /*text*/ None);
+
+    split_model_request_messages(&mut request, &[])
+        .expect("bounded tool call inputs should remain valid");
+
+    assert_eq!(request.input, sources);
+}
+
+#[test]
+fn rejects_tool_calls_with_unsplittable_fixed_overhead() {
+    let mut request = request(
+        vec![ResponseItem::FunctionCall {
+            id: None,
+            name: "tool".repeat(max_model_request_item_bytes()),
+            namespace: None,
+            arguments: "{}".to_string(),
+            encrypted_function_args: None,
+            call_id: "function-call".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        "",
+        /*text*/ None,
+    );
+
+    let error = split_model_request_messages(&mut request, &[])
+        .expect_err("fixed tool call overhead should remain subject to the hard item cap");
+
+    assert!(error.to_string().contains("individual input item"));
 }
 
 #[test]

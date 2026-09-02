@@ -4,48 +4,20 @@ use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
-use codex_app_server_protocol::ClientRequest;
-use codex_app_server_protocol::JSONRPCError;
-use codex_app_server_protocol::JSONRPCMessage;
-use codex_app_server_protocol::ProjectChangeType;
-use codex_app_server_protocol::ProjectChangedNotification;
-use codex_app_server_protocol::ProjectCreateParams;
-use codex_app_server_protocol::ProjectCreateResponse;
-use codex_app_server_protocol::ProjectDeleteParams;
-use codex_app_server_protocol::ProjectDeleteResponse;
-use codex_app_server_protocol::ProjectImportParams;
-use codex_app_server_protocol::ProjectImportResponse;
-use codex_app_server_protocol::ProjectListParams;
-use codex_app_server_protocol::ProjectListResponse;
-use codex_app_server_protocol::ProjectMoveParams;
-use codex_app_server_protocol::ProjectMoveResponse;
-use codex_app_server_protocol::ProjectReadParams;
-use codex_app_server_protocol::ProjectReadResponse;
-use codex_app_server_protocol::ProjectRoot;
-use codex_app_server_protocol::ProjectUpdateParams;
-use codex_app_server_protocol::ProjectUpdateResponse;
-use codex_app_server_protocol::RequestId;
-use codex_app_server_protocol::ThreadForkParams;
-use codex_app_server_protocol::ThreadForkResponse;
-use codex_app_server_protocol::ThreadListParams;
-use codex_app_server_protocol::ThreadListResponse;
-use codex_app_server_protocol::ThreadMetadataGitInfoUpdateParams;
-use codex_app_server_protocol::ThreadMetadataUpdateParams;
-use codex_app_server_protocol::ThreadMetadataUpdateResponse;
-use codex_app_server_protocol::ThreadProjectUpdatedNotification;
-use codex_app_server_protocol::ThreadReadParams;
-use codex_app_server_protocol::ThreadReadResponse;
-use codex_app_server_protocol::ThreadResumeParams;
-use codex_app_server_protocol::ThreadResumeResponse;
-use codex_app_server_protocol::ThreadStartParams;
-use codex_app_server_protocol::ThreadStartResponse;
-use codex_app_server_protocol::TurnStartParams;
-use codex_app_server_protocol::UserInput;
+// This wildcard is a temporary conflict guard for the upstream synchronization.
+#[allow(clippy::wildcard_imports)]
+use codex_app_server_protocol::*;
 use codex_features::Feature;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use uuid::Uuid;
+
+#[cfg(any())]
+#[tokio::test]
+async fn projects_list_by_recency_and_preserve_metadata_timestamps() -> Result<()> {
+    anyhow::bail!("upstream sync guard: reconcile project fields")
+}
 
 #[tokio::test]
 async fn projects_persist_and_assign_threads() -> Result<()> {

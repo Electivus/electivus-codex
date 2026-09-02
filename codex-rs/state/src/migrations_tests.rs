@@ -314,6 +314,67 @@ INSERT INTO threads (
 }
 
 #[tokio::test]
+async fn thread_artifact_migration_preserves_existing_section_metadata() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = sqlite
+        .open_read_write_pool(&sqlite.state_db_path())
+        .await
+        .expect("sqlite database should open");
+    migrator_through(/*version*/ 53)
+        .run(&pool)
+        .await
+        .expect("released thread migrations should apply");
+    sqlx::query("UPDATE thread_sections SET appearance = ? WHERE id = ?")
+        .bind(r#"{"icon":"pin"}"#)
+        .bind(PINNED_THREAD_SECTION_ID)
+        .execute(&pool)
+        .await
+        .expect("released section appearance should remain writable");
+
+    STATE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("artifact migration should apply without rewriting released migrations");
+    let section = sqlx::query_as::<_, (String, String, Option<String>)>(
+        "SELECT id, name, appearance FROM thread_sections WHERE id = ?",
+    )
+    .bind(PINNED_THREAD_SECTION_ID)
+    .fetch_one(&pool)
+    .await
+    .expect("existing section metadata should remain available");
+    assert_eq!(
+        section,
+        (
+            PINNED_THREAD_SECTION_ID.to_string(),
+            PINNED_THREAD_SECTION_NAME.to_string(),
+            Some(r#"{"icon":"pin"}"#.to_string()),
+        )
+    );
+
+    let artifact_tables = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'thread_artifacts'",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("artifact table should exist");
+    assert_eq!(artifact_tables, vec!["thread_artifacts"]);
+
+    let mut released_migrator = migrator_through(/*version*/ 53);
+    released_migrator.ignore_missing = true;
+    released_migrator
+        .run(&pool)
+        .await
+        .expect("released binaries should tolerate the additive artifact migration");
+}
+
+#[tokio::test]
 async fn thread_section_order_migration_backfills_stably() {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home)
@@ -855,7 +916,7 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
 
 #[tokio::test]
 async fn repairs_complete_official_thread_migration_history_before_fork_migrations() {
-    for official_last_version in 43..=50 {
+    for official_last_version in 43..=52 {
         let sqlite_home = crate::runtime::test_support::unique_temp_dir();
         tokio::fs::create_dir_all(&sqlite_home)
             .await
@@ -885,6 +946,8 @@ async fn repairs_complete_official_thread_migration_history_before_fork_migratio
             (48, 51),
             (49, 52),
             (50, 53),
+            (51, 54),
+            (52, 55),
         ]
         .into_iter()
         .take_while(|(official_version, _)| *official_version <= official_last_version)

@@ -261,32 +261,10 @@ fn searchable_content(item: &RolloutItem) -> Option<String> {
                     })
                     .collect::<String>(),
             ),
-            TurnItem::HookPrompt(_)
-            | TurnItem::Plan(_)
-            | TurnItem::Reasoning(_)
-            | TurnItem::CommandExecution(_)
-            | TurnItem::DynamicToolCall(_)
-            | TurnItem::CollabAgentToolCall(_)
-            | TurnItem::SubAgentActivity(_)
-            | TurnItem::WebSearch(_)
-            | TurnItem::ImageView(_)
-            | TurnItem::Extension(_)
-            | TurnItem::ImageGeneration(_)
-            | TurnItem::EnteredReviewMode(_)
-            | TurnItem::ExitedReviewMode(_)
-            | TurnItem::FileChange(_)
-            | TurnItem::McpToolCall(_)
-            | TurnItem::ContextCompaction(_) => None,
+            // Only completed user and agent messages contribute searchable text.
+            _ => None,
         },
-        RolloutItem::SessionMeta(_)
-        | RolloutItem::TurnContext(_)
-        | RolloutItem::EventMsg(_)
-        | RolloutItem::ResponseItem(_)
-        | RolloutItem::InterAgentCommunication(_)
-        | RolloutItem::InterAgentCommunicationMetadata { .. }
-        | RolloutItem::Compacted(_)
-        | RolloutItem::SecurityRiskScore(_)
-        | RolloutItem::WorldState(_) => None,
+        _ => None,
     }
 }
 

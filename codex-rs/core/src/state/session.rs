@@ -128,11 +128,12 @@ impl SessionState {
         self.auto_compact_window.clear_prefill();
     }
 
-    pub(crate) fn replace_annotated_history(
+    pub(crate) fn replace_compacted_annotated_history(
         &mut self,
         items: Vec<ResponseItemEnvelope>,
         reference_context_item: Option<TurnContextItem>,
     ) {
+        // This entry point always starts a compacted history window.
         self.history.replace_annotated(items);
         self.history
             .set_reference_context_item(reference_context_item);

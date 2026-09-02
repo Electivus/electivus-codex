@@ -3428,7 +3428,7 @@ impl Session {
         let mut world_state_item = None;
         {
             let mut state = self.state.lock().await;
-            state.replace_annotated_history(items, reference_context_item.clone());
+            state.replace_compacted_annotated_history(items, reference_context_item.clone());
             if let Some(world_state) = world_state_baseline {
                 let snapshot = world_state.snapshot();
                 world_state_item = Some(WorldStateItem::full(snapshot.clone().into_object()));

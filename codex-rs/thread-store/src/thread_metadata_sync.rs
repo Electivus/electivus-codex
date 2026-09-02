@@ -444,7 +444,6 @@ mod tests {
     use codex_protocol::protocol::ThreadGoalUpdatedEvent;
     use codex_protocol::protocol::ThreadSettingsAppliedEvent;
     use codex_protocol::protocol::ThreadSettingsSnapshot;
-    use codex_protocol::protocol::TurnContextItem;
     use codex_protocol::protocol::TurnStartedEvent;
     use codex_protocol::protocol::UserMessageEvent;
     use codex_protocol::user_input::UserInput;
@@ -880,29 +879,12 @@ mod tests {
     }
 
     fn turn_context(cwd: PathBuf, turn_id: &str) -> RolloutItem {
-        RolloutItem::TurnContext(TurnContextItem {
-            turn_id: Some(turn_id.to_string()),
-            cwd: PathUri::from_host_native_path(&cwd).expect("absolute cwd"),
-            workspace_roots: None,
-            current_date: None,
-            timezone: None,
-            approval_policy: AskForApproval::Never,
-            approvals_reviewer: None,
-            sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess.into(),
-            permission_profile: None,
-            active_permission_profile: None,
-            network: None,
-            file_system_sandbox_policy: None,
-            model: "test-model".to_string(),
-            comp_hash: None,
-            personality: None,
-            collaboration_mode: None,
-            multi_agent_version: None,
-            multi_agent_mode: None,
-            realtime_active: None,
-            effort: None,
-            summary: ReasoningSummary::Auto,
-        })
+        RolloutItem::TurnContext(crate::test_support::turn_context_item(
+            turn_id,
+            PathUri::from_host_native_path(&cwd).expect("absolute cwd"),
+            codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
+            "test-model",
+        ))
     }
 
     fn session_meta(thread_id: ThreadId) -> SessionMetaLine {
