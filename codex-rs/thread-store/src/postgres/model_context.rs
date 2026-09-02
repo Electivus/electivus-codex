@@ -215,6 +215,8 @@ fn replay_omits_oversized_context_item(item: &ResponseItem) -> bool {
         ResponseItem::Reasoning { .. }
             | ResponseItem::Compaction { .. }
             | ResponseItem::ContextCompaction { .. }
+            | ResponseItem::FunctionCall { .. }
+            | ResponseItem::CustomToolCall { .. }
     )
 }
 

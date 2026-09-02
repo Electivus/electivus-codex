@@ -495,109 +495,60 @@ fn splits_non_replayed_agent_messages_without_losing_text() {
 }
 
 #[test]
-fn projects_oversized_tool_call_inputs_preserving_envelopes() {
-    let function_id = ResponseItemId::with_suffix("fc", "oversized");
-    let custom_id = ResponseItemId::with_suffix("ctc", "oversized");
-    let metadata = InternalChatMessageMetadataPassthrough {
-        turn_id: Some("turn-tool-call".to_string()),
-        ..Default::default()
-    };
-    let function_arguments = serde_json::json!({ "message": "a".repeat(150_000) }).to_string();
-    let encrypted_arguments = vec!["encrypted".repeat(20_000)];
-    let custom_input = "custom input".repeat(20_000);
-    let sources = vec![
+fn omits_oversized_tool_call_pairs_at_request_boundary() {
+    let oversized_pairs = vec![
         ResponseItem::FunctionCall {
-            id: Some(function_id.clone()),
+            id: Some(ResponseItemId::with_suffix("fc", "oversized")),
             name: "echo".to_string(),
             namespace: Some("mcp".to_string()),
-            arguments: function_arguments.clone(),
-            encrypted_function_args: Some(encrypted_arguments.clone()),
+            arguments: serde_json::json!({ "message": "a".repeat(150_000) }).to_string(),
+            encrypted_function_args: Some(vec!["encrypted".repeat(20_000)]),
             call_id: "function-call".to_string(),
-            internal_chat_message_metadata_passthrough: Some(metadata.clone()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("function-call".to_string()),
+            name: Some("echo".to_string()),
+            namespace: Some("mcp".to_string()),
+            output: FunctionCallOutputPayload::from_text("function output".to_string()),
+            internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::CustomToolCall {
-            id: Some(custom_id.clone()),
+            id: Some(ResponseItemId::with_suffix("ctc", "oversized")),
             status: Some("completed".to_string()),
             call_id: "custom-call".to_string(),
             name: "custom".to_string(),
             namespace: Some("tools".to_string()),
-            input: custom_input.clone(),
-            internal_chat_message_metadata_passthrough: Some(metadata.clone()),
+            input: "custom input".repeat(20_000),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::CustomToolCallOutput {
+            id: None,
+            call_id: "custom-call".to_string(),
+            name: Some("custom".to_string()),
+            output: FunctionCallOutputPayload::from_text("custom output".to_string()),
+            internal_chat_message_metadata_passthrough: None,
         },
     ];
     assert!(
-        sources
+        oversized_pairs
             .iter()
+            .filter(|item| matches!(
+                item,
+                ResponseItem::FunctionCall { .. } | ResponseItem::CustomToolCall { .. }
+            ))
             .all(|item| estimate_item_token_count(item) > MAX_MODEL_REQUEST_ITEM_TOKENS as i64)
     );
-    let mut request = request(sources, "", /*text*/ None);
+    let retained = message("retained context".to_string());
+    let mut input = oversized_pairs;
+    input.push(retained.clone());
+    let mut request = request(input, "", /*text*/ None);
 
     split_model_request_messages(&mut request, &[])
-        .expect("model-generated tool call inputs should be projected");
+        .expect("paired oversized tool calls should be omitted atomically");
 
-    assert!(
-        request.input.iter().all(|item| {
-            estimate_item_token_count(item) <= MAX_MODEL_REQUEST_ITEM_TOKENS as i64
-        })
-    );
-    let [function_call, custom_call] = request.input.as_slice() else {
-        panic!("expected the two projected tool calls");
-    };
-    let ResponseItem::FunctionCall {
-        id,
-        name,
-        namespace,
-        arguments,
-        encrypted_function_args,
-        call_id,
-        internal_chat_message_metadata_passthrough,
-    } = function_call
-    else {
-        panic!("expected projected function call");
-    };
-    assert_eq!(id, &Some(function_id));
-    assert_eq!(name, "echo");
-    assert_eq!(namespace.as_deref(), Some("mcp"));
-    assert_eq!(call_id, "function-call");
-    assert_eq!(
-        internal_chat_message_metadata_passthrough,
-        &Some(metadata.clone())
-    );
-    assert_eq!(encrypted_function_args, &None);
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(arguments).expect("valid omission marker"),
-        serde_json::json!({
-            "_codex_tool_call_input_omitted": {
-                "original_argument_bytes": function_arguments.len(),
-                "encrypted_argument_bytes": encrypted_arguments.iter().map(String::len).sum::<usize>(),
-            }
-        })
-    );
-    let ResponseItem::CustomToolCall {
-        id,
-        status,
-        call_id,
-        name,
-        namespace,
-        input,
-        internal_chat_message_metadata_passthrough,
-    } = custom_call
-    else {
-        panic!("expected projected custom tool call");
-    };
-    assert_eq!(id, &Some(custom_id));
-    assert_eq!(status.as_deref(), Some("completed"));
-    assert_eq!(call_id, "custom-call");
-    assert_eq!(name, "custom");
-    assert_eq!(namespace.as_deref(), Some("tools"));
-    assert_eq!(internal_chat_message_metadata_passthrough, &Some(metadata));
-    let custom_input_bytes = custom_input.len();
-    assert_eq!(
-        input,
-        &format!(
-            "[tool call input omitted to fit model context limit; original bytes: {custom_input_bytes}]"
-        )
-    );
+    assert_eq!(request.input, vec![retained]);
 }
 
 #[test]

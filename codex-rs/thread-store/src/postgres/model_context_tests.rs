@@ -369,12 +369,32 @@ fn model_context_validation_accepts_request_projectable_items_and_rejects_unspli
         encrypted_content: Some("encrypted".repeat(10_000)),
         internal_chat_message_metadata_passthrough: None,
     };
+    let oversized_function_call = ResponseItem::FunctionCall {
+        id: None,
+        name: "function".to_string(),
+        namespace: None,
+        arguments: "argument".repeat(50_000),
+        encrypted_function_args: Some(vec!["encrypted".repeat(20_000)]),
+        call_id: "function-call".to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let oversized_custom_tool_call = ResponseItem::CustomToolCall {
+        id: None,
+        status: Some("completed".to_string()),
+        call_id: "custom-call".to_string(),
+        name: "custom".to_string(),
+        namespace: None,
+        input: "input".repeat(50_000),
+        internal_chat_message_metadata_passthrough: None,
+    };
 
     for accepted in [
         &multi_image_output,
         &encrypted_output,
         &oversized_compaction,
         &oversized_context_compaction,
+        &oversized_function_call,
+        &oversized_custom_tool_call,
     ] {
         let mut budget = ModelContextBudget::new(thread_id);
         validate_response_item(accepted, &mut budget)

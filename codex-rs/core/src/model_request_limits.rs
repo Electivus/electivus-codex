@@ -9,7 +9,6 @@ use std::collections::VecDeque;
 use std::ops::Range;
 
 use crate::context_manager::estimate_item_token_count;
-use crate::context_manager::project_tool_call_input_to_limit;
 use crate::context_manager::remove_corresponding_for;
 use crate::context_manager::truncate_output_item_to_limit;
 use crate::context_manager::updates::split_model_context_item_to_limit;
@@ -22,7 +21,8 @@ pub(crate) fn split_model_request_messages(
     request: &mut ResponsesApiRequest,
     tools: &[ToolSpec],
 ) -> Result<()> {
-    request.input = split_input_items(std::mem::take(&mut request.input))?;
+    let (input, _) = omit_oversized_tool_call_pairs(std::mem::take(&mut request.input));
+    request.input = split_input_items(input)?;
     validate_total_request_budget(request, tools)
 }
 
@@ -31,8 +31,20 @@ pub(crate) fn bound_replayed_model_request(
     tools: &[ToolSpec],
     replay_range: Range<usize>,
 ) -> Result<()> {
-    let replay_start = replay_range.start.min(request.input.len());
-    let replay_end = replay_range.end.min(request.input.len()).max(replay_start);
+    let original_replay_start = replay_range.start.min(request.input.len());
+    let original_replay_end = replay_range
+        .end
+        .min(request.input.len())
+        .max(original_replay_start);
+    let (input, omitted_positions) =
+        omit_oversized_tool_call_pairs(std::mem::take(&mut request.input));
+    let replay_start = original_replay_start.saturating_sub(
+        omitted_positions.partition_point(|position| *position < original_replay_start),
+    );
+    let replay_end = original_replay_end.saturating_sub(
+        omitted_positions.partition_point(|position| *position < original_replay_end),
+    );
+    request.input = input;
     let suffix = split_input_items(request.input.split_off(replay_end))?;
     let replay = request.input.split_off(replay_start);
     request.input = split_input_items(std::mem::take(&mut request.input))?;
@@ -82,6 +94,51 @@ pub(crate) fn bound_replayed_model_request(
     request.input.extend(replay.into_iter().flatten());
     request.input.extend(suffix);
     validate_total_request_budget(request, tools)
+}
+
+fn omit_oversized_tool_call_pairs(items: Vec<ResponseItem>) -> (Vec<ResponseItem>, Vec<usize>) {
+    let mut omitted = vec![false; items.len()];
+    for (position, item) in items.iter().enumerate() {
+        if estimate_item_token_count(item) <= MAX_MODEL_REQUEST_ITEM_TOKENS as i64 {
+            continue;
+        }
+        let corresponding_position = match item {
+            ResponseItem::FunctionCall { call_id, .. } => items.iter().position(|candidate| {
+                matches!(
+                    candidate,
+                    ResponseItem::FunctionCallOutput {
+                        call_id: Some(existing),
+                        ..
+                    } if existing == call_id
+                )
+            }),
+            ResponseItem::CustomToolCall { call_id, .. } => items.iter().position(|candidate| {
+                matches!(
+                    candidate,
+                    ResponseItem::CustomToolCallOutput {
+                        call_id: existing,
+                        ..
+                    } if existing == call_id
+                )
+            }),
+            _ => None,
+        };
+        if let Some(corresponding_position) = corresponding_position {
+            omitted[position] = true;
+            omitted[corresponding_position] = true;
+        }
+    }
+    let omitted_positions = omitted
+        .iter()
+        .enumerate()
+        .filter_map(|(position, omitted)| omitted.then_some(position))
+        .collect();
+    let retained = items
+        .into_iter()
+        .enumerate()
+        .filter_map(|(position, item)| (!omitted[position]).then_some(item))
+        .collect();
+    (retained, omitted_positions)
 }
 
 fn split_input_items(items: Vec<ResponseItem>) -> Result<Vec<ResponseItem>> {
@@ -220,7 +277,6 @@ fn split_and_validate_input_item(item: ResponseItem) -> Result<Vec<ResponseItem>
         {
             continue;
         }
-        let item = project_tool_call_input_to_limit(&item);
         let item = match &item {
             ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. } => {
                 truncate_output_item_to_limit(&item)

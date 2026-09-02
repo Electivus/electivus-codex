@@ -1719,6 +1719,40 @@ fn record_replayed_items_preserves_oversized_opaque_items_for_request_projection
 }
 
 #[test]
+fn record_replayed_items_preserves_oversized_tool_call_inputs() {
+    let items = vec![
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "function".to_string(),
+            namespace: None,
+            arguments: "argument".repeat(50_000),
+            encrypted_function_args: Some(vec!["encrypted".repeat(20_000)]),
+            call_id: "function-call".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::CustomToolCall {
+            id: None,
+            status: Some("completed".to_string()),
+            call_id: "custom-call".to_string(),
+            name: "custom".to_string(),
+            namespace: None,
+            input: "input".repeat(50_000),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+    assert!(
+        items
+            .iter()
+            .all(|item| estimate_item_token_count(item) > 10_000)
+    );
+    let mut history = ContextManager::new();
+
+    history.record_replayed_items(&items, TruncationPolicy::Tokens(100_000));
+
+    assert_eq!(raw_items(&history), items);
+}
+
+#[test]
 fn rollback_treats_an_oversized_agent_message_as_one_turn() {
     let agent_message = ResponseItem::AgentMessage {
         id: None,
