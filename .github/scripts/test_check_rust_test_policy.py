@@ -114,6 +114,18 @@ async fn conditional_test() {}
         ):
             self.assertIn(expected, issues)
 
+    def test_pending_upstream_ignore_cannot_reclassify_reserved_test(self) -> None:
+        test = next(iter(policy.TEMPORARY_CERTIFICATION_TESTS))
+        occurrence = policy.IgnoreOccurrence("src/upstream.rs", test, "ignore")
+        manifest = {
+            "ignores": {},
+            "pending_upstream_ignores": {
+                occurrence.identity: "helper-process|https://github.com/Electivus/electivus-codex/pull/207"
+            },
+        }
+        issues = "\n".join(policy.validate_ignore_policy([occurrence], manifest))
+        self.assertIn("inherited flaky test must be temporary-certification", issues)
+
 
 class QuarantinePolicyTests(unittest.TestCase):
     def setUp(self) -> None:

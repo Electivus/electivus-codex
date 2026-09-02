@@ -264,6 +264,13 @@ def validate_ignore_policy(
             issues.append(f"{identity}: unknown pending upstream category {category!r}")
         if category == "temporary-certification":
             issues.append(f"{identity}: pending upstream ignores cannot be temporary-certification")
+        occurrence = inventory.get(identity)
+        if (
+            identity not in records
+            and occurrence is not None
+            and occurrence.test in TEMPORARY_CERTIFICATION_TESTS
+        ):
+            issues.append(f"{identity}: inherited flaky test must be temporary-certification")
         if not separator or GITHUB_TRACKING_RE.fullmatch(tracking) is None:
             issues.append(
                 f"{identity}: pending upstream ignore requires a GitHub issue or pull request URL"
