@@ -196,4 +196,4 @@ if ((${#resource_args[@]} > 0)); then
 fi
 python_args+=(--force)
 
-"$python_bin" "${python_args[@]}"
+CODEX_REPO_ROOT="$repo_root" "$python_bin" "${python_args[@]}"

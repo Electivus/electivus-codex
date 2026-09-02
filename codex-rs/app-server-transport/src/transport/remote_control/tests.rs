@@ -37,8 +37,13 @@ use codex_login::save_auth;
 use codex_login::token_data::TokenData;
 use codex_login::token_data::parse_chatgpt_jwt_claims;
 use codex_protocol::auth::AuthMode;
+use codex_state::PostgresNamespaceAction;
+use codex_state::PostgresNamespaceConfig;
+use codex_state::PostgresPoolConfig;
+use codex_state::PostgresRuntimeStatePool;
 use codex_state::RemoteControlEnrollmentRecord;
 use codex_state::StateRuntime;
+use codex_state::manage_postgres_namespace;
 use codex_utils_absolute_path::test_support::PathExt;
 use futures::SinkExt;
 use futures::StreamExt;
@@ -181,7 +186,7 @@ async fn plain_start_resolves_persisted_remote_control_preference() {
             remote_control_target: None,
             server_name: test_server_name(),
         },
-        Some(state_db),
+        Some(state_db.remote_control_enrollment_store()),
         remote_control_auth_manager(),
         RemoteControlChannels {
             transport_event_tx,
@@ -208,6 +213,132 @@ async fn plain_start_resolves_persisted_remote_control_preference() {
         };
         assert_eq!(*desired_state_tx.borrow(), expected, "case {name}");
     }
+}
+
+#[tokio::test]
+#[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "this contract test connects only to a PostgreSQL pool"
+)]
+async fn postgres_contract_replicas_share_enrollment_with_websocket_preference_resolution()
+-> anyhow::Result<()> {
+    const TEST_DATABASE_URL_ENV: &str = "CODEX_TEST_POSTGRES_URL";
+    let schema = format!("codex_transport_rc_{}", uuid::Uuid::now_v7().simple());
+    let config = PostgresNamespaceConfig::new(
+        TEST_DATABASE_URL_ENV.to_string(),
+        schema.clone(),
+        PostgresPoolConfig::default(),
+    )?;
+    manage_postgres_namespace(config.clone(), PostgresNamespaceAction::Migrate).await?;
+    let database_url = std::env::var(TEST_DATABASE_URL_ENV)?;
+    mark_postgres_namespace_ready(&database_url, &schema).await?;
+    let writer = PostgresRuntimeStatePool::connect(config.clone()).await?;
+    let reader = PostgresRuntimeStatePool::connect(config).await?;
+    let writer_store = writer.remote_control_enrollment_store();
+    let reader_store = reader.remote_control_enrollment_store();
+    let remote_control_target = normalize_remote_control_url(TEST_REMOTE_CONTROL_URL)?;
+    let enrollment = RemoteControlEnrollment {
+        remote_control_target: remote_control_target.clone(),
+        account_id: "account_id".to_string(),
+        environment_id: "postgres-environment".to_string(),
+        server_id: "postgres-server".to_string(),
+        server_name: "PostgreSQL replica".to_string(),
+        remote_control_token: None,
+        expires_at: None,
+        next_refresh_at: None,
+    };
+    update_persisted_remote_control_enrollment(
+        Some(&writer_store),
+        &remote_control_target,
+        &enrollment.account_id,
+        Some("postgres-replica"),
+        Some(&enrollment),
+        /*remote_control_enabled*/ Some(true),
+    )
+    .await?;
+    let (transport_event_tx, _transport_event_rx) = mpsc::channel(CHANNEL_CAPACITY);
+    let (status_tx, _status_rx) = watch::channel(RemoteControlStatusChangedNotification {
+        status: RemoteControlConnectionStatus::Disabled,
+        server_name: test_server_name(),
+        installation_id: TEST_INSTALLATION_ID.to_string(),
+        environment_id: None,
+    });
+    let (desired_state_tx, _desired_state_rx) = watch::channel(RemoteControlDesiredState::Unknown);
+    let desired_state_tx = Arc::new(desired_state_tx);
+    let mut websocket = RemoteControlWebsocket::new(
+        RemoteControlWebsocketConfig {
+            remote_control_url: TEST_REMOTE_CONTROL_URL.to_string(),
+            installation_id: TEST_INSTALLATION_ID.to_string(),
+            remote_control_target: None,
+            server_name: test_server_name(),
+        },
+        Some(reader_store),
+        remote_control_auth_manager(),
+        RemoteControlChannels {
+            transport_event_tx,
+            status_publisher: RemoteControlStatusPublisher::new(status_tx),
+            current_enrollment: Arc::new(RemoteControlEnrollmentState::new(
+                /*enrollment*/ None,
+            )),
+            pairing_persistence_key: watch::channel(/*init*/ None).0,
+            desired_state_persistence_lock: Arc::new(Semaphore::new(1)),
+        },
+        CancellationToken::new(),
+        desired_state_tx.clone(),
+    );
+    assert!(
+        websocket
+            .resolve_unknown_desired_state(Some("postgres-replica"))
+            .await
+    );
+    assert_eq!(
+        *desired_state_tx.borrow(),
+        RemoteControlDesiredState::Enabled {
+            persistence_preference: Some(true),
+        }
+    );
+
+    writer.close().await;
+    reader.close().await;
+    let cleanup_pool = sqlx::PgPool::connect(&database_url).await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA \"{schema}\" CASCADE"
+    )))
+    .execute(&cleanup_pool)
+    .await?;
+    cleanup_pool.close().await;
+    Ok(())
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "this helper connects only to a PostgreSQL pool"
+)]
+async fn mark_postgres_namespace_ready(database_url: &str, schema: &str) -> anyhow::Result<()> {
+    let pool = sqlx::PgPool::connect(database_url).await?;
+    let migration = format!("\"{schema}\".runtime_state_migration");
+    let evidence = json!({
+        "sourceIdentity": "remote-control-transport-contract",
+        "sourceFingerprint": "remote-control-transport-contract-fingerprint",
+        "phase": "ready",
+        "ready": true,
+        "fencingToken": 4,
+        "namespaceDigest": "remote-control-transport-contract-digest",
+        "globalReferentialIntegrityValidated": true,
+        "canonicalThreadHistoryOrderingValidated": true,
+    });
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO {migration} (source_identity, source_fingerprint, phase, ready, \
+         phase_evidence, fencing_token) VALUES ($1, $2, 'ready', TRUE, $3, 4)"
+    )))
+    .bind("remote-control-transport-contract")
+    .bind("remote-control-transport-contract-fingerprint")
+    .bind(evidence)
+    .execute(&pool)
+    .await?;
+    pool.close().await;
+    Ok(())
 }
 
 #[tokio::test]
@@ -415,7 +546,7 @@ pub(super) fn remote_control_handle_with_current_enrollment(
         desired_state_rpc_lock: Arc::new(Semaphore::new(1)),
         desired_state_persistence_lock: Arc::new(Semaphore::new(1)),
         status_tx: Arc::new(status_tx),
-        state_db: None,
+        enrollment_store: None,
         remote_control_url: remote_control_url.to_string(),
         current_enrollment,
         pairing_persistence_key: watch::channel(None).0,
@@ -431,7 +562,11 @@ async fn ephemeral_enable_preserves_durable_preference() {
         TEST_REMOTE_CONTROL_URL,
         remote_control_auth_manager(),
     );
-    remote_handle.state_db = Some(remote_control_state_runtime(&codex_home).await);
+    remote_handle.enrollment_store = Some(
+        remote_control_state_runtime(&codex_home)
+            .await
+            .remote_control_enrollment_store(),
+    );
     remote_handle
         .desired_state_tx
         .send_replace(RemoteControlDesiredState::Enabled {
@@ -1084,7 +1219,7 @@ async fn remote_control_start_allows_missing_auth_when_enabled() {
 }
 
 #[tokio::test]
-async fn remote_control_start_reports_missing_state_db_as_disabled_when_enabled() {
+async fn remote_control_start_reports_missing_enrollment_persistence_as_disabled_when_enabled() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener should bind");
@@ -1106,7 +1241,7 @@ async fn remote_control_start_reports_missing_state_db_as_disabled_when_enabled(
         RemoteControlStartupMode::EnabledEphemeral,
     )
     .await
-    .expect("remote control should start disabled without sqlite state db");
+    .expect("remote control should start disabled without enrollment persistence");
     let mut status_rx = remote_handle.status_receiver();
     assert_eq!(
         status_rx.borrow().clone(),
@@ -1120,20 +1255,25 @@ async fn remote_control_start_reports_missing_state_db_as_disabled_when_enabled(
 
     timeout(Duration::from_millis(100), listener.accept())
         .await
-        .expect_err("remote control should not connect without sqlite state db");
+        .expect_err("remote control should not connect without enrollment persistence");
 
+    let enable_error = remote_handle
+        .enable_ephemeral()
+        .expect_err("enable should fail");
     assert_eq!(
-        remote_handle
-            .enable_ephemeral()
-            .expect_err("enable should fail"),
+        enable_error,
         RemoteControlEnableError::Unavailable(super::RemoteControlUnavailable)
+    );
+    assert_eq!(
+        enable_error.to_string(),
+        "remote control enrollment persistence is unavailable"
     );
     timeout(Duration::from_millis(100), listener.accept())
         .await
-        .expect_err("remote control should remain disabled without sqlite state db");
+        .expect_err("remote control should remain disabled without enrollment persistence");
     timeout(Duration::from_millis(20), status_rx.changed())
         .await
-        .expect_err("status should remain disabled without sqlite state db");
+        .expect_err("status should remain disabled without enrollment persistence");
 
     shutdown_token.cancel();
     timeout(Duration::from_secs(1), remote_task)
@@ -1708,7 +1848,7 @@ async fn remote_control_http_mode_refreshes_persisted_enrollment_before_connecti
         next_refresh_at: None,
     };
     update_persisted_remote_control_enrollment(
-        Some(state_db.as_ref()),
+        Some(&state_db.remote_control_enrollment_store()),
         &remote_control_target,
         "account_id",
         /*app_server_client_name*/ None,
@@ -1793,7 +1933,7 @@ async fn remote_control_http_mode_refreshes_persisted_enrollment_before_connecti
     );
     assert_eq!(
         load_persisted_remote_control_enrollment(
-            Some(state_db.as_ref()),
+            Some(&state_db.remote_control_enrollment_store()),
             &remote_control_target,
             "account_id",
             /*app_server_client_name*/ None,
@@ -1829,7 +1969,7 @@ async fn remote_control_stdio_mode_waits_for_client_name_before_connecting() {
         next_refresh_at: None,
     };
     update_persisted_remote_control_enrollment(
-        Some(state_db.as_ref()),
+        Some(&state_db.remote_control_enrollment_store()),
         &remote_control_target,
         "account_id",
         Some(app_server_client_name),
@@ -2024,7 +2164,7 @@ async fn persisted_enable_does_not_follow_auth_to_an_account_without_a_preferenc
         next_refresh_at: None,
     };
     update_persisted_remote_control_enrollment(
-        Some(state_db.as_ref()),
+        Some(&state_db.remote_control_enrollment_store()),
         &remote_control_target,
         "account_a",
         /*app_server_client_name*/ None,
@@ -2142,7 +2282,7 @@ async fn remote_control_http_mode_reenrolls_when_refresh_reports_stale_enrollmen
         next_refresh_at: None,
     };
     update_persisted_remote_control_enrollment(
-        Some(state_db.as_ref()),
+        Some(&state_db.remote_control_enrollment_store()),
         &remote_control_target,
         "account_id",
         /*app_server_client_name*/ None,
@@ -2267,7 +2407,7 @@ async fn remote_control_http_mode_reenrolls_after_explicit_missing_server_404() 
         next_refresh_at: None,
     };
     update_persisted_remote_control_enrollment(
-        Some(state_db.as_ref()),
+        Some(&state_db.remote_control_enrollment_store()),
         &remote_control_target,
         "account_id",
         /*app_server_client_name*/ None,
@@ -2405,7 +2545,7 @@ async fn remote_control_http_mode_preserves_stale_enrollment_when_reenrollment_f
         next_refresh_at: None,
     };
     update_persisted_remote_control_enrollment(
-        Some(state_db.as_ref()),
+        Some(&state_db.remote_control_enrollment_store()),
         &remote_control_target,
         "account_id",
         /*app_server_client_name*/ None,
@@ -2527,7 +2667,7 @@ async fn remote_control_http_mode_preserves_enrollment_after_generic_websocket_4
         next_refresh_at: None,
     };
     update_persisted_remote_control_enrollment(
-        Some(state_db.as_ref()),
+        Some(&state_db.remote_control_enrollment_store()),
         &remote_control_target,
         "account_id",
         /*app_server_client_name*/ None,
@@ -2603,7 +2743,7 @@ async fn remote_control_http_mode_preserves_enrollment_after_generic_websocket_4
 
     assert_eq!(
         load_persisted_remote_control_enrollment(
-            Some(state_db.as_ref()),
+            Some(&state_db.remote_control_enrollment_store()),
             &remote_control_target,
             "account_id",
             /*app_server_client_name*/ None,

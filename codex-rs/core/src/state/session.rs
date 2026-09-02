@@ -144,6 +144,17 @@ impl SessionState {
         self.auto_compact_window.clear_prefill();
     }
 
+    pub(crate) fn replace_replayed_annotated_history(
+        &mut self,
+        items: Vec<ResponseItemEnvelope>,
+        reference_context_item: Option<TurnContextItem>,
+    ) {
+        self.history.replace_annotated_replayed(items);
+        self.history
+            .set_reference_context_item(reference_context_item);
+        self.auto_compact_window.clear_prefill();
+    }
+
     pub(crate) fn set_token_info(&mut self, info: Option<TokenUsageInfo>) {
         self.history.set_token_info(info);
     }

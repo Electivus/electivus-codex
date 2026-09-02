@@ -1,0 +1,2454 @@
+#!/usr/bin/env python3
+
+import fcntl
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import tempfile
+import textwrap
+import time
+import unittest
+
+
+INSTALL_SCRIPT = Path(__file__).with_name("install-local.sh")
+SOURCE_REPO = INSTALL_SCRIPT.parents[2]
+TARGET = "x86_64-unknown-linux-gnu"
+RELEASE_PREFIX = f"local-debug-{TARGET}"
+
+
+class InstallLocalShTest(unittest.TestCase):
+    def test_default_build_preserves_dirty_workspace_and_uses_development_version(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            cargo_toml = repo / "codex-rs" / "Cargo.toml"
+            cargo_lock = repo / "codex-rs" / "Cargo.lock"
+            cargo_toml.write_bytes(cargo_toml.read_bytes() + b"# dirty manifest\r\n")
+            cargo_lock.write_bytes(cargo_lock.read_bytes() + b"# dirty lock\r\n")
+            (repo / "untracked-probe.txt").write_text("untracked\n", encoding="utf-8")
+            original_files = cargo_toml.read_bytes(), cargo_lock.read_bytes()
+
+            result = run_installer(root, repo)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                read_build_log(root),
+                {
+                    "version": "0.0.0",
+                    "cargo_profile": "dev",
+                    "debug_assertions": "false",
+                    "rg_bin": None,
+                    "probe": "untracked\n",
+                },
+            )
+            self.assertEqual(
+                (cargo_toml.read_bytes(), cargo_lock.read_bytes()),
+                original_files,
+            )
+
+    def test_automatic_version_uses_greatest_ancestral_release_and_restores_bytes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            cargo_toml = repo / "codex-rs" / "Cargo.toml"
+            cargo_lock = repo / "codex-rs" / "Cargo.lock"
+            original_files = cargo_toml.read_bytes(), cargo_lock.read_bytes()
+
+            result = run_installer(
+                root,
+                repo,
+                arguments=["--use-upstream-version"],
+                mutate_lock=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            build_log = read_build_log(root)
+            self.assertEqual(build_log["version"], "0.148.0-alpha.12")
+            build_arguments = read_build_arguments(root)
+            self.assertIn("--package-version", build_arguments)
+            self.assertNotIn("--version", build_arguments)
+            self.assertEqual(
+                (cargo_toml.read_bytes(), cargo_lock.read_bytes()),
+                original_files,
+            )
+
+    def test_explicit_override_precedes_environment_and_already_versioned_wins(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+
+            result = run_installer(
+                root,
+                repo,
+                arguments=["--upstream-version", "2.0.0-beta.1"],
+                extra_env={"CODEX_UPSTREAM_VERSION": "3.0.0"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(read_build_log(root)["version"], "2.0.0-beta.1")
+
+            write_workspace_version(repo / "codex-rs" / "Cargo.toml", "4.5.6")
+            second_root = root / "second"
+            second_root.mkdir()
+            result = run_installer(
+                second_root,
+                repo,
+                arguments=["--upstream-version", "not-semver"],
+                extra_env={"CODEX_UPSTREAM_VERSION": "also-invalid"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(read_build_log(second_root)["version"], "4.5.6")
+
+    def test_environment_override_enables_versioning_and_invalid_value_fails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+
+            result = run_installer(
+                root,
+                repo,
+                extra_env={"CODEX_UPSTREAM_VERSION": "5.6.7+local.1"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(read_build_log(root)["version"], "5.6.7+local.1")
+
+            invalid_root = root / "invalid"
+            invalid_root.mkdir()
+            result = run_installer(
+                invalid_root,
+                repo,
+                extra_env={"CODEX_UPSTREAM_VERSION": "rust-v5.6.7"},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("tag prefixes are not accepted", result.stderr)
+            self.assertFalse((invalid_root / "build.json").exists())
+
+    def test_windows_delegation_rejects_unix_only_version_sources(self) -> None:
+        cases = (
+            ("argument", ["--upstream-version", "1.2.3"], {}),
+            ("equals-argument", ["--upstream-version=1.2.3"], {}),
+            ("environment", [], {"CODEX_UPSTREAM_VERSION": "1.2.3"}),
+        )
+        for name, arguments, extra_env in cases:
+            with (
+                self.subTest(name=name),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                repo = create_repo(root)
+                env = installer_env(root, repo, extra_env=extra_env)
+                fake_bin = Path(env["PATH"].split(os.pathsep, 1)[0])
+                delegated = root / "powershell-delegated"
+                write_executable(
+                    fake_bin / "uname",
+                    '#!/bin/sh\ncase "$1" in -s) echo MINGW64_NT-10.0;; '
+                    "-m) echo x86_64;; *) echo MINGW64_NT-10.0;; esac\n",
+                )
+                write_executable(
+                    fake_bin / "pwsh",
+                    '#!/bin/sh\ntouch "$CODEX_TEST_DELEGATED"\nexit 97\n',
+                )
+                env["CODEX_TEST_DELEGATED"] = str(delegated)
+
+                result = subprocess.run(
+                    [
+                        "sh",
+                        str(repo / "scripts/install/install-local.sh"),
+                        *arguments,
+                    ],
+                    cwd=repo,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                source = (
+                    "CODEX_UPSTREAM_VERSION"
+                    if name == "environment"
+                    else "--upstream-version"
+                )
+                self.assertIn(f"{source} is Unix-only", result.stderr)
+                self.assertIn("issue #167", result.stderr)
+                self.assertFalse(delegated.exists())
+                self.assertFalse((root / "build.json").exists())
+
+    def test_no_provable_baseline_fails_without_fetching(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root, include_releases=False)
+            refs_before = git(repo, "show-ref").stdout
+
+            result = run_installer(
+                root,
+                repo,
+                arguments=["--use-upstream-version"],
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("shallow or synthetic checkout", result.stderr)
+            self.assertIn("--upstream-version <SEMVER>", result.stderr)
+            self.assertEqual(git(repo, "show-ref").stdout, refs_before)
+
+    def test_build_failure_and_signal_restore_files_without_pruning(self) -> None:
+        for build_mode in ("fail", "signal"):
+            with self.subTest(build_mode=build_mode):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    repo = create_repo(root)
+                    releases_dir = prepare_previous_releases(root)
+                    cargo_toml = repo / "codex-rs" / "Cargo.toml"
+                    cargo_lock = repo / "codex-rs" / "Cargo.lock"
+                    original_files = cargo_toml.read_bytes(), cargo_lock.read_bytes()
+
+                    result = run_installer(
+                        root,
+                        repo,
+                        arguments=["--use-upstream-version"],
+                        build_mode=build_mode,
+                        mutate_lock=True,
+                    )
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(
+                        (cargo_toml.read_bytes(), cargo_lock.read_bytes()),
+                        original_files,
+                    )
+                    self.assertEqual(
+                        sorted(path.name for path in releases_dir.iterdir()),
+                        ["previous-1", "previous-2", "previous-3"],
+                    )
+
+    def test_direct_signals_stop_and_reap_the_package_builder(self) -> None:
+        for sent_signal, expected_status in (
+            (signal.SIGHUP, 129),
+            (signal.SIGINT, 130),
+            (signal.SIGTERM, 143),
+        ):
+            with (
+                self.subTest(sent_signal=sent_signal),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                repo = create_repo(root)
+                continue_path = root / "continue-build"
+                after_continue = root / "builder-mutated-after-cleanup"
+                cargo_toml = repo / "codex-rs/Cargo.toml"
+                cargo_lock = repo / "codex-rs/Cargo.lock"
+                original_files = cargo_toml.read_bytes(), cargo_lock.read_bytes()
+                env = installer_env(
+                    root,
+                    repo,
+                    build_mode="hold",
+                    mutate_lock=True,
+                    extra_env={
+                        "CODEX_TEST_CONTINUE": str(continue_path),
+                        "CODEX_TEST_AFTER_CONTINUE": str(after_continue),
+                    },
+                )
+                process = subprocess.Popen(
+                    [
+                        "sh",
+                        str(repo / "scripts/install/install-local.sh"),
+                        "--use-upstream-version",
+                    ],
+                    cwd=repo,
+                    env=env,
+                    start_new_session=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    wait_for_path(root / "build.ready")
+                    os.kill(process.pid, sent_signal)
+                    stdout, stderr = communicate_bounded(process)
+
+                    self.assertEqual(
+                        process.returncode, expected_status, stderr + stdout
+                    )
+                    self.assertEqual(
+                        (cargo_toml.read_bytes(), cargo_lock.read_bytes()),
+                        original_files,
+                    )
+                    self.assertFalse(
+                        (root / "codex-home/packages/standalone/current").exists()
+                    )
+                    continue_path.touch()
+                    self.assertFalse(after_continue.exists())
+                finally:
+                    continue_path.touch(exist_ok=True)
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate(timeout=2)
+
+    def test_direct_signals_rollback_and_reap_visible_candidate_verification(
+        self,
+    ) -> None:
+        for sent_signal, expected_status in (
+            (signal.SIGHUP, 129),
+            (signal.SIGINT, 130),
+            (signal.SIGTERM, 143),
+        ):
+            with (
+                self.subTest(sent_signal=sent_signal),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                repo = create_repo(root)
+                releases_dir = prepare_previous_releases(root)
+                previous_release = releases_dir / "previous-1"
+                (previous_release / "bin").mkdir()
+                write_executable(
+                    previous_release / "bin/codex",
+                    "#!/bin/sh\nprintf 'previous installation\\n'\n",
+                )
+                current = releases_dir.parent / "current"
+                current.symlink_to(previous_release)
+                visible_command = root / "install-bin/codex"
+                visible_command.parent.mkdir()
+                visible_command.symlink_to(current / "bin/codex")
+                previous_current_target = os.readlink(current)
+                previous_command_target = os.readlink(visible_command)
+                verify_continue = root / "continue-verification"
+                verify_ready = root / "verify.ready"
+                after_continue = root / "verifier-mutated-after-cleanup"
+                env = installer_env(
+                    root,
+                    repo,
+                    extra_env={
+                        "CODEX_TEST_VERIFY_READY": str(verify_ready),
+                        "CODEX_TEST_VERIFY_CONTINUE": str(verify_continue),
+                        "CODEX_TEST_VERIFY_AFTER_CONTINUE": str(after_continue),
+                    },
+                )
+                process = subprocess.Popen(
+                    ["sh", str(repo / "scripts/install/install-local.sh")],
+                    cwd=repo,
+                    env=env,
+                    start_new_session=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    wait_for_path(verify_ready)
+                    self.assertNotEqual(os.readlink(current), previous_current_target)
+                    os.kill(process.pid, sent_signal)
+                    stdout, stderr = communicate_bounded(process)
+
+                    self.assertEqual(
+                        process.returncode, expected_status, stderr + stdout
+                    )
+                    self.assertEqual(os.readlink(current), previous_current_target)
+                    self.assertEqual(
+                        os.readlink(visible_command), previous_command_target
+                    )
+                    verify_continue.touch()
+                    self.assertFalse(after_continue.exists())
+                finally:
+                    verify_continue.touch(exist_ok=True)
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate(timeout=2)
+
+    def test_term_after_current_swap_restores_previous_current(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            releases_dir = prepare_previous_releases(root)
+            previous_release = releases_dir / "previous-1"
+            (previous_release / "bin").mkdir()
+            write_executable(previous_release / "bin/codex", "#!/bin/sh\nexit 0\n")
+            current = releases_dir.parent / "current"
+            current.symlink_to(previous_release)
+            previous_current_target = os.readlink(current)
+            visible_command = root / "install-bin/codex"
+            visible_command.parent.mkdir()
+            visible_command.symlink_to(current / "bin/codex")
+            env = installer_env(root, repo)
+            install_current_swap_signal(env)
+
+            process = subprocess.run(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(process.returncode, 143, process.stderr + process.stdout)
+            self.assertEqual(os.readlink(current), previous_current_target)
+
+    def test_term_after_current_swap_preserves_concurrent_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            releases_dir = prepare_previous_releases(root)
+            previous_release = releases_dir / "previous-1"
+            (previous_release / "bin").mkdir()
+            write_executable(previous_release / "bin/codex", "#!/bin/sh\nexit 0\n")
+            current = releases_dir.parent / "current"
+            current.symlink_to(previous_release)
+            visible_command = root / "install-bin/codex"
+            visible_command.parent.mkdir()
+            visible_command.symlink_to(current / "bin/codex")
+            env = installer_env(
+                root,
+                repo,
+                extra_env={"CODEX_TEST_CURRENT_SWAP_CONCURRENT": "1"},
+            )
+            install_current_swap_signal(env)
+
+            process = subprocess.run(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(process.returncode, 143, process.stderr + process.stdout)
+            self.assertTrue(current.is_dir())
+            self.assertEqual(
+                (current / "concurrent-owner.txt").read_text(encoding="utf-8"),
+                "keep in place\n",
+            )
+            recovery_paths = list(current.parent.glob(".activation-recovery.current.*"))
+            self.assertEqual(len(recovery_paths), 1)
+            self.assertTrue((recovery_paths[0] / "previous.value").is_file())
+
+    def test_concurrent_workspace_edit_is_preserved_and_blocks_activation(self) -> None:
+        for edited_name in ("Cargo.toml", "Cargo.lock"):
+            with (
+                self.subTest(edited_name=edited_name),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                repo = create_repo(root)
+                continue_path = root / "continue-build"
+                env = installer_env(
+                    root,
+                    repo,
+                    build_mode="hold",
+                    extra_env={"CODEX_TEST_CONTINUE": str(continue_path)},
+                )
+                process = subprocess.Popen(
+                    [
+                        "sh",
+                        str(repo / "scripts/install/install-local.sh"),
+                        "--use-upstream-version",
+                    ],
+                    cwd=repo,
+                    env=env,
+                    start_new_session=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                edited_path = repo / "codex-rs" / edited_name
+                try:
+                    wait_for_path(root / "build.ready")
+                    edited_path.write_bytes(
+                        edited_path.read_bytes() + b"# concurrent edit\n"
+                    )
+                    concurrent_bytes = edited_path.read_bytes()
+                    continue_path.touch()
+                    stdout, stderr = process.communicate(timeout=10)
+
+                    self.assertNotEqual(process.returncode, 0, stdout)
+                    self.assertEqual(edited_path.read_bytes(), concurrent_bytes)
+                    self.assertIn(
+                        f"Concurrent workspace edit detected in {edited_name}", stderr
+                    )
+                    transaction_dir = version_transaction_dir(repo)
+                    self.assertTrue((transaction_dir / "Cargo.toml.original").is_file())
+                    self.assertTrue((transaction_dir / "Cargo.lock.original").is_file())
+                    self.assertFalse(
+                        (root / "codex-home/packages/standalone/current").exists()
+                    )
+                finally:
+                    continue_path.touch(exist_ok=True)
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate(timeout=2)
+
+    def test_edit_during_cargo_metadata_is_not_rebaselined_or_lost(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            metadata_ready = root / "metadata.ready"
+            metadata_continue = root / "metadata.continue"
+            cargo_lock = repo / "codex-rs/Cargo.lock"
+            env = installer_env(
+                root,
+                repo,
+                extra_env={
+                    "CODEX_TEST_METADATA_READY": str(metadata_ready),
+                    "CODEX_TEST_METADATA_CONTINUE": str(metadata_continue),
+                },
+            )
+            process = subprocess.Popen(
+                [
+                    "sh",
+                    str(repo / "scripts/install/install-local.sh"),
+                    "--use-upstream-version",
+                ],
+                cwd=repo,
+                env=env,
+                start_new_session=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                wait_for_path(metadata_ready)
+                cargo_lock.write_bytes(cargo_lock.read_bytes() + b"# metadata race\n")
+                raced_bytes = cargo_lock.read_bytes()
+                metadata_continue.touch()
+                stdout, stderr = process.communicate(timeout=10)
+
+                self.assertNotEqual(process.returncode, 0, stdout)
+                self.assertEqual(cargo_lock.read_bytes(), raced_bytes)
+                self.assertIn(
+                    "Concurrent workspace edit detected in Cargo.lock", stderr
+                )
+                transaction_dir = version_transaction_dir(repo)
+                self.assertTrue((transaction_dir / "Cargo.lock.original").is_file())
+                self.assertFalse(
+                    (root / "codex-home/packages/standalone/current").exists()
+                )
+            finally:
+                metadata_continue.touch(exist_ok=True)
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=2)
+
+    def test_workspace_edit_after_final_comparison_is_never_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            cargo_toml = repo / "codex-rs/Cargo.toml"
+            race_bytes = b"# edit after final comparison\n"
+            env = installer_env(
+                root,
+                repo,
+                extra_env={
+                    "CODEX_TEST_CMP_RACE_TARGET": str(cargo_toml),
+                    "CODEX_TEST_CMP_RACE_BYTES": race_bytes.decode(),
+                    "CODEX_TEST_CMP_RACE_COUNT": str(root / "cmp-count"),
+                },
+            )
+            install_cmp_restore_race(env)
+
+            result = subprocess.run(
+                [
+                    "sh",
+                    str(repo / "scripts/install/install-local.sh"),
+                    "--use-upstream-version",
+                ],
+                cwd=repo,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(cargo_toml.read_bytes().endswith(race_bytes))
+            self.assertTrue(
+                (root / "codex-home/packages/standalone/current").is_symlink()
+            )
+
+    def test_signal_terminates_and_reaps_builder_grandchild_before_restore(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            grandchild_pid_file = root / "grandchild.pid"
+            grandchild_continue = root / "grandchild.continue"
+            grandchild_after = root / "grandchild.after"
+            env = installer_env(
+                root,
+                repo,
+                build_mode="grandchild-hold",
+                extra_env={
+                    "CODEX_TEST_GRANDCHILD_PID": str(grandchild_pid_file),
+                    "CODEX_TEST_CONTINUE": str(grandchild_continue),
+                    "CODEX_TEST_AFTER_CONTINUE": str(grandchild_after),
+                },
+            )
+            process = subprocess.Popen(
+                [
+                    "sh",
+                    str(repo / "scripts/install/install-local.sh"),
+                    "--use-upstream-version",
+                ],
+                cwd=repo,
+                env=env,
+                start_new_session=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                wait_for_path(grandchild_pid_file)
+                grandchild_pid = int(grandchild_pid_file.read_text(encoding="utf-8"))
+                os.kill(grandchild_pid, 0)
+                os.kill(process.pid, signal.SIGTERM)
+                stdout, stderr = communicate_bounded(process)
+
+                self.assertEqual(process.returncode, 143, stderr + stdout)
+                wait_for_process_exit(grandchild_pid)
+                grandchild_continue.touch()
+                time.sleep(0.1)
+                self.assertFalse(grandchild_after.exists())
+                self.assertFalse(version_transaction_dir(repo).exists())
+            finally:
+                grandchild_continue.touch(exist_ok=True)
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=2)
+
+    def test_signal_terminates_builder_descendant_in_a_new_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            descendant_pid_file = root / "new-session-descendant.pid"
+            descendant_continue = root / "new-session-descendant.continue"
+            descendant_after = root / "new-session-descendant.after"
+            env = installer_env(
+                root,
+                repo,
+                build_mode="new-session-grandchild-hold",
+                extra_env={
+                    "CODEX_TEST_GRANDCHILD_PID": str(descendant_pid_file),
+                    "CODEX_TEST_CONTINUE": str(descendant_continue),
+                    "CODEX_TEST_AFTER_CONTINUE": str(descendant_after),
+                },
+            )
+            process = subprocess.Popen(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                start_new_session=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            descendant_pid = None
+            try:
+                wait_for_path(descendant_pid_file)
+                descendant_pid = int(descendant_pid_file.read_text(encoding="utf-8"))
+                os.kill(descendant_pid, 0)
+                os.kill(process.pid, signal.SIGTERM)
+                stdout, stderr = communicate_bounded(process)
+
+                self.assertEqual(process.returncode, 143, stderr + stdout)
+                wait_for_process_exit(descendant_pid)
+                descendant_continue.touch()
+                time.sleep(0.1)
+                self.assertFalse(descendant_after.exists())
+            finally:
+                descendant_continue.touch(exist_ok=True)
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=2)
+                if descendant_pid is not None:
+                    try:
+                        os.kill(descendant_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_activation_failure_restores_prior_links_command_and_workspace(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            releases_dir = prepare_previous_releases(root)
+            previous_release = releases_dir / "previous-1"
+            (previous_release / "bin").mkdir()
+            write_executable(
+                previous_release / "bin/codex",
+                "#!/bin/sh\nprintf 'previous installation\\n'\n",
+            )
+            current = releases_dir.parent / "current"
+            current.symlink_to(previous_release)
+            visible_command = root / "install-bin/codex"
+            visible_command.parent.mkdir()
+            visible_command.symlink_to(current / "bin/codex")
+            previous_current_target = os.readlink(current)
+            previous_command_target = os.readlink(visible_command)
+            cargo_toml = repo / "codex-rs" / "Cargo.toml"
+            cargo_lock = repo / "codex-rs" / "Cargo.lock"
+            original_files = cargo_toml.read_bytes(), cargo_lock.read_bytes()
+
+            result = run_installer(
+                root,
+                repo,
+                arguments=["--use-upstream-version"],
+                codex_exit=19,
+                mutate_lock=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(
+                (cargo_toml.read_bytes(), cargo_lock.read_bytes()),
+                original_files,
+            )
+            self.assertEqual(os.readlink(current), previous_current_target)
+            self.assertEqual(os.readlink(visible_command), previous_command_target)
+            previous_version = subprocess.run(
+                [str(visible_command), "--version"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(previous_version.returncode, 0, previous_version.stderr)
+            self.assertEqual(previous_version.stdout, "previous installation\n")
+            self.assertGreaterEqual(len(list(releases_dir.iterdir())), 4)
+
+    def test_activation_rollback_preserves_concurrent_path_replacements(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            releases_dir = prepare_previous_releases(root)
+            previous_release = releases_dir / "previous-1"
+            (previous_release / "bin").mkdir()
+            write_executable(previous_release / "bin/codex", "#!/bin/sh\nexit 0\n")
+            current = releases_dir.parent / "current"
+            current.symlink_to(previous_release)
+            visible_command = root / "install-bin/codex"
+            visible_command.parent.mkdir()
+            visible_command.symlink_to(current / "bin/codex")
+            verify_ready = root / "verify.ready"
+            verify_continue = root / "verify.continue"
+            env = installer_env(
+                root,
+                repo,
+                codex_exit=19,
+                extra_env={
+                    "CODEX_TEST_VERIFY_READY": str(verify_ready),
+                    "CODEX_TEST_VERIFY_CONTINUE": str(verify_continue),
+                },
+            )
+            process = subprocess.Popen(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                wait_for_path(verify_ready)
+                current.unlink()
+                user_current = root / "user-current"
+                user_current.mkdir()
+                current.symlink_to(user_current)
+                visible_command.unlink()
+                user_command = b"#!/bin/sh\nprintf 'user edit\\n'\n"
+                visible_command.write_bytes(user_command)
+                visible_command.chmod(0o755)
+                verify_continue.touch()
+                stdout, stderr = process.communicate(timeout=10)
+
+                self.assertNotEqual(process.returncode, 0, stdout)
+                self.assertEqual(current.resolve(), user_current)
+                self.assertEqual(visible_command.read_bytes(), user_command)
+                self.assertIn("Concurrent activation edit detected", stderr)
+                self.assertIn("Activation recovery material retained at:", stderr)
+            finally:
+                verify_continue.touch(exist_ok=True)
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+
+    def test_activation_rollback_preserves_concurrent_directory_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            releases_dir = prepare_previous_releases(root)
+            previous_release = releases_dir / "previous-1"
+            (previous_release / "bin").mkdir()
+            write_executable(previous_release / "bin/codex", "#!/bin/sh\nexit 0\n")
+            current = releases_dir.parent / "current"
+            current.symlink_to(previous_release)
+            visible_command = root / "install-bin/codex"
+            visible_command.parent.mkdir()
+            visible_command.symlink_to(current / "bin/codex")
+            verify_ready = root / "verify.ready"
+            verify_continue = root / "verify.continue"
+            env = installer_env(
+                root,
+                repo,
+                codex_exit=19,
+                extra_env={
+                    "CODEX_TEST_VERIFY_READY": str(verify_ready),
+                    "CODEX_TEST_VERIFY_CONTINUE": str(verify_continue),
+                },
+            )
+            process = subprocess.Popen(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                wait_for_path(verify_ready)
+                current.unlink()
+                current.mkdir()
+                concurrent_content = current / "concurrent-owner.txt"
+                concurrent_content.write_text("keep in place\n", encoding="utf-8")
+                verify_continue.touch()
+                stdout, stderr = process.communicate(timeout=10)
+
+                self.assertNotEqual(process.returncode, 0, stdout)
+                self.assertTrue(current.is_dir())
+                self.assertEqual(
+                    concurrent_content.read_text(encoding="utf-8"),
+                    "keep in place\n",
+                )
+                self.assertIn("Concurrent activation edit detected", stderr)
+                self.assertIn("Activation recovery material retained at:", stderr)
+            finally:
+                verify_continue.touch(exist_ok=True)
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+
+    def test_activation_rollback_puts_back_object_swapped_before_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            releases_dir = prepare_previous_releases(root)
+            previous_release = releases_dir / "previous-1"
+            (previous_release / "bin").mkdir()
+            write_executable(previous_release / "bin/codex", "#!/bin/sh\nexit 0\n")
+            current = releases_dir.parent / "current"
+            current.symlink_to(previous_release)
+            visible_command = root / "install-bin/codex"
+            visible_command.parent.mkdir()
+            visible_command.symlink_to(current / "bin/codex")
+            raced_identity = root / "raced-identity"
+            env = installer_env(root, repo, codex_exit=19)
+            install_activation_claim_race(env, current, raced_identity)
+
+            result = subprocess.run(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            current_stat = current.lstat()
+            self.assertEqual(
+                f"{current_stat.st_dev}:{current_stat.st_ino}:{current_stat.st_mode}",
+                raced_identity.read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                (current / "concurrent-owner.txt").read_text(encoding="utf-8"),
+                "keep in place\n",
+            )
+            recovery_paths = list(current.parent.glob(".activation-recovery.current.*"))
+            self.assertEqual(len(recovery_paths), 1)
+            self.assertFalse((recovery_paths[0] / "claimed-value").exists())
+            self.assertIn("Concurrent activation edit detected", result.stderr)
+            self.assertIn("Activation recovery material retained at:", result.stderr)
+
+    def test_activation_claim_race_preserves_successor_and_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            releases_dir = prepare_previous_releases(root)
+            previous_release = releases_dir / "previous-1"
+            (previous_release / "bin").mkdir()
+            write_executable(previous_release / "bin/codex", "#!/bin/sh\nexit 0\n")
+            current = releases_dir.parent / "current"
+            current.symlink_to(previous_release)
+            visible_command = root / "install-bin/codex"
+            visible_command.parent.mkdir()
+            visible_command.symlink_to(current / "bin/codex")
+            raced_identity = root / "raced-identity"
+            env = installer_env(root, repo, codex_exit=19)
+            install_activation_claim_race(
+                env,
+                current,
+                raced_identity,
+                successor="successor value\n",
+            )
+
+            result = subprocess.run(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(current.read_text(encoding="utf-8"), "successor value\n")
+            recovery_paths = list(current.parent.glob(".activation-recovery.current.*"))
+            self.assertEqual(len(recovery_paths), 1)
+            claimed_path = recovery_paths[0] / "claimed-value"
+            claimed_stat = claimed_path.lstat()
+            self.assertEqual(
+                f"{claimed_stat.st_dev}:{claimed_stat.st_ino}:{claimed_stat.st_mode}",
+                raced_identity.read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                (claimed_path / "concurrent-owner.txt").read_text(encoding="utf-8"),
+                "keep in place\n",
+            )
+            self.assertIn("Another activation edit appeared", result.stderr)
+            self.assertIn("Activation recovery material retained at:", result.stderr)
+
+    def test_missing_lockfile_is_restored_as_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            cargo_lock = repo / "codex-rs" / "Cargo.lock"
+            cargo_lock.unlink()
+
+            result = run_installer(
+                root,
+                repo,
+                arguments=["--use-upstream-version"],
+                mutate_lock=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(cargo_lock.exists())
+
+    def test_forced_termination_marker_blocks_other_install_root_without_restoring(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+
+            killed = run_installer(
+                root,
+                repo,
+                arguments=["--use-upstream-version"],
+                build_mode="kill",
+                mutate_lock=True,
+            )
+            self.assertNotEqual(killed.returncode, 0)
+            transaction_dir = version_transaction_dir(repo)
+            self.assertTrue((transaction_dir / "Cargo.toml.original").is_file())
+            self.assertTrue((transaction_dir / "Cargo.lock.original").is_file())
+
+            cargo_toml = repo / "codex-rs" / "Cargo.toml"
+            cargo_toml.write_bytes(cargo_toml.read_bytes() + b"# edit after crash\n")
+            post_crash_bytes = cargo_toml.read_bytes()
+            retry_root = root / "retry"
+            retry_root.mkdir()
+            retry = run_installer(
+                retry_root,
+                repo,
+                arguments=["--upstream-version", "9.9.9"],
+            )
+
+            self.assertNotEqual(retry.returncode, 0)
+            self.assertEqual(cargo_toml.read_bytes(), post_crash_bytes)
+            self.assertIn(str(transaction_dir), retry.stderr)
+            self.assertIn("Refusing to restore or mutate", retry.stderr)
+            self.assertIn("Recovery steps", retry.stderr)
+
+    def test_restore_verification_failure_retains_backups_before_activation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+
+            result = run_installer(
+                root,
+                repo,
+                arguments=["--use-upstream-version"],
+                build_mode="break-restore",
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            transaction_dir = version_transaction_dir(repo)
+            self.assertTrue((transaction_dir / "Cargo.toml.original").is_file())
+            self.assertIn("Failed to restore and verify", result.stderr)
+            self.assertFalse(
+                (root / "codex-home" / "packages" / "standalone" / "current").exists()
+            )
+
+    def test_fallback_locks_serialize_without_publishing_pidless_directories(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            first_root = root / "first"
+            second_root = root / "second"
+            first_root.mkdir()
+            second_root.mkdir()
+            continue_path = root / "continue"
+            link_race_ready = root / "link-race.ready"
+            link_race_continue = root / "link-race.continue"
+            first_env = installer_env(
+                first_root,
+                repo,
+                build_mode="hold",
+                extra_env={"CODEX_TEST_CONTINUE": str(continue_path)},
+                force_fallback_locks=True,
+            )
+            second_env = installer_env(
+                second_root,
+                repo,
+                extra_env={
+                    "CODEX_TEST_LINK_RACE_CONTINUE": str(link_race_continue),
+                    "CODEX_TEST_LINK_RACE_READY": str(link_race_ready),
+                    "CODEX_TEST_LINK_RACE_TARGET": str(version_lock_path(repo)),
+                },
+                force_fallback_locks=True,
+            )
+            install_link_hook(second_env, root / "link-hook")
+            command = [
+                "sh",
+                str(repo / "scripts/install/install-local.sh"),
+                "--use-upstream-version",
+            ]
+
+            first = subprocess.Popen(
+                command,
+                cwd=repo,
+                env=first_env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            second = None
+            try:
+                wait_for_path(first_root / "build.ready")
+                first_install_lock = (
+                    first_root / "codex-home/packages/standalone/install.lock.d"
+                )
+                shared_version_lock = version_lock_path(repo)
+                self.assertTrue(first_install_lock.is_file())
+                self.assertTrue(
+                    first_install_lock.read_text().splitlines()[0].isdigit()
+                )
+                self.assertTrue(shared_version_lock.is_file())
+                self.assertTrue(
+                    shared_version_lock.read_text().splitlines()[0].isdigit()
+                )
+                second = subprocess.Popen(
+                    command,
+                    cwd=repo,
+                    env=second_env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                wait_for_path(
+                    second_root / "codex-home/packages/standalone/install.lock.d"
+                )
+                second_install_lock = (
+                    second_root / "codex-home/packages/standalone/install.lock.d"
+                )
+                self.assertTrue(second_install_lock.is_file())
+                self.assertTrue(
+                    second_install_lock.read_text().splitlines()[0].isdigit()
+                )
+                self.assertFalse((second_root / "build.json").exists())
+                wait_for_path(link_race_ready)
+                continue_path.touch()
+                wait_for_path_to_disappear(shared_version_lock)
+                link_race_continue.touch()
+                first_stdout, first_stderr = first.communicate(timeout=10)
+                second_stdout, second_stderr = second.communicate(timeout=10)
+                self.assertEqual(first.returncode, 0, first_stderr + first_stdout)
+                self.assertEqual(second.returncode, 0, second_stderr + second_stdout)
+            finally:
+                for process in (first, second):
+                    if process is not None and process.poll() is None:
+                        process.kill()
+                        process.communicate()
+
+    def test_macos_lockf_serializes_install_and_version_transactions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            first_root = root / "first"
+            second_root = root / "second"
+            first_root.mkdir()
+            second_root.mkdir()
+            continue_path = root / "continue"
+            lockf_log = root / "lockf.log"
+            first_env = installer_env(
+                first_root,
+                repo,
+                build_mode="hold",
+                extra_env={
+                    "CODEX_TEST_CONTINUE": str(continue_path),
+                    "CODEX_TEST_LOCKF_LOG": str(lockf_log),
+                },
+                force_lockf=True,
+            )
+            second_env = installer_env(
+                second_root,
+                repo,
+                extra_env={"CODEX_TEST_LOCKF_LOG": str(lockf_log)},
+                force_lockf=True,
+            )
+            command = [
+                "sh",
+                str(repo / "scripts/install/install-local.sh"),
+                "--use-upstream-version",
+            ]
+            first = subprocess.Popen(
+                command,
+                cwd=repo,
+                env=first_env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            second = None
+            try:
+                wait_for_path(first_root / "build.ready")
+                second = subprocess.Popen(
+                    command,
+                    cwd=repo,
+                    env=second_env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                wait_for_glob_count(
+                    str(
+                        second_root
+                        / "codex-home/packages/standalone/install.lockf-attempt.*"
+                    ),
+                    1,
+                )
+                self.assertFalse((second_root / "build.json").exists())
+                continue_path.touch()
+                first_stdout, first_stderr = first.communicate(timeout=10)
+                second_stdout, second_stderr = second.communicate(timeout=10)
+
+                self.assertEqual(first.returncode, 0, first_stderr + first_stdout)
+                self.assertEqual(second.returncode, 0, second_stderr + second_stdout)
+                lock_paths = lockf_log.read_text(encoding="utf-8").splitlines()
+                self.assertIn(
+                    str(first_root / "codex-home/packages/standalone/install.lock"),
+                    lock_paths,
+                )
+                self.assertIn(
+                    str(version_transaction_dir(repo).parent / "version.lock"),
+                    lock_paths,
+                )
+            finally:
+                continue_path.touch(exist_ok=True)
+                for process in (first, second):
+                    if process is not None and process.poll() is None:
+                        process.kill()
+                        process.communicate()
+
+    def test_signal_while_macos_lockf_waits_reaps_holder_and_fifo(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            standalone_root = root / "codex-home/packages/standalone"
+            standalone_root.mkdir(parents=True)
+            lock_file = standalone_root / "install.lock"
+            holder_pid_file = root / "lockf-holder.pid"
+            lock_stream = lock_file.open("w")
+            fcntl.flock(lock_stream, fcntl.LOCK_EX)
+            env = installer_env(
+                root,
+                repo,
+                extra_env={
+                    "CODEX_TEST_LOCKF_LOG": str(root / "lockf.log"),
+                    "CODEX_TEST_LOCKF_PID_FILE": str(holder_pid_file),
+                },
+                force_lockf=True,
+            )
+            process = subprocess.Popen(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                start_new_session=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                wait_for_path(holder_pid_file)
+                wait_for_glob_count(str(standalone_root / "install.lockf-attempt.*"), 1)
+                holder_pid = int(holder_pid_file.read_text(encoding="utf-8"))
+                os.kill(holder_pid, 0)
+                os.kill(process.pid, signal.SIGTERM)
+                stdout, stderr = communicate_bounded(process)
+
+                self.assertEqual(process.returncode, 143, stderr + stdout)
+                wait_for_process_exit(holder_pid)
+                self.assertEqual(
+                    list(standalone_root.glob("install.lockf-attempt.*")), []
+                )
+                self.assertFalse((root / "build.json").exists())
+            finally:
+                fcntl.flock(lock_stream, fcntl.LOCK_UN)
+                lock_stream.close()
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=2)
+
+    def test_macos_lockf_waiters_use_private_readiness_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            shared_codex_home = root / "shared-codex-home"
+            shared_install_bin = root / "shared-install-bin"
+            process_roots = [root / name for name in ("first", "second", "third")]
+            for process_root in process_roots:
+                process_root.mkdir()
+            continue_paths = [root / f"continue-{index}" for index in range(3)]
+            environments = []
+            for index, process_root in enumerate(process_roots):
+                environment = installer_env(
+                    process_root,
+                    repo,
+                    build_mode="hold",
+                    extra_env={
+                        "CODEX_HOME": str(shared_codex_home),
+                        "CODEX_INSTALL_DIR": str(shared_install_bin),
+                        "CODEX_TEST_CONTINUE": str(continue_paths[index]),
+                        "CODEX_TEST_LOCKF_LOG": str(root / "lockf.log"),
+                        "CODEX_TEST_LOCKF_PID_FILE": str(
+                            process_root / "lockf-holder.pid"
+                        ),
+                    },
+                    force_lockf=True,
+                )
+                environments.append(environment)
+            command = ["sh", str(repo / "scripts/install/install-local.sh")]
+            processes: list[subprocess.Popen[str]] = []
+            try:
+                first = subprocess.Popen(
+                    command,
+                    cwd=repo,
+                    env=environments[0],
+                    start_new_session=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                processes.append(first)
+                wait_for_path(process_roots[0] / "build.ready")
+                for environment in environments[1:]:
+                    processes.append(
+                        subprocess.Popen(
+                            command,
+                            cwd=repo,
+                            env=environment,
+                            start_new_session=True,
+                            text=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                        )
+                    )
+                for process_root in process_roots[1:]:
+                    wait_for_path(process_root / "lockf-holder.pid")
+                standalone_root = shared_codex_home / "packages/standalone"
+                wait_for_glob_count(str(standalone_root / "install.lockf-attempt.*"), 3)
+
+                continue_paths[0].touch()
+                first_stdout, first_stderr = first.communicate(timeout=10)
+                self.assertEqual(first.returncode, 0, first_stderr + first_stdout)
+                waiter_ready_paths = [
+                    process_root / "build.ready" for process_root in process_roots[1:]
+                ]
+                wait_for_any_path(waiter_ready_paths)
+                time.sleep(0.1)
+                self.assertEqual(
+                    sum(path.exists() for path in waiter_ready_paths),
+                    1,
+                    "only the waiter whose lockf holder acquired the lock may proceed",
+                )
+                selected = 1 if waiter_ready_paths[0].exists() else 2
+                continue_paths[selected].touch()
+                selected_stdout, selected_stderr = processes[selected].communicate(
+                    timeout=10
+                )
+                self.assertEqual(
+                    processes[selected].returncode,
+                    0,
+                    selected_stderr + selected_stdout,
+                )
+                remaining = 2 if selected == 1 else 1
+                wait_for_path(waiter_ready_paths[remaining - 1])
+                continue_paths[remaining].touch()
+                remaining_stdout, remaining_stderr = processes[remaining].communicate(
+                    timeout=10
+                )
+                self.assertEqual(
+                    processes[remaining].returncode,
+                    0,
+                    remaining_stderr + remaining_stdout,
+                )
+                self.assertEqual(list(standalone_root.glob("*.lockf-attempt.*")), [])
+            finally:
+                for continue_path in continue_paths:
+                    continue_path.touch(exist_ok=True)
+                for process in processes:
+                    finish_fixture_process(process)
+
+    def test_signal_during_macos_lockf_fifo_handoff_is_interruptible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            handoff_ready = root / "handoff.ready"
+            handoff_continue = root / "handoff.continue"
+            env = installer_env(
+                root,
+                repo,
+                extra_env={
+                    "CODEX_TEST_LOCKF_LOG": str(root / "lockf.log"),
+                    "CODEX_TEST_HANDOFF_READY": str(handoff_ready),
+                    "CODEX_TEST_HANDOFF_CONTINUE": str(handoff_continue),
+                },
+                force_lockf=True,
+            )
+            install_lockf_handoff_barrier(env)
+            process = subprocess.Popen(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                start_new_session=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                wait_for_path(handoff_ready)
+                os.kill(process.pid, signal.SIGTERM)
+                stdout, stderr = communicate_bounded(process)
+
+                self.assertEqual(process.returncode, 143, stderr + stdout)
+                standalone_root = root / "codex-home/packages/standalone"
+                self.assertEqual(list(standalone_root.glob("*.lockf-attempt.*")), [])
+                self.assertFalse((root / "build.json").exists())
+            finally:
+                handoff_continue.touch(exist_ok=True)
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=2)
+
+    def test_fallback_reclaims_a_stale_legacy_mkdir_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            legacy_lock = version_lock_path(repo)
+            legacy_lock.mkdir(parents=True)
+            (legacy_lock / "pid").write_text("2147483647\n", encoding="utf-8")
+            (legacy_lock / "started_at").write_text("1\n", encoding="utf-8")
+
+            result = run_installer(
+                root,
+                repo,
+                arguments=["--use-upstream-version"],
+                force_fallback_locks=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(legacy_lock.exists())
+
+    def test_recent_dead_fallback_lock_reports_when_to_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            env = installer_env(root, repo, force_fallback_locks=True)
+            standalone_root = root / "codex-home/packages/standalone"
+            standalone_root.mkdir(parents=True)
+            lock_path = standalone_root / "install.lock.d"
+            lock_contents = "2147483647\n1787659200\nmissing-owner\n"
+            lock_path.write_text(lock_contents, encoding="utf-8")
+            process = subprocess.Popen(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                start_new_session=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = communicate_bounded(process)
+
+                self.assertNotEqual(process.returncode, 0, stdout)
+                self.assertIn("no longer live", stderr)
+                self.assertIn("Retry after 600 seconds", stderr)
+                self.assertEqual(lock_path.read_text(encoding="utf-8"), lock_contents)
+                self.assertFalse((root / "build.json").exists())
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=2)
+
+    def test_fallback_reclaimers_cannot_remove_a_new_version_lock_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            version_lock = version_lock_path(repo)
+            version_lock.parent.mkdir(parents=True, exist_ok=True)
+            version_lock.write_text(
+                "2147483647\n1\n" + str(version_lock.parent / "missing-owner") + "\n",
+                encoding="utf-8",
+            )
+            reclaim_continue = root / "allow-reclaim"
+            build_continue = root / "allow-build"
+            command = [
+                "sh",
+                str(repo / "scripts/install/install-local.sh"),
+                "--use-upstream-version",
+            ]
+            processes: list[subprocess.Popen[str]] = []
+            process_roots = [root / name for name in ("first", "second", "third")]
+            try:
+                for process_root in process_roots[:2]:
+                    process_root.mkdir()
+                    env = installer_env(
+                        process_root,
+                        repo,
+                        build_mode="hold",
+                        extra_env={
+                            "CODEX_TEST_CONTINUE": str(build_continue),
+                            "CODEX_TEST_RECLAIM_CONTINUE": str(reclaim_continue),
+                        },
+                        force_fallback_locks=True,
+                    )
+                    install_reclaim_guard_barrier(env)
+                    processes.append(
+                        subprocess.Popen(
+                            command,
+                            cwd=repo,
+                            env=env,
+                            text=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                        )
+                    )
+
+                wait_for_glob_count(f"{version_lock}.reclaim.*", 2)
+                reclaim_continue.touch()
+                wait_for_any_path(
+                    [process_root / "build.ready" for process_root in process_roots[:2]]
+                )
+                live_owner = version_lock.read_text(encoding="utf-8")
+                live_pid = int(live_owner.splitlines()[0])
+                os.kill(live_pid, 0)
+
+                third_root = process_roots[2]
+                third_root.mkdir()
+                third_env = installer_env(
+                    third_root,
+                    repo,
+                    build_mode="hold",
+                    extra_env={
+                        "CODEX_TEST_CONTINUE": str(build_continue),
+                        "CODEX_TEST_RECLAIM_CONTINUE": str(reclaim_continue),
+                    },
+                    force_fallback_locks=True,
+                )
+                install_reclaim_guard_barrier(third_env)
+                processes.append(
+                    subprocess.Popen(
+                        command,
+                        cwd=repo,
+                        env=third_env,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                )
+                time.sleep(0.2)
+                self.assertFalse((third_root / "build.ready").exists())
+                self.assertEqual(version_lock.read_text(encoding="utf-8"), live_owner)
+
+                build_continue.touch()
+                for process in processes:
+                    stdout, stderr = process.communicate(timeout=10)
+                    self.assertEqual(process.returncode, 0, stderr + stdout)
+            finally:
+                reclaim_continue.touch(exist_ok=True)
+                build_continue.touch(exist_ok=True)
+                for process in processes:
+                    if process.poll() is None:
+                        process.kill()
+                        process.communicate()
+
+    def test_live_reused_or_unverifiable_install_lock_pid_fails_closed(self) -> None:
+        for case in ("fingerprint-mismatch", "unknown-identity"):
+            with (
+                self.subTest(case=case),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                repo = create_repo(root)
+                env = installer_env(root, repo, force_fallback_locks=True)
+                standalone_root = root / "codex-home/packages/standalone"
+                standalone_root.mkdir(parents=True)
+                lock_path = standalone_root / "install.lock.d"
+                lock_lines = [str(os.getpid()), "1787659200", "foreign-owner"]
+                if case == "fingerprint-mismatch":
+                    lock_lines.append("fingerprint=definitely-not-this-process")
+                lock_contents = "\n".join(lock_lines) + "\n"
+                lock_path.write_text(lock_contents, encoding="utf-8")
+                process = subprocess.Popen(
+                    ["sh", str(repo / "scripts/install/install-local.sh")],
+                    cwd=repo,
+                    env=env,
+                    start_new_session=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    stdout, stderr = communicate_bounded(process)
+
+                    self.assertNotEqual(process.returncode, 0, stdout)
+                    self.assertIn(str(lock_path), stderr)
+                    self.assertIn("manual recovery", stderr)
+                    self.assertEqual(
+                        lock_path.read_text(encoding="utf-8"), lock_contents
+                    )
+                    self.assertFalse((root / "build.json").exists())
+                    self.assertFalse((standalone_root / "current").exists())
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate(timeout=2)
+
+    def test_malformed_fallback_lock_metadata_fails_closed_promptly(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            env = installer_env(root, repo, force_fallback_locks=True)
+            standalone_root = root / "codex-home/packages/standalone"
+            standalone_root.mkdir(parents=True)
+            lock_path = standalone_root / "install.lock.d"
+            lock_contents = "not-a-pid\nnot-a-timestamp\nforeign-owner\n"
+            lock_path.write_text(lock_contents, encoding="utf-8")
+            process = subprocess.Popen(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                start_new_session=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = communicate_bounded(process)
+
+                self.assertNotEqual(process.returncode, 0, stdout)
+                self.assertIn("metadata", stderr)
+                self.assertIn("manual recovery", stderr)
+                self.assertEqual(lock_path.read_text(encoding="utf-8"), lock_contents)
+                self.assertFalse((root / "build.json").exists())
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=2)
+
+    def test_fallback_hardlink_claim_failure_is_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            env = installer_env(root, repo, force_fallback_locks=True)
+            lock_path = root / "codex-home/packages/standalone/install.lock.d"
+            env["CODEX_TEST_LINK_ERROR_TARGET"] = str(lock_path)
+            install_link_hook(env, root / "link-hook")
+            process = subprocess.Popen(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                start_new_session=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = communicate_bounded(process)
+
+                self.assertNotEqual(process.returncode, 0, stdout)
+                self.assertIn("Cannot claim the installer lock", stderr)
+                self.assertIn("hard-link", stderr)
+                self.assertIn("retry", stderr)
+                self.assertFalse((root / "build.json").exists())
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=2)
+
+    def test_signal_cleanup_preserves_a_successor_reclaim_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            env = installer_env(root, repo, force_fallback_locks=True)
+            standalone_root = root / "codex-home/packages/standalone"
+            lock_path = standalone_root / "install.lock.d"
+            lock_path.mkdir(parents=True)
+            (lock_path / "pid").write_text("2147483647\n", encoding="utf-8")
+            (lock_path / "started_at").write_text("1\n", encoding="utf-8")
+            successor_marker = Path(f"{lock_path}.reclaim.successor")
+            successor_guard = Path(f"{lock_path}.reclaim.guard")
+            env["CODEX_TEST_SUCCESSOR_MARKER"] = str(successor_marker)
+            install_guard_unlink_successor_signal(env)
+            process = subprocess.Popen(
+                ["sh", str(repo / "scripts/install/install-local.sh")],
+                cwd=repo,
+                env=env,
+                start_new_session=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = communicate_bounded(process)
+
+                self.assertEqual(process.returncode, 143, stderr + stdout)
+                self.assertTrue(successor_marker.is_file())
+                self.assertTrue(successor_guard.is_file())
+                self.assertTrue(os.path.samefile(successor_marker, successor_guard))
+                self.assertFalse((root / "build.json").exists())
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=2)
+
+    def test_prune_only_removes_validated_installer_owned_releases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = create_repo(root)
+            for _ in range(3):
+                installed = run_installer(root, repo)
+                self.assertEqual(installed.returncode, 0, installed.stderr)
+            releases_dir = root / "codex-home/packages/standalone/releases"
+            genuine_releases = sorted(
+                path
+                for path in releases_dir.iterdir()
+                if path.name.startswith(RELEASE_PREFIX)
+            )
+            self.assertEqual(len(genuine_releases), 3)
+            electivus = releases_dir / "Electivus"
+            electivus.mkdir()
+            (electivus / "keep.txt").write_text("owned elsewhere\n", encoding="utf-8")
+            malformed_local = releases_dir / f"{RELEASE_PREFIX}-not-a-release"
+            malformed_local.mkdir()
+            (malformed_local / "keep.txt").write_text(
+                "not installer-owned\n", encoding="utf-8"
+            )
+            invalid_layout = releases_dir / f"{RELEASE_PREFIX}-20260824120000-9999"
+            invalid_layout.mkdir()
+            (invalid_layout / "keep.txt").write_text(
+                "invalid package layout\n", encoding="utf-8"
+            )
+            copied_release = releases_dir / f"{RELEASE_PREFIX}-20260801120000-1"
+            shutil.copytree(genuine_releases[-1], copied_release, symlinks=True)
+            copied_probe = copied_release / "copied-release.txt"
+            copied_probe.write_text(
+                "receipt copied under a foreign release name\n", encoding="utf-8"
+            )
+            local_rg = root / "local-rg"
+            write_executable(local_rg, "#!/bin/sh\nexit 0\n")
+
+            result = run_installer(
+                root,
+                repo,
+                extra_env={"CODEX_LOCAL_RG": str(local_rg)},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(read_build_log(root)["rg_bin"], str(local_rg))
+            current = root / "codex-home/packages/standalone/current"
+            retained_genuine_releases = [
+                path for path in genuine_releases if path.exists()
+            ]
+            self.assertEqual(len(retained_genuine_releases), 2)
+            self.assertTrue(copied_probe.is_file())
+            self.assertEqual(
+                (electivus / "keep.txt").read_text(encoding="utf-8"),
+                "owned elsewhere\n",
+            )
+            self.assertEqual(
+                (malformed_local / "keep.txt").read_text(encoding="utf-8"),
+                "not installer-owned\n",
+            )
+            self.assertEqual(
+                (invalid_layout / "keep.txt").read_text(encoding="utf-8"),
+                "invalid package layout\n",
+            )
+            self.assertTrue(current.resolve().is_dir())
+
+
+def create_repo(root: Path, *, include_releases: bool = True) -> Path:
+    repo = root / "repo"
+    (repo / "scripts/install").mkdir(parents=True)
+    (repo / "scripts/codex_package").mkdir()
+    (repo / "codex-rs").mkdir()
+    shutil.copy2(INSTALL_SCRIPT, repo / "scripts/install/install-local.sh")
+    for name in ("__init__.py", "targets.py", "version.py"):
+        shutil.copy2(
+            SOURCE_REPO / "scripts/codex_package" / name,
+            repo / "scripts/codex_package" / name,
+        )
+    (repo / "scripts/build_codex_package.py").write_text(
+        BUILD_STUB,
+        encoding="utf-8",
+    )
+    write_workspace_version(repo / "codex-rs/Cargo.toml", "0.0.0")
+    (repo / "codex-rs/Cargo.lock").write_bytes(b"# original lock\r\nversion = 4\r\n")
+    git(repo, "init", "--initial-branch=main")
+    git(repo, "config", "user.name", "Installer Test")
+    git(repo, "config", "user.email", "installer@example.test")
+    commit_all(repo, "Initial source", day=1)
+    if not include_releases:
+        return repo
+
+    cargo_toml = repo / "codex-rs/Cargo.toml"
+    for day, release in ((2, "0.148.0-alpha.9"), (3, "0.148.0-alpha.12")):
+        write_workspace_version(cargo_toml, release)
+        commit_all(repo, f"Release {release}", day=day)
+    write_workspace_version(cargo_toml, "0.0.0")
+    commit_all(repo, "Resume development", day=4)
+    git(repo, "switch", "--create", "unmerged-release")
+    write_workspace_version(cargo_toml, "0.148.0-alpha.19")
+    commit_all(repo, "Release 0.148.0-alpha.19", day=5)
+    git(repo, "switch", "main")
+    git(repo, "tag", "rust-v99.0.0")
+    return repo
+
+
+BUILD_STUB = textwrap.dedent(
+    r"""
+    import json
+    import os
+    from pathlib import Path
+    import re
+    import signal
+    import sys
+    import time
+
+    repo = Path(__file__).parents[1]
+    cargo_toml = repo / "codex-rs/Cargo.toml"
+    cargo_lock = repo / "codex-rs/Cargo.lock"
+    args = sys.argv[1:]
+    value_after = lambda name: args[args.index(name) + 1] if name in args else None
+    if "--version" in args:
+        raise SystemExit("the package builder does not accept --version")
+    version = value_after("--package-version") or re.search(
+        r'(?ms)^\[workspace\.package\].*?^version\s*=\s*"([^"]+)"',
+        cargo_toml.read_text(encoding="utf-8"),
+    ).group(1)
+    log = {
+        "version": version,
+        "cargo_profile": value_after("--cargo-profile"),
+        "debug_assertions": os.environ.get("CARGO_PROFILE_DEV_DEBUG_ASSERTIONS"),
+        "rg_bin": value_after("--rg-bin"),
+        "probe": (repo / "untracked-probe.txt").read_text(encoding="utf-8")
+        if (repo / "untracked-probe.txt").exists()
+        else None,
+    }
+    Path(os.environ["CODEX_TEST_BUILD_LOG"]).write_text(json.dumps(log), encoding="utf-8")
+    Path(os.environ["CODEX_TEST_BUILD_ARGUMENTS"]).write_text(
+        json.dumps(args), encoding="utf-8"
+    )
+    mode = os.environ.get("CODEX_TEST_BUILD_MODE", "success")
+    if mode == "fail":
+        raise SystemExit(23)
+    if mode == "signal":
+        os.kill(int(os.environ["CODEX_LOCAL_INSTALLER_PID"]), signal.SIGTERM)
+        raise SystemExit(23)
+    if mode == "kill":
+        os.kill(int(os.environ["CODEX_LOCAL_INSTALLER_PID"]), signal.SIGKILL)
+        raise SystemExit(23)
+    if mode in {"grandchild-hold", "new-session-grandchild-hold"}:
+        grandchild_pid = os.fork()
+        if grandchild_pid == 0:
+            if mode == "new-session-grandchild-hold":
+                os.setsid()
+            while not Path(os.environ["CODEX_TEST_CONTINUE"]).exists():
+                time.sleep(0.01)
+            Path(os.environ["CODEX_TEST_AFTER_CONTINUE"]).touch()
+            raise SystemExit(0)
+        Path(os.environ["CODEX_TEST_GRANDCHILD_PID"]).write_text(
+            str(grandchild_pid), encoding="utf-8"
+        )
+        while True:
+            time.sleep(0.01)
+    if mode == "hold":
+        Path(os.environ["CODEX_TEST_READY"]).touch()
+        while not Path(os.environ["CODEX_TEST_CONTINUE"]).exists():
+            time.sleep(0.01)
+        after_continue = os.environ.get("CODEX_TEST_AFTER_CONTINUE")
+        if after_continue:
+            Path(after_continue).touch()
+
+    package_dir = Path(value_after("--package-dir"))
+    target = value_after("--target")
+    for directory in ("bin", "codex-path", "codex-resources"):
+        (package_dir / directory).mkdir(parents=True, exist_ok=True)
+    codex_exit = os.environ.get("CODEX_TEST_CODEX_EXIT", "0")
+    files = {
+        "bin/codex": f'''#!/bin/sh
+    if [ -n "${{CODEX_TEST_VERIFY_READY:-}}" ]; then
+      : >"$CODEX_TEST_VERIFY_READY"
+      while [ ! -e "$CODEX_TEST_VERIFY_CONTINUE" ]; do sleep 0.01; done
+      if [ -n "${{CODEX_TEST_VERIFY_AFTER_CONTINUE:-}}" ]; then
+        : >"$CODEX_TEST_VERIFY_AFTER_CONTINUE"
+      fi
+    fi
+    exit {codex_exit}
+    ''',
+        "codex-path/rg": "#!/bin/sh\nexit 0\n",
+        "codex-resources/bwrap": "#!/bin/sh\nexit 0\n",
+        "bin/codex-code-mode-host": "#!/bin/sh\nexit 0\n",
+    }
+    for name, content in files.items():
+        path = package_dir / name
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o755)
+    (package_dir / "codex-package.json").write_text(
+        json.dumps(
+            {
+                "layoutVersion": 1,
+                "version": version,
+                "target": target,
+                "variant": "codex",
+                "entrypoint": "bin/codex",
+                "resourcesDir": "codex-resources",
+                "pathDir": "codex-path",
+            }
+        ),
+        encoding="utf-8",
+    )
+    if mode == "break-restore":
+        cargo_toml.unlink()
+        cargo_toml.mkdir()
+    """
+).lstrip()
+
+
+def run_installer(
+    root: Path,
+    repo: Path,
+    *,
+    arguments: list[str] | None = None,
+    build_mode: str = "success",
+    codex_exit: int = 0,
+    mutate_lock: bool = False,
+    extra_env: dict[str, str] | None = None,
+    force_fallback_locks: bool = False,
+    force_lockf: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["sh", str(repo / "scripts/install/install-local.sh"), *(arguments or [])],
+        cwd=repo,
+        env=installer_env(
+            root,
+            repo,
+            build_mode=build_mode,
+            codex_exit=codex_exit,
+            mutate_lock=mutate_lock,
+            extra_env=extra_env,
+            force_fallback_locks=force_fallback_locks,
+            force_lockf=force_lockf,
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def installer_env(
+    root: Path,
+    repo: Path,
+    *,
+    build_mode: str = "success",
+    codex_exit: int = 0,
+    mutate_lock: bool = False,
+    extra_env: dict[str, str] | None = None,
+    force_fallback_locks: bool = False,
+    force_lockf: bool = False,
+) -> dict[str, str]:
+    fake_bin = root / "fake-bin"
+    fake_bin.mkdir(exist_ok=True)
+    home = root / "home"
+    home.mkdir(exist_ok=True)
+    write_executable(
+        fake_bin / "cargo",
+        """#!/bin/sh
+manifest_path=""
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "--manifest-path" ]; then
+    manifest_path="$argument"
+    break
+  fi
+  previous="$argument"
+done
+if [ "${CODEX_TEST_MUTATE_LOCK:-0}" = 1 ] && [ "${1:-}" = metadata ]; then
+  printf '%s\n' 'mutated by cargo metadata' >"$(dirname "$manifest_path")/Cargo.lock"
+fi
+if [ "${1:-}" = metadata ] && [ -n "${CODEX_TEST_METADATA_READY:-}" ]; then
+  : >"$CODEX_TEST_METADATA_READY"
+  while [ ! -e "$CODEX_TEST_METADATA_CONTINUE" ]; do sleep 0.01; done
+fi
+exit 0
+""",
+    )
+    write_executable(
+        fake_bin / "uname",
+        '#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo x86_64;; *) echo Linux;; esac\n',
+    )
+    if force_fallback_locks or force_lockf:
+        for command in (
+            "awk",
+            "basename",
+            "cat",
+            "chmod",
+            "cmp",
+            "cp",
+            "dirname",
+            "find",
+            "git",
+            "grep",
+            "head",
+            "ln",
+            "mkdir",
+            "mkfifo",
+            "mktemp",
+            "mv",
+            "python3",
+            "readlink",
+            "rm",
+            "sed",
+            "sh",
+            "sleep",
+            "sort",
+            "tr",
+        ):
+            command_path = shutil.which(command)
+            assert command_path is not None
+            (fake_bin / command).symlink_to(command_path)
+    if force_lockf:
+        write_executable(
+            fake_bin / "uname",
+            '#!/bin/sh\ncase "$1" in -s) echo Darwin;; -m) echo x86_64;; *) echo Darwin;; esac\n',
+        )
+        write_executable(
+            fake_bin / "lockf",
+            textwrap.dedent(
+                """\
+                #!/bin/sh
+                [ "$1" = "-k" ] || exit 96
+                shift
+                lock_path="$1"
+                shift
+                printf '%s\n' "$lock_path" >>"$CODEX_TEST_LOCKF_LOG"
+                if [ -n "${CODEX_TEST_LOCKF_PID_FILE:-}" ]; then
+                  printf '%s\n' "$$" >"$CODEX_TEST_LOCKF_PID_FILE"
+                fi
+                exec /usr/bin/flock "$lock_path" "$@"
+                """
+            ),
+        )
+    write_executable(
+        fake_bin / "date",
+        '#!/bin/sh\ncase "$1" in '
+        "+%Y%m%d%H%M%S) echo 20260825120000;; "
+        "+%s) echo 1787659200;; "
+        '*) exec /bin/date "$@";; esac\n',
+    )
+    env = {
+        **os.environ,
+        "PATH": str(fake_bin)
+        if force_fallback_locks or force_lockf
+        else f"{fake_bin}:/usr/bin:/bin",
+        "HOME": str(home),
+        "SHELL": "/bin/sh",
+        "CODEX_HOME": str(root / "codex-home"),
+        "CODEX_INSTALL_DIR": str(root / "install-bin"),
+        "CODEX_TEST_BUILD_LOG": str(root / "build.json"),
+        "CODEX_TEST_BUILD_ARGUMENTS": str(root / "build-arguments.json"),
+        "CODEX_TEST_BUILD_MODE": build_mode,
+        "CODEX_TEST_CODEX_EXIT": str(codex_exit),
+        "CODEX_TEST_MUTATE_LOCK": "1" if mutate_lock else "0",
+        "CODEX_TEST_READY": str(root / "build.ready"),
+        "TMPDIR": str(root),
+        "CARGO_PROFILE_DEV_DEBUG_ASSERTIONS": "caller-value",
+    }
+    env.pop("CODEX_REPO_ROOT", None)
+    env.pop("CODEX_UPSTREAM_VERSION", None)
+    env.update(extra_env or {})
+    return env
+
+
+def prepare_previous_releases(root: Path, *, timestamped: bool = False) -> Path:
+    releases_dir = root / "codex-home/packages/standalone/releases"
+    releases_dir.mkdir(parents=True)
+    for index in range(1, 4):
+        name = (
+            f"{RELEASE_PREFIX}-2026082{index}120000-{index}"
+            if timestamped
+            else f"previous-{index}"
+        )
+        release_dir = releases_dir / name
+        release_dir.mkdir()
+        if timestamped:
+            for relative_path in (
+                "bin/codex",
+                "bin/codex-code-mode-host",
+                "codex-path/rg",
+                "codex-resources/bwrap",
+            ):
+                executable = release_dir / relative_path
+                executable.parent.mkdir(parents=True, exist_ok=True)
+                write_executable(executable, "#!/bin/sh\nexit 0\n")
+            (release_dir / "codex").symlink_to("bin/codex")
+            (release_dir / "codex-package.json").write_text(
+                json.dumps(
+                    {
+                        "layoutVersion": 1,
+                        "version": f"0.0.{index}",
+                        "target": TARGET,
+                        "variant": "codex",
+                        "entrypoint": "bin/codex",
+                        "resourcesDir": "codex-resources",
+                        "pathDir": "codex-path",
+                    }
+                ),
+                encoding="utf-8",
+            )
+    return releases_dir
+
+
+def version_transaction_dir(repo: Path) -> Path:
+    return Path(
+        git(
+            repo,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "codex-local-version/transaction",
+        ).stdout.strip()
+    )
+
+
+def version_lock_path(repo: Path) -> Path:
+    return version_transaction_dir(repo).parent / "version.lock.d"
+
+
+def read_build_log(root: Path) -> dict[str, object]:
+    return json.loads((root / "build.json").read_text(encoding="utf-8"))
+
+
+def read_build_arguments(root: Path) -> list[str]:
+    return json.loads((root / "build-arguments.json").read_text(encoding="utf-8"))
+
+
+def wait_for_path(path: Path) -> None:
+    deadline = time.monotonic() + 5
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for {path}")
+        time.sleep(0.01)
+
+
+def wait_for_path_to_disappear(path: Path) -> None:
+    deadline = time.monotonic() + 5
+    while path.exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for {path} to disappear")
+        time.sleep(0.01)
+
+
+def wait_for_any_path(paths: list[Path]) -> None:
+    deadline = time.monotonic() + 5
+    while not any(path.exists() for path in paths):
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for one of {paths}")
+        time.sleep(0.01)
+
+
+def wait_for_glob_count(pattern: str, count: int) -> None:
+    deadline = time.monotonic() + 5
+    parent = Path(pattern).parent
+    name = Path(pattern).name
+    while len(list(parent.glob(name))) < count:
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for {count} matches of {pattern}")
+        time.sleep(0.01)
+
+
+def install_reclaim_guard_barrier(env: dict[str, str]) -> None:
+    fake_ln = Path(env["PATH"]) / "ln"
+    fake_ln.unlink()
+    write_executable(
+        fake_ln,
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            last=""
+            for argument in "$@"; do last="$argument"; done
+            case "$last" in
+            *.reclaim.guard)
+              while [ ! -e "$CODEX_TEST_RECLAIM_CONTINUE" ]; do
+                sleep 0.01
+              done
+              ;;
+            esac
+            exec /usr/bin/ln "$@"
+            """
+        ),
+    )
+
+
+def install_link_hook(env: dict[str, str], hook_dir: Path) -> None:
+    hook_dir.mkdir()
+    (hook_dir / "sitecustomize.py").write_text(
+        textwrap.dedent(
+            """\
+            import errno
+            import os
+            from pathlib import Path
+            import time
+
+
+            real_link = os.link
+
+
+            def controlled_link(source, destination, *args, **kwargs):
+                destination_path = os.fsdecode(destination)
+                if destination_path == os.environ.get("CODEX_TEST_LINK_ERROR_TARGET"):
+                    raise OSError(errno.EPERM, "simulated hard-link failure")
+                try:
+                    return real_link(source, destination, *args, **kwargs)
+                except FileExistsError:
+                    if destination_path == os.environ.get("CODEX_TEST_LINK_RACE_TARGET"):
+                        Path(os.environ["CODEX_TEST_LINK_RACE_READY"]).touch()
+                        while not Path(
+                            os.environ["CODEX_TEST_LINK_RACE_CONTINUE"]
+                        ).exists():
+                            time.sleep(0.01)
+                    raise
+
+
+            os.link = controlled_link
+            """
+        ),
+        encoding="utf-8",
+    )
+    existing_python_path = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        f"{hook_dir}{os.pathsep}{existing_python_path}"
+        if existing_python_path
+        else str(hook_dir)
+    )
+
+
+def install_guard_unlink_successor_signal(env: dict[str, str]) -> None:
+    fake_rm = Path(env["PATH"]) / "rm"
+    fake_rm.unlink()
+    write_executable(
+        fake_rm,
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            last=""
+            for argument in "$@"; do last="$argument"; done
+            case "$last" in
+            *.reclaim.guard)
+              if mkdir "$TMPDIR/guard-unlink-once" 2>/dev/null; then
+                /usr/bin/rm "$@"
+                {
+                  printf '%s\n' "$$"
+                  date +%s
+                  printf '%s\n' 'fingerprint=successor'
+                } >"$CODEX_TEST_SUCCESSOR_MARKER"
+                /usr/bin/ln "$CODEX_TEST_SUCCESSOR_MARKER" "$last"
+                kill -TERM "$PPID"
+                exit 0
+              fi
+              ;;
+            esac
+            exec /usr/bin/rm "$@"
+            """
+        ),
+    )
+
+
+def install_cmp_restore_race(env: dict[str, str]) -> None:
+    fake_cmp = Path(env["PATH"].split(os.pathsep)[0]) / "cmp"
+    write_executable(
+        fake_cmp,
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            /usr/bin/cmp "$@"
+            cmp_status=$?
+            last=""
+            for argument in "$@"; do last="$argument"; done
+            if [ "$cmp_status" -eq 0 ] && [ "$last" = "$CODEX_TEST_CMP_RACE_TARGET" ]; then
+              count=0
+              if [ -f "$CODEX_TEST_CMP_RACE_COUNT" ]; then
+                count=$(cat "$CODEX_TEST_CMP_RACE_COUNT")
+              fi
+              count=$((count + 1))
+              printf '%s\n' "$count" >"$CODEX_TEST_CMP_RACE_COUNT"
+              if [ "$count" -eq 3 ]; then
+                printf '%s' "$CODEX_TEST_CMP_RACE_BYTES" >>"$CODEX_TEST_CMP_RACE_TARGET"
+              fi
+            fi
+            exit "$cmp_status"
+            """
+        ),
+    )
+
+
+def install_lockf_handoff_barrier(env: dict[str, str]) -> None:
+    fake_cat = Path(env["PATH"]) / "cat"
+    fake_cat.unlink()
+    write_executable(
+        fake_cat,
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            case "${1:-}" in
+            */control)
+              : >"$CODEX_TEST_HANDOFF_READY"
+              while [ ! -e "$CODEX_TEST_HANDOFF_CONTINUE" ]; do sleep 0.01; done
+              ;;
+            esac
+            exec /usr/bin/cat "$@"
+            """
+        ),
+    )
+
+
+def install_current_swap_signal(env: dict[str, str]) -> None:
+    fake_mv = Path(env["PATH"].split(os.pathsep, 1)[0]) / "mv"
+    write_executable(
+        fake_mv,
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            previous=""
+            last=""
+            for argument in "$@"; do
+              previous="$last"
+              last="$argument"
+            done
+            /usr/bin/mv "$@"
+            mv_status=$?
+            case "$previous:$last" in
+            */.current.*:*/current)
+              if [ "$mv_status" -eq 0 ] && mkdir "$TMPDIR/current-swap-signaled" 2>/dev/null; then
+                if [ "${CODEX_TEST_CURRENT_SWAP_CONCURRENT:-0}" = 1 ]; then
+                  /usr/bin/rm -f "$last"
+                  /usr/bin/mkdir "$last"
+                  printf '%s\n' 'keep in place' >"$last/concurrent-owner.txt"
+                fi
+                kill -TERM "$PPID"
+              fi
+              ;;
+            esac
+            exit "$mv_status"
+            """
+        ),
+    )
+
+
+def install_activation_claim_race(
+    env: dict[str, str],
+    target: Path,
+    raced_identity: Path,
+    *,
+    successor: str | None = None,
+) -> None:
+    hook_dir = raced_identity.parent / "python-hook"
+    hook_dir.mkdir()
+    (hook_dir / "sitecustomize.py").write_text(
+        textwrap.dedent(
+            """\
+            import os
+
+
+            real_rename = os.rename
+
+
+            def race_rename(source, destination, *args, **kwargs):
+                source_path = os.fsdecode(source)
+                destination_path = os.fsdecode(destination)
+                if (
+                    source_path == os.environ["CODEX_TEST_ACTIVATION_CLAIM_TARGET"]
+                    and os.path.basename(destination_path) == "claimed-value"
+                    and not os.path.exists(os.environ["CODEX_TEST_ACTIVATION_RACED"])
+                ):
+                    os.unlink(source_path)
+                    os.mkdir(source_path)
+                    with open(
+                        os.path.join(source_path, "concurrent-owner.txt"),
+                        "w",
+                        encoding="utf-8",
+                    ) as stream:
+                        stream.write("keep in place\\n")
+                    raced_stat = os.lstat(source_path)
+                    with open(
+                        os.environ["CODEX_TEST_ACTIVATION_RACED"],
+                        "w",
+                        encoding="utf-8",
+                    ) as stream:
+                        stream.write(
+                            f"{raced_stat.st_dev}:{raced_stat.st_ino}:"
+                            f"{raced_stat.st_mode}"
+                        )
+                    result = real_rename(source, destination, *args, **kwargs)
+                    successor = os.environ.get("CODEX_TEST_ACTIVATION_SUCCESSOR")
+                    if successor is not None:
+                        with open(source_path, "w", encoding="utf-8") as stream:
+                            stream.write(successor)
+                    return result
+                return real_rename(source, destination, *args, **kwargs)
+
+
+            os.rename = race_rename
+            """
+        ),
+        encoding="utf-8",
+    )
+    existing_python_path = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        f"{hook_dir}{os.pathsep}{existing_python_path}"
+        if existing_python_path
+        else str(hook_dir)
+    )
+    env["CODEX_TEST_ACTIVATION_CLAIM_TARGET"] = str(target)
+    env["CODEX_TEST_ACTIVATION_RACED"] = str(raced_identity)
+    if successor is not None:
+        env["CODEX_TEST_ACTIVATION_SUCCESSOR"] = successor
+
+
+def communicate_bounded(process: subprocess.Popen[str]) -> tuple[str, str]:
+    try:
+        return process.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        stdout, stderr = process.communicate(timeout=2)
+        raise AssertionError(
+            f"local installer did not fail closed promptly: {stderr}{stdout}"
+        )
+
+
+def finish_fixture_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is None:
+        try:
+            process.communicate(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            signal_fixture_session(process, signal.SIGTERM)
+    try:
+        process.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        signal_fixture_session(process, signal.SIGKILL)
+        process.communicate(timeout=2)
+
+
+def signal_fixture_session(
+    process: subprocess.Popen[str], sent_signal: signal.Signals
+) -> None:
+    try:
+        os.killpg(process.pid, sent_signal)
+    except ProcessLookupError:
+        pass
+
+
+def wait_for_process_exit(pid: int) -> None:
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for process {pid} to exit")
+        time.sleep(0.01)
+
+
+def write_workspace_version(path: Path, workspace_version: str) -> None:
+    path.write_bytes(
+        textwrap.dedent(
+            f'''\
+            [workspace]
+            resolver = "2"
+
+            [workspace.package]
+            version = "{workspace_version}"
+            edition = "2024"
+            '''
+        )
+        .replace("\n", "\r\n")
+        .encode()
+    )
+
+
+def commit_all(repo: Path, message: str, *, day: int) -> None:
+    git(repo, "add", ".")
+    timestamp = f"2026-08-{day:02d}T12:00:00+00:00"
+    git(
+        repo,
+        "commit",
+        "--message",
+        message,
+        extra_env={"GIT_AUTHOR_DATE": timestamp, "GIT_COMMITTER_DATE": timestamp},
+    )
+
+
+def git(
+    repo: Path, *arguments: str, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(repo), *arguments],
+        env={**os.environ, **(extra_env or {})},
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+
+def write_executable(path: Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o755)
+
+
+if __name__ == "__main__":
+    unittest.main()

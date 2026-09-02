@@ -30,13 +30,13 @@ fn resume_history(
     let turn_id = "resume-warning-seed-turn".to_string();
     let turn_ctx = TurnContextItem {
         turn_id: Some(turn_id.clone()),
-        cwd: config.cwd.clone(),
+        cwd: config.cwd.clone().into(),
         workspace_roots: None,
         current_date: None,
         timezone: None,
         approval_policy: config.permissions.approval_policy.value(),
         approvals_reviewer: None,
-        sandbox_policy: config.legacy_sandbox_policy(),
+        sandbox_policy: config.legacy_sandbox_policy().into(),
         permission_profile: None,
         active_permission_profile: None,
         network: None,

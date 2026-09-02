@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::fmt;
+use std::num::NonZeroU32;
 use std::num::NonZeroU64;
 use std::path::Path;
 
@@ -10,6 +12,7 @@ use crate::browser_use::BrowserUseConfigToml;
 use crate::computer_use::ComputerUseConfigToml;
 use crate::permissions_toml::PermissionsToml;
 use crate::profile_toml::ConfigProfile;
+use crate::tool_execution::ToolExecutionToml;
 use crate::types::AnalyticsConfigToml;
 use crate::types::ApprovalsReviewer;
 use crate::types::AppsConfigToml;
@@ -309,8 +312,11 @@ pub struct ConfigToml {
     /// Token budget applied when storing tool/function outputs in the context manager.
     pub tool_output_token_limit: Option<usize>,
 
-    /// Maximum poll window for background terminal output (`write_stdin`), in milliseconds.
-    /// Default: `300000` (5 minutes).
+    /// Timing policy for model-controlled command execution.
+    pub tool_execution: Option<ToolExecutionToml>,
+
+    /// Deprecated alias for `tool_execution.yield.max_ms`. Legacy values below the built-in yield
+    /// default are raised to that default.
     pub background_terminal_max_timeout: Option<u64>,
 
     /// Deprecated: ignored.
@@ -335,6 +341,10 @@ pub struct ConfigToml {
     /// Directory where Codex stores the SQLite state DB.
     /// Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`.
     pub sqlite_home: Option<AbsolutePathBuf>,
+
+    /// Selects and configures the Runtime State Backend.
+    /// SQLite is used when this section is omitted.
+    pub state: Option<StateToml>,
 
     /// Directory where Codex writes log files. Setting this value explicitly
     /// also enables the TUI text log in this directory.
@@ -533,6 +543,145 @@ pub enum ThreadStoreToml {
     InMemory {
         id: String,
     },
+}
+
+/// Runtime State Backend selection.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(tag = "backend", rename_all = "snake_case")]
+#[schemars(deny_unknown_fields)]
+pub enum StateToml {
+    Sqlite {},
+    Postgresql { postgresql: PostgresqlStateToml },
+}
+
+/// PostgreSQL Runtime State Namespace configuration with exactly one connection source.
+#[derive(Serialize, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(untagged)]
+#[schemars(deny_unknown_fields)]
+pub enum PostgresqlStateToml {
+    /// Preferred direct passwordless PostgreSQL mTLS Connection Descriptor.
+    Direct {
+        /// Preferred direct passwordless PostgreSQL mTLS Connection Descriptor with `sslmode=verify-full` and absolute `sslrootcert`, `sslcert`, and `sslkey` paths.
+        url: String,
+
+        /// PostgreSQL schema containing this Runtime State Namespace.
+        #[serde(default = "default_postgresql_state_schema")]
+        schema: String,
+
+        /// Connection-pool configuration.
+        #[serde(default)]
+        pool: PostgresqlStatePoolToml,
+    },
+    /// Compatible environment-backed PostgreSQL mTLS Connection Descriptor.
+    Environment {
+        /// Compatible alternative naming an environment variable containing the passwordless PostgreSQL mTLS Connection Descriptor.
+        url_env: String,
+
+        /// PostgreSQL schema containing this Runtime State Namespace.
+        #[serde(default = "default_postgresql_state_schema")]
+        schema: String,
+
+        /// Connection-pool configuration.
+        #[serde(default)]
+        pool: PostgresqlStatePoolToml,
+    },
+}
+
+#[derive(Deserialize)]
+struct PostgresqlStateTomlWire {
+    url: Option<String>,
+    url_env: Option<String>,
+    #[serde(default = "default_postgresql_state_schema")]
+    schema: String,
+    #[serde(default)]
+    pool: PostgresqlStatePoolToml,
+}
+
+impl<'de> Deserialize<'de> for PostgresqlStateToml {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = PostgresqlStateTomlWire::deserialize(deserializer)?;
+        match (wire.url, wire.url_env) {
+            (Some(url), None) => Ok(Self::Direct {
+                url,
+                schema: wire.schema,
+                pool: wire.pool,
+            }),
+            (None, Some(url_env)) => Ok(Self::Environment {
+                url_env,
+                schema: wire.schema,
+                pool: wire.pool,
+            }),
+            (Some(_), Some(_)) | (None, None) => Err(D::Error::custom(
+                "PostgreSQL Runtime State config must define exactly one of `url` or `url_env`",
+            )),
+        }
+    }
+}
+
+impl fmt::Debug for PostgresqlStateToml {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Direct { schema, pool, .. } => formatter
+                .debug_struct("Direct")
+                .field("url", &"[REDACTED]")
+                .field("schema", schema)
+                .field("pool", pool)
+                .finish(),
+            Self::Environment {
+                url_env,
+                schema,
+                pool,
+            } => formatter
+                .debug_struct("Environment")
+                .field("url_env", url_env)
+                .field("schema", schema)
+                .field("pool", pool)
+                .finish(),
+        }
+    }
+}
+
+/// PostgreSQL Runtime State connection-pool settings.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct PostgresqlStatePoolToml {
+    #[serde(default = "default_postgresql_state_max_connections")]
+    pub max_connections: NonZeroU32,
+
+    #[serde(default = "default_postgresql_state_acquire_timeout_ms")]
+    pub acquire_timeout_ms: NonZeroU64,
+
+    #[serde(default = "default_postgresql_state_statement_timeout_ms")]
+    pub statement_timeout_ms: NonZeroU64,
+}
+
+impl Default for PostgresqlStatePoolToml {
+    fn default() -> Self {
+        Self {
+            max_connections: default_postgresql_state_max_connections(),
+            acquire_timeout_ms: default_postgresql_state_acquire_timeout_ms(),
+            statement_timeout_ms: default_postgresql_state_statement_timeout_ms(),
+        }
+    }
+}
+
+fn default_postgresql_state_schema() -> String {
+    "codex".to_string()
+}
+
+fn default_postgresql_state_max_connections() -> NonZeroU32 {
+    NonZeroU32::new(10).unwrap_or(NonZeroU32::MIN)
+}
+
+fn default_postgresql_state_acquire_timeout_ms() -> NonZeroU64 {
+    NonZeroU64::new(10_000).unwrap_or(NonZeroU64::MIN)
+}
+
+fn default_postgresql_state_statement_timeout_ms() -> NonZeroU64 {
+    NonZeroU64::new(30_000).unwrap_or(NonZeroU64::MIN)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
@@ -1039,5 +1188,115 @@ command = "   "
                 "model_providers.amazon-bedrock: provider auth.command must not be empty"
             )
         );
+    }
+
+    #[test]
+    fn postgresql_state_config_deserializes_with_stable_shape_and_defaults() {
+        let config: ConfigToml = toml::from_str(
+            r#"
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+url_env = "CODEX_POSTGRES_URL"
+"#,
+        )
+        .expect("PostgreSQL state config should deserialize");
+
+        assert_eq!(
+            config.state,
+            Some(StateToml::Postgresql {
+                postgresql: PostgresqlStateToml::Environment {
+                    url_env: "CODEX_POSTGRES_URL".to_string(),
+                    schema: "codex".to_string(),
+                    pool: PostgresqlStatePoolToml::default(),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn postgresql_state_config_deserializes_direct_url() {
+        const URL: &str = "postgresql://codex@db.example/codex?sslmode=verify-full&sslrootcert=/tls/ca.crt&sslcert=/tls/client.crt&sslkey=/tls/client.key";
+        let config: ConfigToml = toml::from_str(&format!(
+            r#"
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+url = "{URL}"
+"#,
+        ))
+        .expect("direct PostgreSQL state URL should deserialize");
+
+        let serialized = serde_json::to_value(&config).expect("config should serialize");
+        assert_eq!(
+            serialized.pointer("/state/postgresql/url"),
+            Some(&serde_json::json!(URL))
+        );
+        assert!(!format!("{config:?}").contains(URL));
+    }
+
+    #[test]
+    fn postgresql_state_config_requires_exactly_one_connection_source() {
+        let both = r#"
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+url = "postgresql://codex@db.example/codex"
+url_env = "CODEX_POSTGRES_URL"
+"#;
+        let neither = r#"
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+schema = "codex"
+"#;
+
+        for config in [both, neither] {
+            toml::from_str::<ConfigToml>(config)
+                .expect_err("exactly one PostgreSQL connection source should be required");
+        }
+    }
+
+    #[test]
+    fn postgresql_state_config_ignores_unrelated_fields_during_normal_deserialization() {
+        let config: ConfigToml = toml::from_str(
+            r#"
+[state]
+backend = "postgresql"
+
+[state.postgresql]
+url_env = "CODEX_POSTGRES_URL"
+future_option = true
+"#,
+        )
+        .expect("ordinary config parsing should ignore unrelated PostgreSQL state fields");
+
+        assert_eq!(
+            config.state,
+            Some(StateToml::Postgresql {
+                postgresql: PostgresqlStateToml::Environment {
+                    url_env: "CODEX_POSTGRES_URL".to_string(),
+                    schema: "codex".to_string(),
+                    pool: PostgresqlStatePoolToml::default(),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn sqlite_state_config_deserializes_without_postgresql_settings() {
+        let config: ConfigToml = toml::from_str(
+            r#"
+[state]
+backend = "sqlite"
+"#,
+        )
+        .expect("SQLite state config should deserialize");
+
+        assert_eq!(config.state, Some(StateToml::Sqlite {}));
     }
 }

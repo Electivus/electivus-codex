@@ -169,13 +169,16 @@ async fn test_queue() -> anyhow::Result<(Arc<dyn QueueStore>, TempDir)> {
     let home = tempfile::tempdir()?;
     let sqlite = SqliteConfig::new_for_testing(home.path().abs());
     let runtime = StateRuntime::init(sqlite.clone(), "test-provider".to_string()).await?;
-    let queue: Arc<dyn QueueStore> = Arc::new(LocalQueueStore::new(runtime));
+    let queue: Arc<dyn QueueStore> =
+        Arc::new(LocalQueueStore::new(runtime).context("SQLite queue storage is unavailable")?);
     Ok((queue, home))
 }
 
 fn loaded_thread_queue(test: &TestCodex) -> anyhow::Result<Arc<dyn QueueStore>> {
     let runtime = test.codex.state_db().context("state runtime unavailable")?;
-    Ok(Arc::new(LocalQueueStore::new(runtime)))
+    Ok(Arc::new(
+        LocalQueueStore::new(runtime).context("SQLite queue storage is unavailable")?,
+    ))
 }
 
 fn user_input(text: &str) -> TurnInput {
@@ -547,7 +550,10 @@ async fn externally_changed_queues_dispatch_independently_and_retry_failed_wakes
     )
     .await?;
     let external_queue = QueuedItemService::new(
-        Arc::new(LocalQueueStore::new(external_runtime)),
+        Arc::new(
+            LocalQueueStore::new(external_runtime)
+                .context("SQLite queue storage is unavailable")?,
+        ),
         Weak::new(),
         Arc::new(NoopExtensionEventSink),
     );

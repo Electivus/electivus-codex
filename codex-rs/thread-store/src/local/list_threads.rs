@@ -11,10 +11,11 @@ use super::LocalThreadStore;
 use super::helpers::resolve_thread_names;
 use super::helpers::resolve_thread_section_metadata;
 use super::helpers::set_thread_name;
-use super::helpers::stored_thread_from_rollout_item;
+use super::helpers::stored_thread_from_rollout_item_with_metadata;
 use super::read_thread::stored_thread_from_state_metadata;
 use crate::ListThreadsParams;
 use crate::SortDirection;
+use crate::ThreadLocationFilter;
 use crate::ThreadPage;
 use crate::ThreadRelationFilter;
 use crate::ThreadSortKey;
@@ -71,17 +72,19 @@ pub(super) async fn list_threads(
         .as_ref()
         .and_then(|cursor| serde_json::to_value(cursor).ok())
         .and_then(|value| value.as_str().map(str::to_owned));
-    let mut items = page
-        .items
-        .into_iter()
-        .filter_map(|item| {
-            stored_thread_from_rollout_item(
-                item,
-                params.archived,
-                store.config.default_model_provider_id.as_str(),
-            )
-        })
-        .collect::<Vec<_>>();
+    let mut items = Vec::with_capacity(page.items.len());
+    for item in page.items {
+        if let Some(thread) = stored_thread_from_rollout_item_with_metadata(
+            store,
+            item,
+            params.archived,
+            store.config.default_model_provider_id.as_str(),
+        )
+        .await
+        {
+            items.push(thread);
+        }
+    }
 
     let thread_history_modes = items
         .iter()
@@ -173,17 +176,32 @@ async fn list_section_threads(
             Err(_) => String::new(),
         })
         .collect::<Vec<_>>();
-    let normalized_cwd_filters = params.cwd_filters.as_ref().map(|filters| {
-        filters
-            .iter()
-            .map(|cwd| codex_rollout::state_db::normalize_cwd_for_state_db(cwd))
-            .collect::<Vec<_>>()
-    });
+    let (normalized_cwd_filters, repository_identity) = match &params.location_filter {
+        ThreadLocationFilter::Unrestricted => (None, None),
+        ThreadLocationFilter::ExactCwds(cwds) => (
+            Some(
+                cwds.iter()
+                    .map(|cwd| codex_rollout::state_db::normalize_cwd_for_state_db(cwd))
+                    .collect::<Vec<_>>(),
+            ),
+            None,
+        ),
+        ThreadLocationFilter::ProjectSessionScope {
+            cwd,
+            repository_identity,
+        } => (
+            Some(vec![codex_rollout::state_db::normalize_cwd_for_state_db(
+                cwd,
+            )]),
+            Some(repository_identity.as_str()),
+        ),
+    };
     let filters = ThreadFilterOptions {
         archived_only: params.archived,
         allowed_sources: allowed_sources.as_slice(),
         model_providers: params.model_providers.as_deref(),
         cwd_filters: normalized_cwd_filters.as_deref(),
+        repository_identity,
         section: Some(Some(section)),
         project_id: params
             .project_id
@@ -253,7 +271,33 @@ pub(super) async fn list_rollout_threads(
     sort_key: codex_rollout::ThreadSortKey,
     sort_direction: codex_rollout::SortDirection,
 ) -> ThreadStoreResult<codex_rollout::ThreadsPage> {
-    if params.relation_filter.is_some() || params.section.is_some() || params.project_id.is_some() {
+    if matches!(
+        params.location_filter,
+        ThreadLocationFilter::ProjectSessionScope { .. }
+    ) {
+        return super::project_scope_repair::list_threads(
+            state_db,
+            config,
+            default_model_provider_id,
+            params,
+            cursor,
+            sort_key,
+            sort_direction,
+        )
+        .await;
+    }
+    let (cwd_filters, repository_identity) = match &params.location_filter {
+        ThreadLocationFilter::Unrestricted => (None, None),
+        ThreadLocationFilter::ExactCwds(cwds) => (Some(cwds.as_slice()), None),
+        ThreadLocationFilter::ProjectSessionScope { .. } => {
+            unreachable!("project scope dispatched before local listing")
+        }
+    };
+    if params.relation_filter.is_some()
+        || params.section.is_some()
+        || params.project_id.is_some()
+        || repository_identity.is_some()
+    {
         let relation_filter = params
             .relation_filter
             .map(|relation_filter| match relation_filter {
@@ -273,7 +317,8 @@ pub(super) async fn list_rollout_threads(
             sort_direction,
             params.allowed_sources.as_slice(),
             params.model_providers.as_deref(),
-            params.cwd_filters.as_deref(),
+            cwd_filters,
+            repository_identity,
             relation_filter,
             params.archived,
             params.section.as_ref().map(Option::as_deref),
@@ -297,7 +342,7 @@ pub(super) async fn list_rollout_threads(
             sort_direction,
             params.allowed_sources.as_slice(),
             params.model_providers.as_deref(),
-            params.cwd_filters.as_deref(),
+            cwd_filters,
             default_model_provider_id,
             params.search_term.as_deref(),
         )
@@ -312,7 +357,7 @@ pub(super) async fn list_rollout_threads(
             sort_direction,
             params.allowed_sources.as_slice(),
             params.model_providers.as_deref(),
-            params.cwd_filters.as_deref(),
+            cwd_filters,
             default_model_provider_id,
             params.search_term.as_deref(),
         )
@@ -327,7 +372,7 @@ pub(super) async fn list_rollout_threads(
             sort_direction,
             params.allowed_sources.as_slice(),
             params.model_providers.as_deref(),
-            params.cwd_filters.as_deref(),
+            cwd_filters,
             default_model_provider_id,
             params.search_term.as_deref(),
         )
@@ -342,7 +387,7 @@ pub(super) async fn list_rollout_threads(
             sort_direction,
             params.allowed_sources.as_slice(),
             params.model_providers.as_deref(),
-            params.cwd_filters.as_deref(),
+            cwd_filters,
             default_model_provider_id,
             params.search_term.as_deref(),
         )
@@ -398,7 +443,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: None,
                 project_id: None,
                 archived: false,
@@ -460,7 +505,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: None,
                 project_id: None,
                 archived: false,
@@ -534,7 +579,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: None,
                 project_id: None,
                 archived: false,
@@ -572,7 +617,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: None,
                 project_id: None,
                 archived: false,
@@ -590,7 +635,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: None,
                 project_id: None,
                 archived: true,
@@ -644,7 +689,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: vec![SessionSource::Cli],
                 model_providers: Some(vec!["test-provider".to_string()]),
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: None,
                 project_id: None,
                 archived: false,
@@ -723,7 +768,7 @@ mod tests {
             sort_direction: SortDirection::Asc,
             allowed_sources: Vec::new(),
             model_providers: None,
-            cwd_filters: None,
+            location_filter: crate::ThreadLocationFilter::Unrestricted,
             section: Some(Some(PINNED_THREAD_SECTION_ID.to_owned())),
             project_id: None,
             archived: false,
@@ -777,7 +822,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: None,
                 project_id: None,
                 archived: false,

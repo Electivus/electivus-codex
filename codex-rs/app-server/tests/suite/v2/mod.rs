@@ -69,6 +69,15 @@ mod plugin_read;
 mod plugin_search;
 mod plugin_share;
 mod plugin_uninstall;
+#[cfg(debug_assertions)]
+mod postgres_goal_service;
+#[cfg(debug_assertions)]
+mod postgres_runtime_state;
+#[cfg(debug_assertions)]
+#[path = "postgres_thread_lease_tests.rs"]
+mod postgres_thread_lease;
+#[cfg(debug_assertions)]
+mod postgres_thread_store;
 mod process_exec;
 mod projects;
 mod rate_limit_reset_credits;

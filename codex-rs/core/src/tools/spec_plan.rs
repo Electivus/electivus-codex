@@ -873,12 +873,13 @@ fn register_code_mode_executors(
     );
     enabled_tools
         .sort_by(|left, right| compare_code_mode_tools(left, right, &namespace_descriptions));
+    let yield_time = turn_context.config.tool_execution.yield_time();
     let execute_handler = CodeModeExecuteHandler::new(
         create_code_mode_tool(
             &enabled_tools,
             &deferred_tools,
             &namespace_descriptions,
-            turn_context.config.code_mode.default_exec_yield_time_ms,
+            yield_time,
             tool_mode == ToolMode::CodeModeOnly,
             if unified_image_budget_enabled(&turn_context.config.features, model_info) {
                 codex_code_mode::ImageDetailVisibility::Hidden
@@ -889,7 +890,7 @@ fn register_code_mode_executors(
         code_mode_nested_tool_specs,
     );
 
-    registry.prepend_trusted(Arc::new(CodeModeWaitHandler));
+    registry.prepend_trusted(Arc::new(CodeModeWaitHandler::new(yield_time)));
     registry.prepend_trusted(Arc::new(execute_handler));
 
     code_mode_tool_names
@@ -1005,8 +1006,9 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
                     include_windows_shell_guidance: should_include_windows_shell_guidance(
                         context.environments,
                     ),
+                    tool_execution: turn_context.config.tool_execution,
                 }));
-                registry.add(WriteStdinHandler);
+                registry.add(WriteStdinHandler::new(turn_context.config.tool_execution));
             }
             if turn_context.config.features.enabled(Feature::ViewImage) {
                 registry.add(ViewImageHandler::new(ViewImageToolOptions {
@@ -1094,10 +1096,11 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
             context.environments,
         ),
         include_windows_shell_guidance: should_include_windows_shell_guidance(context.environments),
+        tool_execution: turn_context.config.tool_execution,
     };
     if features.enabled(Feature::UnifiedExec) {
         registry.add(ExecCommandHandler::new(options));
-        registry.add(WriteStdinHandler);
+        registry.add(WriteStdinHandler::new(turn_context.config.tool_execution));
     } else {
         // Managed requirements are the only configuration path that can keep
         // unified exec disabled. Preserve command execution without exposing a

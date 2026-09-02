@@ -27,7 +27,7 @@ impl StateRuntime {
         thread_id: &str,
         project_id: Option<&str>,
     ) -> anyhow::Result<Option<Option<String>>> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.sqlite_pool()?.begin_with("BEGIN IMMEDIATE").await?;
         if let Some(project_id) = project_id {
             let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM projects WHERE id = ?")
                 .bind(project_id)
@@ -66,7 +66,7 @@ impl StateRuntime {
         sort_direction: SortDirection,
     ) -> anyhow::Result<ProjectsPage> {
         let mut query = project_list_query(cursor, limit, sort_key, sort_direction)?;
-        let rows = query.build().fetch_all(self.pool.as_ref()).await?;
+        let rows = query.build().fetch_all(self.sqlite_pool()?).await?;
         let mut projects: Vec<Project> = Vec::new();
         for row in rows {
             let id: String = row.try_get("id")?;
@@ -90,7 +90,7 @@ impl StateRuntime {
     }
 
     pub async fn get_project(&self, id: &str) -> anyhow::Result<Option<Project>> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.sqlite_pool()?.begin().await?;
         let row = QueryBuilder::<Sqlite>::new(PROJECT_SELECT)
             .push(" WHERE id = ")
             .push_bind(id)
@@ -109,7 +109,7 @@ impl StateRuntime {
         &self,
         idempotency_key: &str,
     ) -> anyhow::Result<Option<Project>> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.sqlite_pool()?.begin().await?;
         let project_id = sqlx::query_scalar::<_, String>(
             "SELECT project_id FROM project_idempotency_keys WHERE key = ?",
         )
@@ -143,7 +143,7 @@ impl StateRuntime {
         thread_ids: &[String],
         idempotency_key: &str,
     ) -> anyhow::Result<CreatedProject> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.sqlite_pool()?.begin_with("BEGIN IMMEDIATE").await?;
         let existing_project_id = sqlx::query_scalar::<_, String>(
             "SELECT project_id FROM project_idempotency_keys WHERE key = ?",
         )
@@ -234,7 +234,7 @@ impl StateRuntime {
         roots: Option<Vec<ProjectRoot>>,
         metadata: Option<BTreeMap<String, String>>,
     ) -> anyhow::Result<Option<(Project, bool)>> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.sqlite_pool()?.begin_with("BEGIN IMMEDIATE").await?;
         let row = QueryBuilder::<Sqlite>::new(PROJECT_SELECT)
             .push(" WHERE id = ")
             .push_bind(id)
@@ -291,7 +291,7 @@ impl StateRuntime {
         project_id: &str,
         before_project_id: Option<&str>,
     ) -> anyhow::Result<Option<bool>> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.sqlite_pool()?.begin_with("BEGIN IMMEDIATE").await?;
         let mut project_ids = sqlx::query_scalar::<_, String>(
             "SELECT id FROM projects ORDER BY position ASC, id ASC",
         )
@@ -340,7 +340,7 @@ impl StateRuntime {
         &self,
         id: &str,
     ) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.sqlite_pool()?.begin_with("BEGIN IMMEDIATE").await?;
         let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM projects WHERE id = ?")
             .bind(id)
             .fetch_one(&mut *tx)

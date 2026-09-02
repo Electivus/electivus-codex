@@ -2,6 +2,7 @@ use super::*;
 use crate::MAX_QUEUE_ITEMS;
 use crate::QueuedUserSubmissionRecord;
 use sqlx::Connection;
+use sqlx::SqliteConnection;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 

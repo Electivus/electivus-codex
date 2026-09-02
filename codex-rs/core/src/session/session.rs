@@ -131,6 +131,7 @@ pub(crate) struct SessionConfiguration {
     /// Effective originator used for this thread's Responses requests and analytics events.
     pub(super) originator: String,
     pub(super) dynamic_tools: Vec<DynamicToolSpec>,
+    pub(super) replayed_dynamic_tools: bool,
     pub(super) user_shell_override: Option<shell::Shell>,
 }
 
@@ -280,9 +281,11 @@ impl SessionConfiguration {
             service_tier: self.step_settings.service_tier.clone(),
             approval_policy: self.step_settings.approval_policy.value(),
             approvals_reviewer: self.step_settings.approvals_reviewer,
-            permission_profile: self.materialized_permission_profile(environment_selections),
+            permission_profile: self
+                .materialized_permission_profile(environment_selections)
+                .into(),
             active_permission_profile: self.active_permission_profile(),
-            cwd: self.legacy_fallback_cwd.clone(),
+            cwd: self.legacy_fallback_cwd.clone().into(),
             reasoning_effort: self.step_settings.collaboration_mode.reasoning_effort(),
             reasoning_summary: self.step_settings.reasoning_summary,
             personality: self.step_settings.personality,
@@ -925,6 +928,10 @@ impl Session {
                 thread_store.as_any().downcast_ref::<LocalThreadStore>()
             {
                 local_store.state_db().await
+            } else if let Some(postgres_store) =
+                thread_store.as_any().downcast_ref::<PostgresThreadStore>()
+            {
+                postgres_store.state_db()
             } else {
                 None
             }
@@ -1388,9 +1395,7 @@ impl Session {
                 // published after SessionConfigured so MCP events follow it.
                 mcp_runtime,
                 mcp_handler_cache: Default::default(),
-                unified_exec_manager: UnifiedExecProcessManager::new(
-                    config.background_terminal_max_timeout,
-                ),
+                unified_exec_manager: UnifiedExecProcessManager::new(),
                 elicitations: crate::elicitation::ElicitationService::new(),
                 shell_zsh_path: config.zsh_path.clone(),
                 main_execve_wrapper_exe: config.main_execve_wrapper_exe.clone(),

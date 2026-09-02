@@ -12,6 +12,7 @@ mod steering;
 mod tool;
 
 pub use api::GoalObjectiveUpdate;
+pub use api::GoalPreviewUpdate;
 pub use api::GoalService;
 pub use api::GoalServiceError;
 pub use api::GoalSetOutcome;

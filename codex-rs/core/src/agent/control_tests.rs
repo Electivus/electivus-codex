@@ -1205,9 +1205,9 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
                         service_tier: None,
                         approval_policy: AskForApproval::Never,
                         approvals_reviewer: ApprovalsReviewer::User,
-                        permission_profile: PermissionProfile::workspace_write(),
+                        permission_profile: PermissionProfile::workspace_write().into(),
                         active_permission_profile: None,
-                        cwd: harness.config.cwd.clone(),
+                        cwd: harness.config.cwd.clone().into(),
                         reasoning_effort: None,
                         reasoning_summary: None,
                         personality: None,
@@ -3620,6 +3620,9 @@ async fn resume_thread_subagent_restores_stored_metadata() {
     assert_eq!(resumed_agent_path, Some(agent_path));
     assert_eq!(resumed_nickname, Some(original_nickname));
     assert_eq!(resumed_role, Some("explorer".to_string()));
+    let store_calls = thread_store.calls().await;
+    assert_eq!(store_calls.load_latest_model_context, 1);
+    assert_eq!(store_calls.read_thread_with_history, 0);
 
     let _ = harness
         .control

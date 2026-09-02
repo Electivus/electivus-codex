@@ -385,7 +385,14 @@ impl App {
             let config_cwd = if self.app_server_target.uses_remote_workspace() {
                 self.config.cwd.to_path_buf()
             } else {
-                target_thread.cwd.to_path_buf()
+                let Some(cwd) = target_thread.cwd.to_inferred_abs_path() else {
+                    self.chat_widget.add_error_message(format!(
+                        "Agent session {root_thread_id} has a working directory that is not valid on this host: {}",
+                        target_thread.cwd.render_for_ui()
+                    ));
+                    return Ok(AppRunControl::Continue);
+                };
+                cwd.to_path_buf()
             };
             let current_cwd = self.config.cwd.to_path_buf();
             let resume_config = match self

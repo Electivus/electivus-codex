@@ -5,6 +5,7 @@ use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::path::Path;
+use std::path::PathBuf;
 
 use super::TranscriptPreviewLine;
 use super::TranscriptPreviewSpeaker;
@@ -39,6 +40,10 @@ pub(crate) async fn load_transcript_preview(
         .thread_read(thread_id, /*include_turns*/ false)
         .await
         .map_err(std::io::Error::other)?;
+    // The markdown parser treats this as lexical display context only; it must never be used for
+    // host filesystem access.
+    let cwd = PathBuf::from(thread.cwd.render_for_ui());
+    let cwd = cwd.as_path();
     let inline_visualization_context = config.and_then(|config| {
         ThreadId::from_string(&thread.id)
             .ok()
@@ -55,7 +60,7 @@ pub(crate) async fn load_transcript_preview(
                     .is_some_and(|name| name.ends_with(".jsonl"))
             {
                 let path = path.clone();
-                let cwd = thread.cwd.clone();
+                let cwd = cwd.to_path_buf();
                 let inline_visualization_context = inline_visualization_context.clone();
                 let scanned = tokio::task::spawn_blocking(move || {
                     scan_legacy_transcript_preview(
@@ -88,12 +93,11 @@ pub(crate) async fn load_transcript_preview(
                     .iter()
                     .rev()
                     .flat_map(|turn| turn.items.iter().rev()),
-                thread.cwd.as_path(),
+                cwd,
                 inline_visualization_context.as_ref(),
             );
         }
         ThreadHistoryMode::Paginated => {
-            let cwd = thread.cwd.as_path();
             let mut cursor = None;
             let mut seen_cursors = HashSet::new();
             let mut scanned_items = 0_usize;

@@ -342,10 +342,15 @@ impl GoalToolExecutor {
             .thread_goals()
             .account_thread_goal_usage(
                 self.thread_id,
-                snapshot.time_delta_seconds,
-                snapshot.token_delta,
-                mode,
-                Some(snapshot.expected_goal_id.as_str()),
+                codex_state::GoalAccountingRequest {
+                    event_id,
+                    time_delta_seconds: snapshot.time_delta_seconds,
+                    token_delta: snapshot.token_delta,
+                    mode,
+                    target: codex_state::GoalAccountingTarget::GoalId(
+                        snapshot.expected_goal_id.as_str(),
+                    ),
+                },
             )
             .await
             .map_err(|err| {
@@ -375,6 +380,15 @@ impl GoalToolExecutor {
                     goal.clone(),
                 );
                 Some(goal)
+            }
+            codex_state::GoalAccountingOutcome::AlreadyAccounted(goal) => {
+                self.accounting_state.mark_progress_accounted_for_status(
+                    turn_id.as_str(),
+                    &snapshot,
+                    goal.status,
+                    budget_limited_goal_disposition,
+                );
+                None
             }
             codex_state::GoalAccountingOutcome::Unchanged(_) => None,
         })

@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Number;
 use serde_json::Value as JsonValue;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -67,6 +68,10 @@ pub struct JsonSchema {
     pub one_of: Option<Vec<JsonSchema>>,
     #[serde(rename = "allOf", skip_serializing_if = "Option::is_none")]
     pub all_of: Option<Vec<JsonSchema>>,
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<Number>,
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<Number>,
     #[serde(rename = "$defs", skip_serializing_if = "Option::is_none")]
     pub defs: Option<BTreeMap<String, JsonSchema>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -122,6 +127,14 @@ impl JsonSchema {
 
     pub fn number(description: Option<String>) -> Self {
         Self::typed(JsonSchemaPrimitiveType::Number, description)
+    }
+
+    pub fn number_with_bounds(description: Option<String>, minimum: u64, maximum: u64) -> Self {
+        Self {
+            minimum: Some(minimum.into()),
+            maximum: Some(maximum.into()),
+            ..Self::number(description)
+        }
     }
 
     pub fn integer(description: Option<String>) -> Self {

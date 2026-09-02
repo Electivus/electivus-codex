@@ -122,13 +122,16 @@ Avoid test-only functions in the main implementation.
 
 Check whether there are existing helpers to make tests more streamlined and readable.
 
-### Change size guidance (800 lines)
+### Change cohesion guidance
 
-Unless the change is mechanical the total number of changed lines should not exceed 800 lines.
-For complex logic changes the size should be under 500 lines.
+Do not impose a numeric changed-line limit on a pull request or treat total diff
+size as a review blocker by itself. Review whether the change is coherent,
+whether its dependencies and affected call sites are understandable, and
+whether its behavior can be validated as one unit.
 
-If the change is larger, explore whether it can be split into reviewable stages and identify the smallest coherent stage to land first.
-Base the staging suggestion on the actual diff, dependencies, and affected call sites.
+Suggest dependent stages only when the actual diff contains independently
+useful, verifiable boundaries. Do not split a cohesive change solely to satisfy
+a line-count target.
 
 ## TUI style conventions
 
@@ -320,3 +323,17 @@ Tests and features must support Linux, macOS and Windows unless feature is expli
 
 Codex supports running connected app-server and exec-server on different operating systems. See the
 `$remote-tests` skill for details about integration testing these configurations.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub Issues for `Electivus/electivus-codex`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage uses the five canonical Matt Pocock skills labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repository uses a multi-context domain documentation layout. See `docs/agents/domain.md`.

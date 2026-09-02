@@ -97,6 +97,7 @@ fn parse_unified_exec_output(raw: &str) -> Result<ParsedUnifiedExecOutput> {
             r#"(?:Process exited with code (?P<exit_code>-?\d+)\n)?"#,
             r#"(?:Process running with session ID (?P<process_id>-?\d+)\n)?"#,
             r#"(?:Original token count: (?P<original_token_count>\d+)\n)?"#,
+            r#"(?:Timing policy adjusted yield_time_ms from \d+ ms to \d+ ms \((?:minimum|maximum) \d+ ms\)\.\n)?"#,
             r#"Output:\n?(?P<output>.*)$"#,
         ))
         .expect("valid unified exec output regex")

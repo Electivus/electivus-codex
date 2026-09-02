@@ -108,6 +108,7 @@ async fn list_threads(mcp: &mut TestAppServer) -> Result<ThreadListResponse> {
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            project_cwd: None,
         })
         .await?;
     let list_resp: JSONRPCResponse = timeout(
@@ -209,7 +210,12 @@ async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
     let thread_path = thread.path.clone().expect("thread path");
     assert!(thread_path.as_path().is_absolute());
     assert_ne!(thread_path.as_path(), original_path);
-    assert!(thread.cwd.as_path().is_absolute());
+    assert!(
+        thread
+            .cwd
+            .to_inferred_abs_path()
+            .is_some_and(|cwd| cwd.as_path().is_absolute())
+    );
     assert_eq!(thread.source, SessionSource::VsCode);
     assert_eq!(thread.thread_source, Some(ThreadSource::User));
     assert_eq!(thread.name, None);
@@ -830,10 +836,13 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
         .thread_goals()
         .account_thread_goal_usage(
             source_thread_id,
-            /*time_delta_seconds*/ 11,
-            /*token_delta*/ 37,
-            codex_state::GoalAccountingMode::ActiveOnly,
-            Some(source_goal.goal_id.as_str()),
+            codex_state::GoalAccountingRequest {
+                event_id: "thread-fork-source-usage",
+                time_delta_seconds: 11,
+                token_delta: 37,
+                mode: codex_state::GoalAccountingMode::ActiveOnly,
+                target: codex_state::GoalAccountingTarget::GoalId(source_goal.goal_id.as_str()),
+            },
         )
         .await?;
     let source_goal = state_db

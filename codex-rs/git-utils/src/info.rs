@@ -159,22 +159,34 @@ pub async fn get_head_commit_hash(cwd: &Path) -> Option<GitSha> {
     }
 }
 
+// Repository Identity participates in composite PostgreSQL B-tree indexes. Keeping the
+// variable-width identity at 1 KiB leaves conservative headroom for the remaining index columns.
+const MAX_REPOSITORY_IDENTITY_BYTES: usize = 1024;
+
+/// Derive a credential-free Repository Identity from a supported Git remote URL.
+///
+/// The canonical identity is rejected when it exceeds 1,024 UTF-8 bytes or contains Unicode
+/// whitespace or control characters.
 pub fn canonicalize_git_remote_url(url: &str) -> Option<String> {
     let url = trim_git_suffix(url.trim().trim_end_matches('/'));
     if url.is_empty() {
         return None;
     }
 
-    if let Some((scheme, rest)) = url.split_once("://") {
-        return canonicalize_git_url_like_remote(scheme, rest);
-    }
+    let repository_identity = if let Some((scheme, rest)) = url.split_once("://") {
+        canonicalize_git_url_like_remote(scheme, rest)
+    } else if let Some((host_part, path)) = parse_scp_like_remote(url) {
+        canonicalize_git_remote_host_path(host_part, path, /*default_port*/ None)
+    } else {
+        let (host_part, path) = url.split_once('/')?;
+        canonicalize_git_remote_host_path(host_part, path, /*default_port*/ None)
+    }?;
 
-    if let Some((host_part, path)) = parse_scp_like_remote(url) {
-        return canonicalize_git_remote_host_path(host_part, path, /*default_port*/ None);
-    }
-
-    let (host_part, path) = url.split_once('/')?;
-    canonicalize_git_remote_host_path(host_part, path, /*default_port*/ None)
+    (repository_identity.len() <= MAX_REPOSITORY_IDENTITY_BYTES
+        && !repository_identity
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace()))
+    .then_some(repository_identity)
 }
 
 fn canonicalize_git_url_like_remote(scheme: &str, rest: &str) -> Option<String> {
@@ -1020,6 +1032,43 @@ mod tests {
                 Some(expected.clone()),
                 Some(BTreeMap::from([("origin".to_string(), expected)])),
             )
+        );
+    }
+
+    #[test]
+    fn canonicalize_git_remote_url_enforces_repository_identity_safety_policy() {
+        let boundary_repo = "r".repeat(1009);
+        let boundary_origin = format!("https://example.test/o/{boundary_repo}");
+        let boundary_identity = format!("example.test/o/{boundary_repo}");
+        assert_eq!(boundary_identity.len(), 1024);
+        assert_eq!(
+            canonicalize_git_remote_url(&boundary_origin),
+            Some(boundary_identity)
+        );
+
+        let oversized_origin = format!("{boundary_origin}r");
+        assert_eq!(canonicalize_git_remote_url(&oversized_origin), None);
+
+        let utf8_boundary_repo = format!("{}r", "é".repeat(504));
+        let utf8_boundary_origin = format!("https://example.test/o/{utf8_boundary_repo}");
+        let utf8_boundary_identity = format!("example.test/o/{utf8_boundary_repo}");
+        assert_eq!(utf8_boundary_identity.len(), 1024);
+        assert_eq!(
+            canonicalize_git_remote_url(&utf8_boundary_origin),
+            Some(utf8_boundary_identity)
+        );
+        assert_eq!(
+            canonicalize_git_remote_url(&format!("{utf8_boundary_origin}r")),
+            None
+        );
+
+        assert_eq!(
+            canonicalize_git_remote_url("https://example.test/acme/repo\ninjected"),
+            None
+        );
+        assert_eq!(
+            canonicalize_git_remote_url("https://example.test/acme/repo\u{2003}injected"),
+            None
         );
     }
 

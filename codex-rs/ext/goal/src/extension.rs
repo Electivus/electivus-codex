@@ -40,6 +40,7 @@ use crate::api::GoalService;
 use crate::events::GoalEventEmitter;
 use crate::metrics::GoalMetrics;
 use crate::runtime::ActiveGoalStopReason;
+use crate::runtime::GoalProgressEvent;
 use crate::runtime::GoalRuntimeConfig;
 use crate::runtime::GoalRuntimeHandle;
 use crate::spec::CREATE_GOAL_TOOL_NAME;
@@ -299,7 +300,7 @@ where
             if let Err(err) = runtime
                 .account_active_goal_progress(
                     turn_id,
-                    &format!("{turn_id}:turn-stop"),
+                    GoalProgressEvent::same(&format!("{turn_id}:turn-stop")),
                     codex_state::GoalAccountingMode::ActiveOnly,
                     BudgetLimitedGoalDisposition::ClearActive,
                 )
@@ -343,7 +344,7 @@ where
             if let Err(err) = runtime
                 .account_active_goal_progress(
                     turn_id,
-                    &format!("{turn_id}:turn-abort"),
+                    GoalProgressEvent::same(&format!("{turn_id}:turn-abort")),
                     codex_state::GoalAccountingMode::ActiveOnly,
                     BudgetLimitedGoalDisposition::ClearActive,
                 )
@@ -459,7 +460,7 @@ where
             let progress = match runtime
                 .account_active_goal_progress(
                     turn_id,
-                    input.call_id,
+                    GoalProgressEvent::same(input.call_id),
                     codex_state::GoalAccountingMode::ActiveOnly,
                     BudgetLimitedGoalDisposition::KeepActive,
                 )

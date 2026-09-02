@@ -13,6 +13,7 @@ use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::rollout_path;
+use app_test_support::set_fake_rollout_cwd;
 use app_test_support::test_absolute_path;
 use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
@@ -1113,7 +1114,7 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
             .await?;
         let ThreadReadResponse { thread: read } =
             timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(read_id)).await??;
-        assert_eq!(read.cwd.as_path(), persisted_cwd);
+        assert_eq!(read.cwd, LegacyAppPathString::from_path(&persisted_cwd));
 
         let list_id = mcp
             .send_raw_request(
@@ -1156,7 +1157,7 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
     assert_eq!(model, "gpt-5.2-codex");
     assert_eq!(reasoning_effort, Some(ReasoningEffort::Ultra));
     assert_eq!(approvals_reviewer, ApprovalsReviewer::AutoReview);
-    assert_eq!(thread.cwd.as_path(), persisted_cwd);
+    assert_eq!(thread.cwd, LegacyAppPathString::from_path(&persisted_cwd));
     assert_eq!(cwd.as_path(), live_cwd);
 
     let update_id = mcp
@@ -2161,7 +2162,7 @@ async fn thread_resume_returns_rollout_history() -> Result<()> {
     assert_eq!(thread.preview, preview);
     assert_eq!(thread.model_provider, "mock_provider");
     assert!(thread.path.as_ref().expect("thread path").is_absolute());
-    assert_eq!(thread.cwd.as_path(), saved_cwd);
+    assert_eq!(thread.cwd, LegacyAppPathString::from_path(&saved_cwd));
     assert_eq!(cwd, test_absolute_path("/"));
     assert_eq!(thread.cli_version, "0.0.0");
     assert_eq!(thread.source, SessionSource::Cli);
@@ -2188,6 +2189,146 @@ async fn thread_resume_returns_rollout_history() -> Result<()> {
         }
         other => panic!("expected user message item, got {other:?}"),
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn foreign_recorded_working_directory_is_metadata_only_for_resume_and_fork() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    #[cfg(not(windows))]
+    let recorded_working_directory = r"C:\Users\alice\project";
+    #[cfg(windows)]
+    let recorded_working_directory = "/home/alice/project";
+    let thread_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-05T12-00-00",
+        "2025-01-05T12:00:00Z",
+        "Foreign working directory",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    set_fake_rollout_cwd(
+        &rollout_path(codex_home.path(), "2025-01-05T12-00-00", &thread_id),
+        Path::new(recorded_working_directory),
+    )?;
+    let explicit_thread_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-06T12-00-00",
+        "2025-01-06T12:00:00Z",
+        "Foreign working directory with explicit override",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    set_fake_rollout_cwd(
+        &rollout_path(
+            codex_home.path(),
+            "2025-01-06T12-00-00",
+            &explicit_thread_id,
+        ),
+        Path::new(recorded_working_directory),
+    )?;
+    let explicit_cwd = codex_home.path().join("explicit-override");
+    std::fs::create_dir(&explicit_cwd)?;
+    let expected_recorded_working_directory =
+        LegacyAppPathString::from_string(recorded_working_directory);
+    let expected_active_cwd = codex_home.path().abs();
+    let expected_explicit_cwd = explicit_cwd.abs();
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+
+    let read_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: thread_id.clone(),
+            include_turns: false,
+        })
+        .await?;
+    let ThreadReadResponse {
+        thread: source_before,
+    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(read_id)).await??;
+    assert_eq!(source_before.cwd, expected_recorded_working_directory);
+
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread_id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadResumeResponse {
+        thread: resumed,
+        cwd: resume_cwd,
+        ..
+    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
+    assert_eq!(resumed.cwd, expected_recorded_working_directory);
+    assert_eq!(resume_cwd, expected_active_cwd);
+
+    let fork_id = mcp
+        .send_thread_fork_request(ThreadForkParams {
+            thread_id: thread_id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadForkResponse {
+        thread: forked,
+        cwd: fork_cwd,
+        ..
+    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(fork_id)).await??;
+    assert_eq!(
+        forked.cwd,
+        LegacyAppPathString::from_abs_path(&expected_active_cwd)
+    );
+    assert_eq!(fork_cwd, expected_active_cwd);
+
+    let read_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id,
+            include_turns: false,
+        })
+        .await?;
+    let ThreadReadResponse {
+        thread: source_after,
+    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(read_id)).await??;
+    assert_eq!(source_after.cwd, expected_recorded_working_directory);
+
+    mcp.start_turn_and_wait_for_completion(TurnStartParams {
+        thread_id: source_after.id,
+        input: vec![UserInput::Text {
+            text: "Continue safely".to_string(),
+            text_elements: Vec::new(),
+        }],
+        ..Default::default()
+    })
+    .await?;
+
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: explicit_thread_id,
+            cwd: Some(explicit_cwd.to_string_lossy().into_owned()),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadResumeResponse {
+        thread: explicitly_resumed,
+        cwd: explicit_active_cwd,
+        ..
+    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
+    assert_eq!(explicitly_resumed.cwd, expected_recorded_working_directory);
+    assert_eq!(explicit_active_cwd, expected_explicit_cwd);
+
+    mcp.start_turn_and_wait_for_completion(TurnStartParams {
+        thread_id: explicitly_resumed.id,
+        input: vec![UserInput::Text {
+            text: "Continue from the explicit working directory".to_string(),
+            text_elements: Vec::new(),
+        }],
+        ..Default::default()
+    })
+    .await?;
 
     Ok(())
 }
@@ -3032,10 +3173,13 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
         .thread_goals()
         .account_thread_goal_usage(
             thread_id,
-            /*time_delta_seconds*/ 12,
-            /*token_delta*/ 50,
-            codex_state::GoalAccountingMode::ActiveOnly,
-            Some(persisted_goal.goal_id.as_str()),
+            codex_state::GoalAccountingRequest {
+                event_id: "thread-resume-persisted-usage",
+                time_delta_seconds: 12,
+                token_delta: 50,
+                mode: codex_state::GoalAccountingMode::ActiveOnly,
+                target: codex_state::GoalAccountingTarget::GoalId(persisted_goal.goal_id.as_str()),
+            },
         )
         .await?;
 

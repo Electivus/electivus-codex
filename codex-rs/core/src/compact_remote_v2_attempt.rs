@@ -68,6 +68,8 @@ pub(super) async fn run_remote_compact_v2_attempt(
     let trace_input_history = compaction_trace
         .is_enabled()
         .then(|| history.raw_items().cloned().collect());
+    let replay_prefix_items = history.replay_prefix_items();
+    let replayed_history = history.is_replayed_history();
     let (mut input, prompt_input_metadata): (Vec<_>, Vec<_>) = history
         .for_prompt_annotated(&turn_context.model_info().input_modalities)
         .into_iter()
@@ -77,6 +79,8 @@ pub(super) async fn run_remote_compact_v2_attempt(
     input.push(ResponseItem::CompactionTrigger {});
     let prompt = Prompt {
         input,
+        replay_prefix_items,
+        replayed_history,
         tools: tool_router.model_visible_specs(),
         parallel_tool_calls: true,
         base_instructions,

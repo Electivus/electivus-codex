@@ -1315,6 +1315,7 @@ async fn thread_list(endpoint: &Endpoint, config_overrides: &[String], limit: u3
             cwd: None,
             use_state_db_only: false,
             search_term: None,
+            project_cwd: None,
         })?;
         println!("< thread/list response: {response:?}");
 

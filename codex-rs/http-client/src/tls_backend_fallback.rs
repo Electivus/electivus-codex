@@ -15,6 +15,8 @@ use crate::OutboundProxyRoute;
 const MAX_CACHED_RUSTLS_DESTINATIONS: usize = 16;
 // Schannel maps TLS alert 70 (protocol_version) to SEC_E_UNSUPPORTED_FUNCTION.
 const SCHANNEL_PROTOCOL_VERSION_ERROR: i32 = 0x8009_0302_u32 as i32;
+// Current Windows builds can instead surface the same peer alert as SEC_E_ILLEGAL_MESSAGE.
+const SCHANNEL_ILLEGAL_MESSAGE_ERROR: i32 = 0x8009_0326_u32 as i32;
 
 #[derive(Clone, Default)]
 pub(crate) struct RustlsClientCache {
@@ -105,26 +107,24 @@ pub(crate) fn should_retry_with_rustls(error: &reqwest::Error) -> bool {
     error.is_connect() && !error.is_timeout() && error.source().is_some_and(has_retryable_tls_error)
 }
 
+pub(crate) fn has_certificate_error(error: &(dyn Error + 'static)) -> bool {
+    let mut source = Some(error);
+    while let Some(error) = source {
+        if is_certificate_error_message(&error.to_string().to_ascii_lowercase()) {
+            return true;
+        }
+        source = error.source();
+    }
+    false
+}
+
 fn has_retryable_tls_error(error: &(dyn Error + 'static)) -> bool {
     let mut source = Some(error);
     let mut recognized_negotiation_failure = false;
 
     while let Some(error) = source {
         let message = error.to_string().to_ascii_lowercase();
-        if [
-            "certificate",
-            "unknown issuer",
-            "unknown ca",
-            "untrusted",
-            "self signed",
-            "self-signed",
-            "hostname",
-            "expired",
-            "revoked",
-        ]
-        .iter()
-        .any(|marker| message.contains(marker))
-        {
+        if is_certificate_error_message(&message) {
             return false;
         }
 
@@ -136,9 +136,13 @@ fn has_retryable_tls_error(error: &(dyn Error + 'static)) -> bool {
         let is_schannel_protocol_version_error = error
             .downcast_ref::<std::io::Error>()
             .and_then(std::io::Error::raw_os_error)
-            == Some(SCHANNEL_PROTOCOL_VERSION_ERROR)
+            .is_some_and(|error| {
+                error == SCHANNEL_PROTOCOL_VERSION_ERROR || error == SCHANNEL_ILLEGAL_MESSAGE_ERROR
+            })
             || message.contains("(os error -2146893054)")
-            || message.contains("0x80090302");
+            || message.contains("0x80090302")
+            || message.contains("(os error -2146893018)")
+            || message.contains("0x80090326");
         if is_macos_protocol_version_error
             || is_linux_protocol_version_error
             || is_schannel_protocol_version_error
@@ -149,6 +153,22 @@ fn has_retryable_tls_error(error: &(dyn Error + 'static)) -> bool {
     }
 
     recognized_negotiation_failure
+}
+
+fn is_certificate_error_message(message: &str) -> bool {
+    [
+        "certificate",
+        "unknown issuer",
+        "unknown ca",
+        "untrusted",
+        "self signed",
+        "self-signed",
+        "hostname",
+        "expired",
+        "revoked",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
 }
 
 #[cfg(test)]

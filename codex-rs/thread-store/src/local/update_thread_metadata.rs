@@ -437,6 +437,7 @@ async fn apply_metadata_update(
                 metadata.first_user_message = Some(first_user_message);
             }
             if let Some(git_info) = patch.git_info {
+                let updates_origin = git_info.origin_url.is_some();
                 let existing_git_info = git_info_from_parts(
                     metadata.git_sha.clone(),
                     metadata.git_branch.clone(),
@@ -446,6 +447,12 @@ async fn apply_metadata_update(
                 metadata.git_sha = sha;
                 metadata.git_branch = branch;
                 metadata.git_origin_url = origin_url;
+                if updates_origin {
+                    metadata.repository_identity = metadata
+                        .git_origin_url
+                        .as_deref()
+                        .and_then(codex_git_utils::canonicalize_git_remote_url);
+                }
             }
             if let Some(project_id) = project_id.as_ref() {
                 metadata.project_id = project_id.clone();
@@ -984,7 +991,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: Some(Some(codex_state::PINNED_THREAD_SECTION_ID.to_string())),
                 project_id: None,
                 archived: false,
@@ -1490,7 +1497,7 @@ mod tests {
             .expect("set permission profile")
             .expect("local store returns updated thread");
 
-        assert_eq!(thread.permission_profile, PermissionProfile::Disabled);
+        assert_eq!(thread.permission_profile(), PermissionProfile::Disabled);
         let thread = store
             .update_thread_metadata(UpdateThreadMetadataParams {
                 thread_id,
@@ -2158,7 +2165,7 @@ mod tests {
                 sort_direction: SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: Some(Vec::new()),
-                cwd_filters: Some(vec![workspace]),
+                location_filter: crate::ThreadLocationFilter::ExactCwds(vec![workspace]),
                 section: None,
                 project_id: None,
                 archived: false,

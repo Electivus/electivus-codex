@@ -1,6 +1,7 @@
 use crate::ARCHIVED_SESSIONS_SUBDIR;
 use crate::RolloutItem;
 use crate::SESSIONS_SUBDIR;
+use crate::backfill_lease::ActiveBackfillLease;
 use crate::compression;
 use crate::recorder::RolloutRecorder;
 use crate::rollout_file_name::RolloutFileName;
@@ -16,9 +17,9 @@ use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
-use codex_state::BackfillState;
+use codex_state::BackfillClaimOutcome;
+use codex_state::BackfillLeaseUpdate;
 use codex_state::BackfillStats;
-use codex_state::BackfillStatus;
 use codex_state::DB_ERROR_METRIC;
 use codex_state::DB_METRIC_BACKFILL;
 use codex_state::DB_METRIC_BACKFILL_DURATION_MS;
@@ -27,14 +28,24 @@ use codex_state::ThreadMetadataBuilder;
 use codex_state::apply_rollout_item;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 use tracing::info;
 use tracing::warn;
 
 const BACKFILL_BATCH_SIZE: usize = 200;
 #[cfg(not(test))]
-const BACKFILL_LEASE_SECONDS: i64 = 900;
+const BACKFILL_LEASE_DURATION: Duration = Duration::from_secs(900);
 #[cfg(test)]
-const BACKFILL_LEASE_SECONDS: i64 = 1;
+const BACKFILL_LEASE_DURATION: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BackfillRunOutcome {
+    Completed,
+    Busy,
+    AlreadyComplete,
+    LeaseLost,
+    Failed,
+}
 
 pub(crate) fn builder_from_session_meta(
     session_meta: &SessionMetaLine,
@@ -64,11 +75,12 @@ pub(crate) fn builder_from_session_meta(
     Some(builder)
 }
 
-pub fn builder_from_items(
-    items: &[RolloutItem],
+pub fn builder_from_items<'a>(
+    items: impl IntoIterator<Item = &'a RolloutItem>,
     rollout_path: &Path,
 ) -> Option<ThreadMetadataBuilder> {
-    if let Some(session_meta) = items.iter().find_map(|item| match item {
+    let mut items = items.into_iter();
+    if let Some(session_meta) = items.find_map(|item| match item {
         RolloutItem::SessionMeta(meta_line) => Some(meta_line),
         RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
@@ -136,30 +148,43 @@ pub async fn extract_metadata_from_rollout(
 ) -> anyhow::Result<ExtractionOutcome> {
     let (items, _thread_id, parse_errors) =
         RolloutRecorder::load_rollout_items(rollout_path).await?;
-    if items.is_empty() {
+    extract_metadata_from_items(rollout_path, items.iter(), parse_errors, default_provider).await
+}
+
+pub(crate) async fn extract_metadata_from_items<'a>(
+    rollout_path: &Path,
+    items: impl Clone + DoubleEndedIterator<Item = &'a RolloutItem>,
+    parse_errors: usize,
+    default_provider: &str,
+) -> anyhow::Result<ExtractionOutcome> {
+    if items.clone().next().is_none() {
         return Err(anyhow::anyhow!(
             "empty session file: {}",
             rollout_path.display()
         ));
     }
-    let builder = builder_from_items(items.as_slice(), rollout_path).ok_or_else(|| {
+    let builder = builder_from_items(items.clone(), rollout_path).ok_or_else(|| {
         anyhow::anyhow!(
             "rollout missing metadata builder: {}",
             rollout_path.display()
         )
     })?;
     let mut metadata = builder.build(default_provider);
-    for item in &items {
+    for item in items.clone() {
         apply_rollout_item(&mut metadata, item, default_provider);
     }
     if let Some(updated_at) = file_modified_time_utc(rollout_path).await {
         metadata.updated_at = updated_at;
         metadata.recency_at = updated_at;
     }
+    let thread_id = metadata.id;
     Ok(ExtractionOutcome {
         metadata,
-        memory_mode: items.iter().rev().find_map(|item| match item {
-            RolloutItem::SessionMeta(meta_line) => meta_line.meta.memory_mode.clone(),
+        memory_mode: items.rev().find_map(|item| match item {
+            RolloutItem::SessionMeta(meta_line) if meta_line.meta.id == thread_id => {
+                meta_line.meta.memory_mode.clone()
+            }
+            RolloutItem::SessionMeta(_) => None,
             RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -174,83 +199,58 @@ pub async fn extract_metadata_from_rollout(
     })
 }
 
-pub(crate) async fn backfill_sessions(
+pub(crate) async fn backfill_sessions_with_owner(
     runtime: &codex_state::StateRuntime,
     codex_home: &Path,
     default_provider: &str,
-) {
+    owner_id: &str,
+) -> BackfillRunOutcome {
     backfill_sessions_with_lease(
         runtime,
         codex_home,
         default_provider,
-        BACKFILL_LEASE_SECONDS,
+        BACKFILL_LEASE_DURATION,
+        owner_id,
     )
-    .await;
+    .await
 }
 
 pub(crate) async fn backfill_sessions_with_lease(
     runtime: &codex_state::StateRuntime,
     codex_home: &Path,
     default_provider: &str,
-    backfill_lease_seconds: i64,
-) {
+    backfill_lease_duration: Duration,
+    owner_id: &str,
+) -> BackfillRunOutcome {
+    // This scanner is deliberately tied to the SQLite StateRuntime. Backend selection in #31
+    // must give PostgreSQL startup its native coordinator/gate without routing it through JSONL.
     let metric_client = codex_otel::global();
     let timer = metric_client
         .as_ref()
         .and_then(|otel| otel.start_timer(DB_METRIC_BACKFILL_DURATION_MS, &[]).ok());
-    let backfill_state = match runtime.get_backfill_state().await {
-        Ok(state) => state,
-        Err(err) => {
-            warn!(
-                "failed to read backfill state at {}: {err}",
+    let coordinator = runtime.backfill_coordinator();
+    let (lease, backfill_state) = match coordinator
+        .try_claim(owner_id, backfill_lease_duration)
+        .await
+    {
+        Ok(BackfillClaimOutcome::Claimed { lease, state }) => (lease, state),
+        Ok(BackfillClaimOutcome::Complete(_)) => return BackfillRunOutcome::AlreadyComplete,
+        Ok(BackfillClaimOutcome::Busy(_)) => {
+            info!(
+                "state db backfill already running at {}; skipping duplicate worker",
                 codex_home.display()
             );
-            BackfillState::default()
+            return BackfillRunOutcome::Busy;
         }
-    };
-    if backfill_state.status == BackfillStatus::Complete {
-        return;
-    }
-    let claimed = match runtime.try_claim_backfill(backfill_lease_seconds).await {
-        Ok(claimed) => claimed,
         Err(err) => {
             warn!(
                 "failed to claim backfill worker at {}: {err}",
                 codex_home.display()
             );
-            return;
+            return BackfillRunOutcome::Failed;
         }
     };
-    if !claimed {
-        info!(
-            "state db backfill already running at {}; skipping duplicate worker",
-            codex_home.display()
-        );
-        return;
-    }
-    let mut backfill_state = match runtime.get_backfill_state().await {
-        Ok(state) => state,
-        Err(err) => {
-            warn!(
-                "failed to read claimed backfill state at {}: {err}",
-                codex_home.display()
-            );
-            BackfillState {
-                status: BackfillStatus::Running,
-                ..Default::default()
-            }
-        }
-    };
-    if backfill_state.status != BackfillStatus::Running {
-        if let Err(err) = runtime.mark_backfill_running().await {
-            warn!(
-                "failed to mark backfill running at {}: {err}",
-                codex_home.display()
-            );
-        } else {
-            backfill_state.status = BackfillStatus::Running;
-        }
-    }
+    let active_lease = ActiveBackfillLease::new(coordinator, lease, backfill_lease_duration);
 
     let sessions_root = codex_home.join(SESSIONS_SUBDIR);
     let archived_root = codex_home.join(ARCHIVED_SESSIONS_SUBDIR);
@@ -288,6 +288,14 @@ pub(crate) async fn backfill_sessions_with_lease(
     let mut last_watermark = backfill_state.last_watermark.clone();
     for batch in rollout_paths.chunks(BACKFILL_BATCH_SIZE) {
         for rollout in batch {
+            if !active_lease.is_live() {
+                warn!(
+                    "lost backfill lease at {}; stopping worker",
+                    codex_home.display()
+                );
+                active_lease.release().await;
+                return BackfillRunOutcome::LeaseLost;
+            }
             stats.scanned = stats.scanned.saturating_add(1);
             match extract_metadata_from_rollout(&rollout.path, default_provider).await {
                 Ok(outcome) => {
@@ -317,6 +325,25 @@ pub(crate) async fn backfill_sessions_with_lease(
                         metadata.archived_at = file_modified_time_utc(&rollout.path)
                             .await
                             .or(Some(fallback_archived_at));
+                    }
+                    match active_lease.heartbeat(backfill_lease_duration).await {
+                        Ok(BackfillLeaseUpdate::Applied) => {}
+                        Ok(BackfillLeaseUpdate::Rejected) => {
+                            warn!(
+                                "lost backfill lease before writing {}; stopping worker",
+                                rollout.path.display()
+                            );
+                            active_lease.release().await;
+                            return BackfillRunOutcome::LeaseLost;
+                        }
+                        Err(err) => {
+                            warn!(
+                                "failed to renew backfill lease before writing {}: {err}",
+                                rollout.path.display()
+                            );
+                            active_lease.release().await;
+                            return BackfillRunOutcome::Failed;
+                        }
                     }
                     if let Err(err) = runtime.upsert_thread(&metadata).await {
                         stats.failed = stats.failed.saturating_add(1);
@@ -348,28 +375,49 @@ pub(crate) async fn backfill_sessions_with_lease(
         }
 
         if let Some(last_entry) = batch.last() {
-            if let Err(err) = runtime
-                .checkpoint_backfill(last_entry.watermark.as_str())
+            match active_lease
+                .checkpoint(last_entry.watermark.as_str(), backfill_lease_duration)
                 .await
             {
-                warn!(
-                    "failed to checkpoint backfill at {}: {err}",
-                    codex_home.display()
-                );
-            } else {
-                last_watermark = Some(last_entry.watermark.clone());
+                Ok(BackfillLeaseUpdate::Applied) => {
+                    last_watermark = Some(last_entry.watermark.clone());
+                }
+                Ok(BackfillLeaseUpdate::Rejected) => {
+                    warn!(
+                        "lost backfill lease at {}; stopping worker",
+                        codex_home.display()
+                    );
+                    active_lease.release().await;
+                    return BackfillRunOutcome::LeaseLost;
+                }
+                Err(err) => {
+                    warn!(
+                        "failed to checkpoint backfill at {}: {err}",
+                        codex_home.display()
+                    );
+                    active_lease.release().await;
+                    return BackfillRunOutcome::Failed;
+                }
             }
         }
     }
-    if let Err(err) = runtime
-        .mark_backfill_complete(last_watermark.as_deref())
-        .await
-    {
-        warn!(
-            "failed to mark backfill complete at {}: {err}",
-            codex_home.display()
-        );
-    }
+    let outcome = match active_lease.complete(last_watermark.as_deref()).await {
+        Ok(BackfillLeaseUpdate::Applied) => BackfillRunOutcome::Completed,
+        Ok(BackfillLeaseUpdate::Rejected) => {
+            warn!(
+                "lost backfill lease at {}; completion rejected",
+                codex_home.display()
+            );
+            BackfillRunOutcome::LeaseLost
+        }
+        Err(err) => {
+            warn!(
+                "failed to mark backfill complete at {}: {err}",
+                codex_home.display()
+            );
+            BackfillRunOutcome::Failed
+        }
+    };
 
     info!(
         "state db backfill scanned={}, upserted={}, failed={}",
@@ -397,6 +445,7 @@ pub(crate) async fn backfill_sessions_with_lease(
         };
         let _ = timer.record(&[("status", status)]);
     }
+    outcome
 }
 
 #[derive(Debug, Clone)]

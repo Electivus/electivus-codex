@@ -8,6 +8,7 @@ mod model_context;
 mod move_thread_to_section;
 mod paginated_fork;
 mod pending_thread_metadata;
+mod project_scope_repair;
 mod projects;
 mod read_thread;
 mod revert_thread;
@@ -701,6 +702,7 @@ mod tests {
     use codex_protocol::protocol::TurnStartedEvent;
     use codex_protocol::protocol::UserMessageEvent;
     use codex_rollout::RolloutItem;
+    use codex_utils_path_uri::PathUri;
     use tempfile::TempDir;
 
     use super::*;
@@ -933,13 +935,13 @@ mod tests {
         let turn_context = |model: &str, approval_policy| {
             RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
-                cwd: serde_json::from_value(serde_json::json!(cwd)).expect("absolute cwd"),
+                cwd: PathUri::from_host_native_path(&cwd).expect("absolute cwd"),
                 workspace_roots: None,
                 current_date: None,
                 timezone: None,
                 approval_policy,
                 approvals_reviewer: None,
-                sandbox_policy: SandboxPolicy::DangerFullAccess,
+                sandbox_policy: SandboxPolicy::DangerFullAccess.into(),
                 permission_profile: None,
                 active_permission_profile: None,
                 network: None,

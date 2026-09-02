@@ -286,7 +286,7 @@ mod tests {
                 sort_direction: crate::SortDirection::Desc,
                 allowed_sources: Vec::new(),
                 model_providers: None,
-                cwd_filters: None,
+                location_filter: crate::ThreadLocationFilter::Unrestricted,
                 section: None,
                 project_id: None,
                 archived: true,

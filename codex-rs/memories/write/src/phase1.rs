@@ -1,13 +1,14 @@
-use crate::build_stage_one_input_message;
 use crate::metrics::MEMORY_PHASE_ONE_E2E_MS;
 use crate::metrics::MEMORY_PHASE_ONE_JOBS;
 use crate::metrics::MEMORY_PHASE_ONE_OUTPUT;
 use crate::metrics::MEMORY_PHASE_ONE_TOKEN_USAGE;
+use crate::prompts::StageOneRolloutContext;
+use crate::prompts::build_stage_one_input_message_with_context;
+use crate::repository::RepositoryIdentity;
 use crate::runtime::MemoryStartupContext;
 use crate::runtime::StageOneRequestContext;
 use codex_config::types::MemoriesConfig;
 use codex_core::Prompt;
-use codex_core::RolloutRecorder;
 use codex_core::config::Config;
 use codex_protocol::ResponseItemId;
 use codex_protocol::error::CodexErr;
@@ -27,6 +28,9 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
 use tracing::warn;
+
+#[path = "phase1_heartbeat.rs"]
+mod heartbeat;
 
 struct JobResult {
     outcome: JobOutcome,
@@ -197,8 +201,13 @@ async fn build_request_context(
             .memory_extraction_preferred_model()
             .to_string()
     });
+    let reasoning_effort = config
+        .memories
+        .extract_model_reasoning_effort
+        .clone()
+        .unwrap_or(crate::stage_one::REASONING_EFFORT);
     context
-        .stage_one_request_context(config, &model_name, crate::stage_one::REASONING_EFFORT)
+        .stage_one_request_context(config, &model_name, reasoning_effort)
         .await
 }
 
@@ -232,51 +241,97 @@ mod job {
         stage_one_context: &StageOneRequestContext,
     ) -> JobResult {
         let claimed_thread = claim.thread;
-        let (stage_one_output, token_usage) = match sample(
-            context,
-            config,
-            &claimed_thread.rollout_path,
-            &claimed_thread.cwd,
-            stage_one_context,
-        )
-        .await
-        {
-            Ok(output) => output,
-            Err(reason) => {
-                result::failed(
-                    context,
-                    claimed_thread.id,
-                    &claim.ownership_token,
-                    &reason.to_string(),
-                )
-                .await;
-                return JobResult {
-                    outcome: JobOutcome::Failed,
-                    token_usage: None,
-                };
-            }
+        let thread_id = claimed_thread.id;
+        let Some(state_db) = context.state_db() else {
+            warn!("state db unavailable while running phase-1 job for thread {thread_id}");
+            return JobResult {
+                outcome: JobOutcome::Failed,
+                token_usage: None,
+            };
         };
 
-        if stage_one_output.raw_memory.is_empty() || stage_one_output.rollout_summary.is_empty() {
-            return JobResult {
-                outcome: result::no_output(context, claimed_thread.id, &claim.ownership_token)
-                    .await,
-                token_usage,
-            };
-        }
-
-        JobResult {
-            outcome: result::success(
+        let outcome = heartbeat::execute_with_heartbeat(
+            state_db.memories(),
+            thread_id,
+            &claim.ownership_token,
+            heartbeat::HeartbeatConfig::new(
+                std::time::Duration::from_secs(crate::stage_one::JOB_HEARTBEAT_SECONDS),
+                crate::stage_one::JOB_LEASE_SECONDS,
+            ),
+            sample(
                 context,
-                claimed_thread.id,
-                &claim.ownership_token,
-                claimed_thread.updated_at.timestamp(),
-                &stage_one_output.raw_memory,
-                &stage_one_output.rollout_summary,
-                stage_one_output.rollout_slug.as_deref(),
-            )
-            .await,
-            token_usage,
+                config,
+                thread_id,
+                &claimed_thread.rollout_path,
+                &claimed_thread.cwd,
+                RepositoryIdentity::from_git_origin_url(claimed_thread.git_origin_url.as_deref()),
+                stage_one_context,
+            ),
+            |sample_result| async {
+                let (stage_one_output, token_usage) = match sample_result {
+                    Ok(output) => output,
+                    Err(reason) => {
+                        result::failed(
+                            context,
+                            thread_id,
+                            &claim.ownership_token,
+                            &reason.to_string(),
+                        )
+                        .await;
+                        return JobResult {
+                            outcome: JobOutcome::Failed,
+                            token_usage: None,
+                        };
+                    }
+                };
+
+                if stage_one_output.raw_memory.is_empty()
+                    || stage_one_output.rollout_summary.is_empty()
+                {
+                    return JobResult {
+                        outcome: result::no_output(context, thread_id, &claim.ownership_token)
+                            .await,
+                        token_usage,
+                    };
+                }
+
+                JobResult {
+                    outcome: result::success(
+                        context,
+                        thread_id,
+                        &claim.ownership_token,
+                        claimed_thread.updated_at.timestamp(),
+                        &stage_one_output.raw_memory,
+                        &stage_one_output.rollout_summary,
+                        stage_one_output.rollout_slug.as_deref(),
+                    )
+                    .await,
+                    token_usage,
+                }
+            },
+        )
+        .await;
+
+        match outcome {
+            heartbeat::HeartbeatOutcome::Completed(result) => result,
+            heartbeat::HeartbeatOutcome::OwnershipLost => {
+                warn!(
+                    "lost phase-1 ownership for thread {thread_id}; cancelling extraction without persisting its result"
+                );
+                JobResult {
+                    outcome: JobOutcome::Failed,
+                    token_usage: None,
+                }
+            }
+            heartbeat::HeartbeatOutcome::HeartbeatFailed(reason) => {
+                warn!(
+                    "phase-1 heartbeat failed for thread {thread_id}; cancelling extraction without persisting its result: {reason}"
+                );
+                JobResult {
+                    outcome: JobOutcome::Failed,
+                    token_usage: None,
+                }
+            }
         }
     }
 
@@ -284,11 +339,13 @@ mod job {
     async fn sample(
         context: &MemoryStartupContext,
         config: &Config,
+        thread_id: codex_protocol::ThreadId,
         rollout_path: &Path,
         rollout_cwd: &Path,
+        repository: Option<RepositoryIdentity>,
         stage_one_context: &StageOneRequestContext,
     ) -> anyhow::Result<(StageOneOutput, Option<TokenUsage>)> {
-        let (rollout_items, _, _) = RolloutRecorder::load_rollout_items(rollout_path).await?;
+        let rollout_items = context.load_thread_history(thread_id).await?;
         let rollout_contents = serialize_filtered_rollout_response_items(&rollout_items)?;
 
         let mut prompt = Prompt::default();
@@ -296,10 +353,13 @@ mod job {
             id: Some(ResponseItemId::new("msg")),
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
-                text: build_stage_one_input_message(
+                text: build_stage_one_input_message_with_context(
                     &stage_one_context.model_info,
-                    rollout_path,
-                    rollout_cwd,
+                    StageOneRolloutContext {
+                        rollout_path,
+                        rollout_cwd,
+                        repository: repository.as_ref(),
+                    },
                     &rollout_contents,
                 )?,
             }],
@@ -669,6 +729,10 @@ fn emit_metrics(context: &StageOneRequestContext, counts: &Stats) {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "phase1_heartbeat_tests.rs"]
+mod heartbeat_tests;
 
 #[cfg(test)]
 mod tests {

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
 pub fn normalize_for_path_comparison(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
-    let canonical = path.as_ref().canonicalize()?;
+    let canonical = dunce::canonicalize(path.as_ref())?;
     Ok(normalize_for_wsl(canonical))
 }
 

@@ -1,5 +1,6 @@
 //! Root of the `codex-core` library.
 
+#![recursion_limit = "256"]
 // Prevent accidental direct writes to stdout/stderr in library code. All
 // user-visible output must go through the appropriate abstraction (e.g.,
 // the TUI or the tracing stack).
@@ -75,6 +76,7 @@ pub(crate) mod mcp;
 mod mcp_skill_dependencies;
 mod mcp_tool_approval_templates;
 mod mcp_tool_exposure;
+mod model_request_limits;
 mod network_policy_decision;
 pub use mcp::McpManager;
 mod original_image_detail;
@@ -149,6 +151,7 @@ pub mod spawn;
 pub(crate) mod state_db_bridge;
 pub use state_db_bridge::StateDbHandle;
 pub use state_db_bridge::init_state_db;
+pub use state_db_bridge::try_init_state_db;
 mod thread_rollout_truncation;
 pub use thread_rollout_truncation::truncate_rollout_after_turn_id;
 pub use thread_rollout_truncation::truncate_rollout_before_turn_id;

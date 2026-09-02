@@ -4362,6 +4362,7 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected(
                 section_id: None,
                 project_id: None,
                 cwd: None,
+                project_cwd: None,
                 use_state_db_only: true,
                 search_term: None,
                 parent_thread_id: Some(thread.id.clone()),

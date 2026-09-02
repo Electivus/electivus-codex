@@ -2,33 +2,58 @@
 
 set -eu
 
-RELEASE="${CODEX_RELEASE:-latest}"
+RELEASE="${CODEX_RELEASE:-stable}"
+UPDATE_CHANNEL="${CODEX_UPDATE_CHANNEL:-}"
+INSTALLER_PROTOCOL="${CODEX_INSTALLER_PROTOCOL:-direct}"
+INSTALLER_DIGEST="${CODEX_INSTALLER_DIGEST:-}"
+INSTALLER_STDIN_MODE=false
+case "$-" in
+  *s*) INSTALLER_STDIN_MODE=true ;;
+esac
 NON_INTERACTIVE="${CODEX_NON_INTERACTIVE:-false}"
-DEFAULT_PREFER_RELEASES_OPENAI_COM="true"
-PREFER_RELEASES_OPENAI_COM="${CODEX_INSTALLER_USE_RELEASES_OPENAI_COM:-$DEFAULT_PREFER_RELEASES_OPENAI_COM}"
-RELEASES_BASE_URL="https://releases.openai.com/codex"
-RELEASES_CONNECT_TIMEOUT=10
-RELEASES_METADATA_TIMEOUT=30
-RELEASES_ASSET_TIMEOUT=300
-release_source="github"
+PUBLISHER="Electivus"
+REPOSITORY="Electivus/electivus-codex"
+TAG_PREFIX="electivus-v"
+GITHUB_API_BASE="https://api.github.com/repos/$REPOSITORY"
+GITHUB_RELEASE_BASE="https://github.com/$REPOSITORY/releases/download"
+METADATA_MAX_BYTES=1048576
+MANIFEST_MAX_BYTES=1048576
+INSTALLER_MAX_BYTES=4194304
+PACKAGE_MAX_BYTES=1073741824
+MAX_RELEASE_PAGES=4
 
 BIN_DIR="${CODEX_INSTALL_DIR:-$HOME/.local/bin}"
 BIN_PATH="$BIN_DIR/codex"
 CODE_MODE_HOST_BIN_PATH="$BIN_DIR/codex-code-mode-host"
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 STANDALONE_ROOT="$CODEX_HOME_DIR/packages/standalone"
-RELEASES_DIR="$STANDALONE_ROOT/releases"
+RELEASES_DIR="$STANDALONE_ROOT/releases/$PUBLISHER/electivus-codex"
 CURRENT_LINK="$STANDALONE_ROOT/current"
 LOCK_FILE="$STANDALONE_ROOT/install.lock"
-LOCK_DIR="$STANDALONE_ROOT/install.lock.d"
-LOCK_STALE_AFTER_SECS=600
-
+LOCK_PATH="$STANDALONE_ROOT/install.lock.d"
 path_action="already"
 path_profile=""
 conflict_manager=""
-conflict_path=""
 lock_kind=""
+lock_owner_file=""
 tmp_dir=""
+download_pid=""
+download_reader_pid=""
+verification_pid=""
+active_download_pipe=""
+delegate_pid=""
+delegate_starting=false
+pending_signal_status=""
+pending_signal_name=""
+cleanup_done=false
+active_reclaim_marker=""
+active_reclaim_guard=""
+activation_rollback_pending=false
+active_stage_release=""
+release_replacement_pending=false
+replaced_release_dir=""
+replaced_release_backup=""
+replaced_release_existed=false
 
 step() {
   printf '==> %s\n' "$1"
@@ -38,34 +63,77 @@ warn() {
   printf 'WARNING: %s\n' "$1" >&2
 }
 
-normalize_version() {
+validate_version() {
+  version="$1"
+  if printf '%s' "$version" | LC_ALL=C od -An -v -tu1 | LC_ALL=C awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i + 0 == 10 || $i + 0 == 13) {
+          found = 1
+          exit
+        }
+      }
+    }
+    END { exit found ? 0 : 1 }
+  '; then
+    echo "Invalid Electivus release version: values must not contain CR or LF bytes." >&2
+    return 1
+  fi
+  version_bytes="$(printf '%s' "$version" | LC_ALL=C wc -c | tr -d ' ')"
+  if [ "$version_bytes" -gt 128 ]; then
+    echo "Invalid Electivus release version: values must not exceed the 128-byte safety limit." >&2
+    return 1
+  fi
+  semver_without_build="${version%%+*}"
+  case "$semver_without_build" in
+    *-*) core="${semver_without_build%%-*}"; prerelease="${semver_without_build#*-}" ;;
+    *) core="$semver_without_build"; prerelease="" ;;
+  esac
+
+  if ! printf '%s\n' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
+    echo "Invalid Electivus release version: $version. Expected a valid SemVer value." >&2
+    return 1
+  fi
+
+  if [ -n "$prerelease" ] && printf '%s\n' "$prerelease" | tr '.' '\n' |
+    grep -Eq '^0[0-9]+$'; then
+    echo "Invalid Electivus release version: $version. Numeric pre-release identifiers cannot have leading zeroes." >&2
+    return 1
+  fi
+
+  [ "$core" != "0.0.0" ] || {
+    echo "Invalid Electivus release version: 0.0.0 is reserved for Fork development builds." >&2
+    return 1
+  }
+}
+
+version_is_prerelease() {
+  case "${1%%+*}" in
+    *-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_channel() {
   case "$1" in
-    "" | latest)
-      printf 'latest\n'
-      ;;
-    rust-v*)
-      printf '%s\n' "${1#rust-v}"
-      ;;
-    v*)
-      printf '%s\n' "${1#v}"
-      ;;
+    stable | pre-release) ;;
     *)
-      printf '%s\n' "$1"
+      echo "Invalid Electivus Update channel: $1. Expected stable or pre-release." >&2
+      return 1
       ;;
   esac
 }
 
-validate_version() {
-  version="$1"
-
-  if [ "$version" = "latest" ]; then
-    return
-  fi
-
-  if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-alpha(\.[0-9]+){0,2}|-beta(\.[0-9]+)?)?$'; then
-    echo "Invalid Codex release version: $version. Expected latest or x.y.z[-alpha[.N[.M]]|-beta[.N]]." >&2
-    return 1
-  fi
+validate_installer_protocol() {
+  case "$1" in
+    direct) ;;
+    *)
+      if ! printf '%s\n' "$1" | grep -Eq '^installer-v[1-9][0-9]*$'; then
+        echo "Invalid Installer protocol: $1. Expected direct or installer-vN." >&2
+        return 1
+      fi
+      ;;
+  esac
 }
 
 parse_args() {
@@ -79,15 +147,42 @@ parse_args() {
         RELEASE="$2"
         shift
         ;;
+      --channel)
+        if [ "$#" -lt 2 ]; then
+          echo "--channel requires a value." >&2
+          exit 1
+        fi
+        UPDATE_CHANNEL="$2"
+        shift
+        ;;
+      --installer-protocol)
+        if [ "$#" -lt 2 ]; then
+          echo "--installer-protocol requires a value." >&2
+          exit 1
+        fi
+        INSTALLER_PROTOCOL="$2"
+        shift
+        ;;
+      --installer-digest)
+        if [ "$#" -lt 2 ]; then
+          echo "--installer-digest requires a SHA-256 digest." >&2
+          exit 1
+        fi
+        INSTALLER_DIGEST="$2"
+        shift
+        ;;
       --help | -h)
         cat <<EOF
-Usage: install.sh [--release VERSION]
+Usage: install.sh [--release stable|pre-release|VERSION] [--channel CHANNEL]
 
 Environment:
-  CODEX_RELEASE          Version to install; overridden by --release.
+  CODEX_RELEASE          stable, pre-release, bare SemVer, or electivus-v tag.
+  CODEX_UPDATE_CHANNEL   Persisted channel for an exact install.
+  CODEX_INSTALLER_PROTOCOL
+                         Installer protocol recorded in the receipt.
+  CODEX_INSTALLER_DIGEST Verified SHA-256 of the executing installer, supplied
+                         by an immutable Installer protocol bootstrap.
   CODEX_NON_INTERACTIVE  Set to 1, true, or yes to skip prompts.
-  CODEX_INSTALLER_USE_RELEASES_OPENAI_COM
-                         Set to 0, false, or no to use GitHub Releases.
 EOF
         exit 0
         ;;
@@ -100,203 +195,442 @@ EOF
   done
 }
 
+stop_active_download() {
+  if [ -n "$download_reader_pid" ]; then
+    kill "$download_reader_pid" 2>/dev/null || true
+  fi
+  if [ -n "$download_pid" ]; then
+    kill "$download_pid" 2>/dev/null || true
+  fi
+  if [ -n "$download_reader_pid" ]; then
+    kill -KILL "$download_reader_pid" 2>/dev/null || true
+    wait "$download_reader_pid" 2>/dev/null || true
+    download_reader_pid=""
+  fi
+  if [ -n "$download_pid" ]; then
+    kill -KILL "$download_pid" 2>/dev/null || true
+    wait "$download_pid" 2>/dev/null || true
+    download_pid=""
+  fi
+  if [ -n "$active_download_pipe" ]; then
+    rm -f "$active_download_pipe"
+    active_download_pipe=""
+  fi
+}
+
+stop_active_verification() {
+  [ -n "$verification_pid" ] || return 0
+
+  kill "$verification_pid" 2>/dev/null || true
+  kill -KILL "$verification_pid" 2>/dev/null || true
+  wait "$verification_pid" 2>/dev/null || true
+  verification_pid=""
+}
+
+stop_active_delegate() {
+  signal_name="$1"
+  [ -n "$delegate_pid" ] || return 0
+  case "$signal_name" in
+    INT) delegate_signal=TERM ;;
+    *) delegate_signal="$signal_name" ;;
+  esac
+  kill -s "$delegate_signal" "$delegate_pid" 2>/dev/null || true
+  wait "$delegate_pid" 2>/dev/null || true
+  delegate_pid=""
+}
+
 download_file() {
   url="$1"
   output="$2"
+  max_bytes="${3:-$PACKAGE_MAX_BYTES}"
+
+  require_command head
+  require_command mkfifo
+  download_pipe="$tmp_dir/download.$$.fifo"
+  rm -f "$download_pipe"
+  mkfifo "$download_pipe"
+  active_download_pipe="$download_pipe"
 
   if command -v curl >/dev/null 2>&1; then
-    case "$url" in
-      "$RELEASES_BASE_URL"/*)
-        curl -fsSL --connect-timeout "$RELEASES_CONNECT_TIMEOUT" --max-time "$RELEASES_ASSET_TIMEOUT" "$url" -o "$output"
-        ;;
-      *)
-        curl -fsSL "$url" -o "$output"
-        ;;
-    esac
-    return
+    curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+      --connect-timeout 10 --max-time 300 "$url" >"$download_pipe" &
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -t 1 -T 300 --https-only --secure-protocol=TLSv1_2 \
+      -O "$download_pipe" "$url" &
+  else
+    rm -f "$download_pipe"
+    echo "curl or wget is required to install Electivus Codex." >&2
+    exit 1
   fi
 
-  if command -v wget >/dev/null 2>&1; then
-    case "$url" in
-      "$RELEASES_BASE_URL"/*)
-        wget -q -t 1 -T "$RELEASES_ASSET_TIMEOUT" -O "$output" "$url"
-        ;;
-      *)
-        wget -q -O "$output" "$url"
-        ;;
-    esac
-    return
+  download_pid=$!
+  head_status=0
+  head -c $((max_bytes + 1)) "$download_pipe" >"$output" &
+  download_reader_pid=$!
+  wait "$download_reader_pid" || head_status=$?
+  download_reader_pid=""
+  if [ "$head_status" -ne 0 ]; then
+    stop_active_download
+    rm -f "$output"
+    return 1
+  fi
+  downloaded_bytes="$(wc -c <"$output" | tr -d ' ')"
+  if [ "$downloaded_bytes" -gt "$max_bytes" ]; then
+    stop_active_download
+    rm -f "$output"
+    echo "Download from $url exceeded the $max_bytes-byte safety limit." >&2
+    return 1
   fi
 
-  echo "curl or wget is required to install Codex." >&2
-  exit 1
+  transport_status=0
+  wait "$download_pid" || transport_status=$?
+  download_pid=""
+  rm -f "$download_pipe"
+  active_download_pipe=""
+  if [ "$transport_status" -ne 0 ]; then
+    rm -f "$output"
+    return 1
+  fi
 }
 
 download_text() {
   url="$1"
-
-  if command -v curl >/dev/null 2>&1; then
-    case "$url" in
-      "$RELEASES_BASE_URL"/*)
-        curl -fsSL --connect-timeout "$RELEASES_CONNECT_TIMEOUT" --max-time "$RELEASES_METADATA_TIMEOUT" "$url"
-        ;;
-      *)
-        curl -fsSL "$url"
-        ;;
-    esac
-    return
-  fi
-
-  if command -v wget >/dev/null 2>&1; then
-    case "$url" in
-      "$RELEASES_BASE_URL"/*)
-        wget -q -t 1 -T "$RELEASES_METADATA_TIMEOUT" -O - "$url"
-        ;;
-      *)
-        wget -q -O - "$url"
-        ;;
-    esac
-    return
-  fi
-
-  echo "curl or wget is required to install Codex." >&2
-  exit 1
+  output="$2"
+  download_file "$url" "$output" "$METADATA_MAX_BYTES"
 }
 
-download_file_with_fallback() {
-  primary_url="$1"
-  fallback_url="$2"
-  output="$3"
-  expected_digest="$4"
-  fallback_asset="$5"
-  required_manifest_asset="${6:-}"
+metadata_file_contains_nul() {
+  metadata_path="$1"
 
-  if download_file "$primary_url" "$output" &&
-    verify_archive_digest "$output" "$expected_digest" &&
-    { [ -z "$required_manifest_asset" ] || package_archive_digest "$required_manifest_asset" "$output" >/dev/null; }; then
-    return
-  fi
+  LC_ALL=C od -An -v -tu1 "$metadata_path" | LC_ALL=C awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i + 0 == 0) {
+          found = 1
+          exit
+        }
+      }
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
 
-  if [ -z "$fallback_url" ]; then
+reject_nul_metadata() {
+  metadata_path="$1"
+  description="$2"
+
+  if metadata_file_contains_nul "$metadata_path"; then
+    echo "$description contains a forbidden NUL byte." >&2
     return 1
-  fi
-
-  warn "Could not download or verify $primary_url; retrying from GitHub Releases."
-  download_file "$fallback_url" "$output"
-  if verify_archive_digest "$output" "$expected_digest" &&
-    { [ -z "$required_manifest_asset" ] || package_archive_digest "$required_manifest_asset" "$output" >/dev/null; }; then
-    return
-  fi
-
-  resolve_release_from_github "$resolved_version"
-  fallback_digest="$(release_asset_digest "$fallback_asset")"
-  verify_archive_digest "$output" "$fallback_digest"
-  if [ -n "$required_manifest_asset" ]; then
-    package_archive_digest "$required_manifest_asset" "$output" >/dev/null
   fi
 }
 
 parse_release_metadata() {
-  # Bound awk's record size so compact, single-line JSON stays fast on every
-  # supported awk implementation. JSON strings cannot contain literal newlines,
-  # so the record boundaries inserted by fold do not change the document.
-  LC_ALL=C fold -b -w 4096 | LC_ALL=C awk '
-    function finish_string(value) {
-      if (object_depth == 1 && key == "tag_name") {
-        print "tag_name\t" value
-      } else if (object_depth == asset_object_depth) {
-        if (key == "name") {
-          asset_name = value
-        } else if (key == "digest") {
-          asset_digest = value
+  # od gives awk bounded records while preserving every input byte, including
+  # literal newlines that JSON permits as whitespace but forbids in strings.
+  LC_ALL=C od -An -v -tu1 | LC_ALL=C awk '
+    function is_whitespace(value) {
+      return value == 9 || value == 10 || value == 13 || value == 32
+    }
+
+    function reset_release() {
+      release_tag = ""
+      release_draft = ""
+      release_prerelease = ""
+      release_published_at = ""
+    }
+
+    function save_value(value, value_type, value_depth, value_key) {
+      if (value_depth == release_object_depth) {
+        if (value_key == "tag_name") {
+          release_tag = value_type == "string" ? value : ""
+        } else if (value_key == "draft") {
+          release_draft = value_type == "boolean" ? value : ""
+        } else if (value_key == "prerelease") {
+          release_prerelease = value_type == "boolean" ? value : ""
+        } else if (value_key == "published_at") {
+          release_published_at = value_type == "string" ? value : ""
+        }
+      } else if (value_depth == asset_object_depth) {
+        if (value_key == "name") {
+          asset_name = value_type == "string" ? value : ""
+        } else if (value_key == "digest") {
+          asset_digest = value_type == "string" ? value : ""
+        } else if (value_key == "state") {
+          asset_state = value_type == "string" ? value : ""
+        } else if (value_key == "size") {
+          asset_size = value_type == "number" ? value : ""
         }
       }
+    }
 
-      expecting_value = 0
-      key = ""
+    function value_is_expected() {
+      if (depth == 0) {
+        return root_state == "value"
+      }
+      return (container[depth] == "object" && state[depth] == "value") ||
+        (container[depth] == "array" &&
+          (state[depth] == "value" || state[depth] == "value_or_end"))
+    }
+
+    function accept_value_start(value_kind) {
+      if (!value_is_expected()) {
+        invalid = 1
+        return 0
+      }
+      if (depth == 0) {
+        root_state = "started"
+        root_kind = value_kind
+        return 1
+      }
+      if (container[depth] == "array" && depth == 1 &&
+          root_kind == "array" && value_kind != "object") {
+        invalid = 1
+      }
+      if (container[depth] == "array" && depth == assets_array_depth &&
+          value_kind != "object") {
+        invalid = 1
+      }
+      state[depth] = "comma_or_end"
+      return 1
+    }
+
+    function begin_container(value_kind, parent_depth, parent_key) {
+      parent_depth = depth
+      parent_key = parent_depth > 0 && container[parent_depth] == "object" ?
+        member_key[parent_depth] : ""
+      if (!accept_value_start(value_kind)) {
+        return
+      }
+
+      depth++
+      container[depth] = value_kind
+      if (value_kind == "object") {
+        state[depth] = "key_or_end"
+        object_id[depth] = ++next_object_id
+      } else {
+        state[depth] = "value_or_end"
+      }
+
+      if (value_kind == "object" &&
+          (depth == 1 ||
+            (depth == 2 && container[1] == "array" && root_kind == "array"))) {
+        release_object_depth = depth
+        reset_release()
+      } else if (value_kind == "array" &&
+          parent_depth == release_object_depth && parent_key == "assets") {
+        assets_array_depth = depth
+      } else if (value_kind == "object" &&
+          assets_array_depth != 0 && parent_depth == assets_array_depth) {
+        asset_object_depth = depth
+        asset_name = ""
+        asset_digest = ""
+        asset_state = ""
+        asset_size = ""
+      }
+    }
+
+    function finish_scalar(value, value_type, value_depth, value_key) {
+      save_value(value, value_type, value_depth, value_key)
+      if (value_depth == 0) {
+        root_state = "done"
+      }
+    }
+
+    function finish_primitive(primitive_type) {
+      if (!primitive_mode || primitive == "" ||
+          primitive !~ /^(true|false|null|-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?)$/) {
+        invalid = 1
+      } else {
+        if (primitive == "true" || primitive == "false") {
+          primitive_type = "boolean"
+        } else if (primitive == "null") {
+          primitive_type = "null"
+        } else {
+          primitive_type = "number"
+        }
+        finish_scalar(primitive, primitive_type, scalar_depth, scalar_key)
+      }
+      primitive_mode = 0
+      primitive = ""
+    }
+
+    function close_object() {
+      if (depth == 0 || container[depth] != "object" ||
+          (state[depth] != "key_or_end" && state[depth] != "comma_or_end")) {
+        invalid = 1
+        return
+      }
+      if (depth == asset_object_depth) {
+        print "asset|" asset_name "|" asset_digest "|" asset_state "|" asset_size
+        asset_object_depth = 0
+      }
+      if (depth == release_object_depth) {
+        print "release|" release_tag "|" release_draft "|" release_prerelease "|" release_published_at
+        print "end"
+        release_object_depth = 0
+      }
+      delete container[depth]
+      delete state[depth]
+      delete member_key[depth]
+      delete object_id[depth]
+      depth--
+      if (depth == 0) {
+        root_state = "done"
+      }
+    }
+
+    function close_array() {
+      if (depth == 0 || container[depth] != "array" ||
+          (state[depth] != "value_or_end" && state[depth] != "comma_or_end")) {
+        invalid = 1
+        return
+      }
+      if (depth == assets_array_depth) {
+        assets_array_depth = 0
+      }
+      delete container[depth]
+      delete state[depth]
+      depth--
+      if (depth == 0) {
+        root_state = "done"
+      }
+    }
+
+    BEGIN {
+      root_state = "value"
     }
 
     {
-      for (i = 1; i <= length($0); i++) {
-        char = substr($0, i, 1)
+      for (i = 1; i <= NF; i++) {
+        byte = $i + 0
+        char = sprintf("%c", byte)
 
         if (in_string) {
-          if (escaped) {
-            token = token "\\" char
+          if (unicode_remaining > 0) {
+            if (char !~ /[0-9A-Fa-f]/) {
+              invalid = 1
+            }
+            token = token char
+            unicode_remaining--
+          } else if (escaped) {
+            if (char == "u") {
+              token = token char
+              unicode_remaining = 4
+            } else if (char == "\"" || char == "\\" || char == "/" ||
+                char == "b" || char == "f" || char == "n" ||
+                char == "r" || char == "t") {
+              token = token char
+            } else {
+              invalid = 1
+            }
             escaped = 0
           } else if (char == "\\") {
+            # Fail closed instead of comparing raw and decoded spellings of
+            # object keys, which could otherwise hide a semantic duplicate.
+            if (string_role == "key") {
+              invalid = 1
+            }
+            token = token char
             escaped = 1
           } else if (char == "\"") {
             in_string = 0
-            if (string_is_value) {
-              finish_string(token)
+            if (string_role == "key") {
+              seen_index = object_id[string_depth] SUBSEP token
+              if (seen_key[seen_index]++) {
+                invalid = 1
+              }
+              member_key[string_depth] = token
+              state[string_depth] = "colon"
             } else {
-              pending_key = token
+              finish_scalar(token, "string", scalar_depth, scalar_key)
             }
+          } else if (byte < 32) {
+            invalid = 1
           } else {
             token = token char
           }
           continue
         }
 
+        if (primitive_mode) {
+          if (is_whitespace(byte) || char == "," || char == "]" || char == "}") {
+            finish_primitive()
+          } else {
+            primitive = primitive char
+            continue
+          }
+        }
+
+        if (is_whitespace(byte)) {
+          continue
+        }
+        if (depth == 0 && root_state == "done") {
+          invalid = 1
+          continue
+        }
+
         if (char == "\"") {
+          if (depth > 0 && container[depth] == "object" &&
+              (state[depth] == "key_or_end" || state[depth] == "key")) {
+            string_role = "key"
+            string_depth = depth
+          } else if (value_is_expected()) {
+            scalar_depth = depth
+            scalar_key = depth > 0 && container[depth] == "object" ?
+              member_key[depth] : ""
+            accept_value_start("string")
+            string_role = "value"
+          } else {
+            invalid = 1
+            continue
+          }
           in_string = 1
           token = ""
           escaped = 0
-          string_is_value = expecting_value
-        } else if (char == ":" && pending_key != "") {
-          key = pending_key
-          pending_key = ""
-          expecting_value = 1
+          unicode_remaining = 0
         } else if (char == "{") {
-          object_depth++
-          if (assets_array_depth != 0 &&
-              array_depth == assets_array_depth &&
-              asset_object_depth == 0) {
-            asset_object_depth = object_depth
-            asset_name = ""
-            asset_digest = ""
-          }
-          expecting_value = 0
-          key = ""
+          begin_container("object")
         } else if (char == "}") {
-          if (object_depth == asset_object_depth) {
-            if (asset_name != "" && asset_digest != "") {
-              print "asset\t" asset_name "\t" asset_digest
-            }
-            asset_object_depth = 0
-            asset_name = ""
-            asset_digest = ""
-          }
-          object_depth--
-          expecting_value = 0
-          key = ""
-          pending_key = ""
+          close_object()
         } else if (char == "[") {
-          array_depth++
-          if (expecting_value && key == "assets" && object_depth == 1) {
-            assets_array_depth = array_depth
-          }
-          expecting_value = 0
-          key = ""
+          begin_container("array")
         } else if (char == "]") {
-          if (array_depth == assets_array_depth) {
-            assets_array_depth = 0
-          }
-          array_depth--
-          expecting_value = 0
-          key = ""
-          pending_key = ""
+          close_array()
         } else if (char == ",") {
-          expecting_value = 0
-          key = ""
-          pending_key = ""
+          if (depth == 0 || state[depth] != "comma_or_end") {
+            invalid = 1
+          } else if (container[depth] == "object") {
+            state[depth] = "key"
+          } else {
+            state[depth] = "value"
+          }
+        } else if (char == ":") {
+          if (depth == 0 || container[depth] != "object" || state[depth] != "colon") {
+            invalid = 1
+          } else {
+            state[depth] = "value"
+          }
+        } else if (value_is_expected()) {
+          scalar_depth = depth
+          scalar_key = depth > 0 && container[depth] == "object" ?
+            member_key[depth] : ""
+          accept_value_start("primitive")
+          primitive_mode = 1
+          primitive = char
+        } else {
+          invalid = 1
         }
       }
     }
 
     END {
-      if (in_string || object_depth != 0 || array_depth != 0) {
+      if (primitive_mode) {
+        finish_primitive()
+      }
+      if (invalid || root_state != "done" || in_string || escaped ||
+          unicode_remaining != 0 || depth != 0 || release_object_depth != 0 ||
+          asset_object_depth != 0 || assets_array_depth != 0) {
         exit 1
       }
     }
@@ -305,141 +639,465 @@ parse_release_metadata() {
 
 release_url_for_asset() {
   asset="$1"
-  resolved_version="$2"
+  release_tag="$2"
 
-  printf 'https://github.com/openai/codex/releases/download/rust-v%s/%s\n' "$resolved_version" "$asset"
-}
-
-releases_url_for_asset() {
-  asset="$1"
-  resolved_version="$2"
-
-  printf '%s/releases/%s/%s\n' "$RELEASES_BASE_URL" "$resolved_version" "$asset"
+  printf '%s/%s/%s\n' "$GITHUB_RELEASE_BASE" "$release_tag" "$asset"
 }
 
 release_metadata_url() {
-  resolved_version="$1"
+  release_tag="$1"
 
-  printf 'https://api.github.com/repos/openai/codex/releases/tags/rust-v%s\n' "$resolved_version"
+  printf '%s/releases/tags/%s\n' "$GITHUB_API_BASE" "$release_tag"
 }
 
-parse_downloaded_release_metadata() {
-  requested_release="$1"
-  source_name="$2"
-  if ! release_metadata="$(printf '%s\n' "$release_json" | parse_release_metadata)"; then
-    echo "Could not parse $source_name release metadata for Codex $requested_release." >&2
-    return 1
-  fi
+semver_compare() {
+  LC_ALL=C awk -v left="$1" -v right="$2" '
+    function numeric_compare(a, b) {
+      sub(/^0+/, "", a)
+      sub(/^0+/, "", b)
+      if (a == "") a = "0"
+      if (b == "") b = "0"
+      if (length(a) != length(b)) return length(a) > length(b) ? 1 : -1
+      if (a == b) return 0
+      return a > b ? 1 : -1
+    }
+    function parse(version, core, pre, plus, dash) {
+      plus = index(version, "+")
+      if (plus) version = substr(version, 1, plus - 1)
+      dash = index(version, "-")
+      parsed_core = dash ? substr(version, 1, dash - 1) : version
+      parsed_pre = dash ? substr(version, dash + 1) : ""
+    }
+    BEGIN {
+      parse(left); left_core = parsed_core; left_pre = parsed_pre
+      parse(right); right_core = parsed_core; right_pre = parsed_pre
+      split(left_core, left_parts, ".")
+      split(right_core, right_parts, ".")
+      for (i = 1; i <= 3; i++) {
+        comparison = numeric_compare(left_parts[i], right_parts[i])
+        if (comparison) { print comparison; exit }
+      }
+      if (left_pre == "" && right_pre == "") { print 0; exit }
+      if (left_pre == "") { print 1; exit }
+      if (right_pre == "") { print -1; exit }
+      left_count = split(left_pre, left_ids, ".")
+      right_count = split(right_pre, right_ids, ".")
+      count = left_count > right_count ? left_count : right_count
+      for (i = 1; i <= count; i++) {
+        if (i > left_count) { print -1; exit }
+        if (i > right_count) { print 1; exit }
+        left_numeric = left_ids[i] ~ /^[0-9]+$/
+        right_numeric = right_ids[i] ~ /^[0-9]+$/
+        if (left_numeric && right_numeric) {
+          comparison = numeric_compare(left_ids[i], right_ids[i])
+        } else if (left_numeric != right_numeric) {
+          comparison = left_numeric ? -1 : 1
+        } else if (left_ids[i] == right_ids[i]) {
+          comparison = 0
+        } else {
+          comparison = left_ids[i] > right_ids[i] ? 1 : -1
+        }
+        if (comparison) { print comparison; exit }
+      }
+      print 0
+    }
+  '
 }
 
-resolve_metadata_version() {
-  release_tag="$(printf '%s\n' "$release_metadata" | awk -F '\t' '$1 == "tag_name" { print $2; exit }')"
-  case "$release_tag" in
-    rust-v*) metadata_version="${release_tag#rust-v}" ;;
-    *) metadata_version="" ;;
+asset_digest_in_metadata() {
+  lookup_asset="$1"
+  lookup_metadata="$2"
+
+  printf '%s\n' "$lookup_metadata" | awk -F '|' -v asset="$lookup_asset" '
+    $1 == "asset" && $2 == asset {
+      count++
+      digest = $3
+    }
+    END {
+      if (count != 1 || digest !~ /^sha256:[0-9a-fA-F]{64}$/) {
+        exit 1
+      }
+      sub(/^sha256:/, "", digest)
+      print tolower(digest)
+    }
+  '
+}
+
+release_assets_are_complete() {
+  complete_metadata="$1"
+
+  printf '%s\n' "$complete_metadata" | LC_ALL=C awk -F '|' \
+    -v package_limit="$PACKAGE_MAX_BYTES" \
+    -v manifest_limit="$MANIFEST_MAX_BYTES" \
+    -v installer_limit="$INSTALLER_MAX_BYTES" '
+      $1 == "asset" {
+        count++
+        name = $2
+        digest = $3
+        state = $4
+        size = $5
+        if (name == "" || length(name) > 256 || seen[name]++) invalid = 1
+        if (digest !~ /^sha256:[0-9a-fA-F]{64}$/) invalid = 1
+        if (state != "uploaded" || size !~ /^[0-9]+$/ || size == 0) invalid = 1
+        limit = package_limit
+        if (name == "install.sh" || name == "install.ps1") {
+          limit = installer_limit
+        } else if (name == "codex-package_SHA256SUMS" ||
+            name == "installer_SHA256SUMS") {
+          limit = manifest_limit
+        }
+        if (size > limit) invalid = 1
+      }
+      END {
+        if (invalid || count == 0 || count > 64) exit 1
+      }
+    ' || return 1
+
+  for required_asset in \
+    codex-package-aarch64-pc-windows-msvc.tar.gz \
+    codex-package-aarch64-unknown-linux-musl.tar.gz \
+    codex-package-x86_64-pc-windows-msvc.tar.gz \
+    codex-package-x86_64-unknown-linux-musl.tar.gz \
+    codex-package_SHA256SUMS \
+    install.sh \
+    install.ps1 \
+    installer_SHA256SUMS; do
+    asset_digest_in_metadata "$required_asset" "$complete_metadata" >/dev/null 2>&1 || return 1
+  done
+}
+
+published_at_is_valid() {
+  printf '%s\n' "$1" | LC_ALL=C awk '
+    function all_digits(value) {
+      return value != "" && value !~ /[^0-9]/
+    }
+    function leap_year(year) {
+      return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    }
+    {
+      value = $0
+      if (length(value) < 20 || substr(value, 5, 1) != "-" ||
+          substr(value, 8, 1) != "-" || substr(value, 11, 1) != "T" ||
+          substr(value, 14, 1) != ":" || substr(value, 17, 1) != ":") exit 1
+      year_text = substr(value, 1, 4)
+      month_text = substr(value, 6, 2)
+      day_text = substr(value, 9, 2)
+      hour_text = substr(value, 12, 2)
+      minute_text = substr(value, 15, 2)
+      second_text = substr(value, 18, 2)
+      if (!all_digits(year_text) || !all_digits(month_text) ||
+          !all_digits(day_text) || !all_digits(hour_text) ||
+          !all_digits(minute_text) || !all_digits(second_text)) exit 1
+      year = year_text + 0
+      month = month_text + 0
+      day = day_text + 0
+      hour = hour_text + 0
+      minute = minute_text + 0
+      second = second_text + 0
+      if (year < 1 || month < 1 || month > 12 || hour > 23 ||
+          minute > 59 || second > 59) exit 1
+      month_days = 31
+      if (month == 4 || month == 6 || month == 9 || month == 11) {
+        month_days = 30
+      } else if (month == 2) {
+        month_days = leap_year(year) ? 29 : 28
+      }
+      if (day < 1 || day > month_days) exit 1
+
+      suffix = substr(value, 20)
+      if (substr(suffix, 1, 1) == ".") {
+        position = 2
+        while (position <= length(suffix) &&
+            substr(suffix, position, 1) ~ /[0-9]/) position++
+        if (position == 2) exit 1
+        suffix = substr(suffix, position)
+      }
+      if (suffix == "Z") exit 0
+      if (length(suffix) != 6 || substr(suffix, 1, 1) !~ /[+-]/ ||
+          substr(suffix, 4, 1) != ":") exit 1
+      offset_hour = substr(suffix, 2, 2)
+      offset_minute = substr(suffix, 5, 2)
+      if (!all_digits(offset_hour) || !all_digits(offset_minute) ||
+          offset_hour + 0 > 23 || offset_minute + 0 > 59) exit 1
+    }
+  '
+}
+
+consider_release() {
+  c_tag="$1"
+  c_draft="$2"
+  c_prerelease_flag="$3"
+  c_published_at="$4"
+  c_assets="$5"
+
+  [ "$c_draft" = "false" ] || return 0
+  [ -n "$c_published_at" ] && published_at_is_valid "$c_published_at" || return 0
+  case "$c_tag" in
+    "$TAG_PREFIX"*) c_version="${c_tag#"$TAG_PREFIX"}" ;;
+    *) return 0 ;;
   esac
-  if [ -z "$metadata_version" ]; then
-    echo "Failed to resolve the latest Codex release version." >&2
-    return 1
-  fi
-  validate_version "$metadata_version"
-}
+  validate_version "$c_version" >/dev/null 2>&1 || return 0
 
-resolve_release_from_github() {
-  normalized_version="$1"
-  if [ "$normalized_version" = "latest" ]; then
-    requested_release="latest"
-    metadata_url="https://api.github.com/repos/openai/codex/releases/latest"
+  if version_is_prerelease "$c_version"; then
+    [ "$c_prerelease_flag" = "true" ] || return 0
+    c_channel="pre-release"
   else
-    resolved_version="$normalized_version"
-    requested_release="$resolved_version"
-    metadata_url="$(release_metadata_url "$resolved_version")"
+    [ "$c_prerelease_flag" = "false" ] || return 0
+    c_channel="stable"
   fi
 
-  if ! release_json="$(download_text "$metadata_url")"; then
-    echo "Could not fetch GitHub release metadata for Codex $requested_release. GitHub API may be unavailable or rate limited." >&2
-    exit 1
-  fi
+  release_assets_are_complete "$c_assets" || return 0
 
-  parse_downloaded_release_metadata "$requested_release" "GitHub"
-
-  if [ "$normalized_version" = "latest" ]; then
-    resolve_metadata_version
-    resolved_version="$metadata_version"
-  fi
-
-  release_source="github"
-}
-
-resolve_release_from_releases() {
-  normalized_version="$1"
-
-  if [ "$normalized_version" = "latest" ]; then
-    requested_release="latest"
-    metadata_url="$RELEASES_BASE_URL/channels/latest"
-  else
-    requested_release="$normalized_version"
-    metadata_url="$RELEASES_BASE_URL/releases/$normalized_version/release.json"
-  fi
-
-  if ! release_json="$(download_text "$metadata_url")"; then
-    return 1
-  fi
-
-  if ! parse_downloaded_release_metadata "$requested_release" "releases.openai.com"; then
-    return 1
-  fi
-  if ! resolve_metadata_version; then
-    return 1
-  fi
-  if [ "$normalized_version" != "latest" ] && [ "$metadata_version" != "$normalized_version" ]; then
-    echo "Release metadata version did not match requested Codex version $normalized_version." >&2
-    return 1
-  fi
-  resolved_version="$metadata_version"
-  release_source="releases.openai.com"
-}
-
-resolve_release() {
-  normalized_version="$(normalize_version "$RELEASE")"
-  validate_version "$normalized_version"
-
-  case "$PREFER_RELEASES_OPENAI_COM" in
-    1 | [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss])
-      if resolve_release_from_releases "$normalized_version" &&
-        select_release_assets; then
-        return
+  if [ -n "$seen_release_tags" ]; then
+    while IFS= read -r seen_release_tag; do
+      if [ "$seen_release_tag" = "$c_tag" ]; then
+        echo "Electivus release inventory contains duplicate release record $c_tag." >&2
+        return 1
       fi
-      warn "releases.openai.com is unavailable; falling back to GitHub Releases."
+    done <<EOF
+$seen_release_tags
+EOF
+  fi
+  seen_release_tags="${seen_release_tags}${seen_release_tags:+
+}$c_tag"
+
+  case "$requested_kind" in
+    exact)
+      [ "$c_version" = "$requested_version" ] || return 0
+      ;;
+    stable)
+      [ "$c_channel" = "stable" ] || return 0
+      ;;
+    pre-release)
+      if [ "$c_channel" != "pre-release" ]; then
+        [ "$c_channel" = "stable" ] || return 0
+        [ "$installed_managed_channel" = "pre-release" ] || return 0
+        version_is_prerelease "$installed_managed_version" || return 0
+        installed_core="${installed_managed_version%%+*}"
+        installed_core="${installed_core%%-*}"
+        candidate_core="${c_version%%+*}"
+        [ "$candidate_core" = "$installed_core" ] || return 0
+        [ "$(semver_compare "$c_version" "$installed_managed_version")" -gt 0 ] || return 0
+      fi
       ;;
   esac
 
-  resolve_release_from_github "$normalized_version"
+  if [ -n "$selected_version" ]; then
+    c_comparison="$(semver_compare "$c_version" "$selected_version")"
+    if [ "$c_comparison" -lt 0 ]; then
+      return 0
+    fi
+    if [ "$c_comparison" -eq 0 ] && [ "$c_version" != "$selected_version" ]; then
+      echo "Electivus release inventory contains ambiguous equal-precedence versions $selected_version and $c_version." >&2
+      return 1
+    fi
+  fi
+
+  selected_version="$c_version"
+  selected_tag="$c_tag"
+  selected_channel="$c_channel"
+  selected_release_metadata="$c_assets"
+}
+
+select_release_from_records() {
+  parsed_records="$1"
+  pending_assets=""
+  record_tag=""
+  record_draft=""
+  record_prerelease=""
+  record_published_at=""
+
+  while IFS='|' read -r record_kind record_one record_two record_three record_four; do
+    case "$record_kind" in
+      asset)
+        pending_assets="${pending_assets}${pending_assets:+
+}$record_kind|$record_one|$record_two|$record_three|$record_four"
+        ;;
+      release)
+        record_tag="$record_one"
+        record_draft="$record_two"
+        record_prerelease="$record_three"
+        record_published_at="$record_four"
+        ;;
+      end)
+        consider_release \
+          "$record_tag" \
+          "$record_draft" \
+          "$record_prerelease" \
+          "$record_published_at" \
+          "$pending_assets" || return 1
+        pending_assets=""
+        record_tag=""
+        ;;
+    esac
+  done <<EOF
+$parsed_records
+EOF
+}
+
+parse_release_document() {
+  document="$1"
+  description="$2"
+  expected_root="$3"
+  root_char="$(printf '%s' "$document" | LC_ALL=C awk '
+    {
+      for (i = 1; i <= length($0); i++) {
+        char = substr($0, i, 1)
+        if (char !~ /[[:space:]]/) {
+          print char
+          exit
+        }
+      }
+    }
+  ')"
+  if [ "$root_char" != "$expected_root" ]; then
+    case "$expected_root" in
+      '[') expected_description="a JSON array" ;;
+      *) expected_description="a JSON object" ;;
+    esac
+    echo "$description must be $expected_description." >&2
+    return 1
+  fi
+  if ! parsed_document="$(printf '%s\n' "$document" | parse_release_metadata)"; then
+    echo "Could not parse $description as bounded GitHub release metadata." >&2
+    return 1
+  fi
+  printf '%s\n' "$parsed_document"
+}
+
+normalize_release_request() {
+  validate_installer_protocol "$INSTALLER_PROTOCOL"
+  if [ -n "$UPDATE_CHANNEL" ]; then
+    validate_channel "$UPDATE_CHANNEL"
+  fi
+
+  case "$RELEASE" in
+    stable | pre-release)
+      requested_kind="$RELEASE"
+      if [ -n "$UPDATE_CHANNEL" ] && [ "$UPDATE_CHANNEL" != "$requested_kind" ]; then
+        echo "--release $RELEASE conflicts with Update channel $UPDATE_CHANNEL." >&2
+        return 1
+      fi
+      requested_channel="$requested_kind"
+      requested_version=""
+      ;;
+    latest | rust-v* | v* | "")
+      echo "Invalid Electivus release selector: ${RELEASE:-<empty>}. Use stable, pre-release, bare SemVer, or an electivus-v... tag." >&2
+      return 1
+      ;;
+    "$TAG_PREFIX"*)
+      requested_kind="exact"
+      requested_version="${RELEASE#"$TAG_PREFIX"}"
+      validate_version "$requested_version"
+      ;;
+    *)
+      requested_kind="exact"
+      requested_version="$RELEASE"
+      validate_version "$requested_version"
+      ;;
+  esac
+
+  if [ "$requested_kind" = "exact" ]; then
+    if [ -n "$UPDATE_CHANNEL" ]; then
+      requested_channel="$UPDATE_CHANNEL"
+    elif version_is_prerelease "$requested_version"; then
+      requested_channel="pre-release"
+    else
+      requested_channel="stable"
+    fi
+    if [ "$requested_channel" = "stable" ] && version_is_prerelease "$requested_version"; then
+      echo "Stable Update channel cannot install pre-release version $requested_version." >&2
+      return 1
+    fi
+  fi
+}
+
+resolve_release() {
+  normalize_release_request
+  selected_version=""
+  selected_tag=""
+  selected_channel=""
+  selected_release_metadata=""
+  seen_release_tags=""
+
+  if [ "$requested_kind" = "exact" ]; then
+    requested_tag="$TAG_PREFIX$requested_version"
+    metadata_url="$(release_metadata_url "$requested_tag")"
+    metadata_path="$tmp_dir/metadata.json"
+    if ! download_text "$metadata_url" "$metadata_path"; then
+      echo "Could not fetch published Electivus release metadata for $requested_tag." >&2
+      return 1
+    fi
+    reject_nul_metadata "$metadata_path" "$requested_tag metadata" || return 1
+    release_json="$(cat "$metadata_path")"
+    records="$(parse_release_document "$release_json" "$requested_tag" '{')" || return 1
+    select_release_from_records "$records" || return 1
+  else
+    page=1
+    records=""
+    inventory_count=0
+    terminal_page=false
+    while [ "$page" -le "$MAX_RELEASE_PAGES" ]; do
+      metadata_url="$GITHUB_API_BASE/releases?per_page=100&page=$page"
+      metadata_path="$tmp_dir/metadata.json"
+      if ! download_text "$metadata_url" "$metadata_path"; then
+        echo "Could not fetch bounded Electivus release inventory page $page." >&2
+        return 1
+      fi
+      reject_nul_metadata "$metadata_path" "Electivus release inventory page $page" || return 1
+      release_json="$(cat "$metadata_path")"
+      page_records="$(parse_release_document "$release_json" "Electivus release inventory page $page" '[')" || return 1
+      page_count="$(printf '%s\n' "$page_records" | awk -F '|' '$1 == "release" { count++ } END { print count + 0 }')"
+      if [ "$page_count" -gt 100 ]; then
+        echo "Electivus release inventory page $page exceeds 100 releases." >&2
+        return 1
+      fi
+      inventory_count=$((inventory_count + page_count))
+      if [ "$inventory_count" -gt $((MAX_RELEASE_PAGES * 100)) ]; then
+        echo "Electivus release inventory exceeds the bounded 400-release safety limit." >&2
+        return 1
+      fi
+      if [ -n "$page_records" ]; then
+        records="${records}${records:+
+}$page_records"
+      fi
+      if [ "$page_count" -lt 100 ]; then
+        terminal_page=true
+        break
+      fi
+      page=$((page + 1))
+    done
+    if [ "$terminal_page" != true ]; then
+      echo "Electivus release inventory exceeds the $MAX_RELEASE_PAGES-page safety limit." >&2
+      return 1
+    fi
+    select_release_from_records "$records" || return 1
+  fi
+
+  if [ -z "$selected_version" ]; then
+    if [ "$requested_kind" = "stable" ]; then
+      echo "No complete stable Electivus release is published. To opt into pre-releases, run install.sh --release pre-release." >&2
+    elif [ "$requested_kind" = "pre-release" ]; then
+      echo "No complete Electivus pre-release is published." >&2
+    else
+      echo "Electivus release $TAG_PREFIX$requested_version is not published, valid, and complete." >&2
+    fi
+    return 1
+  fi
+
+  resolved_version="$selected_version"
+  release_tag="$selected_tag"
+  release_metadata="$selected_release_metadata"
+  resolved_channel="$requested_channel"
+  if [ "$requested_kind" = "pre-release" ] && [ "$selected_channel" = "stable" ]; then
+    resolved_channel="stable"
+  fi
   select_release_assets
 }
 
 release_asset_digest_or_empty() {
   asset="$1"
-
-  digest="$(printf '%s\n' "$release_metadata" | awk -F '\t' -v asset="$asset" '
-    $1 == "asset" && $2 == asset {
-      print $3
-      exit
-    }
-  ')"
-
-  case "$digest" in
-    sha256:????????????????????????????????????????????????????????????????)
-      digest="${digest#sha256:}"
-      case "$digest" in
-        *[!0-9a-fA-F]*) return 1 ;;
-      esac
-      printf '%s\n' "$digest"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  asset_digest_in_metadata "$asset" "$release_metadata"
 }
 
 release_asset_exists() {
@@ -453,7 +1111,7 @@ release_asset_digest() {
 
   digest="$(release_asset_digest_or_empty "$asset" || true)"
   if [ -z "$digest" ]; then
-    echo "Could not find SHA-256 digest for release asset $asset." >&2
+    echo "Could not find one valid SHA-256 digest for Electivus release asset $asset." >&2
     exit 1
   fi
 
@@ -463,34 +1121,13 @@ release_asset_digest() {
 select_release_assets() {
   package_asset="codex-package-$vendor_target.tar.gz"
   checksum_asset="codex-package_SHA256SUMS"
-  download_fallback_url=""
-  checksum_fallback_url=""
-
-  if release_asset_exists "$package_asset" &&
-    release_asset_exists "$checksum_asset"; then
-    install_layout="package"
-    asset="$package_asset"
-  elif release_asset_exists "codex-npm-$npm_tag-$resolved_version.tgz"; then
-    install_layout="legacy-platform-npm"
-    asset="codex-npm-$npm_tag-$resolved_version.tgz"
-  else
-    echo "Could not find Codex package or platform npm release assets for Codex $resolved_version." >&2
-    return 1
-  fi
-
-  if [ "$release_source" = "releases.openai.com" ]; then
-    download_url="$(releases_url_for_asset "$asset" "$resolved_version")"
-    download_fallback_url="$(release_url_for_asset "$asset" "$resolved_version")"
-    if [ "$install_layout" = "package" ]; then
-      checksum_url="$(releases_url_for_asset "$checksum_asset" "$resolved_version")"
-      checksum_fallback_url="$(release_url_for_asset "$checksum_asset" "$resolved_version")"
-    fi
-  else
-    download_url="$(release_url_for_asset "$asset" "$resolved_version")"
-    if [ "$install_layout" = "package" ]; then
-      checksum_url="$(release_url_for_asset "$checksum_asset" "$resolved_version")"
-    fi
-  fi
+  installer_asset="install.sh"
+  installer_checksum_asset="installer_SHA256SUMS"
+  install_layout="package"
+  asset="$package_asset"
+  download_url="$(release_url_for_asset "$asset" "$release_tag")"
+  checksum_url="$(release_url_for_asset "$checksum_asset" "$release_tag")"
+  installer_checksum_url="$(release_url_for_asset "$installer_checksum_asset" "$release_tag")"
 }
 
 package_archive_digest() {
@@ -499,14 +1136,14 @@ package_archive_digest() {
 
   digest="$(awk -v asset="$asset" '
     $2 == asset && length($1) == 64 && $1 !~ /[^0-9a-fA-F]/ {
-      print tolower($1)
-      found = 1
-      exit
+      digest = tolower($1)
+      found++
     }
     END {
-      if (!found) {
+      if (found != 1) {
         exit 1
       }
+      print digest
     }
   ' "$manifest_path" 2>/dev/null || true)"
 
@@ -516,6 +1153,188 @@ package_archive_digest() {
   fi
 
   printf '%s\n' "$digest"
+}
+
+verify_manifest_assets() {
+  manifest_path="$1"
+  shift
+
+  for manifest_asset in "$@"; do
+    manifest_digest="$(package_archive_digest "$manifest_asset" "$manifest_path")" || return 1
+    metadata_digest="$(release_asset_digest "$manifest_asset")"
+    if [ "$manifest_digest" != "$metadata_digest" ]; then
+      echo "SHA-256 digest disagreement for $manifest_asset between GitHub release metadata and $(basename "$manifest_path")." >&2
+      return 1
+    fi
+  done
+}
+
+write_installation_receipt() {
+  receipt_path="$1"
+  receipt_package_digest="$2"
+  receipt_installer_digest="$3"
+
+  # This schema is intentionally explicit and shared with the Windows
+  # installer and Rust installation-context consumers.
+  cat >"$receipt_path" <<EOF
+{
+  "publisher": "$PUBLISHER",
+  "repository": "$REPOSITORY",
+  "tag": "$release_tag",
+  "update_channel": "$resolved_channel",
+  "target": "$vendor_target",
+  "package_digest": "$receipt_package_digest",
+  "installer_digest": "$receipt_installer_digest",
+  "installer_protocol": "$INSTALLER_PROTOCOL"
+}
+EOF
+}
+
+receipt_string_field() {
+  receipt_path="$1"
+  receipt_key="$2"
+
+  sed -n "s/.*\"$receipt_key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+    "$receipt_path" | head -n 1
+}
+
+load_current_managed_receipt() {
+  installed_managed_version=""
+  installed_managed_channel=""
+  receipt_path="$CURRENT_LINK/installation-receipt.json"
+  [ -f "$receipt_path" ] || return 0
+
+  receipt_publisher="$(receipt_string_field "$receipt_path" publisher)"
+  receipt_repository="$(receipt_string_field "$receipt_path" repository)"
+  receipt_tag="$(receipt_string_field "$receipt_path" tag)"
+  receipt_channel="$(receipt_string_field "$receipt_path" update_channel)"
+  receipt_target="$(receipt_string_field "$receipt_path" target)"
+  receipt_package_digest="$(receipt_string_field "$receipt_path" package_digest)"
+  receipt_installer_digest="$(receipt_string_field "$receipt_path" installer_digest)"
+  receipt_protocol="$(receipt_string_field "$receipt_path" installer_protocol)"
+
+  [ "$receipt_publisher" = "$PUBLISHER" ] &&
+    [ "$receipt_repository" = "$REPOSITORY" ] &&
+    [ "$receipt_target" = "$vendor_target" ] || return 0
+  case "$receipt_tag" in
+    "$TAG_PREFIX"*) receipt_version="${receipt_tag#"$TAG_PREFIX"}" ;;
+    *) return 0 ;;
+  esac
+  validate_version "$receipt_version" >/dev/null 2>&1 || return 0
+  validate_channel "$receipt_channel" >/dev/null 2>&1 || return 0
+  validate_installer_protocol "$receipt_protocol" >/dev/null 2>&1 || return 0
+  printf '%s\n' "$receipt_package_digest" | grep -Eq '^[0-9a-fA-F]{64}$' || return 0
+  printf '%s\n' "$receipt_installer_digest" | grep -Eq '^[0-9a-fA-F]{64}$' || return 0
+  if version_is_prerelease "$receipt_version"; then
+    [ "$receipt_channel" = "pre-release" ] || return 0
+  fi
+  installed_managed_version="$receipt_version"
+  installed_managed_channel="$receipt_channel"
+}
+
+refuse_managed_downgrade() {
+  if [ -n "$installed_managed_version" ] &&
+    [ "$(semver_compare "$resolved_version" "$installed_managed_version")" -lt 0 ]; then
+    echo "Refusing to downgrade managed Electivus Codex from $installed_managed_version to $resolved_version." >&2
+    return 1
+  fi
+}
+
+bind_installer_provenance() {
+  metadata_installer_digest="$1"
+  if [ ! -f "$0" ] || [ ! -r "$0" ]; then
+    echo "Cannot prove the executing install.sh bytes at $0; refusing to write installer provenance." >&2
+    return 1
+  fi
+  executing_installer_digest="$(file_sha256 "$0")"
+
+  case "$INSTALLER_PROTOCOL" in
+    direct)
+      if [ -n "$INSTALLER_DIGEST" ]; then
+        echo "A verified installer digest requires an immutable installer-vN protocol." >&2
+        return 1
+      fi
+      ;;
+    *)
+      if [ -z "$INSTALLER_DIGEST" ]; then
+        echo "Installer protocol $INSTALLER_PROTOCOL requires the exact verified installer digest from its bootstrap." >&2
+        return 1
+      fi
+      printf '%s\n' "$INSTALLER_DIGEST" | grep -Eq '^[0-9a-fA-F]{64}$' || {
+        echo "Invalid verified installer digest: expected 64 hexadecimal SHA-256 characters." >&2
+        return 1
+      }
+      INSTALLER_DIGEST="$(printf '%s\n' "$INSTALLER_DIGEST" | tr 'A-F' 'a-f')"
+      if [ "$INSTALLER_DIGEST" != "$metadata_installer_digest" ]; then
+        echo "Verified installer digest disagrees with the selected Electivus release metadata." >&2
+        return 1
+      fi
+      ;;
+  esac
+
+  if [ "$executing_installer_digest" != "$metadata_installer_digest" ]; then
+    echo "The executing install.sh digest does not match the selected Electivus release metadata." >&2
+    return 1
+  fi
+  if [ -n "$INSTALLER_DIGEST" ] && [ "$executing_installer_digest" != "$INSTALLER_DIGEST" ]; then
+    echo "The executing install.sh digest does not match the bootstrap-verified digest." >&2
+    return 1
+  fi
+  resolved_installer_digest="$executing_installer_digest"
+}
+
+download_verified_release_installer() {
+  verified_installer_path="$tmp_dir/install.sh"
+  bootstrap_manifest_path="$tmp_dir/installer_SHA256SUMS"
+  bootstrap_manifest_digest="$(release_asset_digest "$installer_checksum_asset")"
+
+  step "Downloading verified Electivus release installer"
+  download_file \
+    "$installer_checksum_url" \
+    "$bootstrap_manifest_path" \
+    "$MANIFEST_MAX_BYTES"
+  verify_archive_digest "$bootstrap_manifest_path" "$bootstrap_manifest_digest"
+  verify_manifest_assets "$bootstrap_manifest_path" install.sh install.ps1
+  download_file \
+    "$(release_url_for_asset "$installer_asset" "$release_tag")" \
+    "$verified_installer_path" \
+    "$INSTALLER_MAX_BYTES"
+  verify_archive_digest "$verified_installer_path" "$installer_metadata_digest"
+}
+
+delegate_to_release_installer() {
+  delegated_installer_protocol="installer-v1"
+  delegate_starting=true
+  (
+    trap - HUP INT TERM
+    export CODEX_RELEASE="$resolved_version"
+    export CODEX_UPDATE_CHANNEL="$resolved_channel"
+    export CODEX_INSTALLER_PROTOCOL="$delegated_installer_protocol"
+    export CODEX_INSTALLER_DIGEST="$installer_metadata_digest"
+    exec /bin/sh "$verified_installer_path" \
+      --release "$resolved_version" \
+      --channel "$resolved_channel" \
+      --installer-protocol "$delegated_installer_protocol" \
+      --installer-digest "$installer_metadata_digest"
+  ) <&0 &
+  delegate_pid=$!
+  delegate_starting=false
+  if [ -n "$pending_signal_name" ]; then
+    handle_signal "$pending_signal_status" "$pending_signal_name"
+  fi
+
+  delegate_status=0
+  wait "$delegate_pid" || delegate_status=$?
+  delegate_pid=""
+  return "$delegate_status"
+}
+
+receipt_matches() {
+  receipt_release_dir="$1"
+  receipt_expected_path="$2"
+
+  [ -f "$receipt_release_dir/installation-receipt.json" ] &&
+    cmp -s "$receipt_release_dir/installation-receipt.json" "$receipt_expected_path"
 }
 
 file_sha256() {
@@ -670,28 +1489,555 @@ rewrite_path_block() {
   mv "$tmp_profile" "$profile"
 }
 
-mkdir_lock_is_stale() {
-  [ -d "$LOCK_DIR" ] || return 1
+process_start_fingerprint() {
+  identity_pid="$1"
+  if [ -r "/proc/$identity_pid/stat" ]; then
+    identity_start="$(sed 's/.*) //' "/proc/$identity_pid/stat" 2>/dev/null | awk '{ print $20 }')"
+    identity_boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+    case "$identity_start" in
+      '' | *[!0-9]*) return 1 ;;
+    esac
+    [ -n "$identity_boot" ] || return 1
+    printf 'linux-proc:%s:%s\n' "$identity_boot" "$identity_start"
+    return
+  fi
+  return 1
+}
 
-  pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-  started_at="$(cat "$LOCK_DIR/started_at" 2>/dev/null || true)"
-  now="$(date +%s 2>/dev/null || printf '0')"
+bounded_positive_decimal() {
+  decimal_value="$1"
+  decimal_bound="$2"
+  printf '%s\n' "$decimal_value" | LC_ALL=C awk -v bound="$decimal_bound" '
+    NR == 1 { value = $0 }
+    END {
+      if (NR != 1 || value !~ /^[1-9][0-9]*$/) exit 1
+      if (length(value) < length(bound)) exit 0
+      if (length(value) > length(bound)) exit 1
+      exit ("x" value) <= ("x" bound) ? 0 : 1
+    }
+  '
+}
 
-  case "$started_at" in
-    ''|*[!0-9]*)
-      started_at=0
-      ;;
-  esac
+valid_process_fingerprint() {
+  checked_fingerprint="$1"
+  printf '%s\n' "$checked_fingerprint" | LC_ALL=C awk '
+    NR == 1 { value = $0 }
+    END {
+      if (NR != 1) exit 1
+      exit value ~ /^linux-proc:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[1-9][0-9]*$/ ? 0 : 1
+    }
+  ' || return 1
+  fingerprint_ticks="${checked_fingerprint##*:}"
+  bounded_positive_decimal "$fingerprint_ticks" 18446744073709551615
+}
 
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+read_legacy_lock_metadata() {
+  metadata_lock="$1"
+  metadata_python="$(command -v python3 2>/dev/null || true)"
+  if [ -z "$metadata_python" ]; then
+    printf 'lock\n'
+    return 1
+  fi
+  "$metadata_python" - "$metadata_lock" <<'PY'
+import os
+import stat
+import sys
+
+
+lock_path = sys.argv[1]
+no_follow = getattr(os, "O_NOFOLLOW", None)
+directory = getattr(os, "O_DIRECTORY", None)
+
+
+def fail(field):
+    print(field)
+    raise SystemExit(1)
+
+
+def identity(file_stat):
+    return file_stat.st_dev, file_stat.st_ino, stat.S_IFMT(file_stat.st_mode)
+
+
+if no_follow is None or directory is None:
+    fail("lock")
+flags = os.O_RDONLY | os.O_NONBLOCK | no_follow | getattr(os, "O_CLOEXEC", 0)
+
+try:
+    lock_descriptor = os.open(lock_path, flags | directory)
+    lock_stat = os.fstat(lock_descriptor)
+    if not stat.S_ISDIR(lock_stat.st_mode):
+        fail("lock")
+    values = []
+    opened_identities = {}
+    for field, optional in (("pid", False), ("started_at", False), ("fingerprint", True)):
+        try:
+            descriptor = os.open(field, flags, dir_fd=lock_descriptor)
+        except FileNotFoundError:
+            if not optional:
+                fail(field)
+            values.append("")
+            opened_identities[field] = None
+            continue
+        except OSError:
+            fail(field)
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                fail(field)
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                contents = stream.read(4097)
+            after = os.fstat(descriptor)
+            if len(contents) > 4096 or identity(before) != identity(after):
+                fail(field)
+            opened_identities[field] = identity(after)
+            raw_value = contents.rstrip(b"\n")
+            if b"\x00" in raw_value or b"\n" in raw_value:
+                fail(field)
+            try:
+                values.append(raw_value.decode("ascii"))
+            except UnicodeDecodeError:
+                fail(field)
+        finally:
+            os.close(descriptor)
+
+    for field, opened_identity in opened_identities.items():
+        try:
+            path_stat = os.stat(
+                field, dir_fd=lock_descriptor, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            if opened_identity is not None:
+                fail(field)
+        except OSError:
+            fail(field)
+        else:
+            if opened_identity is None or identity(path_stat) != opened_identity:
+                fail(field)
+    try:
+        current_lock_stat = os.stat(lock_path, follow_symlinks=False)
+    except OSError:
+        fail("lock")
+    if identity(current_lock_stat) != identity(lock_stat):
+        fail("lock")
+    print("\n".join(values))
+except OSError:
+    fail("lock")
+finally:
+    if "lock_descriptor" in locals():
+        os.close(lock_descriptor)
+PY
+}
+
+report_unverifiable_lock() {
+  unverifiable_lock="$1"
+  unverifiable_description="$2"
+  echo "Cannot safely verify the live process recorded by the $unverifiable_description lock at $unverifiable_lock: $fallback_lock_issue Refusing automatic deletion; manual recovery is required after confirming that no installer owns this path." >&2
+}
+
+fallback_lock_is_stale() {
+  stale_lock="$1"
+  fallback_lock_issue=""
+  stale_fingerprint=""
+  if [ -L "$stale_lock" ]; then
+    fallback_lock_issue="it is a symbolic link, which the fallback lock protocol never follows."
+    return 2
+  elif [ -d "$stale_lock" ]; then
+    stale_pid_path="$stale_lock/pid"
+    stale_started_at_path="$stale_lock/started_at"
+    stale_fingerprint_path="$stale_lock/fingerprint"
+    if ! stale_metadata="$(read_legacy_lock_metadata "$stale_lock" 2>/dev/null)"; then
+      case "$stale_metadata" in
+        pid) stale_metadata_path="$stale_pid_path" ;;
+        started_at) stale_metadata_path="$stale_started_at_path" ;;
+        fingerprint) stale_metadata_path="$stale_fingerprint_path" ;;
+        *) stale_metadata_path="$stale_lock" ;;
+      esac
+      fallback_lock_issue="its legacy metadata at $stale_metadata_path is not a stable regular non-symbolic-link file."
+      return 2
+    fi
+    stale_pid="$(printf '%s\n' "$stale_metadata" | sed -n '1p')"
+    stale_started_at="$(printf '%s\n' "$stale_metadata" | sed -n '2p')"
+    stale_fingerprint="$(printf '%s\n' "$stale_metadata" | sed -n '3p')"
+  elif [ -f "$stale_lock" ]; then
+    stale_pid="$(sed -n '1p' "$stale_lock" 2>/dev/null || true)"
+    stale_started_at="$(sed -n '2p' "$stale_lock" 2>/dev/null || true)"
+    stale_fingerprint="$(sed -n 's/^fingerprint=//p' "$stale_lock" 2>/dev/null)"
+  elif [ -e "$stale_lock" ] || [ -L "$stale_lock" ]; then
+    fallback_lock_issue="it is not a regular file or legacy lock directory."
+    return 2
+  else
+    return 1
+  fi
+  if ! bounded_positive_decimal "$stale_pid" 2147483647; then
+    fallback_lock_issue="its owner PID is missing, malformed, zero, or outside the supported range."
+    return 2
+  fi
+  if ! bounded_positive_decimal "$stale_started_at" 253402300799; then
+    fallback_lock_issue="its started_at metadata is missing, malformed, zero, or outside the supported range."
+    return 2
+  fi
+  if [ -n "$stale_fingerprint" ] && ! valid_process_fingerprint "$stale_fingerprint"; then
+    fallback_lock_issue="its process-start fingerprint is malformed or outside the supported numeric range."
+    return 2
+  fi
+  stale_now="$(date +%s 2>/dev/null || printf '0')"
+  if ! bounded_positive_decimal "$stale_now" 253402300799 ||
+    ! bounded_positive_decimal "$stale_started_at" "$stale_now"; then
+    fallback_lock_issue="its started_at metadata cannot describe the recorded owner."
+    return 2
+  fi
+  if kill -0 "$stale_pid" 2>/dev/null; then
+    if [ -z "$stale_fingerprint" ]; then
+      fallback_lock_issue="it has no process-start fingerprint, so PID $stale_pid cannot be proven to be the original owner."
+      return 2
+    fi
+    current_fingerprint="$(process_start_fingerprint "$stale_pid" || true)"
+    if [ -z "$current_fingerprint" ]; then
+      fallback_lock_issue="this platform cannot prove the process-start identity of PID $stale_pid."
+      return 2
+    fi
+    if [ "$current_fingerprint" != "$stale_fingerprint" ]; then
+      fallback_lock_issue="PID $stale_pid is live but its process-start fingerprint does not match the recorded owner."
+      return 2
+    fi
+    return 1
+  fi
+  # A well-formed lock whose PID no longer exists has no possible owner. Its
+  # age cannot make that dead process live again, so reclaim it immediately.
+  return 0
+}
+
+try_claim_fallback_lock() {
+  try_owner="$1"
+  try_lock="$2"
+  fallback_claim_issue=""
+
+  try_attempt=1
+  while [ "$try_attempt" -le 2 ]; do
+    if [ -L "$try_lock" ]; then
+      return 1
+    fi
+    if ln -T "$try_owner" "$try_lock" 2>/dev/null; then
+      if [ -f "$try_lock" ] && cmp -s "$try_lock" "$try_owner"; then
+        return 0
+      fi
+      fallback_claim_issue="hard-link creation reported success without creating the expected owned lock."
+      return 2
+    fi
+
+    if [ -e "$try_lock" ] || [ -L "$try_lock" ]; then
+      return 1
+    fi
+    try_attempt=$((try_attempt + 1))
+  done
+  fallback_claim_issue="hard-link creation failed even though no competing lock exists."
+  return 2
+}
+
+report_lock_claim_error() {
+  claim_error_lock="$1"
+  claim_error_description="$2"
+  echo "Could not claim the $claim_error_description lock at $claim_error_lock: $fallback_claim_issue" >&2
+}
+
+cleanup_stale_reclaim_markers() {
+  cleanup_lock="$1"
+  for cleanup_marker in "$cleanup_lock".reclaim.*; do
+    { [ -e "$cleanup_marker" ] || [ -L "$cleanup_marker" ]; } || continue
+    [ "$cleanup_marker" = "$cleanup_lock.reclaim.guard" ] && continue
+    if fallback_lock_is_stale "$cleanup_marker"; then
+      if ! rm -f "$cleanup_marker" 2>/dev/null; then
+        echo "Could not remove stale reclaim marker at $cleanup_marker; refusing to proceed while its barrier remains." >&2
+        return 1
+      fi
+    elif [ -n "$fallback_lock_issue" ]; then
+      cleanup_reclaim_issue_path="$cleanup_marker"
+      return 1
+    fi
+  done
+}
+
+reclaim_barrier_exists() {
+  barrier_candidate_lock="$1"
+  for barrier_candidate in "$barrier_candidate_lock".reclaim.*; do
+    { [ -e "$barrier_candidate" ] || [ -L "$barrier_candidate" ]; } && return 0
+  done
+  return 1
+}
+
+wait_for_reclaim_barrier() {
+  barrier_lock="$1"
+  while :; do
+    cleanup_reclaim_issue_path=""
+    if ! cleanup_stale_reclaim_markers "$barrier_lock"; then
+      report_unverifiable_lock "$cleanup_reclaim_issue_path" "reclaim marker"
+      return 1
+    fi
+    barrier_guard="$barrier_lock.reclaim.guard"
+    if [ -e "$barrier_guard" ] || [ -L "$barrier_guard" ]; then
+      if [ -L "$barrier_guard" ] || [ ! -f "$barrier_guard" ]; then
+        fallback_lock_issue="it is not a regular non-symbolic-link reclaim guard."
+        report_unverifiable_lock "$barrier_guard" "reclaim guard"
+        return 1
+      fi
+      if fallback_lock_is_stale "$barrier_guard"; then
+        echo "Stale reclaim guard at $barrier_guard requires manual removal; refusing an unsafe automatic takeover." >&2
+        return 1
+      elif [ -n "$fallback_lock_issue" ]; then
+        report_unverifiable_lock "$barrier_guard" "reclaim guard"
+        return 1
+      fi
+    fi
+    reclaim_barrier_exists "$barrier_lock" || return 0
+    sleep 1
+  done
+}
+
+discard_reclaim_artifact() {
+  discard_path="$1"
+  discard_description="$2"
+  if [ -e "$discard_path" ] || [ -L "$discard_path" ]; then
+    if ! rm -f "$discard_path" 2>/dev/null ||
+      [ -e "$discard_path" ] || [ -L "$discard_path" ]; then
+      echo "Could not remove $discard_description $discard_path." >&2
+      return 1
+    fi
+  fi
+}
+
+publish_reclaim_marker() {
+  publish_lock="$1"
+  if ! publish_prepare="$(mktemp "$publish_lock.reclaim-prepare.XXXXXX")"; then
+    echo "Could not prepare a reclaim marker beside $publish_lock." >&2
+    return 1
+  fi
+  if [ -L "$publish_prepare" ] || [ ! -f "$publish_prepare" ]; then
+    echo "Reclaim marker preparation did not create the expected regular file at $publish_prepare." >&2
+    discard_reclaim_artifact "$publish_prepare" "invalid reclaim marker preparation" || true
+    return 1
+  fi
+  publish_suffix="${publish_prepare##*.}"
+  published_marker="$publish_lock.reclaim.$publish_suffix"
+  if ! printf '%s\n' "$$" >"$publish_prepare"; then
+    echo "Could not write the owner PID to reclaim marker preparation $publish_prepare." >&2
+    discard_reclaim_artifact "$publish_prepare" "partial reclaim marker preparation" || true
+    return 1
+  fi
+  if ! publish_started_at="$(date +%s 2>/dev/null)" ||
+    ! bounded_positive_decimal "$publish_started_at" 253402300799; then
+    echo "Could not determine a valid creation time for reclaim marker preparation $publish_prepare." >&2
+    discard_reclaim_artifact "$publish_prepare" "partial reclaim marker preparation" || true
+    return 1
+  fi
+  if ! printf '%s\n' "$publish_started_at" >>"$publish_prepare"; then
+    echo "Could not write the creation time to reclaim marker preparation $publish_prepare." >&2
+    discard_reclaim_artifact "$publish_prepare" "partial reclaim marker preparation" || true
+    return 1
+  fi
+  if ! printf 'marker=%s\n' "$publish_suffix" >>"$publish_prepare"; then
+    echo "Could not write the identifier to reclaim marker preparation $publish_prepare." >&2
+    discard_reclaim_artifact "$publish_prepare" "partial reclaim marker preparation" || true
+    return 1
+  fi
+  publish_fingerprint=""
+  if publish_fingerprint="$(process_start_fingerprint "$$")"; then
+    if ! printf 'fingerprint=%s\n' "$publish_fingerprint" >>"$publish_prepare"; then
+      echo "Could not write the process fingerprint to reclaim marker preparation $publish_prepare." >&2
+      discard_reclaim_artifact "$publish_prepare" "partial reclaim marker preparation" || true
+      return 1
+    fi
+  fi
+  if [ -L "$publish_prepare" ] || [ ! -f "$publish_prepare" ]; then
+    echo "Reclaim marker preparation is no longer the expected regular file at $publish_prepare." >&2
+    discard_reclaim_artifact "$publish_prepare" "invalid reclaim marker preparation" || true
+    return 1
+  fi
+  if ! mv "$publish_prepare" "$published_marker"; then
+    echo "Could not publish reclaim marker $published_marker." >&2
+    discard_reclaim_artifact "$publish_prepare" "unpublished reclaim marker preparation" || true
+    discard_reclaim_artifact "$published_marker" "partially published reclaim marker" || true
+    return 1
+  fi
+  if [ ! -f "$published_marker" ] || [ -L "$published_marker" ]; then
+    echo "Reclaim marker publication did not create the expected regular file at $published_marker." >&2
+    discard_reclaim_artifact "$publish_prepare" "unpublished reclaim marker preparation" || true
+    discard_reclaim_artifact "$published_marker" "invalid published reclaim marker" || true
+    return 1
+  fi
+  printf '%s\n' "$published_marker"
+}
+
+acquire_reclaim_guard() {
+  guard_lock="$1"
+  guard_marker="$2"
+  reclaim_guard="$guard_lock.reclaim.guard"
+  active_reclaim_guard="$reclaim_guard"
+  while ! ln -T "$guard_marker" "$reclaim_guard" 2>/dev/null; do
+    if { [ -e "$reclaim_guard" ] || [ -L "$reclaim_guard" ]; } &&
+      { [ -L "$reclaim_guard" ] || [ ! -f "$reclaim_guard" ]; }; then
+      fallback_lock_issue="it is not a regular non-symbolic-link reclaim guard."
+      report_unverifiable_lock "$reclaim_guard" "reclaim guard"
+      return 1
+    elif fallback_lock_is_stale "$reclaim_guard"; then
+      echo "Stale reclaim guard at $reclaim_guard requires manual removal; refusing an unsafe automatic takeover." >&2
+      return 1
+    elif [ -n "$fallback_lock_issue" ]; then
+      report_unverifiable_lock "$reclaim_guard" "reclaim guard"
+      return 1
+    elif [ ! -f "$reclaim_guard" ]; then
+      # The previous owner may have released the guard between ln failing and
+      # this check. Retry once to separate that race from a hard-link error.
+      if ln -T "$guard_marker" "$reclaim_guard" 2>/dev/null; then
+        break
+      fi
+      if [ ! -f "$reclaim_guard" ]; then
+        fallback_claim_issue="hard-link creation failed even though no competing reclaim guard exists."
+        report_lock_claim_error "$reclaim_guard" "reclaim guard"
+        return 1
+      fi
+    fi
+    sleep 1
+  done
+  if [ ! -f "$reclaim_guard" ] || ! cmp -s "$reclaim_guard" "$guard_marker"; then
+    remove_reclaim_guard_if_owned "$reclaim_guard" "$guard_marker"
+    active_reclaim_guard=""
+    return 1
+  fi
+}
+
+remove_reclaim_guard_if_owned() {
+  owned_guard="$1"
+  owned_marker="$2"
+  if [ -n "$owned_guard" ] &&
+    [ -n "$owned_marker" ] &&
+    [ -f "$owned_guard" ] &&
+    [ -f "$owned_marker" ] &&
+    cmp -s "$owned_guard" "$owned_marker"; then
+    if ! rm -f "$owned_guard" 2>/dev/null; then
+      return 1
+    fi
+    if [ -f "$owned_guard" ] && cmp -s "$owned_guard" "$owned_marker"; then
+      return 1
+    fi
+  fi
+}
+
+release_reclaim_guard() {
+  guard_marker="$1"
+  if ! remove_reclaim_guard_if_owned "$active_reclaim_guard" "$guard_marker"; then
+    fallback_claim_issue="the owned reclaim guard could not be removed."
+    report_lock_claim_error "$active_reclaim_guard" "reclaim guard"
+    return 1
+  fi
+  active_reclaim_guard=""
+}
+
+reclaim_fallback_lock() {
+  reclaim_lock="$1"
+  reclaim_owner_prefix="$2"
+  if ! active_reclaim_marker="$(publish_reclaim_marker "$reclaim_lock")"; then
+    return 1
+  fi
+  reclaim_suffix="${active_reclaim_marker##*.}"
+  if ! acquire_reclaim_guard "$reclaim_lock" "$active_reclaim_marker"; then
+    if ! rm -f "$active_reclaim_marker" 2>/dev/null; then
+      echo "Could not remove unclaimed reclaim marker $active_reclaim_marker." >&2
+    fi
+    active_reclaim_marker=""
+    active_reclaim_guard=""
     return 1
   fi
 
-  if [ "$started_at" -eq 0 ] || [ "$now" -eq 0 ]; then
-    return 0
+  if [ -d "$reclaim_lock" ]; then
+    if fallback_lock_is_stale "$reclaim_lock"; then
+      reclaimed_lock="$reclaim_lock.stale.$reclaim_suffix"
+      if mv "$reclaim_lock" "$reclaimed_lock" 2>/dev/null; then
+        if ! rm -rf "$reclaimed_lock" 2>/dev/null ||
+          [ -e "$reclaimed_lock" ] || [ -L "$reclaimed_lock" ]; then
+          echo "Could not remove stale legacy lock snapshot at $reclaimed_lock after reclamation." >&2
+          release_reclaim_guard "$active_reclaim_marker" || true
+          return 1
+        fi
+      elif [ -d "$reclaim_lock" ]; then
+        fallback_claim_issue="the stale legacy lock directory could not be moved for safe reclamation."
+        report_lock_claim_error "$reclaim_lock" "stale lock"
+        release_reclaim_guard "$active_reclaim_marker" || true
+        return 1
+      fi
+    fi
+  elif [ -f "$reclaim_lock" ]; then
+    reclaimed_lock="$reclaim_lock.snapshot.$reclaim_suffix"
+    if ln -T "$reclaim_lock" "$reclaimed_lock" 2>/dev/null; then
+      if fallback_lock_is_stale "$reclaimed_lock"; then
+        reclaimed_owner="$(sed -n '3p' "$reclaimed_lock" 2>/dev/null || true)"
+        if ! rm -f "$reclaim_lock" 2>/dev/null ||
+          [ -e "$reclaim_lock" ] || [ -L "$reclaim_lock" ]; then
+          echo "Could not remove stale lock at $reclaim_lock after its safe snapshot was created." >&2
+          if ! rm -f "$reclaimed_lock" 2>/dev/null; then
+            echo "Could not remove stale lock snapshot $reclaimed_lock after the lock removal failure." >&2
+          fi
+          release_reclaim_guard "$active_reclaim_marker" || true
+          return 1
+        fi
+        case "$reclaimed_owner" in
+          "$reclaim_owner_prefix"*) rm -f "$reclaimed_owner" 2>/dev/null || true ;;
+        esac
+      fi
+      if ! rm -f "$reclaimed_lock" 2>/dev/null ||
+        [ -e "$reclaimed_lock" ] || [ -L "$reclaimed_lock" ]; then
+        echo "Could not remove stale lock snapshot at $reclaimed_lock after reclamation." >&2
+        release_reclaim_guard "$active_reclaim_marker" || true
+        return 1
+      fi
+    elif [ -f "$reclaim_lock" ]; then
+      fallback_claim_issue="the stale lock could not be hard-linked for safe reclamation."
+      report_lock_claim_error "$reclaim_lock" "stale lock"
+      release_reclaim_guard "$active_reclaim_marker" || true
+      return 1
+    fi
   fi
+  if ! release_reclaim_guard "$active_reclaim_marker"; then
+    return 1
+  fi
+  if ! rm -f "$active_reclaim_marker" 2>/dev/null; then
+    echo "Could not remove completed reclaim marker $active_reclaim_marker." >&2
+    return 1
+  fi
+  active_reclaim_marker=""
+}
 
-  [ $((now - started_at)) -ge "$LOCK_STALE_AFTER_SECS" ]
+acquire_fallback_lock() {
+  claim_owner="$1"
+  claim_lock="$2"
+  claim_owner_prefix="$3"
+  claim_description="$4"
+
+  while :; do
+    wait_for_reclaim_barrier "$claim_lock" || return 1
+    claim_status=0
+    try_claim_fallback_lock "$claim_owner" "$claim_lock" || claim_status=$?
+    if [ "$claim_status" -eq 0 ]; then
+      wait_for_reclaim_barrier "$claim_lock" || return 1
+      if [ -f "$claim_lock" ] && cmp -s "$claim_lock" "$claim_owner"; then
+        return
+      fi
+      continue
+    fi
+    if [ "$claim_status" -eq 2 ]; then
+      report_lock_claim_error "$claim_lock" "$claim_description"
+      return 1
+    fi
+    if fallback_lock_is_stale "$claim_lock"; then
+      warn "Removing stale $claim_description lock at $claim_lock"
+      reclaim_fallback_lock "$claim_lock" "$claim_owner_prefix" || return 1
+      continue
+    fi
+    if [ -n "$fallback_lock_issue" ]; then
+      report_unverifiable_lock "$claim_lock" "$claim_description"
+      return 1
+    fi
+    sleep 1
+  done
 }
 
 acquire_install_lock() {
@@ -712,27 +2058,62 @@ acquire_install_lock() {
     return
   fi
 
-  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
-    if mkdir_lock_is_stale; then
-      warn "Removing stale installer lock at $LOCK_DIR"
-      rm -rf "$LOCK_DIR"
-      continue
+  lock_owner_file="$(mktemp "$STANDALONE_ROOT/install.lock.owner.XXXXXX")"
+  {
+    printf '%s\n' "$$"
+    date +%s 2>/dev/null || printf '0\n'
+    printf '%s\n' "$lock_owner_file"
+    owner_fingerprint="$(process_start_fingerprint "$$" || true)"
+    if [ -n "$owner_fingerprint" ]; then
+      printf 'fingerprint=%s\n' "$owner_fingerprint"
     fi
-    sleep 1
-  done
+  } >"$lock_owner_file"
 
-  printf '%s\n' "$$" >"$LOCK_DIR/pid"
-  date +%s >"$LOCK_DIR/started_at" 2>/dev/null || true
-  lock_kind="mkdir"
+  acquire_fallback_lock \
+    "$lock_owner_file" \
+    "$LOCK_PATH" \
+    "$STANDALONE_ROOT/install.lock.owner." \
+    installer
+  lock_kind="hardlink"
 }
 
 release_install_lock() {
-  if [ "$lock_kind" = "mkdir" ]; then
-    rm -rf "$LOCK_DIR" 2>/dev/null || true
-  elif [ "$lock_kind" = "flock" ] || [ "$lock_kind" = "lockf" ]; then
-    exec 9>&- 2>/dev/null || true
+  release_lock_status=0
+  if [ "$lock_kind" = "flock" ] || [ "$lock_kind" = "lockf" ]; then
+    if ! exec 9>&- 2>/dev/null; then
+      warn "Could not close the installer lock descriptor."
+      release_lock_status=1
+    fi
+  fi
+  if [ -n "$lock_owner_file" ]; then
+    if [ -f "$LOCK_PATH" ] && cmp -s "$LOCK_PATH" "$lock_owner_file"; then
+      if ! rm -f "$LOCK_PATH" 2>/dev/null; then
+        warn "Could not remove owned installer lock $LOCK_PATH."
+        release_lock_status=1
+      fi
+    fi
+    if ! rm -f "$lock_owner_file" 2>/dev/null; then
+      warn "Could not remove installer lock owner metadata $lock_owner_file."
+      release_lock_status=1
+    fi
+  fi
+  if [ -n "$active_reclaim_guard" ]; then
+    if ! remove_reclaim_guard_if_owned "$active_reclaim_guard" "$active_reclaim_marker"; then
+      warn "Could not remove owned reclaim guard $active_reclaim_guard."
+      release_lock_status=1
+    fi
+    active_reclaim_guard=""
+  fi
+  if [ -n "$active_reclaim_marker" ]; then
+    if ! rm -f "$active_reclaim_marker" 2>/dev/null; then
+      warn "Could not remove owned reclaim marker $active_reclaim_marker."
+      release_lock_status=1
+    fi
+    active_reclaim_marker=""
   fi
   lock_kind=""
+  lock_owner_file=""
+  return "$release_lock_status"
 }
 
 cleanup_stale_install_artifacts() {
@@ -900,7 +2281,6 @@ detect_conflicting_install() {
   fi
 
   conflict_manager="$manager"
-  conflict_path="$existing_path"
   step "Detected existing $manager-managed Codex at $existing_path"
   warn "Multiple managed Codex installs can be ambiguous because PATH order decides which one runs."
 }
@@ -933,14 +2313,20 @@ handle_conflicting_install() {
 }
 
 install_package_release() {
-  release_dir="$1"
-  archive_path="$2"
-  stage_release="$RELEASES_DIR/.staging.$(basename "$release_dir").$$"
+  install_release_dir="$1"
+  install_archive_path="$2"
+  install_receipt_path="$3"
+  install_expected_version="$4"
+  install_expected_target="$5"
+  install_layout="$6"
+  stage_release="$RELEASES_DIR/.staging.$(basename "$install_release_dir").$$"
+  backup_release="$RELEASES_DIR/.rollback.$install_expected_version.$install_expected_target.$$"
 
-  mkdir -p "$RELEASES_DIR"
+  mkdir -p "$RELEASES_DIR" "$(dirname "$install_release_dir")"
   rm -rf "$stage_release"
   mkdir -p "$stage_release"
-  tar -xzf "$archive_path" -C "$stage_release"
+  active_stage_release="$stage_release"
+  tar -xzf "$install_archive_path" -C "$stage_release"
   chmod 0755 \
     "$stage_release/bin/codex" \
     "$stage_release/bin/codex-code-mode-host" \
@@ -949,62 +2335,50 @@ install_package_release() {
     chmod 0755 "$stage_release/codex-resources/bwrap"
   fi
   ln -sf "bin/codex" "$stage_release/codex"
+  cp "$install_receipt_path" "$stage_release/installation-receipt.json"
 
-  if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
-    rm -rf "$release_dir"
-  fi
-  mv "$stage_release" "$release_dir"
-}
-
-install_legacy_platform_npm_release() {
-  release_dir="$1"
-  archive_path="$2"
-  target="$3"
-  stage_release="$RELEASES_DIR/.staging.$(basename "$release_dir").$$"
-  extract_dir="$tmp_dir/extract"
-  vendor_root="$extract_dir/package/vendor/$target"
-
-  mkdir -p "$RELEASES_DIR"
-  rm -rf "$stage_release" "$extract_dir"
-  mkdir -p "$stage_release/codex-resources" "$extract_dir"
-  tar -xzf "$archive_path" -C "$extract_dir"
-
-  cp "$vendor_root/codex/codex" "$stage_release/codex"
-  cp "$vendor_root/path/rg" "$stage_release/codex-resources/rg"
-  chmod 0755 "$stage_release/codex" "$stage_release/codex-resources/rg"
-  if [ -f "$vendor_root/codex-resources/bwrap" ]; then
-    cp "$vendor_root/codex-resources/bwrap" "$stage_release/codex-resources/bwrap"
-    chmod 0755 "$stage_release/codex-resources/bwrap"
-  fi
-
-  if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
-    rm -rf "$release_dir"
-  fi
-  mv "$stage_release" "$release_dir"
-}
-
-release_dir_is_complete() {
-  release_dir="$1"
-  expected_version="$2"
-  expected_target="$3"
-  layout="$4"
-
-  [ -d "$release_dir" ] &&
-    [ "$(basename "$release_dir")" = "$expected_version-$expected_target" ] ||
+  if ! release_contents_are_complete \
+    "$stage_release" \
+    "$install_expected_version" \
+    "$install_expected_target" \
+    "$install_layout" \
+    "$install_receipt_path"; then
+    echo "Downloaded Electivus Codex package did not verify as release $install_expected_version." >&2
     return 1
+  fi
 
-  case "$layout" in
+  replaced_release_dir="$install_release_dir"
+  replaced_release_backup="$backup_release"
+  replaced_release_existed=false
+  release_replacement_pending=true
+  rm -rf "$backup_release"
+  if [ -e "$install_release_dir" ] || [ -L "$install_release_dir" ]; then
+    replaced_release_existed=true
+    mv "$install_release_dir" "$backup_release"
+  fi
+  if ! mv "$stage_release" "$install_release_dir"; then
+    rollback_release_replacement
+    return 1
+  fi
+  active_stage_release=""
+}
+
+release_contents_are_complete() {
+  checked_release_dir="$1"
+  checked_expected_version="$2"
+  checked_expected_target="$3"
+  checked_layout="$4"
+  checked_expected_receipt="$5"
+
+  [ -d "$checked_release_dir" ] || return 1
+
+  case "$checked_layout" in
     package)
-      [ -f "$release_dir/codex-package.json" ] &&
-        [ -x "$release_dir/bin/codex" ] &&
-        [ -x "$release_dir/bin/codex-code-mode-host" ] &&
-        [ -x "$release_dir/codex" ] &&
-        [ -x "$release_dir/codex-path/rg" ] ||
-        return 1
-      ;;
-    legacy-platform-npm)
-      [ -x "$release_dir/codex" ] &&
-        [ -x "$release_dir/codex-resources/rg" ] ||
+      [ -f "$checked_release_dir/codex-package.json" ] &&
+        [ -x "$checked_release_dir/bin/codex" ] &&
+        [ -x "$checked_release_dir/bin/codex-code-mode-host" ] &&
+        [ -x "$checked_release_dir/codex" ] &&
+        [ -x "$checked_release_dir/codex-path/rg" ] ||
         return 1
       ;;
     *)
@@ -1012,14 +2386,178 @@ release_dir_is_complete() {
       ;;
   esac
 
-  case "$layout:$expected_target" in
-    package:*linux* | legacy-platform-npm:*linux*)
-      [ -x "$release_dir/codex-resources/bwrap" ] || return 1
+  case "$checked_layout:$checked_expected_target" in
+    package:*linux*)
+      [ -x "$checked_release_dir/codex-resources/bwrap" ] || return 1
       ;;
   esac
 
-  installed_version="$(version_from_binary "$release_dir/bin/codex" || version_from_binary "$release_dir/codex" || true)"
-  [ "$installed_version" = "$expected_version" ]
+  receipt_matches "$checked_release_dir" "$checked_expected_receipt" || return 1
+
+  installed_version="$(version_from_binary "$checked_release_dir/bin/codex" || version_from_binary "$checked_release_dir/codex" || true)"
+  [ "$installed_version" = "$checked_expected_version" ]
+}
+
+release_dir_is_complete() {
+  release_dir="$1"
+  expected_version="$2"
+  expected_target="$3"
+  layout="$4"
+  expected_receipt="$5"
+
+  [ "$(basename "$release_dir")" = "$expected_target" ] &&
+    [ "$(basename "$(dirname "$release_dir")")" = "$expected_version" ] ||
+    return 1
+
+  release_contents_are_complete \
+    "$release_dir" \
+    "$expected_version" \
+    "$expected_target" \
+    "$layout" \
+    "$expected_receipt"
+}
+
+rollback_release_replacement() {
+  [ "$release_replacement_pending" = true ] || return 0
+
+  rollback_release_status=0
+  if [ "$replaced_release_existed" = true ]; then
+    if [ -n "$replaced_release_backup" ] &&
+      { [ -e "$replaced_release_backup" ] || [ -L "$replaced_release_backup" ]; }; then
+      if ! rm -rf "$replaced_release_dir"; then
+        warn "Could not remove the failed replacement at $replaced_release_dir."
+        warn "The previous release remains preserved at $replaced_release_backup; manual recovery is required."
+        rollback_release_status=1
+      else
+        if mv -nT "$replaced_release_backup" "$replaced_release_dir" &&
+          ! { [ -e "$replaced_release_backup" ] || [ -L "$replaced_release_backup" ]; }; then
+          warn "Release replacement failed; restoring the previous installed bytes."
+        elif [ -e "$replaced_release_dir" ] || [ -L "$replaced_release_dir" ]; then
+          warn "Could not restore the previous release at $replaced_release_dir because that destination reappeared during rollback."
+          warn "The previous release remains preserved at $replaced_release_backup; manual recovery is required."
+          rollback_release_status=1
+        else
+          warn "Could not restore the previous release from $replaced_release_backup."
+          if [ -e "$replaced_release_backup" ] || [ -L "$replaced_release_backup" ]; then
+            warn "The previous release remains preserved at $replaced_release_backup; manual recovery is required."
+          fi
+          rollback_release_status=1
+        fi
+      fi
+    else
+      if [ -n "$replaced_release_backup" ]; then
+        warn "Could not restore the previous release from $replaced_release_backup."
+      else
+        warn "Could not restore the previous release because its backup path was not recorded."
+      fi
+      rollback_release_status=1
+    fi
+  elif [ -n "$replaced_release_dir" ]; then
+    if ! rm -rf "$replaced_release_dir"; then
+      warn "Could not remove the failed new release at $replaced_release_dir."
+      rollback_release_status=1
+    fi
+  fi
+  release_replacement_pending=false
+  replaced_release_dir=""
+  replaced_release_backup=""
+  replaced_release_existed=false
+  return "$rollback_release_status"
+}
+
+commit_release_replacement() {
+  [ "$release_replacement_pending" = true ] || return 0
+
+  if [ "$replaced_release_existed" = true ]; then
+    rm -rf "$replaced_release_backup"
+  fi
+  release_replacement_pending=false
+  replaced_release_dir=""
+  replaced_release_backup=""
+  replaced_release_existed=false
+}
+
+save_activation_path() {
+  saved_path="$1"
+  saved_name="$2"
+  saved_type_path="$tmp_dir/$saved_name.type"
+  saved_value_path="$tmp_dir/$saved_name.value"
+
+  if [ -L "$saved_path" ]; then
+    printf 'link\n' >"$saved_type_path"
+    readlink "$saved_path" >"$saved_value_path"
+  elif [ -f "$saved_path" ]; then
+    printf 'file\n' >"$saved_type_path"
+    cp -p "$saved_path" "$saved_value_path"
+  else
+    printf 'absent\n' >"$saved_type_path"
+  fi
+}
+
+restore_activation_path() {
+  restored_path="$1"
+  restored_name="$2"
+  if ! restored_type="$(cat "$tmp_dir/$restored_name.type")"; then
+    return 1
+  fi
+
+  if ! rm -f "$restored_path"; then
+    return 1
+  fi
+  case "$restored_type" in
+    link)
+      if ! restored_value="$(cat "$tmp_dir/$restored_name.value")"; then
+        return 1
+      fi
+      ln -s "$restored_value" "$restored_path"
+      ;;
+    file)
+      cp -p "$tmp_dir/$restored_name.value" "$restored_path"
+      ;;
+    absent) ;;
+  esac
+}
+
+rollback_activation() {
+  [ "$activation_rollback_pending" = true ] || return 0
+
+  rollback_activation_status=0
+  warn "Activation failed; restoring the previous runnable installation."
+  if ! restore_activation_path "$CURRENT_LINK" current; then
+    warn "Could not restore the previous current release link at $CURRENT_LINK."
+    rollback_activation_status=1
+  fi
+  if ! restore_activation_path "$BIN_PATH" visible-codex; then
+    warn "Could not restore the previous visible Codex command at $BIN_PATH."
+    rollback_activation_status=1
+  fi
+  if ! restore_activation_path "$CODE_MODE_HOST_BIN_PATH" visible-code-mode-host; then
+    warn "Could not restore the previous code-mode host command at $CODE_MODE_HOST_BIN_PATH."
+    rollback_activation_status=1
+  fi
+  activation_rollback_pending=false
+  if [ "$rollback_activation_status" -ne 0 ]; then
+    warn "Activation rollback encountered one or more failures; cleanup will continue with the remaining installer state."
+  fi
+  return "$rollback_activation_status"
+}
+
+activate_release() {
+  release_dir="$1"
+  save_activation_path "$CURRENT_LINK" current
+  save_activation_path "$BIN_PATH" visible-codex
+  save_activation_path "$CODE_MODE_HOST_BIN_PATH" visible-code-mode-host
+  activation_rollback_pending=true
+
+  if update_current_link "$release_dir" &&
+    update_visible_command "$release_dir" &&
+    verify_visible_command; then
+    activation_rollback_pending=false
+    return 0
+  fi
+
+  rollback_activation
+  return 1
 }
 
 update_current_link() {
@@ -1059,7 +2597,12 @@ update_visible_command() {
 }
 
 verify_visible_command() {
-  "$BIN_PATH" --version >/dev/null
+  verification_status=0
+  "$BIN_PATH" --version >/dev/null &
+  verification_pid=$!
+  wait "$verification_pid" || verification_status=$?
+  verification_pid=""
+  [ "$verification_status" -eq 0 ] || return "$verification_status"
   if [ "$os" = "darwin" ] && [ "$install_layout" = "package" ]; then
     [ -x "$CODE_MODE_HOST_BIN_PATH" ]
   fi
@@ -1069,16 +2612,19 @@ parse_args "$@"
 
 require_command mktemp
 require_command tar
+require_command cmp
+require_command od
 
 case "$(uname -s)" in
   Darwin)
-    os="darwin"
+    echo "Electivus does not yet publish or validate standalone macOS artifacts. This installer will not fall back to OpenAI Codex." >&2
+    exit 1
     ;;
   Linux)
     os="linux"
     ;;
   *)
-    echo "install.sh supports macOS and Linux. Use install.ps1 on Windows." >&2
+    echo "install.sh supports Linux only. Use the Electivus install.ps1 on Windows." >&2
     exit 1
     ;;
 esac
@@ -1096,38 +2642,110 @@ case "$(uname -m)" in
     ;;
 esac
 
-if [ "$os" = "darwin" ] && [ "$arch" = "x86_64" ]; then
-  if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = "1" ]; then
-    arch="aarch64"
-  fi
-fi
-
-if [ "$os" = "darwin" ]; then
-  if [ "$arch" = "aarch64" ]; then
-    npm_tag="darwin-arm64"
-    vendor_target="aarch64-apple-darwin"
-    platform_label="macOS (Apple Silicon)"
-  else
-    npm_tag="darwin-x64"
-    vendor_target="x86_64-apple-darwin"
-    platform_label="macOS (Intel)"
-  fi
+if [ "$arch" = "aarch64" ]; then
+  vendor_target="aarch64-unknown-linux-musl"
+  platform_label="Linux (ARM64)"
 else
-  if [ "$arch" = "aarch64" ]; then
-    npm_tag="linux-arm64"
-    vendor_target="aarch64-unknown-linux-musl"
-    platform_label="Linux (ARM64)"
-  else
-    npm_tag="linux-x64"
-    vendor_target="x86_64-unknown-linux-musl"
-    platform_label="Linux (x64)"
-  fi
+  vendor_target="x86_64-unknown-linux-musl"
+  platform_label="Linux (x64)"
 fi
 
+tmp_dir="$(mktemp -d)"
+cleanup() {
+  [ "$cleanup_done" = false ] || return
+  cleanup_done=true
+  trap '' EXIT HUP INT TERM
+  cleanup_status=0
+  if ! stop_active_delegate TERM; then
+    warn "Could not stop the verified release installer."
+    cleanup_status=1
+  fi
+  if ! stop_active_download; then
+    warn "Could not stop every active installer download process."
+    cleanup_status=1
+  fi
+  if ! stop_active_verification; then
+    warn "Could not stop every active installer verification process."
+    cleanup_status=1
+  fi
+  if ! rollback_activation; then
+    cleanup_status=1
+  fi
+  if ! rollback_release_replacement; then
+    cleanup_status=1
+  fi
+  if [ -n "$active_stage_release" ]; then
+    if ! rm -rf "$active_stage_release"; then
+      warn "Could not remove staged release $active_stage_release."
+      cleanup_status=1
+    fi
+    active_stage_release=""
+  fi
+  if ! release_install_lock; then
+    cleanup_status=1
+  fi
+  if [ -n "$tmp_dir" ]; then
+    if ! rm -rf "$tmp_dir"; then
+      warn "Could not remove installer temporary directory $tmp_dir."
+      cleanup_status=1
+    fi
+    tmp_dir=""
+  fi
+  if [ "$cleanup_status" -ne 0 ]; then
+    warn "Installer cleanup encountered one or more failures; review the preceding paths for manual recovery."
+  fi
+  trap - EXIT HUP INT TERM
+  return "$cleanup_status"
+}
+handle_signal() {
+  signal_status="$1"
+  signal_name="$2"
+  if [ "$delegate_starting" = true ]; then
+    if [ -z "$pending_signal_name" ]; then
+      pending_signal_status="$signal_status"
+      pending_signal_name="$signal_name"
+    fi
+    return
+  fi
+  trap '' HUP INT TERM
+  stop_active_delegate "$signal_name"
+  cleanup || true
+  exit "$signal_status"
+}
+handle_exit() {
+  exit_status="$?"
+  cleanup_status=0
+  cleanup || cleanup_status=$?
+  trap - EXIT
+  if [ "$exit_status" -ne 0 ]; then
+    exit "$exit_status"
+  fi
+  exit "$cleanup_status"
+}
+trap handle_exit EXIT
+trap 'handle_signal 129 HUP' HUP
+trap 'handle_signal 130 INT' INT
+trap 'handle_signal 143 TERM' TERM
+
+load_current_managed_receipt
 resolve_release
-release_name="$resolved_version-$vendor_target"
-release_dir="$RELEASES_DIR/$release_name"
-current_version="$(current_installed_version)"
+release_dir="$RELEASES_DIR/$resolved_version/$vendor_target"
+package_metadata_digest="$(release_asset_digest "$package_asset")"
+installer_metadata_digest="$(release_asset_digest "$installer_asset")"
+if [ "$INSTALLER_PROTOCOL" = "direct" ] && [ "$INSTALLER_STDIN_MODE" = true ]; then
+  download_verified_release_installer
+  delegate_status=0
+  delegate_to_release_installer || delegate_status=$?
+  exit "$delegate_status"
+fi
+bind_installer_provenance "$installer_metadata_digest"
+refuse_managed_downgrade
+expected_receipt="$tmp_dir/installation-receipt.json"
+write_installation_receipt \
+  "$expected_receipt" \
+  "$package_metadata_digest" \
+  "$resolved_installer_digest"
+current_version="$installed_managed_version"
 
 if [ -n "$current_version" ] && [ "$current_version" != "$resolved_version" ]; then
   step "Updating Codex CLI from $current_version to $resolved_version"
@@ -1138,54 +2756,63 @@ else
 fi
 step "Detected platform: $platform_label"
 step "Resolved version: $resolved_version"
+step "Update channel: $resolved_channel"
 
 detect_conflicting_install
-
-tmp_dir="$(mktemp -d)"
-cleanup() {
-  release_install_lock
-  if [ -n "$tmp_dir" ]; then
-    rm -rf "$tmp_dir"
-  fi
-}
-trap cleanup EXIT INT TERM
 
 acquire_install_lock
 cleanup_stale_install_artifacts
 
-if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target" "$install_layout"; then
-  if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
-    warn "Found incomplete existing release at $release_dir; reinstalling."
-  fi
-
-  archive_path="$tmp_dir/$asset"
-  checksum_path="$tmp_dir/$checksum_asset"
-
-  step "Downloading Codex CLI"
-  if [ "$install_layout" = "package" ]; then
-    checksum_digest="$(release_asset_digest "$checksum_asset")"
-    download_file_with_fallback "$checksum_url" "$checksum_fallback_url" "$checksum_path" "$checksum_digest" "$checksum_asset" "$asset"
-    expected_digest="$(package_archive_digest "$asset" "$checksum_path")"
+if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
+  if receipt_matches "$release_dir" "$expected_receipt"; then
+    warn "The installed release cannot be authenticated from its archive receipt alone; safely reinstalling."
   else
-    expected_digest="$(release_asset_digest "$asset")"
-  fi
-  download_file_with_fallback "$download_url" "$download_fallback_url" "$archive_path" "$expected_digest" "$asset"
-
-  step "Installing standalone package to $release_dir"
-  if [ "$install_layout" = "package" ]; then
-    install_package_release "$release_dir" "$archive_path"
-  else
-    install_legacy_platform_npm_release "$release_dir" "$archive_path" "$vendor_target"
+    warn "Found incomplete or provenance-mismatched Electivus release at $release_dir; reinstalling."
   fi
 fi
-if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target" "$install_layout"; then
-  echo "Installed Codex command did not report expected version $resolved_version." >&2
+
+archive_path="$tmp_dir/$asset"
+checksum_path="$tmp_dir/$checksum_asset"
+installer_checksum_path="$tmp_dir/$installer_checksum_asset"
+
+step "Downloading Electivus checksum manifests"
+checksum_digest="$(release_asset_digest "$checksum_asset")"
+download_file "$checksum_url" "$checksum_path" "$MANIFEST_MAX_BYTES"
+verify_archive_digest "$checksum_path" "$checksum_digest"
+verify_manifest_assets \
+  "$checksum_path" \
+  codex-package-aarch64-pc-windows-msvc.tar.gz \
+  codex-package-aarch64-unknown-linux-musl.tar.gz \
+  codex-package-x86_64-pc-windows-msvc.tar.gz \
+  codex-package-x86_64-unknown-linux-musl.tar.gz
+
+installer_checksum_digest="$(release_asset_digest "$installer_checksum_asset")"
+download_file "$installer_checksum_url" "$installer_checksum_path" "$MANIFEST_MAX_BYTES"
+verify_archive_digest "$installer_checksum_path" "$installer_checksum_digest"
+verify_manifest_assets "$installer_checksum_path" install.sh install.ps1
+
+expected_digest="$(package_archive_digest "$asset" "$checksum_path")"
+step "Downloading Electivus Codex CLI"
+download_file "$download_url" "$archive_path" "$PACKAGE_MAX_BYTES"
+verify_archive_digest "$archive_path" "$expected_digest"
+
+step "Installing Electivus standalone package to $release_dir"
+install_package_release \
+  "$release_dir" \
+  "$archive_path" \
+  "$expected_receipt" \
+  "$resolved_version" \
+  "$vendor_target" \
+  "$install_layout"
+if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target" "$install_layout" "$expected_receipt"; then
+  echo "Installed Electivus Codex command or receipt did not match expected release $resolved_version." >&2
   exit 1
 fi
-update_current_link "$release_dir"
-update_visible_command "$release_dir"
+load_current_managed_receipt
+refuse_managed_downgrade
+activate_release "$release_dir"
+commit_release_replacement
 add_to_path
-verify_visible_command
 release_install_lock
 handle_conflicting_install
 
@@ -1205,5 +2832,5 @@ case "$path_action" in
     ;;
 esac
 
-printf 'Codex CLI %s installed successfully.\n' "$resolved_version"
+printf 'Electivus Codex CLI %s installed successfully.\n' "$resolved_version"
 maybe_launch_codex_now

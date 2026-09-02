@@ -2184,6 +2184,41 @@ fn non_empty_trimmed(value: String) -> Option<String> {
 }
 
 async fn state_check(config: &Config, command: &DoctorCommand) -> DoctorCheck {
+    if let codex_state::RuntimeStateBackendConfig::Postgresql { namespace, .. } =
+        &config.runtime_state_backend
+    {
+        let mut details = Vec::new();
+        path_readiness(&mut details, "CODEX_HOME", &config.codex_home);
+        path_readiness(&mut details, "log dir", &config.log_dir);
+        details.push("Runtime State Backend: postgresql".to_string());
+        details.push(format!("PostgreSQL schema: {}", namespace.schema()));
+        standalone_release_cache_details(&mut details);
+
+        return match codex_state::PostgresRuntimeStatePool::connect(namespace.clone()).await {
+            Ok(pool) => {
+                pool.close().await;
+                DoctorCheck::new(
+                    "state.paths",
+                    "state",
+                    CheckStatus::Ok,
+                    "PostgreSQL Runtime State Namespace is ready",
+                )
+                .detail("PostgreSQL runtime readiness: ok")
+                .details(details)
+            }
+            Err(error) => DoctorCheck::new(
+                "state.paths",
+                "state",
+                CheckStatus::Fail,
+                "PostgreSQL Runtime State Namespace is unavailable or incompatible",
+            )
+            .detail(format!("PostgreSQL runtime readiness: {error:#}"))
+            .details(details)
+            .remediation(
+                "Verify the configured PostgreSQL URL (direct or environment-backed), PostgreSQL 18 availability, and the final Runtime State Migration or Initialization readiness report.",
+            ),
+        };
+    }
     let mut details = Vec::new();
     path_readiness(&mut details, "CODEX_HOME", &config.codex_home);
     path_readiness(&mut details, "log dir", &config.log_dir);

@@ -303,18 +303,13 @@ fn rendered_history_rows(
     } else {
         HistoryRenderMode::Rich
     };
-    thread_items_to_transcript_cells(
-        Some(thread_id),
-        &thread.cwd,
-        items,
-        visibility,
-        Some(config),
-    )
-    .into_iter()
-    .fold(rendered_rows, |rows, cell| {
-        let height = usize::from(cell.desired_height_for_mode(width, mode));
-        rows + height + usize::from(height != 0 && rows != 0 && !cell.is_stream_continuation())
-    })
+    let cwd = std::path::PathBuf::from(thread.cwd.render_for_ui());
+    thread_items_to_transcript_cells(Some(thread_id), &cwd, items, visibility, Some(config))
+        .into_iter()
+        .fold(rendered_rows, |rows, cell| {
+            let height = usize::from(cell.desired_height_for_mode(width, mode));
+            rows + height + usize::from(height != 0 && rows != 0 && !cell.is_stream_continuation())
+        })
 }
 
 #[cfg(test)]

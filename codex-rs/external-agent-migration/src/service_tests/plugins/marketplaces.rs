@@ -657,29 +657,25 @@ async fn import_rejects_forged_project_relative_external_agent_plugin_item() {
         }])
         .await;
 
-    assert_eq!(
-        outcome,
-        ExternalAgentConfigImportOutcome {
-            pending_plugin_imports: Vec::new(),
-            item_results: vec![ExternalAgentConfigImportItemResult {
-                item_type: ExternalAgentConfigMigrationItemType::Plugins,
-                description: String::new(),
-                cwd: Some(repo_root.clone()),
-                success_count: 0,
-                error_count: 1,
-                successes: Vec::new(),
-                raw_errors: vec![ExternalAgentConfigImportRawError {
-                    item_type: ExternalAgentConfigMigrationItemType::Plugins,
-                    error_type: None,
-                    sub_error_type: None,
-                    failure_stage: "plugin_import".to_string(),
-                    message: "repository-scoped plugin migration is not allowed".to_string(),
-                    cwd: Some(repo_root),
-                    source: None,
-                }],
-            }],
-        }
-    );
+    let mut expected = ExternalAgentConfigImportOutcome::default();
+    expected.item_results = vec![ExternalAgentConfigImportItemResult {
+        item_type: ExternalAgentConfigMigrationItemType::Plugins,
+        description: String::new(),
+        cwd: Some(repo_root.clone()),
+        success_count: 0,
+        error_count: 1,
+        successes: Vec::new(),
+        raw_errors: vec![ExternalAgentConfigImportRawError {
+            item_type: ExternalAgentConfigMigrationItemType::Plugins,
+            error_type: None,
+            sub_error_type: None,
+            failure_stage: "plugin_import".to_string(),
+            message: "repository-scoped plugin migration is not allowed".to_string(),
+            cwd: Some(repo_root),
+            source: None,
+        }],
+    }];
+    assert_eq!(outcome, expected);
     assert!(!codex_home.join("config.toml").exists());
 }
 

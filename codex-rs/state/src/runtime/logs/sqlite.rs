@@ -1,8 +1,34 @@
-use super::*;
+use super::super::LOG_PARTITION_ROW_LIMIT;
+use super::super::LOG_PARTITION_SIZE_LIMIT_BYTES;
+#[cfg(test)]
+use super::super::StateRuntime;
+#[cfg(test)]
+use super::super::test_support;
+use super::LOG_RETENTION_DAYS;
+use super::estimated_log_bytes;
+use super::format_feedback_log_line;
+use crate::LogEntry;
+use crate::LogQuery;
+use crate::LogRow;
+use chrono::Utc;
+use sqlx::QueryBuilder;
+use sqlx::Row;
+use sqlx::Sqlite;
+use sqlx::SqliteConnection;
+use sqlx::SqlitePool;
+use std::collections::BTreeSet;
+use std::sync::Arc;
 
-const LOG_RETENTION_DAYS: i64 = 10;
+#[derive(Clone)]
+pub(super) struct SqliteLogStore {
+    pool: Arc<SqlitePool>,
+}
 
-impl StateRuntime {
+impl SqliteLogStore {
+    pub(super) fn new(pool: Arc<SqlitePool>) -> Self {
+        Self { pool }
+    }
+
     pub async fn insert_log(&self, entry: &LogEntry) -> anyhow::Result<()> {
         self.insert_logs(std::slice::from_ref(entry)).await
     }
@@ -13,7 +39,7 @@ impl StateRuntime {
             return Ok(());
         }
 
-        let mut tx = self.logs_pool.begin().await?;
+        let mut tx = self.pool.begin().await?;
         let mut builder = QueryBuilder::<Sqlite>::new(
             "INSERT INTO logs (ts, ts_nanos, level, target, feedback_log_body, thread_id, process_uuid, module_path, file, line, estimated_bytes) ",
         );
@@ -23,6 +49,7 @@ impl StateRuntime {
             // Both `query_logs` and `/feedback` read the persisted
             // `feedback_log_body`, while `LogEntry.message` is only a write-time
             // fallback for callers that still populate the old field.
+            let estimated_bytes = estimated_log_bytes(entry);
             row.push_bind(entry.ts)
                 .push_bind(entry.ts_nanos)
                 .push_bind(&entry.level)
@@ -33,7 +60,7 @@ impl StateRuntime {
                 .push_bind(&entry.module_path)
                 .push_bind(&entry.file)
                 .push_bind(entry.line)
-                .push_bind(entry.estimated_bytes());
+                .push_bind(estimated_bytes);
         });
         builder.build().execute(&mut *tx).await?;
         self.prune_logs_after_insert(entries, &mut tx).await?;
@@ -283,7 +310,7 @@ WHERE id IN (
     pub(crate) async fn delete_logs_before(&self, cutoff_ts: i64) -> anyhow::Result<u64> {
         let result = sqlx::query("DELETE FROM logs WHERE ts < ?")
             .bind(cutoff_ts)
-            .execute(self.logs_pool.as_ref())
+            .execute(self.pool.as_ref())
             .await?;
         Ok(result.rows_affected())
     }
@@ -299,7 +326,7 @@ WHERE id IN (
         // PASSIVE checkpoints copy whatever is immediately available and skip
         // frames that would require waiting on active readers or writers.
         sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
-            .execute(self.logs_pool.as_ref())
+            .execute(self.pool.as_ref())
             .await?;
         Ok(())
     }
@@ -321,7 +348,7 @@ WHERE id IN (
 
         let rows = builder
             .build_query_as::<LogRow>()
-            .fetch_all(self.logs_pool.as_ref())
+            .fetch_all(self.pool.as_ref())
             .await?;
         Ok(rows)
     }
@@ -402,7 +429,7 @@ WHERE cumulative_estimated_bytes <=
         builder.push(" ORDER BY ts DESC, ts_nanos DESC, id DESC");
         let rows = builder
             .build_query_as::<FeedbackLogRow>()
-            .fetch_all(self.logs_pool.as_ref())
+            .fetch_all(self.pool.as_ref())
             .await?;
 
         let mut lines = Vec::new();
@@ -425,19 +452,26 @@ WHERE cumulative_estimated_bytes <=
         Ok(ordered_bytes)
     }
 
-    /// Query per-thread feedback logs, capped to the per-thread SQLite retention budget.
-    pub async fn query_feedback_logs(&self, thread_id: &str) -> anyhow::Result<Vec<u8>> {
-        self.query_feedback_logs_for_threads(&[thread_id]).await
-    }
-
     /// Return the max log id matching optional filters.
     pub async fn max_log_id(&self, query: &LogQuery) -> anyhow::Result<i64> {
         let mut builder =
             QueryBuilder::<Sqlite>::new("SELECT MAX(id) AS max_id FROM logs WHERE 1 = 1");
         push_log_filters(&mut builder, query);
-        let row = builder.build().fetch_one(self.logs_pool.as_ref()).await?;
+        let row = builder.build().fetch_one(self.pool.as_ref()).await?;
         let max_id: Option<i64> = row.try_get("max_id")?;
         Ok(max_id.unwrap_or(0))
+    }
+
+    pub(super) async fn delete_logs_for_thread(&self, thread_id: &str) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM logs WHERE thread_id = ?")
+            .bind(thread_id)
+            .execute(self.pool.as_ref())
+            .await?;
+        Ok(())
+    }
+
+    pub(super) async fn close(&self) {
+        self.pool.close().await;
     }
 }
 
@@ -447,24 +481,6 @@ struct FeedbackLogRow {
     ts_nanos: i64,
     level: String,
     feedback_log_body: String,
-}
-
-fn format_feedback_log_line(
-    ts: i64,
-    ts_nanos: i64,
-    level: &str,
-    feedback_log_body: &str,
-) -> String {
-    let nanos = u32::try_from(ts_nanos).unwrap_or(0);
-    let timestamp = match DateTime::<Utc>::from_timestamp(ts, nanos) {
-        Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
-        None => format!("{ts}.{ts_nanos:09}Z"),
-    };
-    let mut line = format!("{timestamp} {level:>5} {feedback_log_body}");
-    if !line.ends_with('\n') {
-        line.push('\n');
-    }
-    line
 }
 
 fn push_log_filters(builder: &mut QueryBuilder<Sqlite>, query: &LogQuery) {

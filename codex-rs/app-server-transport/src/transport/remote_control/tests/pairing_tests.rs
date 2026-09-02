@@ -960,7 +960,7 @@ async fn remote_control_handle_reenrolls_after_stale_pairing_enrollment() {
         &remote_control_url,
         remote_control_auth_manager_with_home(&codex_home),
     );
-    remote_handle.state_db = Some(state_db.clone());
+    remote_handle.enrollment_store = Some(state_db.remote_control_enrollment_store());
     let stale_enrollment = remote_handle
         .current_enrollment
         .lock()
@@ -979,7 +979,7 @@ async fn remote_control_handle_reenrolls_after_stale_pairing_enrollment() {
         next_refresh_at: None,
     };
     update_persisted_remote_control_enrollment(
-        Some(state_db.as_ref()),
+        Some(&state_db.remote_control_enrollment_store()),
         &remote_control_target,
         "account_id",
         /*app_server_client_name*/ None,

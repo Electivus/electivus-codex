@@ -18,6 +18,7 @@ fn exec_command_tool_matches_expected_spec() {
     let tool = create_exec_command_tool(CommandToolOptions {
         allow_login_shell: true,
         exec_permission_approvals_enabled: false,
+        tool_execution: codex_config::ToolExecutionPolicy::default(),
     });
 
     let description = if cfg!(windows) {
@@ -29,11 +30,7 @@ fn exec_command_tool_matches_expected_spec() {
         "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
             .to_string()
     };
-    let yield_time_ms_description = if cfg!(windows) {
-        "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 10000-30000 ms."
-    } else {
-        "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."
-    };
+    let yield_time_ms_description = "Wait before yielding output. Non-interactive commands use the configured default 30000 ms and range 10000-300000 ms. TTY commands use the fixed default 10000 ms and range 250-30000 ms. Commands that finish sooner return immediately.";
 
     let mut properties = BTreeMap::from([
         (
@@ -104,6 +101,7 @@ fn exec_command_tool_can_hide_shell_parameter() {
         CommandToolOptions {
             allow_login_shell: true,
             exec_permission_approvals_enabled: false,
+            tool_execution: codex_config::ToolExecutionPolicy::default(),
         },
         /*include_environment_id*/ false,
         /*include_shell_parameter*/ false,
@@ -116,7 +114,7 @@ fn exec_command_tool_can_hide_shell_parameter() {
 
 #[test]
 fn write_stdin_tool_matches_expected_spec() {
-    let tool = create_write_stdin_tool();
+    let tool = create_write_stdin_tool(codex_config::ToolExecutionPolicy::default());
 
     let properties = BTreeMap::from([
         (
@@ -134,7 +132,7 @@ fn write_stdin_tool_matches_expected_spec() {
         (
             "yield_time_ms".to_string(),
             JsonSchema::number(Some(
-                "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default.".to_string(),
+                "Wait before yielding output. Empty polls use the configured default 30000 ms and range 10000-300000 ms. Non-empty writes use the fixed default 250 ms and range 250-30000 ms.".to_string(),
             )),
         ),
         (

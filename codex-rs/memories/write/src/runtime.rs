@@ -32,6 +32,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::user_input::UserInput;
+use codex_rollout::RolloutItem;
 use codex_rollout_trace::InferenceTraceContext;
 use codex_state::StateRuntime;
 use codex_terminal_detection::user_agent;
@@ -204,6 +205,16 @@ impl MemoryStartupContext {
 
     pub(crate) fn start_timer(&self, name: &str) -> Option<codex_otel::Timer> {
         self.session_telemetry.start_timer(name, &[]).ok()
+    }
+
+    pub(crate) async fn load_thread_history(
+        &self,
+        thread_id: ThreadId,
+    ) -> anyhow::Result<Vec<RolloutItem>> {
+        Ok(self
+            .thread_manager
+            .load_thread_history_items(thread_id)
+            .await?)
     }
 
     pub(crate) async fn stage_one_request_context(

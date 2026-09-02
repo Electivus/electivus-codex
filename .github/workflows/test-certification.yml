@@ -1,0 +1,146 @@
+name: Test certification
+
+on:
+  push:
+    branches: [certification/issue-89]
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full immutable commit SHA to certify.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+
+jobs:
+  certify:
+    name: Certify ${{ matrix.test_id }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - test_id: core-pending-input
+            package: codex-core
+            identity: suite::pending_input::injected_user_input_triggers_follow_up_request_with_deltas
+          - test_id: app-server-exec-approval-item-id
+            package: codex-app-server
+            identity: suite::v2::review::review_start_exec_approval_item_id_matches_command_execution_item
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      TARGET: x86_64-unknown-linux-gnu
+      EVIDENCE_DIR: ${{ github.workspace }}/.certification/${{ matrix.test_id }}
+      RUST_MIN_STACK: "8388608"
+      CARGO_PROFILE_CI_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          persist-credentials: false
+
+      - name: Initialize immutable evidence manifest
+        run: |
+          set -euo pipefail
+          mkdir -p "${EVIDENCE_DIR}/junit"
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/verify_test_certification.py" init \
+            "${EVIDENCE_DIR}/manifest.json" \
+            --candidate-sha "${CANDIDATE_SHA}" \
+            --checked-out-sha "$(git rev-parse HEAD)" \
+            --test-id "${{ matrix.test_id }}" \
+            --workflow-ref "${GITHUB_WORKFLOW_REF}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --runner-os "${RUNNER_OS}" \
+            --runner-arch "${RUNNER_ARCH}"
+
+      - name: Free disk space for certification builds
+        run: |
+          set -euo pipefail
+          sudo rm -rf /opt/ghc /opt/hostedtoolcache /usr/local/.ghcup /usr/local/lib/android /usr/share/dotnet
+
+      - uses: ./.github/actions/setup-ci
+
+      - name: Install Linux build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev bubblewrap
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ env.TARGET }}
+
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: nextest@0.9.103
+
+      - name: Run ordered retry-free sequence
+        run: |
+          set -euo pipefail
+          junit_source="${GITHUB_WORKSPACE}/codex-rs/target/nextest/default/junit.xml"
+          for order in $(seq 1 20); do
+            report="${EVIDENCE_DIR}/junit/$(printf '%02d' "${order}").xml"
+            rm -f -- "${junit_source}" "${report}"
+            set +e
+            cargo nextest run \
+              --cargo-profile ci-test --target "${TARGET}" \
+              -p "${{ matrix.package }}" \
+              --test all \
+              --retries 0 \
+              --run-ignored=only \
+              -E "test(=${{ matrix.identity }})"
+            test_status=$?
+            set -e
+            if [[ -f "${junit_source}" ]]; then
+              cp "${junit_source}" "${report}"
+            fi
+            set +e
+            python3 "${GITHUB_WORKSPACE}/.github/scripts/check_nextest_junit.py" \
+              "${report}" --expected-testcases 1 --reject-skipped
+            junit_status=$?
+            python3 "${GITHUB_WORKSPACE}/.github/scripts/verify_test_certification.py" record \
+              "${EVIDENCE_DIR}/manifest.json" "${report}" \
+              --order "${order}" --exit-code "${test_status}"
+            record_status=$?
+            set -e
+            if [[ "${test_status}" -ne 0 || "${junit_status}" -ne 0 || "${record_status}" -ne 0 ]]; then
+              break
+            fi
+          done
+
+      - name: Verify and summarize independent sequence
+        if: always()
+        run: |
+          set +e
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/verify_test_certification.py" verify \
+            "${EVIDENCE_DIR}/manifest.json" --expected-sha "${CANDIDATE_SHA}"
+          status=$?
+          set -e
+          outcome=passed
+          if [[ "${status}" -ne 0 ]]; then
+            outcome=failed
+          fi
+          {
+            echo "## #89 certification: ${{ matrix.test_id }}"
+            echo
+            echo "- Outcome: \`${outcome}\`"
+            echo "- Candidate: [\`${CANDIDATE_SHA}\`](https://github.com/${GITHUB_REPOSITORY}/commit/${CANDIDATE_SHA})"
+            echo "- Evidence: [workflow run](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}), artifact \`test-certification-${{ matrix.test_id }}-${CANDIDATE_SHA}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          exit "${status}"
+
+      - name: Upload retained certification evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: test-certification-${{ matrix.test_id }}-${{ env.CANDIDATE_SHA }}
+          path: ${{ env.EVIDENCE_DIR }}
+          if-no-files-found: error
+          retention-days: 90

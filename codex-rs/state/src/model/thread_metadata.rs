@@ -185,6 +185,10 @@ pub struct ThreadMetadata {
     pub git_branch: Option<String>,
     /// The git origin URL, if known.
     pub git_origin_url: Option<SanitizedGitUrl>,
+    /// Credential-free canonical identity derived from the Git origin.
+    pub repository_identity: Option<String>,
+    /// Internal provenance used to distinguish an explicit clear from missing rollout metadata.
+    pub(crate) git_origin_url_is_explicit: bool,
 }
 
 /// Builder data required to construct [`ThreadMetadata`] without parsing filenames.
@@ -316,11 +320,21 @@ impl ThreadMetadataBuilder {
             git_sha: self.git_sha.clone(),
             git_branch: self.git_branch.clone(),
             git_origin_url: self.git_origin_url.clone(),
+            repository_identity: self
+                .git_origin_url
+                .as_deref()
+                .and_then(codex_git_utils::canonicalize_git_remote_url),
+            git_origin_url_is_explicit: false,
         }
     }
 }
 
 impl ThreadMetadata {
+    /// Whether the Git origin value came from an explicit SQLite metadata update.
+    pub fn git_origin_url_is_explicit(&self) -> bool {
+        self.git_origin_url_is_explicit
+    }
+
     /// Preserve SQLite-owned Git fields when rollout-derived metadata is reconciled.
     pub fn prefer_existing_git_info(&mut self, existing: &Self) {
         if matches!(self.history_mode, ThreadHistoryMode::Paginated)
@@ -333,6 +347,8 @@ impl ThreadMetadata {
             self.git_sha = existing.git_sha.clone();
             self.git_branch = existing.git_branch.clone();
             self.git_origin_url = existing.git_origin_url.clone();
+            self.repository_identity = existing.repository_identity.clone();
+            self.git_origin_url_is_explicit = existing.git_origin_url_is_explicit;
             return;
         }
         if existing.git_sha.is_some() {
@@ -341,8 +357,10 @@ impl ThreadMetadata {
         if existing.git_branch.is_some() {
             self.git_branch = existing.git_branch.clone();
         }
-        if existing.git_origin_url.is_some() {
+        if existing.git_origin_url_is_explicit {
             self.git_origin_url = existing.git_origin_url.clone();
+            self.repository_identity = existing.repository_identity.clone();
+            self.git_origin_url_is_explicit = existing.git_origin_url_is_explicit;
         }
     }
 
@@ -448,6 +466,12 @@ impl ThreadMetadata {
         if self.git_origin_url != other.git_origin_url {
             diffs.push("git_origin_url");
         }
+        if self.repository_identity != other.repository_identity {
+            diffs.push("repository_identity");
+        }
+        if self.git_origin_url_is_explicit != other.git_origin_url_is_explicit {
+            diffs.push("git_origin_url_is_explicit");
+        }
         diffs
     }
 }
@@ -491,6 +515,8 @@ pub(crate) struct ThreadRow {
     git_sha: Option<String>,
     git_branch: Option<String>,
     git_origin_url: Option<String>,
+    repository_identity: Option<String>,
+    git_origin_url_is_explicit: bool,
 }
 
 impl ThreadRow {
@@ -529,6 +555,8 @@ impl ThreadRow {
             git_sha: row.try_get("git_sha")?,
             git_branch: row.try_get("git_branch")?,
             git_origin_url: row.try_get("git_origin_url")?,
+            repository_identity: row.try_get("repository_identity")?,
+            git_origin_url_is_explicit: row.try_get::<i64, _>("git_origin_url_is_explicit")? != 0,
         })
     }
 }
@@ -571,6 +599,8 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             git_sha,
             git_branch,
             git_origin_url,
+            repository_identity,
+            git_origin_url_is_explicit,
         } = row;
         let thread_source = thread_source
             .map(|thread_source| thread_source.parse())
@@ -629,6 +659,8 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             git_branch,
             git_origin_url: git_origin_url
                 .and_then(|origin_url| SanitizedGitUrl::try_from(origin_url).ok()),
+            repository_identity,
+            git_origin_url_is_explicit,
         })
     }
 }
@@ -737,6 +769,8 @@ mod tests {
             git_sha: None,
             git_branch: None,
             git_origin_url: None,
+            repository_identity: None,
+            git_origin_url_is_explicit: false,
         }
     }
 
@@ -774,6 +808,8 @@ mod tests {
             git_sha: None,
             git_branch: None,
             git_origin_url: None,
+            repository_identity: None,
+            git_origin_url_is_explicit: false,
         }
     }
 
@@ -819,6 +855,74 @@ mod tests {
         );
         let existing = expected_thread_metadata(/*reasoning_effort*/ None);
         let expected = reconciled.clone();
+
+        reconciled.prefer_existing_git_info(&existing);
+
+        assert_eq!(reconciled, expected);
+    }
+
+    #[test]
+    fn legacy_reconcile_replaces_non_explicit_stale_origin() {
+        let mut reconciled = expected_thread_metadata(/*reasoning_effort*/ None);
+        reconciled.git_origin_url = Some(
+            SanitizedGitUrl::try_from("https://example.com/acme/current.git")
+                .expect("valid git remote URL"),
+        );
+        reconciled.repository_identity = Some("example.com/acme/current".to_string());
+        let mut existing = reconciled.clone();
+        existing.git_origin_url = Some(
+            SanitizedGitUrl::try_from("https://example.com/acme/stale.git")
+                .expect("valid git remote URL"),
+        );
+        existing.repository_identity = Some("example.com/acme/stale".to_string());
+        let expected = reconciled.clone();
+
+        reconciled.prefer_existing_git_info(&existing);
+
+        assert_eq!(reconciled, expected);
+    }
+
+    #[test]
+    fn legacy_reconcile_preserves_explicit_reclassified_origin() {
+        let mut reconciled = expected_thread_metadata(/*reasoning_effort*/ None);
+        reconciled.git_origin_url = Some(
+            SanitizedGitUrl::try_from("https://example.com/acme/rollout.git")
+                .expect("valid git remote URL"),
+        );
+        reconciled.repository_identity = Some("example.com/acme/rollout".to_string());
+        let mut existing = reconciled.clone();
+        existing.git_origin_url = Some(
+            SanitizedGitUrl::try_from("https://example.com/acme/reclassified.git")
+                .expect("valid git remote URL"),
+        );
+        existing.repository_identity = Some("example.com/acme/reclassified".to_string());
+        existing.git_origin_url_is_explicit = true;
+        let mut expected = reconciled.clone();
+        expected.git_origin_url = existing.git_origin_url.clone();
+        expected.repository_identity = existing.repository_identity.clone();
+        expected.git_origin_url_is_explicit = true;
+
+        reconciled.prefer_existing_git_info(&existing);
+
+        assert_eq!(reconciled, expected);
+    }
+
+    #[test]
+    fn paginated_reconcile_preserves_non_explicit_sqlite_origin() {
+        let mut reconciled = expected_thread_metadata(/*reasoning_effort*/ None);
+        reconciled.history_mode = ThreadHistoryMode::Paginated;
+        reconciled.git_origin_url = Some(
+            SanitizedGitUrl::try_from("https://example.com/acme/rollout.git")
+                .expect("valid git remote URL"),
+        );
+        reconciled.repository_identity = Some("example.com/acme/rollout".to_string());
+        let mut existing = reconciled.clone();
+        existing.git_origin_url = Some(
+            SanitizedGitUrl::try_from("https://example.com/acme/sqlite.git")
+                .expect("valid git remote URL"),
+        );
+        existing.repository_identity = Some("example.com/acme/sqlite".to_string());
+        let expected = existing.clone();
 
         reconciled.prefer_existing_git_info(&existing);
 

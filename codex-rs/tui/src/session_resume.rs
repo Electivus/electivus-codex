@@ -1,8 +1,9 @@
 //! Resolve saved-session state needed before resuming or forking a thread.
 //!
 //! The app-server API owns normal thread lifecycle data. This module coordinates
-//! the TUI-specific cwd prompt and falls back to local rollout metadata only
-//! before the app server has resumed the selected thread.
+//! the TUI-specific cwd prompt. Legacy SQLite sessions may fall back to local
+//! rollout metadata before the app server has resumed the selected thread;
+//! PostgreSQL Runtime State remains canonical and never uses that fallback.
 
 use std::io;
 use std::path::Path;
@@ -19,25 +20,28 @@ use codex_protocol::ThreadId;
 use codex_rollout::open_rollout_line_reader;
 use codex_state::StateRuntime;
 use codex_utils_path as path_utils;
+use codex_utils_path_uri::LegacyAppPathString;
+use ratatui::style::Stylize as _;
+use ratatui::text::Line;
 use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Default)]
 struct RolloutResumeState {
     thread_id: Option<ThreadId>,
-    cwd: Option<PathBuf>,
+    cwd: Option<LegacyAppPathString>,
     model: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct SessionMetadata {
     id: ThreadId,
-    cwd: PathBuf,
+    cwd: LegacyAppPathString,
 }
 
 #[derive(Deserialize)]
 struct TurnContextResumeState {
-    cwd: PathBuf,
+    cwd: LegacyAppPathString,
     model: String,
 }
 
@@ -92,11 +96,18 @@ pub(crate) async fn read_session_model(
     thread_id: ThreadId,
     path: Option<&Path>,
 ) -> Option<String> {
-    if let Some(state_db_ctx) = state_db_ctx
-        && let Ok(Some(metadata)) = state_db_ctx.get_thread(thread_id).await
-        && let Some(model) = metadata.model
-    {
-        return Some(model);
+    if let Some(state_db_ctx) = state_db_ctx {
+        let metadata = state_db_ctx
+            .get_thread_resume_metadata(thread_id)
+            .await
+            .ok()
+            .flatten();
+        if !state_db_ctx.uses_local_rollout_history() {
+            return metadata.and_then(|metadata| metadata.model);
+        }
+        if let Some(model) = metadata.and_then(|metadata| metadata.model) {
+            return Some(model);
+        }
     }
 
     let path = path?;
@@ -119,7 +130,7 @@ pub(crate) async fn resolve_cwd_for_resume_or_fork(
             cwd_context.remembered_current_cwd.to_path_buf(),
         )));
     }
-    let Some(history_cwd) = read_session_cwd(
+    let Some(recorded_working_directory) = read_session_cwd(
         state_db_ctx,
         target_session.thread_id,
         target_session.path.as_deref(),
@@ -133,6 +144,29 @@ pub(crate) async fn resolve_cwd_for_resume_or_fork(
         }
         return Ok(ResolveCwdOutcome::Continue(None));
     };
+    let Some(history_cwd) = recorded_working_directory.to_inferred_abs_path() else {
+        let recorded_working_directory = recorded_working_directory.render_for_ui();
+        if matches!(cwd_context.mode, Some(ResumeCwdMode::Session)) {
+            color_eyre::eyre::bail!(
+                "cannot use Recorded Working Directory `{recorded_working_directory}` on this host; use `--cd <path>` or set `tui.resume_cwd = \"current\"`"
+            );
+        }
+        let warning = unusable_recorded_working_directory_warning(
+            action,
+            &recorded_working_directory,
+            cwd_context.current_cwd,
+        );
+        tracing::warn!(
+            recorded_working_directory,
+            current_cwd = %cwd_context.current_cwd.display(),
+            "using current working directory because the session Recorded Working Directory is foreign or unusable"
+        );
+        tui.insert_history_lines(vec![warning]);
+        return Ok(ResolveCwdOutcome::Continue(Some(
+            cwd_context.current_cwd.to_path_buf(),
+        )));
+    };
+    let history_cwd = history_cwd.into_path_buf();
     match cwd_context.mode {
         Some(ResumeCwdMode::Session) => {
             return Ok(ResolveCwdOutcome::Continue(Some(history_cwd)));
@@ -170,11 +204,19 @@ async fn read_session_cwd(
     state_db_ctx: Option<&StateRuntime>,
     thread_id: ThreadId,
     path: Option<&Path>,
-) -> Option<PathBuf> {
-    if let Some(state_db_ctx) = state_db_ctx
-        && let Ok(Some(metadata)) = state_db_ctx.get_thread(thread_id).await
-    {
-        return Some(metadata.cwd);
+) -> Option<LegacyAppPathString> {
+    if let Some(state_db_ctx) = state_db_ctx {
+        let metadata = state_db_ctx
+            .get_thread_resume_metadata(thread_id)
+            .await
+            .ok()
+            .flatten();
+        if !state_db_ctx.uses_local_rollout_history() {
+            return metadata.map(|metadata| LegacyAppPathString::from_path(&metadata.cwd));
+        }
+        if let Some(metadata) = metadata {
+            return Some(LegacyAppPathString::from_path(&metadata.cwd));
+        }
     }
 
     let path = path?;
@@ -190,6 +232,23 @@ async fn read_session_cwd(
             None
         }
     }
+}
+
+fn unusable_recorded_working_directory_warning(
+    action: CwdPromptAction,
+    recorded_working_directory: &str,
+    current_cwd: &Path,
+) -> Line<'static> {
+    let action = match action {
+        CwdPromptAction::Resume => "resume",
+        CwdPromptAction::Fork => "fork",
+    };
+    format!(
+        "Warning: Recorded Working Directory `{recorded_working_directory}` cannot be used on this host. Continuing the {action} in `{}`. Use `--cd <path>` to choose another directory or set `tui.resume_cwd = \"current\"` to keep this behavior.",
+        current_cwd.display()
+    )
+    .red()
+    .into()
 }
 
 pub(crate) fn cwds_differ(current_cwd: &Path, session_cwd: &Path) -> bool {
@@ -270,6 +329,31 @@ mod tests {
         std::fs::write(path, text)
     }
 
+    fn foreign_recorded_working_directory_rollout(
+        temp_dir: &TempDir,
+    ) -> std::io::Result<(ThreadId, PathBuf, &'static str)> {
+        let thread_id = ThreadId::new();
+        #[cfg(not(windows))]
+        let recorded_working_directory = r"C:\Users\alice\project";
+        #[cfg(windows)]
+        let recorded_working_directory = "/home/alice/project";
+        let rollout_path = temp_dir.path().join("rollout.jsonl");
+        write_rollout_lines(
+            &rollout_path,
+            &[rollout_line(
+                "t0",
+                "session_meta",
+                serde_json::json!({
+                    "id": thread_id,
+                    "cwd": recorded_working_directory,
+                    "originator": "test",
+                    "cli_version": "test",
+                }),
+            )],
+        )?;
+        Ok((thread_id, rollout_path, recorded_working_directory))
+    }
+
     #[tokio::test]
     async fn rollout_resume_state_prefers_latest_turn_context() -> std::io::Result<()> {
         let temp_dir = TempDir::new()?;
@@ -306,7 +390,7 @@ mod tests {
         let state = read_rollout_resume_state(&rollout_path).await?;
 
         assert_eq!(state.thread_id, Some(thread_id));
-        assert_eq!(state.cwd, Some(latest));
+        assert_eq!(state.cwd, Some(LegacyAppPathString::from_path(&latest)));
         assert_eq!(state.model, Some("latest".to_string()));
         Ok(())
     }
@@ -334,7 +418,7 @@ mod tests {
         let state = read_rollout_resume_state(&rollout_path).await?;
 
         assert_eq!(state.thread_id, Some(thread_id));
-        assert_eq!(state.cwd, Some(cwd));
+        assert_eq!(state.cwd, Some(LegacyAppPathString::from_path(&cwd)));
         assert_eq!(state.model, None);
         Ok(())
     }
@@ -361,7 +445,7 @@ mod tests {
         let state = read_rollout_resume_state(&rollout_path).await?;
 
         assert_eq!(state.thread_id, Some(thread_id));
-        assert_eq!(state.cwd, Some(cwd));
+        assert_eq!(state.cwd, Some(LegacyAppPathString::from_path(&cwd)));
         Ok(())
     }
 
@@ -404,7 +488,7 @@ mod tests {
         let state = read_rollout_resume_state(&rollout_path).await?;
 
         assert_eq!(state.thread_id, Some(thread_id));
-        assert_eq!(state.cwd, Some(child_cwd));
+        assert_eq!(state.cwd, Some(LegacyAppPathString::from_path(&child_cwd)));
         assert_eq!(state.model.as_deref(), Some("child-model"));
         Ok(())
     }
@@ -463,7 +547,7 @@ mod tests {
         let cwd =
             read_session_cwd(Some(state_runtime.as_ref()), thread_id, Some(&rollout_path)).await;
 
-        assert_eq!(cwd, Some(session_cwd));
+        assert_eq!(cwd, Some(LegacyAppPathString::from_path(&session_cwd)));
         Ok(())
     }
 
@@ -603,6 +687,131 @@ mod tests {
             error.to_string(),
             "failed to determine the working directory recorded for the selected session"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn foreign_recorded_working_directory_defaults_to_current_with_warning()
+    -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let (thread_id, rollout_path, _) = foreign_recorded_working_directory_rollout(&temp_dir)?;
+        let config = crate::legacy_core::config::ConfigBuilder::default()
+            .codex_home(temp_dir.path().to_path_buf())
+            .build()
+            .await?;
+        let current_cwd = config.cwd.to_path_buf();
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+
+        let outcome = resolve_cwd_for_resume_or_fork(
+            &mut tui,
+            &config,
+            /*state_db_ctx*/ None,
+            &SessionTarget {
+                path: Some(rollout_path),
+                thread_id,
+                history_mode: None,
+            },
+            CwdPromptAction::Resume,
+            ResumeCwdContext {
+                current_cwd: &current_cwd,
+                remembered_current_cwd: &current_cwd,
+                allow_remember_current: true,
+                mode: None,
+            },
+        )
+        .await?;
+
+        assert_eq!(
+            outcome,
+            ResolveCwdOutcome::Continue(Some(current_cwd.clone()))
+        );
+        insta::assert_snapshot!(
+            "foreign_recorded_working_directory_warning",
+            unusable_recorded_working_directory_warning(
+                CwdPromptAction::Resume,
+                "<recorded cwd>",
+                Path::new("<current cwd>"),
+            )
+            .to_string()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn configured_session_cwd_rejects_foreign_recorded_working_directory()
+    -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let (thread_id, rollout_path, recorded_working_directory) =
+            foreign_recorded_working_directory_rollout(&temp_dir)?;
+        let config = crate::legacy_core::config::ConfigBuilder::default()
+            .codex_home(temp_dir.path().to_path_buf())
+            .build()
+            .await?;
+        let current_cwd = config.cwd.to_path_buf();
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+
+        let error = resolve_cwd_for_resume_or_fork(
+            &mut tui,
+            &config,
+            /*state_db_ctx*/ None,
+            &SessionTarget {
+                path: Some(rollout_path),
+                thread_id,
+                history_mode: None,
+            },
+            CwdPromptAction::Resume,
+            ResumeCwdContext {
+                current_cwd: &current_cwd,
+                remembered_current_cwd: &current_cwd,
+                allow_remember_current: true,
+                mode: Some(ResumeCwdMode::Session),
+            },
+        )
+        .await
+        .expect_err("session mode must reject a foreign Recorded Working Directory");
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "cannot use Recorded Working Directory `{recorded_working_directory}` on this host; use `--cd <path>` or set `tui.resume_cwd = \"current\"`"
+            )
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_cwd_override_bypasses_foreign_recorded_working_directory()
+    -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let (thread_id, rollout_path, _) = foreign_recorded_working_directory_rollout(&temp_dir)?;
+        let config = crate::legacy_core::config::ConfigBuilder::default()
+            .codex_home(temp_dir.path().to_path_buf())
+            .build()
+            .await?;
+        let explicit_cwd = temp_dir.path().join("explicit");
+        std::fs::create_dir(&explicit_cwd)?;
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+
+        let outcome = resolve_cwd_for_resume_or_fork(
+            &mut tui,
+            &config,
+            /*state_db_ctx*/ None,
+            &SessionTarget {
+                path: Some(rollout_path),
+                thread_id,
+                history_mode: None,
+            },
+            CwdPromptAction::Resume,
+            ResumeCwdContext {
+                current_cwd: config.cwd.as_path(),
+                remembered_current_cwd: &explicit_cwd,
+                allow_remember_current: true,
+                mode: effective_resume_cwd_mode(Some(ResumeCwdMode::Session), Some(&explicit_cwd)),
+            },
+        )
+        .await?;
+
+        assert_eq!(outcome, ResolveCwdOutcome::Continue(Some(explicit_cwd)));
         Ok(())
     }
 }

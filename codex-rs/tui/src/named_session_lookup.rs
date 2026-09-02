@@ -44,6 +44,7 @@ pub(super) struct NamedSessionCandidates<'a> {
     mode: SessionNameLookupMode,
     search_term: Option<&'a str>,
     source_kinds: Vec<ThreadSourceKind>,
+    project_cwd: Option<&'a Path>,
     cursor: Option<String>,
     pending: std::vec::IntoIter<AppServerThread>,
     has_more: bool,
@@ -57,6 +58,7 @@ pub(super) async fn lookup(
     app_server: &mut AppServerSession,
     config: &Config,
     name: &str,
+    project_cwd: Option<&Path>,
 ) -> color_eyre::Result<Option<SessionTarget>> {
     if app_server.uses_remote_workspace() {
         return Ok(lookup_from_app_server(
@@ -64,18 +66,27 @@ pub(super) async fn lookup(
             config,
             name,
             SessionNameLookupMode::ScanAndRepair,
+            project_cwd,
         )
         .await?
         .and_then(super::session_target_from_app_server_thread));
     }
 
-    if let Some(thread) =
-        lookup_from_app_server(app_server, config, name, SessionNameLookupMode::StateDbOnly).await?
+    if let Some(thread) = lookup_from_app_server(
+        app_server,
+        config,
+        name,
+        SessionNameLookupMode::StateDbOnly,
+        project_cwd,
+    )
+    .await?
     {
         return Ok(super::session_target_from_app_server_thread(thread));
     }
 
-    if let Some(target) = lookup_legacy_index_target(app_server, config, name).await? {
+    if project_cwd.is_none()
+        && let Some(target) = lookup_legacy_index_target(app_server, config, name).await?
+    {
         return Ok(Some(target));
     }
 
@@ -84,6 +95,7 @@ pub(super) async fn lookup(
         config,
         name,
         SessionNameLookupMode::ScanAndRepair,
+        project_cwd,
     )
     .await?
     .and_then(super::session_target_from_app_server_thread))
@@ -155,6 +167,7 @@ async fn lookup_from_app_server(
     config: &Config,
     name: &str,
     mode: SessionNameLookupMode,
+    project_cwd: Option<&Path>,
 ) -> color_eyre::Result<Option<AppServerThread>> {
     let mut candidates = NamedSessionCandidates::new(
         name,
@@ -163,6 +176,7 @@ async fn lookup_from_app_server(
         mode,
         Some(name),
         super::resume_source_kinds(/*include_non_interactive*/ false),
+        project_cwd,
     );
     while let Some(candidate) = candidates.next(app_server).await? {
         if let Some(session_meta) = candidate.session_meta
@@ -200,6 +214,7 @@ impl<'a> NamedSessionCandidates<'a> {
         mode: SessionNameLookupMode,
         search_term: Option<&'a str>,
         source_kinds: Vec<ThreadSourceKind>,
+        project_cwd: Option<&'a Path>,
     ) -> Self {
         Self {
             name,
@@ -208,6 +223,7 @@ impl<'a> NamedSessionCandidates<'a> {
             mode,
             search_term,
             source_kinds,
+            project_cwd,
             cursor: None,
             pending: Vec::new().into_iter(),
             has_more: true,
@@ -288,6 +304,9 @@ impl<'a> NamedSessionCandidates<'a> {
                     cwd: None,
                     use_state_db_only: self.mode == SessionNameLookupMode::StateDbOnly,
                     search_term: self.search_term.map(str::to_string),
+                    project_cwd: self
+                        .project_cwd
+                        .map(codex_utils_path_uri::LegacyAppPathString::from_path),
                 })
                 .await?;
             self.cursor = response.next_cursor;

@@ -54,16 +54,16 @@ pub trait QueueStore: Send + Sync {
 /// Adapts the local state runtime to the shared queue-storage interface.
 #[derive(Clone)]
 pub struct LocalQueueStore {
-    state_db: StateDbHandle,
+    queue: SqliteQueueStore,
 }
 
 impl LocalQueueStore {
-    pub fn new(state_db: StateDbHandle) -> Self {
-        Self { state_db }
+    pub fn new(state_db: StateDbHandle) -> Option<Self> {
+        state_db.thread_queue().cloned().map(|queue| Self { queue })
     }
 
     fn queue(&self) -> &SqliteQueueStore {
-        self.state_db.thread_queue()
+        &self.queue
     }
 }
 

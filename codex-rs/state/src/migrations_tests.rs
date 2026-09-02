@@ -8,11 +8,75 @@ use std::borrow::Cow;
 
 use super::STATE_MIGRATOR;
 use super::THREAD_HISTORY_MIGRATOR;
-use super::repair_legacy_recency_migration_version;
 use crate::PINNED_THREAD_SECTION_ID;
 use crate::PINNED_THREAD_SECTION_NAME;
 
 const CUSTOM_THREAD_SECTION_ID: &str = "01984de2-8f74-7c91-a3b2-5c5e937cf317";
+use super::repair_legacy_state_migration_versions;
+
+pub(crate) fn repository_identity_cases() -> Vec<(String, Option<String>)> {
+    let boundary_repo = "r".repeat(1009);
+    let boundary_origin = format!("https://example.test/o/{boundary_repo}");
+    let boundary_identity = format!("example.test/o/{boundary_repo}");
+    assert_eq!(boundary_identity.len(), 1024);
+    let utf8_boundary_repo = format!("{}r", "é".repeat(504));
+    let utf8_boundary_origin = format!("https://example.test/o/{utf8_boundary_repo}");
+    let utf8_boundary_identity = format!("example.test/o/{utf8_boundary_repo}");
+    assert_eq!(utf8_boundary_identity.len(), 1024);
+
+    vec![
+        (
+            "git@github.com:OpenAI/Codex.git".to_string(),
+            Some("github.com/openai/codex".to_string()),
+        ),
+        (
+            "https://user@token@github.com/OpenAI/Codex.git".to_string(),
+            Some("github.com/openai/codex".to_string()),
+        ),
+        (
+            " https://token@GitHub.com /OpenAI/Codex.git ".to_string(),
+            Some("github.com/openai/codex".to_string()),
+        ),
+        (
+            "\t\nhttps://github.com/OpenAI/Codex.git\r\n".to_string(),
+            Some("github.com/openai/codex".to_string()),
+        ),
+        (
+            "\u{2003}https://github.com/OpenAI/Codex.git\u{3000}".to_string(),
+            Some("github.com/openai/codex".to_string()),
+        ),
+        (
+            "ssh://git@github.com:22/OpenAI/Codex.git".to_string(),
+            Some("github.com/openai/codex".to_string()),
+        ),
+        (
+            "ssh://git@ghe.example.test:2222/Org/Repo.git".to_string(),
+            Some("ghe.example.test:2222/Org/Repo".to_string()),
+        ),
+        (
+            "https://github.com/Örg/RÉpo.git".to_string(),
+            Some("github.com/Örg/rÉpo".to_string()),
+        ),
+        (
+            "https://github.com/OpenAI/Codex.git?ref=main".to_string(),
+            Some("github.com/openai/codex".to_string()),
+        ),
+        (
+            "https://ghe.example.test/Org/Repo://Mirror.git".to_string(),
+            Some("ghe.example.test/Org/Repo:/Mirror".to_string()),
+        ),
+        (boundary_origin.clone(), Some(boundary_identity)),
+        (format!("{boundary_origin}r"), None),
+        (utf8_boundary_origin.clone(), Some(utf8_boundary_identity)),
+        (format!("{utf8_boundary_origin}r"), None),
+        ("https://example.test/acme/repo\ninjected".to_string(), None),
+        (
+            "https://example.test/acme/repo\u{2003}injected".to_string(),
+            None,
+        ),
+        ("https://example.test/repo.git".to_string(), None),
+    ]
+}
 
 fn migrator_through(version: i64) -> Migrator {
     Migrator {
@@ -29,6 +93,17 @@ fn migrator_through(version: i64) -> Migrator {
         table_name: STATE_MIGRATOR.table_name.clone(),
         create_schemas: STATE_MIGRATOR.create_schemas.clone(),
         no_tx: STATE_MIGRATOR.no_tx,
+    }
+}
+
+#[test]
+fn repository_identity_corpus_matches_rust_canonicalizer() {
+    for (origin, expected) in repository_identity_cases() {
+        assert_eq!(
+            codex_git_utils::canonicalize_git_remote_url(&origin),
+            expected,
+            "origin: {origin:?}"
+        );
     }
 }
 
@@ -52,16 +127,33 @@ async fn thread_section_migration_preserves_legacy_pin_compatibility() {
         .await
         .expect("released thread migrations should apply");
 
-    for thread_id in [
-        "00000000-0000-0000-0000-000000000043",
-        "00000000-0000-0000-0000-000000000044",
+    for (thread_id, timestamp_ms, insert_after_migration) in [
+        (
+            "00000000-0000-0000-0000-000000000041",
+            1_700_000_000_000_i64,
+            false,
+        ),
+        (
+            "00000000-0000-0000-0000-000000000042",
+            1_700_000_100_000_i64,
+            false,
+        ),
+        (
+            "00000000-0000-0000-0000-000000000043",
+            1_700_000_100_000_i64,
+            false,
+        ),
+        (
+            "00000000-0000-0000-0000-000000000044",
+            1_700_000_000_000_i64,
+            true,
+        ),
     ] {
-        if thread_id.ends_with("44") {
-            sqlx::query("UPDATE threads SET is_pinned = 1 WHERE id = ?")
-                .bind("00000000-0000-0000-0000-000000000043")
+        if insert_after_migration {
+            sqlx::query("UPDATE threads SET is_pinned = 1")
                 .execute(&pool)
                 .await
-                .expect("legacy pin should remain writable before section migration");
+                .expect("legacy pins should remain writable before section migration");
             STATE_MIGRATOR
                 .run(&pool)
                 .await
@@ -87,10 +179,10 @@ INSERT INTO threads (
         )
         .bind(thread_id)
         .bind("/tmp/legacy.jsonl")
-        .bind(1_700_000_000_i64)
-        .bind(1_700_000_000_i64)
-        .bind(1_700_000_000_000_i64)
-        .bind(1_700_000_000_000_i64)
+        .bind(timestamp_ms / 1000)
+        .bind(timestamp_ms / 1000)
+        .bind(timestamp_ms)
+        .bind(timestamp_ms)
         .bind("cli")
         .bind("openai")
         .bind("/tmp")
@@ -117,13 +209,46 @@ INSERT INTO threads (
         )]
     );
 
-    let threads = sqlx::query_as::<_, (i64, Option<String>)>(
-        "SELECT is_pinned, thread_section_id FROM threads ORDER BY id",
+    let threads = sqlx::query_as::<_, (String, i64, Option<String>, Option<i64>, Option<i64>)>(
+        "SELECT id, is_pinned, thread_section_id, section_position, section_entered_at_ms \
+         FROM threads ORDER BY id",
     )
     .fetch_all(&pool)
     .await
     .expect("legacy and section-aware thread metadata should load");
-    assert_eq!(threads, vec![(1, None), (0, None)]);
+    assert_eq!(
+        threads,
+        vec![
+            (
+                "00000000-0000-0000-0000-000000000041".to_string(),
+                1,
+                Some(PINNED_THREAD_SECTION_ID.to_string()),
+                Some(3_000_000),
+                Some(1_700_000_000_000),
+            ),
+            (
+                "00000000-0000-0000-0000-000000000042".to_string(),
+                1,
+                Some(PINNED_THREAD_SECTION_ID.to_string()),
+                Some(2_000_000),
+                Some(1_700_000_100_000),
+            ),
+            (
+                "00000000-0000-0000-0000-000000000043".to_string(),
+                1,
+                Some(PINNED_THREAD_SECTION_ID.to_string()),
+                Some(1_000_000),
+                Some(1_700_000_100_000),
+            ),
+            (
+                "00000000-0000-0000-0000-000000000044".to_string(),
+                0,
+                None,
+                None,
+                None,
+            ),
+        ]
+    );
 
     sqlx::query("INSERT INTO thread_sections (id, name) VALUES (?, ?)")
         .bind(CUSTOM_THREAD_SECTION_ID)
@@ -263,7 +388,7 @@ async fn thread_section_order_migration_backfills_stably() {
         .open_read_write_pool(&sqlite.state_db_path())
         .await
         .expect("sqlite database should open");
-    migrator_through(/*version*/ 45)
+    migrator_through(/*version*/ 47)
         .run(&pool)
         .await
         .expect("pre-ordering migrations should apply");
@@ -747,6 +872,75 @@ INSERT INTO threads (
 }
 
 #[tokio::test]
+async fn repository_identity_migration_backfills_valid_origins_without_changing_metadata() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = sqlite
+        .open_read_write_pool(&sqlite.state_db_path())
+        .await
+        .expect("sqlite database should open");
+    migrator_through(/*version*/ 45)
+        .run(&pool)
+        .await
+        .expect("pre-identity migrations should apply");
+
+    let cases = repository_identity_cases();
+    for (index, (origin, _)) in cases.iter().enumerate() {
+        let id = format!("00000000-0000-0000-0000-{:012}", index + 71);
+        let title = format!("canonicalization-case-{index}");
+        sqlx::query(
+            r#"
+INSERT INTO threads (
+    id, rollout_path, created_at, updated_at, created_at_ms, updated_at_ms, source,
+    model_provider, cwd, title, sandbox_policy, approval_mode, git_origin_url
+) VALUES (?, ?, 1700000000, 1700000100, 1700000000000, 1700000100000, 'cli',
+          'openai', '/tmp/project', ?, 'read-only', 'on-request', ?)
+            "#,
+        )
+        .bind(&id)
+        .bind(format!("/tmp/{id}.jsonl"))
+        .bind(&title)
+        .bind(origin)
+        .execute(&pool)
+        .await
+        .expect("historical thread should insert");
+    }
+
+    STATE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("repository identity migration should apply");
+
+    let rows = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+        "SELECT id, title, git_origin_url, repository_identity FROM threads ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("migrated threads should load");
+    let expected_rows = cases
+        .iter()
+        .enumerate()
+        .map(|(index, (origin, expected))| {
+            (
+                format!("00000000-0000-0000-0000-{:012}", index + 71),
+                format!("canonicalization-case-{index}"),
+                origin.clone(),
+                expected.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rows, expected_rows);
+
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn repairs_recency_migration_that_was_applied_as_version_38() {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home)
@@ -790,7 +984,7 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
         .await
         .expect("legacy recency migration should apply as version 38");
 
-    repair_legacy_recency_migration_version(&pool, &STATE_MIGRATOR)
+    repair_legacy_state_migration_versions(&pool, &STATE_MIGRATOR)
         .await
         .expect("legacy migration history should be repaired");
     STATE_MIGRATOR
@@ -824,6 +1018,97 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
 }
 
 #[tokio::test]
+async fn repairs_complete_official_thread_migration_history_before_fork_migrations() {
+    for official_last_version in 43..=50 {
+        let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+        tokio::fs::create_dir_all(&sqlite_home)
+            .await
+            .expect("sqlite home should be created");
+        let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+            let _ = std::fs::remove_dir_all(sqlite_home);
+        });
+        let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+        let state_path = sqlite.state_db_path();
+        let pool = sqlite
+            .open_read_write_pool(&state_path)
+            .await
+            .expect("sqlite database should open");
+
+        let mut official_migrations = STATE_MIGRATOR
+            .migrations
+            .iter()
+            .filter(|migration| migration.version <= 42)
+            .cloned()
+            .collect::<Vec<_>>();
+        for (official_version, combined_version) in [
+            (43, 44),
+            (44, 45),
+            (45, 47),
+            (46, 48),
+            (47, 50),
+            (48, 51),
+            (49, 52),
+            (50, 53),
+        ]
+        .into_iter()
+        .take_while(|(official_version, _)| *official_version <= official_last_version)
+        {
+            let migration = STATE_MIGRATOR
+                .migrations
+                .iter()
+                .find(|migration| migration.version == combined_version)
+                .expect("combined official migration should exist");
+            official_migrations.push(Migration::new(
+                official_version,
+                migration.description.clone(),
+                migration.migration_type,
+                migration.sql.clone(),
+                migration.no_tx,
+            ));
+        }
+        Migrator::with_migrations(official_migrations)
+            .run(&pool)
+            .await
+            .expect("official migrations should apply");
+
+        repair_legacy_state_migration_versions(&pool, &STATE_MIGRATOR)
+            .await
+            .expect("official migration history should be repaired");
+        STATE_MIGRATOR
+            .run(&pool)
+            .await
+            .expect("fork migrations should apply after repair");
+
+        let applied = sqlx::query(
+            "SELECT version, checksum FROM _sqlx_migrations WHERE version >= 43 ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("applied migrations should load")
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<i64, _>("version"),
+                row.get::<Vec<u8>, _>("checksum"),
+            )
+        })
+        .collect::<Vec<_>>();
+        let expected = STATE_MIGRATOR
+            .migrations
+            .iter()
+            .filter(|migration| migration.version >= 43)
+            .map(|migration| (migration.version, migration.checksum.to_vec()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            applied, expected,
+            "upstream prefix through version {official_last_version}"
+        );
+
+        pool.close().await;
+    }
+}
+
+#[tokio::test]
 async fn repair_recency_migration_succeeds_while_another_connection_holds_writer_slot() {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home)
@@ -852,7 +1137,7 @@ async fn repair_recency_migration_succeeds_while_another_connection_holds_writer
         .await
         .expect("write transaction should acquire the writer slot");
 
-    let repair_result = repair_legacy_recency_migration_version(&read_pool, &STATE_MIGRATOR).await;
+    let repair_result = repair_legacy_state_migration_versions(&read_pool, &STATE_MIGRATOR).await;
 
     write_transaction
         .rollback()

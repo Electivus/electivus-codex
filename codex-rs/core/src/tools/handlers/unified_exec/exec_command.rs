@@ -25,6 +25,11 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolExecutor;
+use crate::tools::timing::TimingParameter;
+use crate::tools::timing::YieldTimingClass;
+use crate::tools::timing::adjustment_message;
+use crate::tools::timing::error_with_timing_adjustment;
+use crate::tools::timing::resolve_yield_timing;
 use crate::unified_exec::ExecCommandRequest;
 use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::UnifiedExecError;
@@ -58,6 +63,7 @@ pub(crate) struct ExecCommandHandlerOptions {
     pub(crate) include_environment_id: bool,
     pub(crate) include_shell_parameter: bool,
     pub(crate) include_windows_shell_guidance: bool,
+    pub(crate) tool_execution: codex_config::ToolExecutionPolicy,
 }
 
 #[derive(Clone, Copy)]
@@ -81,6 +87,7 @@ impl Default for ExecCommandHandler {
                 include_environment_id: false,
                 include_shell_parameter: true,
                 include_windows_shell_guidance: cfg!(windows),
+                tool_execution: codex_config::ToolExecutionPolicy::default(),
             },
         }
     }
@@ -112,6 +119,7 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
             CommandToolOptions {
                 allow_login_shell: self.options.allow_login_shell,
                 exec_permission_approvals_enabled: self.options.exec_permission_approvals_enabled,
+                tool_execution: self.options.tool_execution,
             },
             self.options.include_environment_id,
             self.options.include_shell_parameter,
@@ -288,14 +296,41 @@ impl ExecCommandHandler {
             prefix_rule,
             ..
         } = args;
-        let completion_timeout = match self.lifetime {
-            ExecCommandLifetime::Interactive => None,
+        let (completion_timeout, resolved_yield) = match self.lifetime {
+            ExecCommandLifetime::Interactive => (
+                None,
+                resolve_yield_timing(
+                    turn.config.tool_execution,
+                    if tty {
+                        YieldTimingClass::InteractiveExec
+                    } else {
+                        YieldTimingClass::Global
+                    },
+                    yield_time_ms,
+                ),
+            ),
             ExecCommandLifetime::OneShot => {
                 tty = false;
-                Some(Duration::from_millis(
-                    timeout_ms.unwrap_or(DEFAULT_EXEC_COMMAND_TIMEOUT_MS),
-                ))
+                (
+                    Some(Duration::from_millis(
+                        timeout_ms.unwrap_or(DEFAULT_EXEC_COMMAND_TIMEOUT_MS),
+                    )),
+                    // One-shot execution uses completion_timeout as its deadline and does not
+                    // expose yield_time_ms. Keep the request field populated for the shared
+                    // executor without applying the interactive timing policy to it.
+                    resolve_yield_timing(
+                        turn.config.tool_execution,
+                        YieldTimingClass::Global,
+                        /*requested_ms*/ None,
+                    ),
+                )
             }
+        };
+        let timing_adjustment = match self.lifetime {
+            ExecCommandLifetime::Interactive => {
+                adjustment_message(TimingParameter::Yield, resolved_yield)
+            }
+            ExecCommandLifetime::OneShot => None,
         };
 
         let exec_permission_approvals_enabled =
@@ -386,6 +421,7 @@ impl ExecCommandHandler {
                 exit_code: None,
                 original_token_count: None,
                 output_omitted_bytes: None,
+                timing_adjustment,
                 hook_command: None,
             }));
         }
@@ -396,7 +432,7 @@ impl ExecCommandHandler {
             shell_type,
             hook_command: hook_command.clone(),
             process_id,
-            yield_time_ms,
+            yield_time_ms: resolved_yield.effective_ms,
             max_output_tokens,
             cwd,
             sandbox_cwd: native_environment_cwd,
@@ -419,7 +455,10 @@ impl ExecCommandHandler {
             None => manager.exec_command(request, &context).await,
         };
         match result {
-            Ok(response) => Ok(boxed_tool_output(response)),
+            Ok(mut response) => {
+                response.timing_adjustment = timing_adjustment;
+                Ok(boxed_tool_output(response))
+            }
             Err(UnifiedExecError::SandboxDenied {
                 output,
                 original_token_count,
@@ -442,12 +481,17 @@ impl ExecCommandHandler {
                     exit_code: Some(output.exit_code),
                     original_token_count: Some(original_token_count),
                     output_omitted_bytes,
+                    timing_adjustment,
                     hook_command: Some(hook_command),
                 }))
             }
-            Err(err) => Err(FunctionCallError::RespondToModel(format!(
-                "exec_command failed for `{command_for_display}`: {err:?}"
-            ))),
+            Err(err) => Err(FunctionCallError::RespondToModel(
+                error_with_timing_adjustment(
+                    TimingParameter::Yield,
+                    resolved_yield,
+                    format!("exec_command failed for `{command_for_display}`: {err:?}"),
+                ),
+            )),
         }
     }
 }

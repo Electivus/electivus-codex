@@ -191,7 +191,7 @@ struct ResumeArgsRaw {
     #[arg(long = "last", default_value_t = false)]
     last: bool,
 
-    /// Show all sessions (disables cwd filtering).
+    /// Show all sessions (bypasses Project Session Scope).
     #[arg(long = "all", default_value_t = false)]
     all: bool,
 
@@ -219,7 +219,7 @@ pub struct ResumeArgs {
     /// Resume the most recent recorded session (newest) without specifying an id.
     pub last: bool,
 
-    /// Show all sessions (disables cwd filtering).
+    /// Show all sessions (bypasses Project Session Scope).
     pub all: bool,
 
     /// Optional image(s) to attach to the prompt sent after resuming.

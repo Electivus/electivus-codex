@@ -1,6 +1,9 @@
 use crate::ExternalMemoryFile;
 use crate::discover_external_memory_files;
 use codex_rollout::StateDbHandle;
+use codex_state::ExternalAgentMemoryImport;
+use codex_state::MemoryArtifact;
+use codex_state::MemoryArtifactSet;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -36,6 +39,7 @@ const EXTENSION_INSTRUCTIONS: &str = r#"# Imported external-agent memory
 pub(super) struct MemoryImportOutcome {
     pub synchronized_projects: Vec<String>,
     pub failures: Vec<MemoryImportFailure>,
+    pub memory_import: Option<ExternalAgentMemoryImport>,
     workspace_changed: bool,
 }
 
@@ -72,21 +76,27 @@ pub(super) async fn import(
             "memory import requires the Codex state database",
         )
     })?;
+    prepare_workspace(codex_home, Some(state_db)).await?;
+    let memory_files = discover_external_memory_files(external_agent_home)?;
+    copy_resources(codex_home, &memory_files, &selected_memory)
+}
+
+pub(super) async fn prepare_workspace(
+    codex_home: &Path,
+    state_db: Option<&StateDbHandle>,
+) -> io::Result<()> {
     let memory_root = codex_home.join("memories");
-    codex_memories_write::workspace::prepare_memory_workspace(&memory_root)
+    if let Some(state_db) = state_db {
+        codex_memories_write::prepare_memory_workspace_from_store(
+            state_db.memories(),
+            &memory_root,
+        )
         .await
         .map_err(io::Error::other)?;
-    let memory_files = discover_external_memory_files(external_agent_home)?;
-    let copy_outcome = copy_resources(codex_home, &memory_files, &selected_memory)?;
-    if copy_outcome.workspace_changed
-        && let Err(err) = state_db
-            .memories()
-            .enqueue_global_consolidation(chrono::Utc::now().timestamp())
-            .await
-    {
-        tracing::warn!(error = %err, "failed to enqueue imported memory consolidation");
     }
-    Ok(copy_outcome)
+    codex_memories_write::workspace::prepare_memory_workspace(&memory_root)
+        .await
+        .map_err(io::Error::other)
 }
 
 pub(crate) fn projects_needing_import(
@@ -165,11 +175,59 @@ fn copy_resources(
             workspace_changed = true;
         }
     }
+    let memory_import = workspace_changed
+        .then(|| build_memory_import(codex_home, &synchronized_projects))
+        .transpose()?;
     Ok(MemoryImportOutcome {
         synchronized_projects,
         failures,
+        memory_import,
         workspace_changed,
     })
+}
+
+fn build_memory_import(
+    codex_home: &Path,
+    synchronized_projects: &[String],
+) -> io::Result<ExternalAgentMemoryImport> {
+    let mut artifacts = vec![
+        MemoryArtifact::new(
+            format!("extensions/{EXTENSION_NAME}/instructions.md"),
+            EXTENSION_INSTRUCTIONS.as_bytes().to_vec(),
+        )
+        .map_err(io::Error::other)?,
+    ];
+    for project_key in synchronized_projects {
+        let project_root = resources_root(codex_home).join(project_key);
+        if !project_root.exists() {
+            continue;
+        }
+        let mut relative_paths = BTreeSet::new();
+        collect_relative_paths(&project_root, &project_root, &mut relative_paths)?;
+        for relative_path in relative_paths {
+            let portable_path = relative_path
+                .components()
+                .map(|component| {
+                    component.as_os_str().to_str().ok_or_else(|| {
+                        invalid_data_error("memory resource path is not valid UTF-8")
+                    })
+                })
+                .collect::<io::Result<Vec<_>>>()?
+                .join("/");
+            artifacts.push(
+                MemoryArtifact::new(
+                    format!("extensions/{EXTENSION_NAME}/resources/{project_key}/{portable_path}"),
+                    fs::read(project_root.join(relative_path))?,
+                )
+                .map_err(io::Error::other)?,
+            );
+        }
+    }
+    ExternalAgentMemoryImport::new(
+        synchronized_projects.to_vec(),
+        MemoryArtifactSet::new(artifacts).map_err(io::Error::other)?,
+    )
+    .map_err(io::Error::other)
 }
 
 fn group_memory_files(

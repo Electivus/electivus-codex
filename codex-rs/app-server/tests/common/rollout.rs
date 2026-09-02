@@ -31,6 +31,25 @@ pub fn rollout_path(codex_home: &Path, filename_ts: &str, thread_id: &str) -> Pa
         .join(format!("rollout-{filename_ts}-{thread_id}.jsonl"))
 }
 
+pub fn set_fake_rollout_cwd(path: &Path, cwd: &Path) -> Result<()> {
+    let contents = fs::read_to_string(path)?;
+    let mut lines = contents
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let session_meta = lines
+        .first_mut()
+        .ok_or_else(|| anyhow::anyhow!("rollout at {} is empty", path.display()))?;
+    session_meta["payload"]["cwd"] = serde_json::to_value(cwd)?;
+    let contents = lines
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(path, format!("{contents}\n"))?;
+    Ok(())
+}
+
 /// Create a minimal rollout file under `CODEX_HOME/sessions/YYYY/MM/DD/`.
 ///
 /// - `filename_ts` is the filename timestamp component in `YYYY-MM-DDThh-mm-ss` format.

@@ -3,10 +3,12 @@ use super::thread_input::can_accept_direct_input;
 use super::thread_input::ensure_direct_input_allowed;
 use super::*;
 use codex_goal_extension::GoalObjectiveUpdate;
+use codex_goal_extension::GoalPreviewUpdate;
 use codex_goal_extension::GoalService;
 use codex_goal_extension::GoalServiceError;
 use codex_goal_extension::GoalSetRequest;
 use codex_goal_extension::GoalTokenBudgetUpdate;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
@@ -151,7 +153,8 @@ impl ThreadGoalRequestProcessor {
         let outcome = self
             .goal_service
             .set_thread_goal(
-                &state_db,
+                state_db.thread_goals(),
+                GoalPreviewUpdate::FillIfEmpty(state_db.as_ref()),
                 GoalSetRequest {
                     thread_id,
                     objective: objective
@@ -235,7 +238,7 @@ impl ThreadGoalRequestProcessor {
             .await?;
         let goal = self
             .goal_service
-            .get_thread_goal(&state_db, thread_id)
+            .get_thread_goal(state_db.thread_goals(), thread_id)
             .await
             .map_err(goal_service_error)?
             .map(ThreadGoal::from);
@@ -265,7 +268,7 @@ impl ThreadGoalRequestProcessor {
         };
         let cleared = self
             .goal_service
-            .clear_thread_goal(&state_db, thread_id)
+            .clear_thread_goal(state_db.thread_goals(), thread_id)
             .await
             .map_err(goal_service_error)?;
 
@@ -284,17 +287,87 @@ impl ThreadGoalRequestProcessor {
         thread_id: ThreadId,
         access: GoalAccess,
     ) -> Result<StateDbHandle, JSONRPCErrorError> {
+        let is_mutation = matches!(access, GoalAccess::Mutate);
         if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
-            if matches!(access, GoalAccess::Mutate) {
+            if is_mutation {
                 ensure_direct_input_allowed(thread.as_ref()).await?;
+            }
+            if let Some(state_db) = thread.state_db() {
+                if thread.rollout_path().is_none() && state_db.uses_local_rollout_history() {
+                    return Err(invalid_request(format!(
+                        "ephemeral thread does not support goals: {thread_id}"
+                    )));
+                }
+                return Ok(state_db);
             }
             if thread.rollout_path().is_none() {
                 return Err(invalid_request(format!(
                     "ephemeral thread does not support goals: {thread_id}"
                 )));
             }
-            if let Some(state_db) = thread.state_db() {
-                return Ok(state_db);
+        } else if let Some(state_db) = self
+            .state_db
+            .clone()
+            .filter(|state_db| !state_db.uses_local_rollout_history())
+        {
+            // Runtime-state projections do not carry multi-agent version metadata. Mutations
+            // must inspect canonical history so unloaded PostgreSQL children follow resume's
+            // latest-version and legacy TurnContext fallback rules.
+            match self
+                .thread_manager
+                .read_stored_thread(StoreReadThreadParams {
+                    thread_id,
+                    include_archived: true,
+                    include_history: is_mutation,
+                })
+                .await
+            {
+                Ok(stored_thread) => {
+                    if is_mutation {
+                        let history = stored_thread.history.ok_or_else(|| {
+                            internal_error(format!(
+                                "failed to read thread ownership: persisted history missing for {thread_id}"
+                            ))
+                        })?;
+                        let session_meta = history.items.iter().find_map(|item| match item {
+                            RolloutItem::SessionMeta(session_meta) => Some(&session_meta.meta),
+                            _ => None,
+                        });
+                        let Some(session_meta) = session_meta else {
+                            return Err(internal_error(format!(
+                                "failed to read thread ownership: session metadata missing for {thread_id}"
+                            )));
+                        };
+                        if session_meta.id != thread_id {
+                            return Err(invalid_request(
+                                "thread metadata does not match requested id",
+                            ));
+                        }
+                        let source = session_meta.source.clone();
+                        let initial_history = InitialHistory::Resumed(ResumedHistory {
+                            conversation_id: stored_thread.thread_id,
+                            history: Arc::new(history.items),
+                            rollout_path: stored_thread.rollout_path,
+                        });
+                        if !can_accept_direct_input(
+                            initial_history.get_multi_agent_version(),
+                            &source,
+                        ) {
+                            return Err(invalid_request(
+                                DIRECT_INPUT_TO_MULTI_AGENT_V2_SUBAGENT_ERROR,
+                            ));
+                        }
+                    }
+                    return Ok(state_db);
+                }
+                Err(error) if matches!(error.details(), CodexErrorDetails::ThreadNotFound(_)) => {
+                    return Err(invalid_request(format!("thread not found: {thread_id}")));
+                }
+                Err(error) => {
+                    return Err(internal_error(format!(
+                        "failed to read thread id {thread_id}: {error}"
+                    )));
+                }
             }
         } else {
             let rollout_path = codex_rollout::find_thread_path_by_id_str(
@@ -307,7 +380,7 @@ impl ThreadGoalRequestProcessor {
                 internal_error(format!("failed to locate thread id {thread_id}: {err}"))
             })?
             .ok_or_else(|| invalid_request(format!("thread not found: {thread_id}")))?;
-            if matches!(access, GoalAccess::Mutate) {
+            if is_mutation {
                 let session_meta = codex_rollout::read_session_meta_line(&rollout_path)
                     .await
                     .map_err(|err| {
@@ -343,7 +416,7 @@ impl ThreadGoalRequestProcessor {
 
         self.state_db
             .clone()
-            .ok_or_else(|| internal_error("sqlite state db unavailable for thread goals"))
+            .ok_or_else(|| internal_error("Runtime State Store unavailable for thread goals"))
     }
 
     async fn reconcile_thread_goal_rollout(
@@ -351,6 +424,9 @@ impl ThreadGoalRequestProcessor {
         thread_id: ThreadId,
         state_db: &StateDbHandle,
     ) -> Result<(), JSONRPCErrorError> {
+        if !state_db.uses_local_rollout_history() {
+            return Ok(());
+        }
         let running_thread = self.thread_manager.get_thread(thread_id).await.ok();
         let rollout_path = match running_thread.as_ref() {
             Some(thread) => thread.rollout_path().ok_or_else(|| {

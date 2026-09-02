@@ -51,6 +51,7 @@ impl App {
                                 search_term: None,
                                 parent_thread_id: None,
                                 ancestor_thread_id: Some(root.to_string()),
+                                project_cwd: None,
                             },
                         })
                         .await
