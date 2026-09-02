@@ -2180,6 +2180,7 @@ async fn record_prepared_conversation_items_preserves_atomic_history_and_raw_ite
     item.set_id(Some(ResponseItemId::with_suffix("msg", "raw-event")));
     let metadata = Some(CodexHarnessMetadata {
         client_authored: true,
+        ..Default::default()
     });
 
     session

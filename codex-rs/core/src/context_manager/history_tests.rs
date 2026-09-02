@@ -589,6 +589,50 @@ fn record_annotated_items_preserves_metadata_while_processing_item() {
 }
 
 #[test]
+fn replayed_annotated_items_use_the_persisted_fallback_limit() {
+    let output = FunctionCallOutputPayload {
+        body: FunctionCallOutputBody::Text("word ".repeat(100)),
+        success: Some(true),
+    };
+    let metadata = CodexHarnessMetadata {
+        fallback_token_limit_override: Some(4),
+        ..Default::default()
+    };
+    let envelope = ResponseItemEnvelope {
+        item: ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("call-replayed-limit".to_string()),
+            name: None,
+            namespace: None,
+            output: output.clone(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        metadata: Some(metadata.clone()),
+    };
+    let mut history = ContextManager::new();
+
+    history.record_replayed_annotated_items(
+        std::slice::from_ref(&envelope),
+        TruncationPolicy::Tokens(1_000),
+    );
+
+    assert_eq!(
+        history.annotated_items(),
+        &[ResponseItemEnvelope {
+            item: ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: Some("call-replayed-limit".to_string()),
+                name: None,
+                namespace: None,
+                output: truncate_function_output_payload(&output, TruncationPolicy::Tokens(4)),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            metadata: Some(metadata),
+        }]
+    );
+}
+
+#[test]
 fn for_prompt_annotated_preserves_metadata_while_normalizing_item() {
     let envelope = ResponseItemEnvelope {
         item: ResponseItem::Message {

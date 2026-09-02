@@ -702,6 +702,10 @@ fn normalize_cwd(cwd: PathBuf) -> PathBuf {
     codex_utils_path::normalize_for_path_comparison(cwd.as_path()).unwrap_or(cwd)
 }
 
+fn git_origin_url_as_deref<T: AsRef<str>>(origin_url: &Option<T>) -> Option<&str> {
+    origin_url.as_ref().map(AsRef::as_ref)
+}
+
 async fn apply_thread_git_info_patch(
     state_db: &codex_state::StateRuntime,
     thread_id: ThreadId,
@@ -712,10 +716,7 @@ async fn apply_thread_git_info_patch(
             thread_id,
             git_info.sha.as_ref().map(|sha| sha.as_deref()),
             git_info.branch.as_ref().map(|branch| branch.as_deref()),
-            git_info
-                .origin_url
-                .as_ref()
-                .map(|origin_url| origin_url.as_deref()),
+            git_info.origin_url.as_ref().map(git_origin_url_as_deref),
         )
         .await
         .map_err(|err| ThreadStoreError::Internal {
@@ -747,7 +748,7 @@ async fn apply_thread_git_info(
             thread_id,
             Some(sha.as_deref()),
             Some(branch.as_deref()),
-            Some(origin_url.as_deref()),
+            Some(git_origin_url_as_deref(origin_url)),
         )
         .await
         .map_err(|err| ThreadStoreError::Internal {

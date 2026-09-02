@@ -322,7 +322,7 @@ impl Session {
         if let Some(base_replacement_history) = base_replacement_history {
             history.replace_annotated_with_policy(
                 base_replacement_history,
-                turn_context.model_info.truncation_policy.into(),
+                turn_context.model_info().truncation_policy.into(),
             );
         }
         // Materialize exact history semantics from the replay-derived suffix. The eventual lazy
@@ -333,14 +333,14 @@ impl Session {
                 RolloutItem::ResponseItem(response_item) => {
                     history.record_replayed_annotated_items(
                         std::slice::from_ref(response_item),
-                        turn_context.model_info.truncation_policy.into(),
+                        turn_context.model_info().truncation_policy.into(),
                     );
                 }
                 RolloutItem::InterAgentCommunication(communication) => {
                     let response_item = communication.to_model_input_item();
                     history.record_replayed_items(
                         std::iter::once(&response_item),
-                        turn_context.model_info.truncation_policy.into(),
+                        turn_context.model_info().truncation_policy.into(),
                     );
                 }
                 RolloutItem::InterAgentCommunicationMetadata { .. } => {}
@@ -350,7 +350,7 @@ impl Session {
                         // should stop before any compaction that has Some replacement_history
                         history.replace_annotated_with_policy(
                             replacement_history,
-                            turn_context.model_info.truncation_policy.into(),
+                            turn_context.model_info().truncation_policy.into(),
                         );
                     } else {
                         saw_legacy_compaction_without_replacement_history = true;

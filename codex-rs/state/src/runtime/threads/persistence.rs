@@ -293,15 +293,10 @@ ON CONFLICT(id) DO UPDATE SET
 }
 
 fn extract_memory_mode(items: &[RolloutItem]) -> Option<String> {
-    items.iter().rev().find_map(|item| match item {
-        RolloutItem::SessionMeta(meta_line) => meta_line.meta.memory_mode.clone(),
-        RolloutItem::ResponseItem(_)
-        | RolloutItem::InterAgentCommunication(_)
-        | RolloutItem::InterAgentCommunicationMetadata { .. }
-        | RolloutItem::Compacted(_)
-        | RolloutItem::TurnContext(_)
-        | RolloutItem::WorldState(_)
-        | RolloutItem::SecurityRiskScore(_)
-        | RolloutItem::EventMsg(_) => None,
+    items.iter().rev().find_map(|item| {
+        let RolloutItem::SessionMeta(meta_line) = item else {
+            return None;
+        };
+        meta_line.meta.memory_mode.clone()
     })
 }

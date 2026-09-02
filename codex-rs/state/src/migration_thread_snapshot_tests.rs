@@ -35,6 +35,14 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
+fn test_git_origin_url<T>(value: &str) -> T
+where
+    T: TryFrom<String>,
+    T::Error: std::fmt::Debug,
+{
+    T::try_from(value.to_string()).expect("valid test git origin URL")
+}
+
 struct FixtureHistoryReader {
     histories: HashMap<PathBuf, Vec<RolloutLine>>,
     minimum_read_budget: u64,
@@ -109,7 +117,7 @@ async fn snapshot_preserves_complete_legacy_and_current_thread_domain_read_only(
     legacy.title = "Legacy name".to_string();
     legacy.git_sha = Some("legacy-sha".to_string());
     legacy.git_branch = Some("legacy-branch".to_string());
-    legacy.git_origin_url = Some("https://example.test/legacy.git".to_string());
+    legacy.git_origin_url = Some(test_git_origin_url("https://example.test/legacy.git"));
     runtime.upsert_thread(&legacy).await?;
     runtime
         .set_thread_memory_mode(legacy_id, "polluted")

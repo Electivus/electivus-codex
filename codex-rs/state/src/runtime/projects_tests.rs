@@ -190,13 +190,8 @@ async fn project_import_rejects_unknown_thread_without_partial_project() -> anyh
         .await
         .unwrap_err();
     assert!(error.to_string().contains("thread not found"));
-    assert!(
-        runtime
-            .list_projects(/*cursor*/ None, /*limit*/ 10)
-            .await?
-            .projects
-            .is_empty()
-    );
+    let projects = runtime.list_projects(/*cursor*/ None, /*limit*/ 10).await?;
+    assert!(projects.projects.is_empty());
     Ok(())
 }
 

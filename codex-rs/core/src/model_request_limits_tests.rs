@@ -13,6 +13,10 @@ use codex_tools::ResponsesApiTool;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 
+#[allow(
+    clippy::needless_update,
+    reason = "the upstream request type adds fields during synchronization"
+)]
 fn request(
     input: Vec<ResponseItem>,
     instructions: &str,
@@ -34,6 +38,7 @@ fn request(
         prompt_cache_key: None,
         text,
         client_metadata: None,
+        ..Default::default()
     }
 }
 
@@ -487,6 +492,164 @@ fn splits_non_replayed_agent_messages_without_losing_text() {
         })
         .collect::<Vec<_>>();
     assert_eq!(provenance, expected);
+}
+
+#[test]
+fn projects_oversized_tool_call_inputs_preserving_envelopes() {
+    let function_id = ResponseItemId::with_suffix("fc", "oversized");
+    let custom_id = ResponseItemId::with_suffix("ctc", "oversized");
+    let metadata = InternalChatMessageMetadataPassthrough {
+        turn_id: Some("turn-tool-call".to_string()),
+        ..Default::default()
+    };
+    let function_arguments = serde_json::json!({ "message": "a".repeat(150_000) }).to_string();
+    let encrypted_arguments = vec!["encrypted".repeat(20_000)];
+    let custom_input = "custom input".repeat(20_000);
+    let sources = vec![
+        ResponseItem::FunctionCall {
+            id: Some(function_id.clone()),
+            name: "echo".to_string(),
+            namespace: Some("mcp".to_string()),
+            arguments: function_arguments.clone(),
+            encrypted_function_args: Some(encrypted_arguments.clone()),
+            call_id: "function-call".to_string(),
+            internal_chat_message_metadata_passthrough: Some(metadata.clone()),
+        },
+        ResponseItem::CustomToolCall {
+            id: Some(custom_id.clone()),
+            status: Some("completed".to_string()),
+            call_id: "custom-call".to_string(),
+            name: "custom".to_string(),
+            namespace: Some("tools".to_string()),
+            input: custom_input.clone(),
+            internal_chat_message_metadata_passthrough: Some(metadata.clone()),
+        },
+    ];
+    assert!(
+        sources
+            .iter()
+            .all(|item| estimate_item_token_count(item) > MAX_MODEL_REQUEST_ITEM_TOKENS as i64)
+    );
+    let mut request = request(sources, "", /*text*/ None);
+
+    split_model_request_messages(&mut request, &[])
+        .expect("model-generated tool call inputs should be projected");
+
+    assert!(
+        request.input.iter().all(|item| {
+            estimate_item_token_count(item) <= MAX_MODEL_REQUEST_ITEM_TOKENS as i64
+        })
+    );
+    let [function_call, custom_call] = request.input.as_slice() else {
+        panic!("expected the two projected tool calls");
+    };
+    let ResponseItem::FunctionCall {
+        id,
+        name,
+        namespace,
+        arguments,
+        encrypted_function_args,
+        call_id,
+        internal_chat_message_metadata_passthrough,
+    } = function_call
+    else {
+        panic!("expected projected function call");
+    };
+    assert_eq!(id, &Some(function_id));
+    assert_eq!(name, "echo");
+    assert_eq!(namespace.as_deref(), Some("mcp"));
+    assert_eq!(call_id, "function-call");
+    assert_eq!(
+        internal_chat_message_metadata_passthrough,
+        &Some(metadata.clone())
+    );
+    assert_eq!(encrypted_function_args, &None);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(arguments).expect("valid omission marker"),
+        serde_json::json!({
+            "_codex_tool_call_input_omitted": {
+                "original_argument_bytes": function_arguments.len(),
+                "encrypted_argument_bytes": encrypted_arguments.iter().map(String::len).sum::<usize>(),
+            }
+        })
+    );
+    let ResponseItem::CustomToolCall {
+        id,
+        status,
+        call_id,
+        name,
+        namespace,
+        input,
+        internal_chat_message_metadata_passthrough,
+    } = custom_call
+    else {
+        panic!("expected projected custom tool call");
+    };
+    assert_eq!(id, &Some(custom_id));
+    assert_eq!(status.as_deref(), Some("completed"));
+    assert_eq!(call_id, "custom-call");
+    assert_eq!(name, "custom");
+    assert_eq!(namespace.as_deref(), Some("tools"));
+    assert_eq!(internal_chat_message_metadata_passthrough, &Some(metadata));
+    let custom_input_bytes = custom_input.len();
+    assert_eq!(
+        input,
+        &format!(
+            "[tool call input omitted to fit model context limit; original bytes: {custom_input_bytes}]"
+        )
+    );
+}
+
+#[test]
+fn preserves_bounded_tool_call_inputs() {
+    let sources = vec![
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "echo".to_string(),
+            namespace: None,
+            arguments: r#"{"message":"hello"}"#.to_string(),
+            encrypted_function_args: None,
+            call_id: "function-call".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::CustomToolCall {
+            id: None,
+            status: None,
+            call_id: "custom-call".to_string(),
+            name: "custom".to_string(),
+            namespace: None,
+            input: "hello".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+    let mut request = request(sources.clone(), "", /*text*/ None);
+
+    split_model_request_messages(&mut request, &[])
+        .expect("bounded tool call inputs should remain valid");
+
+    assert_eq!(request.input, sources);
+}
+
+#[test]
+fn rejects_tool_calls_with_unsplittable_fixed_overhead() {
+    let mut request = request(
+        vec![ResponseItem::FunctionCall {
+            id: None,
+            name: "tool".repeat(max_model_request_item_bytes()),
+            namespace: None,
+            arguments: "{}".to_string(),
+            encrypted_function_args: None,
+            call_id: "function-call".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        "",
+        /*text*/ None,
+    );
+
+    let error = split_model_request_messages(&mut request, &[])
+        .expect_err("fixed tool call overhead should remain subject to the hard item cap");
+
+    assert!(error.to_string().contains("individual input item"));
 }
 
 #[test]

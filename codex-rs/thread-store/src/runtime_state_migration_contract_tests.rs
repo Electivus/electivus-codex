@@ -639,6 +639,8 @@ async fn run_migration(
     .await?)
 }
 
+// The destination is `String` before the catch-up and `SanitizedGitUrl` after it.
+#[allow(clippy::useless_conversion)]
 pub(super) async fn migration_source(
     lineage: LineageFixture,
 ) -> Result<MigrationSource, Box<dyn std::error::Error>> {
@@ -719,7 +721,12 @@ pub(super) async fn migration_source(
     metadata.cli_version = "0.0.0".to_string();
     metadata.git_sha = Some("abc987".to_string());
     metadata.git_branch = Some("migration".to_string());
-    metadata.git_origin_url = Some("https://example.test/acme/repo.git".to_string());
+    metadata.git_origin_url = Some(
+        "https://example.test/acme/repo.git"
+            .to_string()
+            .try_into()
+            .expect("valid git remote URL"),
+    );
     runtime.upsert_thread(&metadata).await?;
     let mut legacy = ThreadMetadataBuilder::new(
         legacy_id,

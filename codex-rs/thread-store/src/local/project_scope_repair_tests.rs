@@ -540,6 +540,8 @@ async fn cumulative_source_byte_limit_fails_before_the_project_query() {
     assert!(matches!(error, ThreadStoreError::Internal { .. }));
 }
 
+// The destination is `String` before the catch-up and `SanitizedGitUrl` after it.
+#[allow(clippy::useless_conversion)]
 #[tokio::test]
 async fn repair_refreshes_legacy_identity_but_preserves_explicit_reclassification() {
     let h = Harness::state().await;
@@ -554,7 +556,12 @@ async fn repair_refreshes_legacy_identity_but_preserves_explicit_reclassificatio
         .expect("state lookup")
         .expect("reconciled metadata");
     stale.cwd = h.home.path().join("stale");
-    stale.git_origin_url = Some("https://example.com/acme/stale.git".to_string());
+    stale.git_origin_url = Some(
+        "https://example.com/acme/stale.git"
+            .to_string()
+            .try_into()
+            .expect("valid git remote URL"),
+    );
     h.runtime()
         .upsert_thread(&stale)
         .await

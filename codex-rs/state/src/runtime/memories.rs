@@ -1486,6 +1486,10 @@ WHERE kind = ? OR kind = ?
     Ok(())
 }
 
+#[allow(
+    clippy::useless_conversion,
+    reason = "the upstream git URL type converts into String after synchronization"
+)]
 fn stage1_output_from_row_and_thread(
     row: &sqlx::sqlite::SqliteRow,
     thread: ThreadMetadata,
@@ -1503,7 +1507,7 @@ fn stage1_output_from_row_and_thread(
         rollout_slug: row.try_get("rollout_slug")?,
         cwd: thread.cwd,
         git_branch: thread.git_branch,
-        git_origin_url: thread.git_origin_url,
+        git_origin_url: thread.git_origin_url.map(Into::into),
         generated_at,
     })
 }

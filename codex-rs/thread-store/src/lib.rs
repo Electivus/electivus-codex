@@ -52,6 +52,8 @@ mod search_thread_occurrences_contract_tests;
 #[path = "search_threads_contract_tests.rs"]
 mod search_threads_contract_tests;
 mod store;
+#[cfg(test)]
+mod test_support;
 mod thread_metadata_sync;
 mod thread_sections;
 mod types;

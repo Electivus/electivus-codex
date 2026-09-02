@@ -29,6 +29,14 @@ const OLDER: usize = 2;
 const TOO_FRESH: usize = 4;
 const POLLUTED: usize = 7;
 
+fn test_git_origin_url<T>(value: &str) -> T
+where
+    T: TryFrom<String>,
+    T::Error: std::fmt::Debug,
+{
+    T::try_from(value.to_string()).expect("valid test git origin URL")
+}
+
 struct StartupSeed {
     metadata: ThreadMetadata,
     memory_mode: &'static str,
@@ -89,7 +97,9 @@ fn startup_seeds(now: DateTime<Utc>, root: &Path) -> Result<Vec<StartupSeed>> {
             metadata.first_user_message = Some(preview);
             metadata.git_sha = Some(format!("sha-{index}"));
             metadata.git_branch = Some(format!("startup/branch-{index}"));
-            metadata.git_origin_url = Some(format!("https://example.test/{index}.git"));
+            metadata.git_origin_url = Some(test_git_origin_url(&format!(
+                "https://example.test/{index}.git"
+            )));
             Ok(StartupSeed {
                 metadata,
                 memory_mode,

@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::ops::Range;
 
 use crate::context_manager::estimate_item_token_count;
+use crate::context_manager::project_tool_call_input_to_limit;
 use crate::context_manager::remove_corresponding_for;
 use crate::context_manager::truncate_output_item_to_limit;
 use crate::context_manager::updates::split_model_context_item_to_limit;
@@ -219,6 +220,7 @@ fn split_and_validate_input_item(item: ResponseItem) -> Result<Vec<ResponseItem>
         {
             continue;
         }
+        let item = project_tool_call_input_to_limit(&item);
         let item = match &item {
             ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. } => {
                 truncate_output_item_to_limit(&item)

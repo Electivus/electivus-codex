@@ -198,6 +198,12 @@ enum TurnMultiAgentRuntime {
 }
 
 impl TurnContext {
+    /// Legacy: returns the frozen initial-turn model metadata.
+    /// Step-scoped consumers should use `StepContext::model_info`.
+    pub(crate) fn model_info(&self) -> &Arc<ModelInfo> {
+        &self.model_info
+    }
+
     pub(crate) fn skills_snapshot(&self) -> Arc<HostSkillsSnapshot> {
         let Some(snapshot) = self.extension_data.get::<HostSkillsSnapshot>() else {
             unreachable!("every turn has a host skills snapshot");
