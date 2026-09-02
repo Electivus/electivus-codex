@@ -572,7 +572,9 @@ def _display_path(path: Path) -> str:
 
 
 def _configuration_section(
-    facts: RuntimeFacts, handler_types: tuple[str, ...]
+    facts: RuntimeFacts,
+    handler_types: tuple[str, ...],
+    event_names: frozenset[str],
 ) -> list[str]:
     handlers = ", ".join(f"`{handler}`" for handler in handler_types)
     if "mcp_tool" in handler_types:
@@ -580,10 +582,6 @@ def _configuration_section(
             f"Configured handler variants are {handlers}. `command` and `mcp_tool` execute today; "
             "`prompt` and `agent` parse successfully but discovery skips them with warnings. Empty "
             "commands are also skipped. `commandWindows` overrides `command` only on Windows."
-        )
-        timeout_summary = (
-            f"| `timeout` | Seconds; defaults to {facts.default_timeout_sec}, is normalized to at least 1, "
-            "with stricter SessionEnd and Interrupt rules below. |"
         )
         async_summary = (
             "| `async` | When true, schedules a command hook without waiting for its result or applying "
@@ -595,14 +593,19 @@ def _configuration_section(
             "and `agent` parse successfully but discovery skips them with warnings. Empty commands "
             "are also skipped. `commandWindows` overrides `command` only on Windows."
         )
-        timeout_summary = (
-            f"| `timeout` | Seconds; defaults to {facts.default_timeout_sec}, is normalized to at least 1, "
-            "with a stricter SessionEnd rule below. |"
-        )
         async_summary = (
             "| `async` | Unsupported. Non-SessionEnd async hooks are skipped; SessionEnd emits a warning "
             "and still runs synchronously. |"
         )
+    timeout_rules = (
+        "stricter SessionEnd and Interrupt rules"
+        if "Interrupt" in event_names
+        else "a stricter SessionEnd rule"
+    )
+    timeout_summary = (
+        f"| `timeout` | Seconds; defaults to {facts.default_timeout_sec}, is normalized to at least 1, "
+        f"with {timeout_rules} below. |"
+    )
     return [
         "## Availability and configuration",
         "",
@@ -857,7 +860,7 @@ def render_markdown(
         "subset of schema-reserved decisions; those restrictions are called out below.",
         "",
         *_event_catalog(schemas),
-        *_configuration_section(facts, handler_types),
+        *_configuration_section(facts, handler_types, event_names),
         *_runtime_section(facts, event_names),
         *_output_section(facts, len(schemas)),
     ]
