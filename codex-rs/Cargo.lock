@@ -2801,7 +2801,6 @@ dependencies = [
  "codex-tools",
  "codex-utils-absolute-path",
  "codex-utils-audio",
- "codex-utils-cache",
  "codex-utils-cargo-bin",
  "codex-utils-home-dir",
  "codex-utils-image",
