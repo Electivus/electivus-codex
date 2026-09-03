@@ -595,6 +595,50 @@ fn record_annotated_items_preserves_metadata_while_processing_item(
 }
 
 #[test]
+fn replayed_annotated_items_use_the_persisted_fallback_limit() {
+    let output = FunctionCallOutputPayload {
+        body: FunctionCallOutputBody::Text("word ".repeat(100)),
+        success: Some(true),
+    };
+    let metadata = CodexHarnessMetadata {
+        fallback_token_limit_override: Some(4),
+        ..Default::default()
+    };
+    let envelope = ResponseItemEnvelope {
+        item: ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("call-replayed-limit".to_string()),
+            name: None,
+            namespace: None,
+            output: output.clone(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        metadata: Some(metadata.clone()),
+    };
+    let mut history = ContextManager::new();
+
+    history.record_replayed_annotated_items(
+        std::slice::from_ref(&envelope),
+        TruncationPolicy::Tokens(1_000),
+    );
+
+    assert_eq!(
+        history.annotated_items(),
+        &[ResponseItemEnvelope {
+            item: ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: Some("call-replayed-limit".to_string()),
+                name: None,
+                namespace: None,
+                output: truncate_function_output_payload(&output, TruncationPolicy::Tokens(4)),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            metadata: Some(metadata),
+        }]
+    );
+}
+
+#[test]
 fn for_prompt_annotated_preserves_metadata_while_normalizing_item() {
     let envelope = ResponseItemEnvelope {
         item: ResponseItem::Message {
@@ -1764,6 +1808,40 @@ fn record_replayed_items_preserves_oversized_opaque_items_for_request_projection
 
     assert_eq!(raw_items(&history), items);
     assert_eq!(history.for_prompt(&default_input_modalities()), items);
+}
+
+#[test]
+fn record_replayed_items_preserves_oversized_tool_call_inputs() {
+    let items = vec![
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "function".to_string(),
+            namespace: None,
+            arguments: "argument".repeat(50_000),
+            encrypted_function_args: Some(vec!["encrypted".repeat(20_000)]),
+            call_id: "function-call".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::CustomToolCall {
+            id: None,
+            status: Some("completed".to_string()),
+            call_id: "custom-call".to_string(),
+            name: "custom".to_string(),
+            namespace: None,
+            input: "input".repeat(50_000),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+    assert!(
+        items
+            .iter()
+            .all(|item| estimate_item_token_count(item) > 10_000)
+    );
+    let mut history = ContextManager::new();
+
+    history.record_replayed_items(&items, TruncationPolicy::Tokens(100_000));
+
+    assert_eq!(raw_items(&history), items);
 }
 
 #[test]

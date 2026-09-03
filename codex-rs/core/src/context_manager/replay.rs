@@ -1,3 +1,4 @@
+use codex_history::CodexHarnessMetadata;
 use codex_model_context::estimate_response_item_model_visible_bytes;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
@@ -19,23 +20,43 @@ pub(crate) fn process_replayed_item(
     item: &ResponseItem,
     policy: TruncationPolicy,
 ) -> Option<ResponseItem> {
+    process_replayed_item_with_output_policy(item, policy * 1.2)
+}
+
+pub(crate) fn process_replayed_annotated_item(
+    item: &ResponseItem,
+    metadata: Option<&CodexHarnessMetadata>,
+    policy: TruncationPolicy,
+) -> Option<ResponseItem> {
+    let output_policy = metadata
+        .and_then(|metadata| metadata.fallback_token_limit_override)
+        .map(TruncationPolicy::Tokens)
+        .unwrap_or(policy * 1.2);
+    process_replayed_item_with_output_policy(item, output_policy)
+}
+
+fn process_replayed_item_with_output_policy(
+    item: &ResponseItem,
+    output_policy: TruncationPolicy,
+) -> Option<ResponseItem> {
     match item {
         ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. } => {
-            let preferred = truncate_output_item(item, policy * 1.2);
+            let preferred = truncate_output_item(item, output_policy);
             truncate_output_item_to_limit(&preferred)
         }
-        ResponseItem::Message { .. } | ResponseItem::AgentMessage { .. } => Some(item.clone()),
+        ResponseItem::Message { .. }
+        | ResponseItem::AgentMessage { .. }
+        | ResponseItem::FunctionCall { .. }
+        | ResponseItem::CustomToolCall { .. } => Some(item.clone()),
         ResponseItem::Reasoning { .. }
         | ResponseItem::Compaction { .. }
         | ResponseItem::ContextCompaction { .. } => Some(item.clone()),
         ResponseItem::AdditionalTools { .. }
         | ResponseItem::LocalShellCall { .. }
-        | ResponseItem::FunctionCall { .. }
         | ResponseItem::ToolSearchCall { .. }
         | ResponseItem::ToolSearchOutput { .. }
         | ResponseItem::WebSearchCall { .. }
         | ResponseItem::ImageGenerationCall { .. }
-        | ResponseItem::CustomToolCall { .. }
         | ResponseItem::CompactionTrigger { .. }
         | ResponseItem::Other => {
             (estimate_item_token_count(item) <= MAX_MODEL_CONTEXT_ITEM_TOKENS).then(|| item.clone())

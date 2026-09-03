@@ -137,7 +137,10 @@ async fn protected_model_settings_use_the_proposed_permissions(
         .build_with_auto_env(&server)
         .await?;
     let initial = test.codex.thread_settings_snapshot().await;
-    assert_eq!(initial.permission_profile, PermissionProfile::Disabled);
+    assert_eq!(
+        initial.permission_profile,
+        PermissionProfile::Disabled.into()
+    );
     let model_update = ThreadSettingsOverrides {
         model: Some(PROTECTED_MODEL.to_string()),
         ..Default::default()
@@ -162,7 +165,7 @@ async fn protected_model_settings_use_the_proposed_permissions(
             /*developer_instructions*/ None,
         ),
         approvals_reviewer: ApprovalsReviewer::AutoReview,
-        permission_profile: PermissionProfile::read_only(),
+        permission_profile: PermissionProfile::read_only().into(),
         active_permission_profile: None,
         ..initial
     };

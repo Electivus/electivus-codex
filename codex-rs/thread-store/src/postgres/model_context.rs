@@ -178,11 +178,8 @@ fn validate_model_context_item(
             }
             Ok(())
         }
-        RolloutItem::InterAgentCommunicationMetadata { .. }
-        | RolloutItem::TurnContext(_)
-        | RolloutItem::WorldState(_)
-        | RolloutItem::SecurityRiskScore(_)
-        | RolloutItem::EventMsg(_) => Ok(()),
+        // The remaining rollout items are not model-visible context fragments.
+        _ => Ok(()),
     }
 }
 
@@ -218,6 +215,8 @@ fn replay_omits_oversized_context_item(item: &ResponseItem) -> bool {
         ResponseItem::Reasoning { .. }
             | ResponseItem::Compaction { .. }
             | ResponseItem::ContextCompaction { .. }
+            | ResponseItem::FunctionCall { .. }
+            | ResponseItem::CustomToolCall { .. }
     )
 }
 

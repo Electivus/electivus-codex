@@ -333,7 +333,7 @@ impl Session {
         if let Some(base_replacement_history) = base_replacement_history {
             history.replace_annotated_with_policy(
                 base_replacement_history,
-                turn_context.model_info.truncation_policy.into(),
+                turn_context.model_info().truncation_policy.into(),
             );
         }
         // Materialize exact history semantics from the replay-derived suffix. The eventual lazy
@@ -361,7 +361,7 @@ impl Session {
                         // should stop before any compaction that has Some replacement_history
                         history.replace_annotated_with_policy(
                             replacement_history,
-                            turn_context.model_info.truncation_policy.into(),
+                            turn_context.model_info().truncation_policy.into(),
                         );
                     } else {
                         saw_legacy_compaction_without_replacement_history = true;

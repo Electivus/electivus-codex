@@ -432,7 +432,7 @@ async fn project_list_orders_and_pages_recency_with_roots_and_nulls() -> anyhow:
                     .bind(timestamp)
                     .bind(timestamp / 1000)
                     .bind(id.to_string())
-                    .execute(runtime.pool.as_ref())
+                    .execute(runtime.sqlite_pool()?)
                     .await?;
                 threads.push(id.to_string());
             }
@@ -546,7 +546,7 @@ async fn project_list_orders_and_pages_recency_with_roots_and_nulls() -> anyhow:
         .push(query.sql().as_str())
         .build()
         .bind(/*value*/ 51_i64)
-        .fetch_all(runtime.pool.as_ref())
+        .fetch_all(runtime.sqlite_pool()?)
         .await?;
     let details = plan
         .iter()

@@ -327,7 +327,7 @@ async fn thread_artifact_migration_preserves_existing_section_metadata() {
         .open_read_write_pool(&sqlite.state_db_path())
         .await
         .expect("sqlite database should open");
-    migrator_through(/*version*/ 50)
+    migrator_through(/*version*/ 53)
         .run(&pool)
         .await
         .expect("released thread migrations should apply");
@@ -366,7 +366,7 @@ async fn thread_artifact_migration_preserves_existing_section_metadata() {
     .expect("artifact table should exist");
     assert_eq!(artifact_tables, vec!["thread_artifacts"]);
 
-    let mut released_migrator = migrator_through(/*version*/ 50);
+    let mut released_migrator = migrator_through(/*version*/ 53);
     released_migrator.ignore_missing = true;
     released_migrator
         .run(&pool)
@@ -1019,7 +1019,7 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
 
 #[tokio::test]
 async fn repairs_complete_official_thread_migration_history_before_fork_migrations() {
-    for official_last_version in 43..=50 {
+    for official_last_version in 43..=52 {
         let sqlite_home = crate::runtime::test_support::unique_temp_dir();
         tokio::fs::create_dir_all(&sqlite_home)
             .await
@@ -1049,6 +1049,8 @@ async fn repairs_complete_official_thread_migration_history_before_fork_migratio
             (48, 51),
             (49, 52),
             (50, 53),
+            (51, 54),
+            (52, 55),
         ]
         .into_iter()
         .take_while(|(official_version, _)| *official_version <= official_last_version)

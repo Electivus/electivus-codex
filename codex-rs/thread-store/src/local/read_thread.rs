@@ -629,6 +629,8 @@ mod tests {
         assert_eq!(thread.preview, "Hello from user");
     }
 
+    // The destination is `String` before the catch-up and `SanitizedGitUrl` after it.
+    #[allow(clippy::useless_conversion)]
     #[tokio::test]
     async fn read_thread_by_rollout_path_preserves_legacy_name_and_sqlite_git_info() {
         let home = TempDir::new().expect("temp dir");
@@ -652,7 +654,12 @@ mod tests {
         );
         builder.model_provider = Some(config.default_model_provider_id.clone());
         builder.git_branch = Some("sqlite-branch".to_string());
-        builder.git_origin_url = Some("ssh://git@ghe.example.test:2222/Org/Repo.git".to_string());
+        builder.git_origin_url = Some(
+            "ssh://git@ghe.example.test:2222/Org/Repo.git"
+                .to_string()
+                .try_into()
+                .expect("valid git remote URL"),
+        );
         let recency_at = chrono::DateTime::parse_from_rfc3339("2026-01-03T12:00:00Z")
             .expect("timestamp should parse")
             .with_timezone(&Utc);

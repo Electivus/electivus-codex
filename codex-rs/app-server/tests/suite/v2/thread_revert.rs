@@ -77,7 +77,7 @@ async fn thread_revert_preserves_fork_cutoff_after_cold_resume() -> Result<()> {
         let completed = mcp
             .start_turn_and_wait_for_completion(TurnStartParams {
                 thread_id: parent.id.clone(),
-                cwd: Some(parent.cwd.as_path().to_path_buf()),
+                cwd: Some(AbsolutePathBuf::try_from(parent.cwd.clone())?.into_path_buf()),
                 input: vec![UserInput::Text {
                     text: text.to_string(),
                     text_elements: Vec::new(),

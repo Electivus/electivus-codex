@@ -448,6 +448,7 @@ async fn execute_inner(
                             section_id: None,
                             project_id: None,
                             cwd: None,
+                            project_cwd: None,
                             use_state_db_only: true,
                             search_term: None,
                             parent_thread_id: None,
@@ -586,7 +587,7 @@ async fn execute_inner(
                 );
             }
             thread_start_params.model_provider = Some(source_thread.model_provider.clone());
-            thread_start_params.cwd = Some(source_thread.cwd.to_string_lossy().into_owned());
+            thread_start_params.cwd = Some(source_thread.cwd.to_string());
             thread_start_params.project_id = source_thread.project_id.clone();
             thread_start_params.ephemeral = Some(source_thread.ephemeral);
             thread_start_params.history_mode = (source_thread.history_mode

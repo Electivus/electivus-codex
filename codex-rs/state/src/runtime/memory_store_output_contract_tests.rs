@@ -20,6 +20,14 @@ const FRESH: usize = 1;
 const FRESH_TIE: usize = 2;
 const SELECTED_BASELINE: usize = 5;
 
+fn test_git_origin_url<T>(value: &str) -> T
+where
+    T: TryFrom<String>,
+    T::Error: std::fmt::Debug,
+{
+    T::try_from(value.to_string()).expect("valid test git origin URL")
+}
+
 struct OutputSeed {
     output: Stage1Output,
     usage_count: Option<i64>,
@@ -114,9 +122,7 @@ fn contract_seeds() -> Result<Vec<OutputSeed>> {
                         rollout_slug: (index % 2 == 0).then(|| format!("output-{index}")),
                         cwd: PathBuf::from(format!("/contract/workspaces/workspace-{index}")),
                         git_branch: Some(format!("contract/branch-{index}")),
-                        git_origin_url: Some(format!(
-                            "https://contract-user:contract-token@example.test/org/repo-{index}.git"
-                        )),
+                        git_origin_url: Some(format!("https://example.test/org/repo-{index}.git")),
                         generated_at: timestamp(source_updated_at + 10)?,
                     },
                     usage_count,
@@ -177,8 +183,7 @@ where
         expected_candidates
     );
 
-    let updated_git_origin_url =
-        "ssh://updated-user:updated-token@example.test/org/reclassified.git".to_string();
+    let updated_git_origin_url = "ssh://example.test/org/reclassified.git".to_string();
     update_git_origin_url(
         seeds[FRESH].output.thread_id,
         updated_git_origin_url.clone(),
@@ -250,7 +255,11 @@ async fn seed_sqlite(runtime: &StateRuntime, seeds: &[OutputSeed]) -> Result<()>
         );
         metadata.rollout_path = seed.output.rollout_path.clone();
         metadata.git_branch = seed.output.git_branch.clone();
-        metadata.git_origin_url = seed.output.git_origin_url.clone();
+        metadata.git_origin_url = seed
+            .output
+            .git_origin_url
+            .as_deref()
+            .map(test_git_origin_url);
         runtime.upsert_thread(&metadata).await?;
         if !seed.enabled {
             runtime

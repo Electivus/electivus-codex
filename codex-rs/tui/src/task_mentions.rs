@@ -100,6 +100,7 @@ pub(crate) fn spawn_search(
                         section_id: None,
                         project_id: None,
                         cwd: None,
+                        project_cwd: None,
                         use_state_db_only: true,
                         search_term: None,
                         parent_thread_id: None,
@@ -155,7 +156,7 @@ pub(crate) fn spawn_search(
                 Some(TaskMention {
                     thread_id: thread.id,
                     title,
-                    cwd: thread.cwd.to_string_lossy().into_owned(),
+                    cwd: thread.cwd.to_string(),
                     snippet: result.snippet,
                 })
             })
