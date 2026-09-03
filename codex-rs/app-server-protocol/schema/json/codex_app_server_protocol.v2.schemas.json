@@ -1848,6 +1848,30 @@
             },
             "method": {
               "enum": [
+                "thread/revert"
+              ],
+              "title": "Thread/revertRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadRevertParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/revertRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
                 "thread/list"
               ],
               "title": "Thread/listRequestMethod",
@@ -19228,6 +19252,57 @@
         "thread"
       ],
       "title": "ThreadResumeResponse",
+      "type": "object"
+    },
+    "ThreadRevertParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "Replace a paginated thread's durable history with the prefix before one turn.\n\nThis only changes persisted conversation history. It does not revert local file changes.",
+      "properties": {
+        "beforeTurnId": {
+          "description": "Turn excluded from the replacement history, together with every later turn.",
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "beforeTurnId",
+        "threadId"
+      ],
+      "title": "ThreadRevertParams",
+      "type": "object"
+    },
+    "ThreadRevertResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "itemsBackwardsCursor": {
+          "description": "Opaque cursor for hydrating paginated items backwards.\n\nPass this as `cursor` to `thread/items/list` with `sortDirection: \"desc\"`. The first page includes the item identified by the cursor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "thread": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Thread"
+            }
+          ],
+          "description": "Updated loaded thread metadata. `turns` is always empty; hydrate retained history through `thread/turns/list`."
+        },
+        "turnsBackwardsCursor": {
+          "description": "Opaque cursor for hydrating paginated turns backwards.\n\nPass this as `cursor` to `thread/turns/list` with `sortDirection: \"desc\"`. The first page includes the turn identified by the cursor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "thread"
+      ],
+      "title": "ThreadRevertResponse",
       "type": "object"
     },
     "ThreadRevertedNotification": {
