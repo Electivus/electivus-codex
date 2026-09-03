@@ -119,6 +119,9 @@ mod cwd_prompt;
 mod debug_config;
 mod diff_model;
 mod diff_render;
+// Pre-stage upstream task tools for the synchronization Catch-up without enabling them on main.
+#[cfg(any())]
+mod dynamic_tools;
 mod exec_cell;
 mod exec_command;
 mod external_agent_config_migration;
@@ -189,6 +192,9 @@ mod terminal_probe;
 mod terminal_title;
 mod terminal_visualization_instructions;
 mod text_formatting;
+// Pre-stage upstream task mentions for the synchronization Catch-up without enabling them on main.
+#[cfg(any())]
+mod task_mentions;
 mod theme_picker;
 mod thread_transcript;
 mod token_usage;
@@ -1968,6 +1974,14 @@ mod tests {
     use serial_test::serial;
     use tempfile::TempDir;
 
+    fn git_url_for_test<T>(value: impl Into<String>) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: std::fmt::Debug,
+    {
+        value.into().try_into().expect("valid git remote URL")
+    }
+
     async fn build_config(temp_dir: &TempDir) -> std::io::Result<Config> {
         ConfigBuilder::default()
             .codex_home(temp_dir.path().to_path_buf())
@@ -2017,7 +2031,7 @@ mod tests {
             git: git_origin.map(|repository_url| codex_protocol::protocol::GitInfo {
                 commit_hash: None,
                 branch: None,
-                repository_url: Some(repository_url.to_string()),
+                repository_url: Some(git_url_for_test(repository_url)),
             }),
         })?;
         let lines = [
@@ -3357,7 +3371,7 @@ mod tests {
                     .expect("cli session source should deserialize"),
             );
             builder.cwd = repository_cwd;
-            builder.git_origin_url = Some("git@example.com:acme/project.git".to_string());
+            builder.git_origin_url = Some(git_url_for_test("git@example.com:acme/project.git"));
             let mut metadata = builder.build(config.model_provider_id.as_str());
             metadata.title = "saved-session".to_string();
             metadata.first_user_message = Some("preview text".to_string());
@@ -3374,7 +3388,8 @@ mod tests {
                     .expect("timestamp should parse")
                     .with_timezone(&chrono::Utc),
             );
-            builder.git_origin_url = Some("https://example.com/acme/unrelated.git".to_string());
+            builder.git_origin_url =
+                Some(git_url_for_test("https://example.com/acme/unrelated.git"));
             let mut unrelated_metadata = builder.build(config.model_provider_id.as_str());
             unrelated_metadata.title = "saved-session".to_string();
             unrelated_metadata.first_user_message = Some("unrelated preview".to_string());

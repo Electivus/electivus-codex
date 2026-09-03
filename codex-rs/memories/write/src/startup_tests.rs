@@ -1149,6 +1149,14 @@ const CREDENTIAL_BEARING_ORIGIN: &str =
 const UPDATED_CREDENTIAL_BEARING_ORIGIN: &str =
     "ssh://updated-user:updated-token@github.com/Electivus/electivus-codex.git";
 
+fn git_url_for_test<T>(value: impl Into<String>) -> T
+where
+    T: TryFrom<String>,
+    T::Error: std::fmt::Debug,
+{
+    value.into().try_into().expect("valid git remote URL")
+}
+
 #[derive(Clone, Copy)]
 enum RepositoryMetadataUpdate<'a> {
     Set(&'a str),
@@ -1235,7 +1243,7 @@ async fn seed_stage1_output(
     metadata_builder.cwd = codex_home.join(format!("workspace-{rollout_slug}"));
     metadata_builder.model_provider = Some("test-provider".to_string());
     metadata_builder.git_branch = Some(format!("branch-{rollout_slug}"));
-    metadata_builder.git_origin_url = Some(CREDENTIAL_BEARING_ORIGIN.to_string());
+    metadata_builder.git_origin_url = Some(git_url_for_test(CREDENTIAL_BEARING_ORIGIN));
     let metadata = metadata_builder.build("test-provider");
     db.upsert_thread(&metadata).await?;
 
@@ -1311,7 +1319,7 @@ async fn seed_stage1_candidate(
     metadata_builder.cwd = rollout_cwd;
     metadata_builder.model_provider = Some("test-provider".to_string());
     metadata_builder.git_branch = Some(format!("branch-{rollout_slug}"));
-    metadata_builder.git_origin_url = Some(CREDENTIAL_BEARING_ORIGIN.to_string());
+    metadata_builder.git_origin_url = Some(git_url_for_test(CREDENTIAL_BEARING_ORIGIN));
     let mut metadata = metadata_builder.build("test-provider");
     metadata.preview = Some("remember this startup test conversation".to_string());
     metadata.first_user_message = metadata.preview.clone();
