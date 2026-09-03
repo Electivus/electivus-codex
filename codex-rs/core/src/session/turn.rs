@@ -367,15 +367,9 @@ pub(crate) async fn run_turn(
                 .await?;
 
             // Construct the input that we will send to the model.
-            let (sampling_request_input, replay_prefix_items, replayed_history) = async {
+            let sampling_request_input = async {
                 let history = sess.clone_history().await;
-                let replay_prefix_items = history.replay_prefix_items();
-                let replayed_history = history.is_replayed_history();
-                (
-                    history.for_prompt(&step_context.model_info.input_modalities),
-                    replay_prefix_items,
-                    replayed_history,
-                )
+                history.for_prompt(&step_context.model_info.input_modalities)
             }
             .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
             .await;
@@ -391,8 +385,6 @@ pub(crate) async fn run_turn(
                 &mut client_session,
                 &responses_metadata,
                 sampling_request_input,
-                replay_prefix_items,
-                replayed_history,
                 cancellation_token.child_token(),
             )
             .await
@@ -1318,16 +1310,12 @@ pub(super) fn collect_explicit_app_ids_from_skill_items(
 #[instrument(level = "trace", skip_all)]
 pub(crate) fn build_prompt(
     input: Vec<ResponseItem>,
-    replay_prefix_items: usize,
-    replayed_history: bool,
     step_context: &StepContext,
     base_instructions: BaseInstructions,
 ) -> Prompt {
     let turn_context = &step_context.turn;
     Prompt {
         input,
-        replay_prefix_items,
-        replayed_history,
         tools: step_context.tool_router.model_visible_specs(),
         parallel_tool_calls: true,
         base_instructions,
@@ -1356,8 +1344,6 @@ async fn run_sampling_request(
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
     input: Vec<ResponseItem>,
-    initial_replay_prefix_items: usize,
-    initial_replayed_history: bool,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
     let turn_context = Arc::clone(&step_context.turn);
@@ -1379,19 +1365,12 @@ async fn run_sampling_request(
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
     loop {
-        let (prompt_input, replay_prefix_items, replayed_history) =
-            if let Some(input) = initial_input.take() {
-                (input, initial_replay_prefix_items, initial_replayed_history)
-            } else {
-                let history = sess.clone_history().await;
-                let replay_prefix_items = history.replay_prefix_items();
-                let replayed_history = history.is_replayed_history();
-                (
-                    history.for_prompt(&step_context.model_info.input_modalities),
-                    replay_prefix_items,
-                    replayed_history,
-                )
-            };
+        let prompt_input = if let Some(input) = initial_input.take() {
+            input
+        } else {
+            let history = sess.clone_history().await;
+            history.for_prompt(&step_context.model_info.input_modalities)
+        };
         let mut prompt_input = prompt_input;
         if let Some(executed_tool_calls) = sess.services.executed_tool_calls.as_ref()
             && executed_tool_calls
@@ -1401,8 +1380,6 @@ async fn run_sampling_request(
         }
         let prompt = build_prompt(
             prompt_input,
-            replay_prefix_items,
-            replayed_history,
             step_context.as_ref(),
             base_instructions.clone(),
         );

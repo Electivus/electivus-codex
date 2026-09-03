@@ -6,12 +6,10 @@ use codex_core::config::AgentRoleConfig;
 use codex_core::config::CurrentTimeReminderConfig;
 use codex_features::Feature;
 use codex_history::RolloutItem;
-use codex_model_context::estimate_response_item_model_visible_bytes;
 use codex_models_manager::bundled_models_response;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::PermissionProfile;
-use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::MultiAgentMessages;
 use codex_protocol::openai_models::MultiAgentRoleMessages;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -91,9 +89,8 @@ const FULL_HISTORY_PROACTIVE_PROMPT: &str = "switch to proactive delegation";
 const FULL_HISTORY_EXPLICIT_PROMPT: &str = "restore explicit-only delegation";
 const FULL_HISTORY_PROACTIVE_POLICY: &str = "Proactive multi-agent delegation is active.";
 const FULL_HISTORY_EXPLICIT_POLICY: &str = "Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask";
-const MODEL_VISIBLE_ITEM_BYTES_LIMIT: i64 = 40_000;
 
-fn oversized_subagent_developer_instructions() -> String {
+fn large_subagent_developer_instructions() -> String {
     format!(
         "OVERSIZED_SUBAGENT_DEVELOPER_A:{}\nOVERSIZED_SUBAGENT_DEVELOPER_B:{}",
         "a".repeat(25_000),
@@ -1067,7 +1064,7 @@ async fn spawned_child_receives_forked_parent_context(
 enum FullHistoryV2ModelSelection {
     ConfiguredDefault,
     ExplicitOverride,
-    OversizedDeveloperInstructions,
+    LargeDeveloperInstructions,
     WorldStateIdentity,
     CurrentTimeReminders,
     MultiAgentModeInstructions,
@@ -1076,7 +1073,7 @@ enum FullHistoryV2ModelSelection {
 
 #[test_case(FullHistoryV2ModelSelection::ConfiguredDefault; "configured default with omitted fork_turns")]
 #[test_case(FullHistoryV2ModelSelection::ExplicitOverride; "explicit override with fork_turns all")]
-#[test_case(FullHistoryV2ModelSelection::OversizedDeveloperInstructions; "oversized developer instructions with fork_turns all")]
+#[test_case(FullHistoryV2ModelSelection::LargeDeveloperInstructions; "large developer instructions with fork_turns all")]
 #[test_case(FullHistoryV2ModelSelection::WorldStateIdentity; "world state appends context window when agent identity changes")]
 #[test_case(FullHistoryV2ModelSelection::CurrentTimeReminders; "full fork drops inherited current-time reminders")]
 #[test_case(FullHistoryV2ModelSelection::MultiAgentModeInstructions; "full fork drops inherited multi-agent mode instructions")]
@@ -1122,7 +1119,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
             V2_REQUESTED_MODEL,
             V2_REQUESTED_REASONING_EFFORT,
         ),
-        FullHistoryV2ModelSelection::OversizedDeveloperInstructions => (
+        FullHistoryV2ModelSelection::LargeDeveloperInstructions => (
             json!({
                 "message": CHILD_PROMPT,
                 "task_name": "worker",
@@ -1279,10 +1276,10 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
         config.agent_default_subagent_reasoning_effort = Some(V2_DEFAULT_REASONING_EFFORT);
         if matches!(
             selection,
-            FullHistoryV2ModelSelection::OversizedDeveloperInstructions
+            FullHistoryV2ModelSelection::LargeDeveloperInstructions
         ) {
             config.multi_agent_v2.subagent_developer_instructions =
-                Some(oversized_subagent_developer_instructions());
+                Some(large_subagent_developer_instructions());
         }
     });
     if matches!(selection, FullHistoryV2ModelSelection::WorldStateIdentity) {
@@ -1415,18 +1412,12 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
     }
     if matches!(
         selection,
-        FullHistoryV2ModelSelection::OversizedDeveloperInstructions
+        FullHistoryV2ModelSelection::LargeDeveloperInstructions
     ) {
-        let expected = oversized_subagent_developer_instructions();
+        let expected = large_subagent_developer_instructions();
         assert_eq!(
             child_developer_messages.concat().matches(&expected).count(),
             1
-        );
-        assert!(
-            child_request
-                .input()
-                .iter()
-                .all(|item| serde_json::to_vec(item).is_ok_and(|item| item.len() <= 40_000))
         );
     }
     if matches!(selection, FullHistoryV2ModelSelection::CurrentTimeReminders) {
@@ -2014,14 +2005,10 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
         ]),
     )
     .await;
-    let oversized_child_completion = format!(
-        "OVERSIZED_CHILD_COMPLETION_START:{}:OVERSIZED_CHILD_COMPLETION_END",
-        "0123456789".repeat(5_000)
-    );
     let child_events = match scenario {
         CompletionScenario::Completed => vec![
             ev_response_created("resp-child-1"),
-            ev_assistant_message("msg-child-1", &oversized_child_completion),
+            ev_assistant_message("msg-child-1", "child done"),
             ev_completed("resp-child-1"),
         ],
         CompletionScenario::TerminalError => vec![ev_response_created("resp-child-1")],
@@ -2046,9 +2033,7 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
     .await;
     let error = "stream disconnected before completion: stream closed before response.completed";
     let (payload, expected_text) = match scenario {
-        CompletionScenario::Completed => {
-            (oversized_child_completion, "OVERSIZED_CHILD_COMPLETION_END")
-        }
+        CompletionScenario::Completed => ("child done".to_string(), "child done"),
         CompletionScenario::TerminalError => (
             format!(
                 "Agent errored: {error}\n\nThis agent's turn failed. If you still need this agent, use the available collaboration tools to give it another task."
@@ -2119,31 +2104,20 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
         .await?
         .pop()
         .expect("agent message request");
-    let agent_messages = request.inputs_of_type("agent_message");
-    let reconstructed = agent_messages
-        .iter()
-        .flat_map(|item| {
-            item["content"]
-                .as_array()
-                .expect("agent message content array")
-        })
-        .map(|content| content["text"].as_str().expect("agent message input text"))
-        .collect::<String>();
-
-    assert_eq!(reconstructed, notification);
-    for item in &agent_messages {
-        assert_eq!(item["author"], "/root/worker");
-        assert_eq!(item["recipient"], "/root");
-        let response_item: ResponseItem = serde_json::from_value(item.clone())?;
-        assert!(
-            estimate_response_item_model_visible_bytes(&response_item)
-                <= MODEL_VISIBLE_ITEM_BYTES_LIMIT
-        );
-    }
-    match scenario {
-        CompletionScenario::Completed => assert!(agent_messages.len() > 1),
-        CompletionScenario::TerminalError => assert_eq!(agent_messages.len(), 1),
-    }
+    assert_eq!(
+        strip_response_item_ids_from_json(strip_metadata_from_json(Value::Array(
+            request.inputs_of_type("agent_message"),
+        ))),
+        Value::Array(vec![json!({
+            "type": "agent_message",
+            "author": "/root/worker",
+            "recipient": "/root",
+            "content": [{
+                "type": "input_text",
+                "text": notification,
+            }],
+        })])
+    );
 
     Ok(())
 }

@@ -6,14 +6,10 @@ use anyhow::Result;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
 use codex_core::TurnInputRequest;
-use codex_history::RolloutItem;
-use codex_history::RolloutLine;
-use codex_model_context::estimate_response_item_model_visible_bytes;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
 use codex_protocol::models::PermissionProfile;
-use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadSettingsOverrides;
@@ -38,7 +34,6 @@ use core_test_support::wait_for_mcp_server;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 fn assert_wall_time_header(output: &str) {
@@ -104,126 +99,25 @@ async fn tool_call_output_configured_limit_chars_type() -> Result<()> {
 
     // Inspect what we sent back to the model; it should contain a truncated
     // function_call_output for the shell call.
-    let request = mock2.single_request();
-    let output_item: ResponseItem = serde_json::from_value(
-        request
-            .inputs_of_type("function_call_output")
-            .into_iter()
-            .next()
-            .context("function_call_output item present for shell call")?,
-    )?;
-    let output = request
+    let output = mock2
+        .single_request()
         .function_call_output_text(call_id)
         .context("function_call_output present for shell call")?;
     let output = output.replace("\r\n", "\n");
 
-    // Expect the projected output to remain plain text rather than JSON.
+    // Expect plain text (not JSON) containing the entire shell output.
     assert!(
         serde_json::from_str::<Value>(&output).is_err(),
         "expected truncated shell output to be plain text"
     );
 
     assert!(
-        output.contains("tokens truncated"),
-        "shell output should contain tokens truncated marker: {output}"
-    );
-    assert!(estimate_response_item_model_visible_bytes(&output_item) <= 40_000);
-
-    let home = Arc::clone(&fixture.home);
-    let rollout_path = fixture
-        .session_configured
-        .rollout_path
-        .clone()
-        .context("rollout path")?;
-    fixture.codex.flush_rollout().await?;
-    let persisted_items = std::fs::read_to_string(&rollout_path)?
-        .lines()
-        .map(serde_json::from_str::<RolloutLine>)
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter_map(|line| match line.item {
-            RolloutItem::ResponseItem(envelope) => Some(envelope.item),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        persisted_items
-            .iter()
-            .filter(|item| matches!(
-                item,
-                ResponseItem::FunctionCall { call_id: item_call_id, .. }
-                    if item_call_id == call_id
-            ))
-            .count(),
-        1,
-        "rollout should preserve one matching function call"
-    );
-    let persisted_outputs = persisted_items
-        .iter()
-        .filter(|item| {
-            matches!(
-                item,
-                ResponseItem::FunctionCallOutput { call_id: item_call_id, .. }
-                    if item_call_id.as_deref() == Some(call_id)
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        persisted_outputs.len(),
-        1,
-        "rollout should preserve one atomic function output"
+        (400000..=401000).contains(&output.len()),
+        "we should be almost 100k tokens"
     );
     assert!(
-        estimate_response_item_model_visible_bytes(persisted_outputs[0]) > 40_000,
-        "request-only truncation must not rewrite the persisted output"
-    );
-    let persisted_output = match persisted_outputs[0] {
-        ResponseItem::FunctionCallOutput { output, .. } => output,
-        other => unreachable!("filtered function output changed variant: {other:?}"),
-    };
-    let persisted_text = persisted_output
-        .text_content()
-        .context("persisted shell output should contain text")?;
-    assert!(
-        (400_000..=401_000).contains(&persisted_text.len()),
-        "configured producer limit should remain durable, got {} bytes",
-        persisted_text.len()
-    );
-
-    fixture.codex.shutdown_and_wait().await?;
-    let resumed_mock = mount_sse_once(
-        &server,
-        sse(vec![
-            responses::ev_assistant_message("msg-resumed", "resumed"),
-            responses::ev_completed("resp-resumed"),
-        ]),
-    )
-    .await;
-    let mut resume_builder = test_codex().with_model("gpt-5.2").with_config(|config| {
-        config.tool_output_token_limit = Some(100_000);
-    });
-    let resumed = resume_builder.resume(&server, home, rollout_path).await?;
-    resumed.submit_turn("continue after cold resume").await?;
-
-    let resumed_request = resumed_mock.single_request();
-    assert!(resumed_request.has_function_call(call_id));
-    let resumed_outputs = resumed_request
-        .inputs_of_type("function_call_output")
-        .into_iter()
-        .filter(|item| item.get("call_id").and_then(Value::as_str) == Some(call_id))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        resumed_outputs.len(),
-        1,
-        "cold resume should replay one matching function output"
-    );
-    let resumed_output: ResponseItem = serde_json::from_value(resumed_outputs[0].clone())?;
-    assert!(estimate_response_item_model_visible_bytes(&resumed_output) <= 40_000);
-    pretty_assertions::assert_eq!(resumed_output, output_item);
-    assert!(
-        resumed_request
-            .function_call_output_text(call_id)
-            .is_some_and(|output| output.contains("tokens truncated"))
+        !output.contains("tokens truncated"),
+        "shell output should not contain tokens truncated marker: {output}"
     );
 
     Ok(())
@@ -851,9 +745,9 @@ async fn exec_command_output_not_truncated_with_custom_limit() -> Result<()> {
     Ok(())
 }
 
-// The configured MCP output limit may exceed the mandatory per-request item cap.
+// MCP server output should also remain intact when the config increases the token limit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn mcp_tool_call_output_obeys_hard_cap_with_custom_limit() -> Result<()> {
+async fn mcp_tool_call_output_not_truncated_with_custom_limit() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -934,23 +828,20 @@ async fn mcp_tool_call_output_obeys_hard_cap_with_custom_limit() -> Result<()> {
         )
         .await?;
 
-    let request = mock2.single_request();
-    let output_item: ResponseItem = serde_json::from_value(
-        request
-            .inputs_of_type("function_call_output")
-            .into_iter()
-            .next()
-            .context("function_call_output item present for rmcp call")?,
-    )?;
-    let output = request
+    let output = mock2
+        .single_request()
         .function_call_output_text(call_id)
         .context("function_call_output present for rmcp call")?;
 
-    assert!(
-        output.contains("tokens truncated"),
-        "hard-capped MCP output should include the token marker: {output}"
+    assert_eq!(
+        output.len(),
+        80065,
+        "MCP output should retain its serialized length plus wall-time header"
     );
-    assert!(estimate_response_item_model_visible_bytes(&output_item) <= 40_000);
+    assert!(
+        !output.contains("truncated"),
+        "output should not include truncation markers when limit is raised: {output}"
+    );
 
     Ok(())
 }

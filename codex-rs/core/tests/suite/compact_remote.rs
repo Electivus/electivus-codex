@@ -744,11 +744,6 @@ async fn remote_compact_v2_retains_only_client_developer_messages_when_enabled(
         let requests = response_mock.requests();
         let resumed_request = requests.last().context("resumed request")?;
         let resumed_input = resumed_request.input();
-        assert!(
-            resumed_input
-                .iter()
-                .all(|item| serde_json::to_vec(item).is_ok_and(|item| item.len() <= 40_000))
-        );
         let resumed_sections = resumed_input
             .iter()
             .filter(|item| item.get("role").and_then(Value::as_str) == Some("developer"))

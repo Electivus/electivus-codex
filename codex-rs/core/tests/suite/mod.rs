@@ -90,7 +90,6 @@ mod mcp_tool_cache;
 mod mcp_tool_exposure;
 mod mcp_turn_metadata;
 mod model_overrides;
-mod model_request_limits;
 mod model_runtime_selectors;
 mod model_switching;
 mod model_visible_layout;
