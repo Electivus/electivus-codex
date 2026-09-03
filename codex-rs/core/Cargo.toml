@@ -74,7 +74,6 @@ codex-thread-store = { workspace = true }
 codex-tools = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-audio = { workspace = true }
-codex-utils-cache = { workspace = true }
 codex-utils-image = { workspace = true }
 codex-utils-home-dir = { workspace = true }
 codex-utils-output-truncation = { workspace = true }
@@ -171,13 +170,5 @@ wiremock = { workspace = true }
 zstd = { workspace = true }
 
 [package.metadata.cargo-shear]
-# `codex-utils-cache` is consumed by the upstream history implementation after synchronization.
-ignored = ["codex-utils-cache", "openssl-sys"]
-# The three suite modules below are pre-staged for the synchronization Catch-up,
-# where upstream links them from `tests/suite/mod.rs`.
-ignored-paths = [
-    "tests/remote_env_windows/*.rs",
-    "tests/suite/rollout_compression.rs",
-    "tests/suite/settings_commits.rs",
-    "tests/suite/settings_constraints.rs",
-]
+ignored = ["openssl-sys"]
+ignored-paths = ["tests/remote_env_windows/*.rs"]
