@@ -37,11 +37,6 @@ filter = 'test(rmcp_client) | test(humanlike_typing_1000_chars_appears_live_no_p
 slow-timeout = { period = "1m", terminate-after = 4 }
 
 [[profile.default.overrides]]
-# These PostgreSQL contracts migrate a namespace and exercise oversized resume histories.
-filter = 'test(postgres_contract_paginated_model_context_pages_oversized_presentation_suffix) | test(postgres_contract_resume_splits_oversized_developer_bundle_without_loss)'
-slow-timeout = { period = "1m", terminate-after = 4 }
-
-[[profile.default.overrides]]
 filter = 'test(approval_matrix_covers_all_modes)'
 slow-timeout = { period = "30s", terminate-after = 2 }
 

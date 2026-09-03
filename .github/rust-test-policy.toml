@@ -1,7 +1,7 @@
 version = 1
 
 [postgres_contracts]
-database_count = 116
+database_count = 113
 process_count = 2
 packages = [
     "codex-app-server",
@@ -29,8 +29,6 @@ packages = [
 'codex-rs/app-server/tests/suite/v2/postgres_runtime_state.rs::postgres_contract_external_agent_import_reports_persistence_failure::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/app-server/tests/suite/v2/postgres_thread_lease_tests.rs::postgres_contract_active_session_recovers_expired_lease_before_interrupt::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/app-server/tests/suite/v2/postgres_thread_store.rs::postgres_contract_paginated_rollback_is_visible_across_replicas::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
-'codex-rs/app-server/tests/suite/v2/postgres_thread_store.rs::postgres_contract_resume_accepts_oversized_tool_media_without_rewriting_history::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
-'codex-rs/app-server/tests/suite/v2/postgres_thread_store.rs::postgres_contract_resume_splits_oversized_developer_bundle_without_loss::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/app-server/tests/suite/v2/postgres_thread_store.rs::postgres_contract_store_serves_database_native_v2_history_flows::ignore="requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"' = "specialized-environment"
 'codex-rs/app-server/tests/suite/v2/rate_limits.rs::send_add_credits_nudge_email_maps_cooldown::cfg_attr(target_os="windows",ignore="covered by Linux and macOS CI")' = "out-of-boundary-platform"
 'codex-rs/app-server/tests/suite/v2/rate_limits.rs::send_add_credits_nudge_email_posts_expected_body::cfg_attr(target_os="windows",ignore="covered by Linux and macOS CI")' = "out-of-boundary-platform"
