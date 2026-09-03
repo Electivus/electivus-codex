@@ -73,18 +73,17 @@ class InstallLocalShTest(unittest.TestCase):
             self.assertEqual(build_log["version"], "0.148.0-alpha.12")
             cargo_arguments = read_cargo_arguments(root)
             self.assertEqual(
-                cargo_arguments[:5],
+                cargo_arguments[:4],
                 [
                     "update",
                     "--quiet",
                     "--workspace",
-                    "--offline",
                     "--manifest-path",
                 ],
             )
-            self.assertEqual(Path(cargo_arguments[5]).name, "Cargo.toml")
+            self.assertEqual(Path(cargo_arguments[4]).name, "Cargo.toml")
             self.assertEqual(
-                Path(cargo_arguments[5]).parent.name,
+                Path(cargo_arguments[4]).parent.name,
                 "versioned-codex-rs",
             )
             build_arguments = read_build_arguments(root)

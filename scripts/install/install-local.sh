@@ -353,7 +353,6 @@ resolve_installer_owned_lockfile() {
     cargo update \
     --quiet \
     --workspace \
-    --offline \
     --manifest-path "$versioned_manifest"
   lockfile_status=0
   wait_for_active_child || lockfile_status=$?
