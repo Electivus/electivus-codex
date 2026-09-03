@@ -71,6 +71,22 @@ class InstallLocalShTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             build_log = read_build_log(root)
             self.assertEqual(build_log["version"], "0.148.0-alpha.12")
+            cargo_arguments = read_cargo_arguments(root)
+            self.assertEqual(
+                cargo_arguments[:5],
+                [
+                    "update",
+                    "--quiet",
+                    "--workspace",
+                    "--offline",
+                    "--manifest-path",
+                ],
+            )
+            self.assertEqual(Path(cargo_arguments[5]).name, "Cargo.toml")
+            self.assertEqual(
+                Path(cargo_arguments[5]).parent.name,
+                "versioned-codex-rs",
+            )
             build_arguments = read_build_arguments(root)
             self.assertIn("--package-version", build_arguments)
             self.assertNotIn("--version", build_arguments)
@@ -486,19 +502,19 @@ class InstallLocalShTest(unittest.TestCase):
                         os.killpg(process.pid, signal.SIGKILL)
                         process.communicate(timeout=2)
 
-    def test_edit_during_cargo_metadata_is_not_rebaselined_or_lost(self) -> None:
+    def test_edit_during_lockfile_resolution_is_not_rebaselined_or_lost(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             repo = create_repo(root)
-            metadata_ready = root / "metadata.ready"
-            metadata_continue = root / "metadata.continue"
+            lockfile_ready = root / "lockfile.ready"
+            lockfile_continue = root / "lockfile.continue"
             cargo_lock = repo / "codex-rs/Cargo.lock"
             env = installer_env(
                 root,
                 repo,
                 extra_env={
-                    "CODEX_TEST_METADATA_READY": str(metadata_ready),
-                    "CODEX_TEST_METADATA_CONTINUE": str(metadata_continue),
+                    "CODEX_TEST_LOCKFILE_READY": str(lockfile_ready),
+                    "CODEX_TEST_LOCKFILE_CONTINUE": str(lockfile_continue),
                 },
             )
             process = subprocess.Popen(
@@ -515,10 +531,10 @@ class InstallLocalShTest(unittest.TestCase):
                 stderr=subprocess.PIPE,
             )
             try:
-                wait_for_path(metadata_ready)
-                cargo_lock.write_bytes(cargo_lock.read_bytes() + b"# metadata race\n")
+                wait_for_path(lockfile_ready)
+                cargo_lock.write_bytes(cargo_lock.read_bytes() + b"# lockfile race\n")
                 raced_bytes = cargo_lock.read_bytes()
-                metadata_continue.touch()
+                lockfile_continue.touch()
                 stdout, stderr = process.communicate(timeout=10)
 
                 self.assertNotEqual(process.returncode, 0, stdout)
@@ -532,7 +548,7 @@ class InstallLocalShTest(unittest.TestCase):
                     (root / "codex-home/packages/standalone/current").exists()
                 )
             finally:
-                metadata_continue.touch(exist_ok=True)
+                lockfile_continue.touch(exist_ok=True)
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGKILL)
                     process.communicate(timeout=2)
@@ -1916,12 +1932,15 @@ for argument in "$@"; do
   fi
   previous="$argument"
 done
-if [ "${CODEX_TEST_MUTATE_LOCK:-0}" = 1 ] && [ "${1:-}" = metadata ]; then
-  printf '%s\n' 'mutated by cargo metadata' >"$(dirname "$manifest_path")/Cargo.lock"
+if [ -n "${CODEX_TEST_CARGO_ARGUMENTS:-}" ]; then
+  printf '%s\n' "$@" >"$CODEX_TEST_CARGO_ARGUMENTS"
 fi
-if [ "${1:-}" = metadata ] && [ -n "${CODEX_TEST_METADATA_READY:-}" ]; then
-  : >"$CODEX_TEST_METADATA_READY"
-  while [ ! -e "$CODEX_TEST_METADATA_CONTINUE" ]; do sleep 0.01; done
+if [ "${CODEX_TEST_MUTATE_LOCK:-0}" = 1 ] && [ "${1:-}" = update ]; then
+  printf '%s\n' 'mutated by cargo update' >"$(dirname "$manifest_path")/Cargo.lock"
+fi
+if [ "${1:-}" = update ] && [ -n "${CODEX_TEST_LOCKFILE_READY:-}" ]; then
+  : >"$CODEX_TEST_LOCKFILE_READY"
+  while [ ! -e "$CODEX_TEST_LOCKFILE_CONTINUE" ]; do sleep 0.01; done
 fi
 exit 0
 """,
@@ -2000,6 +2019,7 @@ exit 0
         "CODEX_INSTALL_DIR": str(root / "install-bin"),
         "CODEX_TEST_BUILD_LOG": str(root / "build.json"),
         "CODEX_TEST_BUILD_ARGUMENTS": str(root / "build-arguments.json"),
+        "CODEX_TEST_CARGO_ARGUMENTS": str(root / "cargo-arguments.txt"),
         "CODEX_TEST_BUILD_MODE": build_mode,
         "CODEX_TEST_CODEX_EXIT": str(codex_exit),
         "CODEX_TEST_MUTATE_LOCK": "1" if mutate_lock else "0",
@@ -2074,6 +2094,10 @@ def read_build_log(root: Path) -> dict[str, object]:
 
 def read_build_arguments(root: Path) -> list[str]:
     return json.loads((root / "build-arguments.json").read_text(encoding="utf-8"))
+
+
+def read_cargo_arguments(root: Path) -> list[str]:
+    return (root / "cargo-arguments.txt").read_text(encoding="utf-8").splitlines()
 
 
 def wait_for_path(path: Path) -> None:
