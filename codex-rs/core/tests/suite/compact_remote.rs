@@ -1411,6 +1411,12 @@ async fn remote_manual_compact_chatgpt_auth_reuses_service_tier_and_prompt_cache
     Ok(())
 }
 
+// Reserve the insertion point for the upstream retained-image budget test. The
+// synchronization merge replaces this disabled declaration with the release's
+// complete test using images that fit the fork's per-item request cap.
+#[cfg(any())]
+async fn remote_compact_v2_charges_retained_images_to_token_budget() {}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<()> {
     skip_if_no_network!(Ok(()));

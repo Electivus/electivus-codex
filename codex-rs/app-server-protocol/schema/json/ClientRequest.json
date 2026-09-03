@@ -4683,6 +4683,23 @@
       ],
       "type": "object"
     },
+    "ThreadRevertParams": {
+      "description": "Replace a paginated thread's durable history with the prefix before one turn.\n\nThis only changes persisted conversation history. It does not revert local file changes.",
+      "properties": {
+        "beforeTurnId": {
+          "description": "Turn excluded from the replacement history, together with every later turn.",
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "beforeTurnId",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "ThreadRollbackParams": {
       "description": "DEPRECATED: `thread/rollback` will be removed soon.",
       "properties": {
@@ -5905,6 +5922,30 @@
         "params"
       ],
       "title": "Thread/rollbackRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/revert"
+          ],
+          "title": "Thread/revertRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadRevertParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/revertRequest",
       "type": "object"
     },
     {

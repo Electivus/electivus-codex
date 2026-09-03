@@ -851,6 +851,12 @@ async fn exec_command_output_not_truncated_with_custom_limit() -> Result<()> {
     Ok(())
 }
 
+// Reserve the insertion point for the upstream MCP output-limit coverage. The
+// synchronization merge replaces this disabled declaration with the release's
+// complete tests and keeps their tool-call input below the fork's item cap.
+#[cfg(any())]
+async fn call_mcp_echo() {}
+
 // The configured MCP output limit may exceed the mandatory per-request item cap.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn mcp_tool_call_output_obeys_hard_cap_with_custom_limit() -> Result<()> {

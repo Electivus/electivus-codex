@@ -222,7 +222,19 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
-    let thread_id = start_default_thread(&mut mcp).await?;
+    let ThreadStartResponse { thread, .. } = mcp
+        .start_thread(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            history_mode: Some(ThreadHistoryMode::Legacy),
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("thread/started"),
+    )
+    .await??;
+    let thread_id = thread.id;
     let ReviewStartResponse { turn, .. } = mcp
         .request(|request_id| ClientRequest::ReviewStart {
             request_id,
