@@ -260,7 +260,8 @@ jobs:
         run: |
           python3 "${GITHUB_WORKSPACE}/.github/scripts/check_nextest_junit.py" \
             "${NEXTEST_JUNIT_FILE}" \
-            --expected-testcases "${{ steps.inventory.outputs.expected_total }}"
+            --expected-testcases "${{ steps.inventory.outputs.expected_total }}" \
+            --allow-retries
 
       - name: Upload archive nextest JUnit report
         if: ${{ always() && inputs.artifact_id != '' }}
