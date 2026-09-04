@@ -356,6 +356,8 @@ async fn make_history_test_app() -> Result<(App, tempfile::TempDir)> {
     let codex_home = tempdir()?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = SqliteConfig::new_for_testing(codex_home.path().abs());
+    app.config.runtime_state_backend =
+        codex_state::RuntimeStateBackendConfig::Sqlite(app.config.sqlite.clone());
     Ok((app, codex_home))
 }
 

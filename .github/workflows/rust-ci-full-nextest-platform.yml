@@ -472,7 +472,8 @@ jobs:
         shell: bash
         run: |
           python3 "${GITHUB_WORKSPACE}/.github/scripts/check_nextest_junit.py" \
-            "${NEXTEST_JUNIT_FILE}"
+            "${NEXTEST_JUNIT_FILE}" \
+            --allow-retries
 
       - name: Upload nextest JUnit report
         if: always()

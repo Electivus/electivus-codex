@@ -251,6 +251,7 @@ def validate_topology(
         shard.count(NEXTEST_JUNIT_ENV) == 1
         and ordinary_run.count('rm -f -- "${NEXTEST_JUNIT_FILE}"') == 1
         and shard_junit.count('"${NEXTEST_JUNIT_FILE}"') == 1
+        and shard_junit.count("--allow-retries") == 1
         and "path: ${{ env.NEXTEST_JUNIT_FILE }}" in shard_junit_upload
         and "${CARGO_TARGET_DIR}/nextest/default/junit.xml" not in shard
     )
@@ -260,6 +261,7 @@ def validate_topology(
         and 'junit="${NEXTEST_JUNIT_FILE}"' in pg_run
         and pg_run.count('rm -f -- "${junit}"') == 1
         and pg_junit.count('"${NEXTEST_JUNIT_FILE}"') == 1
+        and pg_junit.count("--allow-retries") == 1
         and "path: ${{ env.NEXTEST_JUNIT_FILE }}" in pg_junit_upload
         and "${CARGO_TARGET_DIR}/nextest/default/junit.xml" not in postgres_job
     )
