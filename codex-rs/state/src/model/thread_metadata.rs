@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::DateTime;
 use chrono::Utc;
+use codex_protocol::SanitizedGitUrl;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
@@ -183,7 +184,7 @@ pub struct ThreadMetadata {
     /// The git branch name, if known.
     pub git_branch: Option<String>,
     /// The git origin URL, if known.
-    pub git_origin_url: Option<String>,
+    pub git_origin_url: Option<SanitizedGitUrl>,
     /// Credential-free canonical identity derived from the Git origin.
     pub repository_identity: Option<String>,
     /// Internal provenance used to distinguish an explicit clear from missing rollout metadata.
@@ -232,7 +233,7 @@ pub struct ThreadMetadataBuilder {
     /// The git branch name, if known.
     pub git_branch: Option<String>,
     /// The git origin URL, if known.
-    pub git_origin_url: Option<String>,
+    pub git_origin_url: Option<SanitizedGitUrl>,
 }
 
 impl ThreadMetadataBuilder {
@@ -656,7 +657,8 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             project_id,
             git_sha,
             git_branch,
-            git_origin_url,
+            git_origin_url: git_origin_url
+                .and_then(|origin_url| SanitizedGitUrl::try_from(origin_url).ok()),
             repository_identity,
             git_origin_url_is_explicit,
         })
@@ -725,6 +727,7 @@ mod tests {
     use super::ThreadRow;
     use chrono::DateTime;
     use chrono::Utc;
+    use codex_protocol::SanitizedGitUrl;
     use codex_protocol::ThreadId;
     use codex_protocol::openai_models::ReasoningEffort;
     use codex_protocol::protocol::ThreadHistoryMode;
@@ -846,7 +849,10 @@ mod tests {
         reconciled.history_mode = ThreadHistoryMode::Paginated;
         reconciled.git_sha = Some("rollout-sha".to_string());
         reconciled.git_branch = Some("rollout-branch".to_string());
-        reconciled.git_origin_url = Some("rollout-origin".to_string());
+        reconciled.git_origin_url = Some(
+            SanitizedGitUrl::try_from("https://example.com/rollout-origin")
+                .expect("valid git remote URL"),
+        );
         let existing = expected_thread_metadata(/*reasoning_effort*/ None);
         let expected = reconciled.clone();
 
@@ -858,10 +864,16 @@ mod tests {
     #[test]
     fn legacy_reconcile_replaces_non_explicit_stale_origin() {
         let mut reconciled = expected_thread_metadata(/*reasoning_effort*/ None);
-        reconciled.git_origin_url = Some("https://example.com/acme/current.git".to_string());
+        reconciled.git_origin_url = Some(
+            SanitizedGitUrl::try_from("https://example.com/acme/current.git")
+                .expect("valid git remote URL"),
+        );
         reconciled.repository_identity = Some("example.com/acme/current".to_string());
         let mut existing = reconciled.clone();
-        existing.git_origin_url = Some("https://example.com/acme/stale.git".to_string());
+        existing.git_origin_url = Some(
+            SanitizedGitUrl::try_from("https://example.com/acme/stale.git")
+                .expect("valid git remote URL"),
+        );
         existing.repository_identity = Some("example.com/acme/stale".to_string());
         let expected = reconciled.clone();
 
@@ -873,10 +885,16 @@ mod tests {
     #[test]
     fn legacy_reconcile_preserves_explicit_reclassified_origin() {
         let mut reconciled = expected_thread_metadata(/*reasoning_effort*/ None);
-        reconciled.git_origin_url = Some("https://example.com/acme/rollout.git".to_string());
+        reconciled.git_origin_url = Some(
+            SanitizedGitUrl::try_from("https://example.com/acme/rollout.git")
+                .expect("valid git remote URL"),
+        );
         reconciled.repository_identity = Some("example.com/acme/rollout".to_string());
         let mut existing = reconciled.clone();
-        existing.git_origin_url = Some("https://example.com/acme/reclassified.git".to_string());
+        existing.git_origin_url = Some(
+            SanitizedGitUrl::try_from("https://example.com/acme/reclassified.git")
+                .expect("valid git remote URL"),
+        );
         existing.repository_identity = Some("example.com/acme/reclassified".to_string());
         existing.git_origin_url_is_explicit = true;
         let mut expected = reconciled.clone();
@@ -893,10 +911,16 @@ mod tests {
     fn paginated_reconcile_preserves_non_explicit_sqlite_origin() {
         let mut reconciled = expected_thread_metadata(/*reasoning_effort*/ None);
         reconciled.history_mode = ThreadHistoryMode::Paginated;
-        reconciled.git_origin_url = Some("https://example.com/acme/rollout.git".to_string());
+        reconciled.git_origin_url = Some(
+            SanitizedGitUrl::try_from("https://example.com/acme/rollout.git")
+                .expect("valid git remote URL"),
+        );
         reconciled.repository_identity = Some("example.com/acme/rollout".to_string());
         let mut existing = reconciled.clone();
-        existing.git_origin_url = Some("https://example.com/acme/sqlite.git".to_string());
+        existing.git_origin_url = Some(
+            SanitizedGitUrl::try_from("https://example.com/acme/sqlite.git")
+                .expect("valid git remote URL"),
+        );
         existing.repository_identity = Some("example.com/acme/sqlite".to_string());
         let expected = existing.clone();
 

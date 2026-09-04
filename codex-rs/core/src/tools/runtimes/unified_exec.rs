@@ -8,7 +8,7 @@ use crate::exec::ExecCapturePolicy;
 use crate::exec::ExecExpiration;
 use crate::guardian::GUARDIAN_REVIEW_TIMEOUT;
 use crate::guardian::GuardianNetworkAccessTrigger;
-use crate::guardian::routes_approval_to_guardian;
+use crate::guardian::routes_approval_policy_to_guardian;
 use crate::plugins::metrics::sidecar_for_command;
 use crate::sandboxing::ExecOptions;
 use crate::sandboxing::ExecServerEnvConfig;
@@ -20,9 +20,9 @@ use crate::tools::network_approval::NetworkApprovalSpec;
 use crate::tools::runtimes::RuntimePathPrepends;
 #[cfg(unix)]
 use crate::tools::runtimes::apply_zsh_fork_path_prepend;
-use crate::tools::runtimes::disable_powershell_profile_for_elevated_windows_sandbox;
 use crate::tools::runtimes::exec_env_for_sandbox_permissions;
 use crate::tools::runtimes::maybe_wrap_shell_lc_with_snapshot;
+use crate::tools::runtimes::prepare_powershell_command_for_elevated_windows_sandbox;
 use crate::tools::runtimes::zsh_fork;
 use crate::tools::sandboxing::Approvable;
 use crate::tools::sandboxing::ApprovalAction;
@@ -35,6 +35,8 @@ use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::managed_network_for_sandbox_permissions;
 use crate::tools::sandboxing::sandbox_permissions_preserving_denied_reads;
 use crate::unified_exec::NoopSpawnLifecycle;
+use crate::unified_exec::TerminalPermissions;
+use crate::unified_exec::TerminalSandboxSource;
 use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::UnifiedExecProcess;
 use crate::unified_exec::UnifiedExecProcessManager;
@@ -106,6 +108,7 @@ pub struct UnifiedExecRuntime<'a> {
 pub(crate) struct UnifiedExecAttempt {
     pub(crate) process: UnifiedExecProcess,
     pub(crate) metrics_sidecar: Option<PluginMetricsSidecar>,
+    pub(crate) permissions: TerminalPermissions,
 }
 
 fn unified_exec_options(
@@ -223,9 +226,14 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
             &file_system_sandbox_policy,
         );
         let network =
-            managed_network_for_sandbox_permissions(req.network.as_ref(), sandbox_permissions)?;
+            managed_network_for_sandbox_permissions(req.network.as_ref(), sandbox_permissions)
+                .cloned();
+        // No-proxy fast path; owners still need a spec for execution-only proxies.
+        if network.is_none() && req.turn_environment.config().network_policy.is_none() {
+            return None;
+        }
         Some(NetworkApprovalSpec {
-            network: Some(network.clone()),
+            network,
             tool_name: ctx.tool_name.clone(),
             trigger: GuardianNetworkAccessTrigger {
                 call_id: ctx.call_id.clone(),
@@ -240,6 +248,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
             command: req.hook_command.clone(),
             environment_id: req.turn_environment.selection.environment_id.clone(),
             permission_profile: req.turn_environment.permission_profile().clone(),
+            network_policy: req.turn_environment.config().network_policy.clone(),
         })
     }
 
@@ -283,8 +292,10 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                 let mut launch = network.remote_launch_config().await.map_err(|err| {
                     ToolError::Codex(CodexErr::Io(io::Error::other(err.to_string())))
                 })?;
-                if routes_approval_to_guardian(&ctx.step_context.turn)
-                    && network.remote_policy_decider().is_some()
+                if routes_approval_policy_to_guardian(
+                    ctx.step_context.settings.approval_policy(),
+                    ctx.step_context.settings.approvals_reviewer(),
+                ) && network.remote_policy_decider().is_some()
                 {
                     let timeout = ctx
                         .session
@@ -390,11 +401,12 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                 *script = format!("{exports}\n{script}");
             }
         }
-        let command = disable_powershell_profile_for_elevated_windows_sandbox(
+        let command = prepare_powershell_command_for_elevated_windows_sandbox(
             &command,
             Some(&req.shell_type),
             attempt.sandbox_requested,
             attempt.windows_sandbox_level,
+            environment_is_remote,
         );
         let command = if matches!(req.shell_type, ShellType::PowerShell) {
             prefix_powershell_script_with_utf8(&command)
@@ -405,6 +417,22 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
             .as_ref()
             .map(PluginMetricsSidecar::additional_permissions);
         let additional_permissions = merge_permission_profiles(
+            req.additional_permissions.as_ref(),
+            sidecar_permissions.as_ref(),
+        );
+        let permissions = TerminalPermissions::for_launch(
+            &req.turn_environment,
+            &ctx.step_context.turn,
+            if self.uses_executor_managed_process_sandbox(req) {
+                TerminalSandboxSource::Executor
+            } else {
+                TerminalSandboxSource::Native
+            },
+            if attempt.is_escalated() {
+                SandboxPermissions::RequireEscalated
+            } else {
+                SandboxPermissions::UseDefault
+            },
             req.additional_permissions.as_ref(),
             sidecar_permissions.as_ref(),
         );
@@ -467,6 +495,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                     return Ok(UnifiedExecAttempt {
                         process,
                         metrics_sidecar,
+                        permissions,
                     });
                 }
                 None => {
@@ -511,6 +540,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
         Ok(UnifiedExecAttempt {
             process,
             metrics_sidecar,
+            permissions,
         })
     }
 }
@@ -524,6 +554,7 @@ mod tests {
     use crate::tools::sandboxing::ToolRuntime;
     use codex_exec_server::Environment;
     use codex_exec_server::LOCAL_ENVIRONMENT_ID;
+    use codex_protocol::config_types::WindowsSandboxLevel;
     use codex_protocol::models::PermissionProfile;
     use codex_protocol::protocol::EnvironmentConfig;
     use codex_protocol::protocol::EnvironmentConfigState;
@@ -544,6 +575,10 @@ mod tests {
                 workspace_roots: Vec::new(),
                 config: EnvironmentConfigState::Ready(EnvironmentConfig {
                     allow_login_shell: true,
+                    workspace_roots: Vec::new(),
+                    windows_sandbox_level: WindowsSandboxLevel::Disabled,
+                    windows_sandbox_private_desktop: true,
+                    use_legacy_landlock: false,
                     permission_profile: PermissionProfileSnapshot::legacy(
                         PermissionProfile::read_only(),
                     ),

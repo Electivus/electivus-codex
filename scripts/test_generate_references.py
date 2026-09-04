@@ -1,7 +1,10 @@
 import contextlib
+import hashlib
 import io
+import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -18,10 +21,46 @@ REFERENCE_GENERATORS = (
     ("hooks", hooks_reference, hooks_reference.DEFAULT_OUTPUT_PATH),
     ("tool", tool_reference, tool_reference.DEFAULT_OUTPUT_PATH),
 )
+PENDING_REFERENCE_POLICY_PATH = (
+    Path(__file__).resolve().parents[1]
+    / ".github"
+    / "pending-upstream-generated-references.json"
+)
+GITHUB_TRACKING_RE = re.compile(
+    r"https://github\.com/Electivus/electivus-codex/(?:issues|pull)/\d+"
+)
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
 class ReferenceGeneratorsTest(unittest.TestCase):
     def test_cli_defaults_stdout_and_committed_docs_stay_synchronized(self) -> None:
+        with PENDING_REFERENCE_POLICY_PATH.open(encoding="utf-8") as policy_file:
+            policy = json.load(policy_file)
+        pending = policy.get("pending_upstream_references", {})
+        self.assertIsInstance(pending, dict)
+        committed_paths = {
+            name: committed_path
+            for name, _module, committed_path in REFERENCE_GENERATORS
+        }
+        self.assertEqual(set(pending) - committed_paths.keys(), set())
+
+        for name, record in pending.items():
+            with self.subTest(name=name, policy="pending"):
+                self.assertIsInstance(record, dict)
+                self.assertEqual(
+                    set(record),
+                    {"generated_sha256", "committed_sha256", "tracking"},
+                )
+                for field in ("generated_sha256", "committed_sha256", "tracking"):
+                    self.assertIsInstance(record[field], str)
+                self.assertIsNotNone(SHA256_RE.fullmatch(record["generated_sha256"]))
+                self.assertIsNotNone(SHA256_RE.fullmatch(record["committed_sha256"]))
+                self.assertIsNotNone(GITHUB_TRACKING_RE.fullmatch(record["tracking"]))
+                self.assertEqual(
+                    hashlib.sha256(committed_paths[name].read_bytes()).hexdigest(),
+                    record["committed_sha256"],
+                )
+
         for name, module, committed_path in REFERENCE_GENERATORS:
             with self.subTest(name=name):
                 script_path = Path(module.__file__)
@@ -34,7 +73,13 @@ class ReferenceGeneratorsTest(unittest.TestCase):
                     env=environment,
                 )
                 self.assertEqual(stdout_result.returncode, 0, stdout_result.stderr)
-                self.assertEqual(stdout_result.stdout, committed_path.read_bytes())
+                committed = committed_path.read_bytes()
+                if stdout_result.stdout != committed:
+                    self.assertIn(name, pending)
+                    self.assertEqual(
+                        hashlib.sha256(stdout_result.stdout).hexdigest(),
+                        pending[name]["generated_sha256"],
+                    )
 
                 with tempfile.TemporaryDirectory() as temp_dir:
                     default_output = Path(temp_dir) / committed_path.name
@@ -161,8 +206,12 @@ class ReferenceGeneratorsTest(unittest.TestCase):
             facts,
             hooks_reference.configured_handler_types(),
         )
-        self.assertIn("all 11 hook events", markdown)
-        self.assertIn("all 21 committed", markdown)
+        self.assertIn(f"all {len(schemas)} hook events", markdown)
+        self.assertIn(f"all {len(fixture_names)} committed", markdown)
+        if "Interrupt" in documented:
+            self.assertIn("stricter SessionEnd and Interrupt rules", markdown)
+        else:
+            self.assertNotIn("SessionEnd and Interrupt rules", markdown)
         self.assertIn("SessionEnd` does not declare", markdown)
         self.assertIn("permissionDecision:allow", markdown)
         self.assertTrue(all(name in markdown for name in fixture_names))

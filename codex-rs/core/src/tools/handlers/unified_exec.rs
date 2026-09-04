@@ -36,6 +36,8 @@ pub(crate) struct ExecCommandArgs {
     #[serde(default)]
     yield_time_ms: Option<u64>,
     #[serde(default)]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
     max_output_tokens: Option<usize>,
     #[serde(default)]
     sandbox_permissions: Option<SandboxPermissions>,

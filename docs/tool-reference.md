@@ -37,9 +37,9 @@ This catalog lists every statically defined model tool in Codex's core registry 
 | `request_plugin_install` | `features.tool_suggest`, `features.apps`, and `features.plugins`. | `function` | _Description is generated at runtime or is not available._ | `codex-rs/core/src/tools/handlers/request_plugin_install_spec.rs` |
 | `request_user_input` | `tools.experimental_request_user_input.enabled`; Default mode also uses `features.default_mode_request_user_input`. | `function` | _Description is generated at runtime or is not available._ | `codex-rs/core/src/tools/handlers/request_user_input_spec.rs` |
 | `send_message` | `features.multi_agent_v2` or model-selected v2. | `function` | Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn. | `codex-rs/core/src/tools/handlers/multi_agents_spec.rs` |
-| `send_user_message_async` | Root agent + model-advertised experimental tool support. | `function` | Send a concise, user-visible acknowledgment, important update, or blocking question. Returns immediately; any reply arrives asynchronously as a new user message. | `codex-rs/core/src/tools/handlers/send_user_message_async.rs` |
+| `send_user_message_async` | Root agent + model-advertised experimental tool support. | `function` | Send a concise message that needs the user's attention during ongoing work. The tool returns immediately without ending the turn or waiting for a reply; any reply arrives asynchronously as a new user message.<br>Only use this tool to ask for missing information, preferences, constraints, clarification, or approval. The message should be concise, easy to read and understand, and at the right level of abstraction that is appropriate for the user and task at hand. | `codex-rs/core/src/tools/handlers/send_user_message_async.rs` |
 | `skills.list` | No dedicated feature; enabled skill provider/orchestrator setting. | `function` | List skills owned by the requested authority. Returns each skill's authority, package, and main_resource. Pass the package to skills.read, and pass next_cursor back as cursor to continue. | `codex-rs/ext/skills/src/tools/list.rs` |
-| `skills.read` | No dedicated feature; enabled skill provider/orchestrator setting. | `function` | Read one page from a skill. Pass its provided package directly; root aliases are resolved automatically. Omit resource to read SKILL.md; to read another file, use the same package and pass the file's complete skill:// identifier as resource. For executor-backed skills, skill_root is the skill's absolute directory in the executor filesystem and can be used to locate bundled scripts. If the package is not provided, use skills.list to find it. Pass next_cursor back as cursor to continue. | `codex-rs/ext/skills/src/tools/read.rs` |
+| `skills.read` | No dedicated feature; enabled skill provider/orchestrator setting. | `function` | Read one page from a skill. Pass its provided package directly; root aliases are resolved automatically. Omit resource to read SKILL.md; to read another file, use the same package and pass the file's complete skill:// identifier as resource. For executor-backed skills, skill_root is the skill's absolute directory in the executor filesystem and can be used to locate bundled scripts. If the package is not provided, use skills.list to find it. Pass next_cursor back as cursor to continue the same snapshot while it is cached; omit cursor to read again. | `codex-rs/ext/skills/src/tools/read.rs` |
 | `spawn_agent` | `features.multi_agent_v2` or model-selected v2. | `function` | _Description is generated at runtime or is not available._ | `codex-rs/core/src/tools/handlers/multi_agents_spec.rs` |
 | `test_sync_tool` | No user feature; model test-tool capability. | `function` | Internal synchronization helper used by Codex integration tests. | `codex-rs/core/src/tools/handlers/test_sync_spec.rs` |
 | `tool_search` | No active feature; model search + namespaces + deferred tools. | `hosted` | Search deferred tool metadata and load matching tools. | `codex-rs/core/src/tools/handlers/tool_search_spec.rs` |
@@ -1055,7 +1055,7 @@ None
 let properties = BTreeMap::from([(
             "message".to_string(),
             JsonSchema::string(Some(
-                "The concise question or update to send to the user.".to_string(),
+                "The concise question to send to the user.".to_string(),
             )),
         )]);
 
@@ -1212,6 +1212,13 @@ let properties = BTreeMap::from([
                 Some(vec!["id".to_string(), "participants".to_string()]),
                 Some(false.into()),
             ),
+        ),
+        (
+            "wait_for_git_enrichment".to_string(),
+            JsonSchema::boolean(Some(
+                "Wait for Git enrichment for the current turn to finish, subject to a timeout."
+                    .to_string(),
+            )),
         ),
     ]);
 

@@ -16,7 +16,10 @@ pub struct CommandToolOptions {
 #[cfg(test)]
 pub fn create_exec_command_tool(options: CommandToolOptions) -> ToolSpec {
     create_exec_command_tool_with_environment_id(
-        options, /*include_environment_id*/ false, /*include_shell_parameter*/ true,
+        options,
+        /*include_environment_id*/ false,
+        /*include_shell_parameter*/ true,
+        /*include_windows_shell_guidance*/ cfg!(windows),
     )
 }
 
@@ -24,6 +27,7 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
     options: CommandToolOptions,
     include_environment_id: bool,
     include_shell_parameter: bool,
+    include_windows_shell_guidance: bool,
 ) -> ToolSpec {
     let yield_time = options.tool_execution.yield_time();
     let yield_time_ms_description = format!(
@@ -94,7 +98,7 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
 
     ToolSpec::Function(ResponsesApiTool {
         name: "exec_command".to_string(),
-        description: if cfg!(windows) {
+        description: if include_windows_shell_guidance {
             format!(
                 "Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n{}",
                 windows_shell_guidance()

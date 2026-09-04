@@ -287,14 +287,16 @@ fn paginated_turn_history(thread_id: ThreadId) -> Vec<RolloutItem> {
         "turn-1", /*started_at*/ 10, /*completed_at*/ 20,
     ));
     history.push(turn_started("turn-2", /*started_at*/ 30));
+    let request_failed = serde_json::from_value(serde_json::json!({
+        "message": "request failed",
+        "codex_error_info": CodexErrorInfo::ServerOverloaded,
+    }))
+    .expect("test error event should deserialize with optional fields defaulted");
     history.push(turn_complete(
         "turn-2",
         /*started_at*/ 30,
         /*completed_at*/ 40,
-        Some(ErrorEvent {
-            message: "request failed".to_string(),
-            codex_error_info: Some(CodexErrorInfo::ServerOverloaded),
-        }),
+        Some(request_failed),
     ));
     history.push(turn_started("turn-3", /*started_at*/ 50));
     history

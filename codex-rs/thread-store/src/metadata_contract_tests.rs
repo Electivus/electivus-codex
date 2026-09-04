@@ -4,15 +4,12 @@ use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
 use codex_protocol::ThreadId;
-use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
-use codex_protocol::protocol::TurnContextItem;
 use codex_rollout::RolloutItem;
 use codex_utils_absolute_path::test_support::PathExt;
 use codex_utils_path_uri::PathUri;
@@ -81,29 +78,14 @@ async fn postgres_contract_metadata_matches_public_thread_store_semantics()
     store
         .append_items(AppendThreadItemsParams {
             thread_id: cwd_thread_id,
-            items: vec![RolloutItem::TurnContext(TurnContextItem {
-                turn_id: Some("latest-turn".to_string()),
-                cwd: PathUri::from_host_native_path(&latest_cwd)?,
-                workspace_roots: None,
-                current_date: None,
-                timezone: None,
-                approval_policy: AskForApproval::Never,
-                approvals_reviewer: None,
-                sandbox_policy: SandboxPolicy::DangerFullAccess.into(),
-                permission_profile: None,
-                active_permission_profile: None,
-                network: None,
-                file_system_sandbox_policy: None,
-                model: "metadata-contract-model".to_string(),
-                comp_hash: None,
-                personality: None,
-                collaboration_mode: None,
-                multi_agent_version: None,
-                multi_agent_mode: None,
-                realtime_active: None,
-                effort: None,
-                summary: ReasoningSummary::Auto,
-            })],
+            items: vec![RolloutItem::TurnContext(
+                crate::test_support::turn_context_item(
+                    "latest-turn",
+                    PathUri::from_host_native_path(&latest_cwd)?,
+                    codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
+                    "metadata-contract-model",
+                ),
+            )],
         })
         .await?;
     store
@@ -117,6 +99,8 @@ async fn postgres_contract_metadata_matches_public_thread_store_semantics()
     fixture.cleanup().await
 }
 
+// The destination is `String` before the catch-up and `SanitizedGitUrl` after it.
+#[allow(clippy::useless_conversion)]
 async fn assert_metadata_contract(
     store: &dyn ThreadStore,
     thread_id: ThreadId,
@@ -201,7 +185,12 @@ async fn assert_metadata_contract(
             git_info: Some(GitInfoPatch {
                 sha: Some(Some("contract-sha".to_string())),
                 branch: Some(Some("main".to_string())),
-                origin_url: Some(Some("https://example.com/acme/contract.git".to_string())),
+                origin_url: Some(Some(
+                    "https://example.com/acme/contract.git"
+                        .to_string()
+                        .try_into()
+                        .expect("valid contract git origin URL"),
+                )),
             }),
             memory_mode: Some(ThreadMemoryMode::Disabled),
             ..Default::default()
@@ -278,7 +267,12 @@ async fn assert_metadata_contract(
         thread_id,
         ThreadMetadataPatch {
             git_info: Some(GitInfoPatch {
-                origin_url: Some(Some(boundary_origin.clone())),
+                origin_url: Some(Some(
+                    boundary_origin
+                        .clone()
+                        .try_into()
+                        .expect("valid boundary git origin URL"),
+                )),
                 ..Default::default()
             }),
             ..Default::default()
@@ -306,7 +300,12 @@ async fn assert_metadata_contract(
         thread_id,
         ThreadMetadataPatch {
             git_info: Some(GitInfoPatch {
-                origin_url: Some(Some(oversized_origin.clone())),
+                origin_url: Some(Some(
+                    oversized_origin
+                        .clone()
+                        .try_into()
+                        .expect("valid oversized git origin URL"),
+                )),
                 ..Default::default()
             }),
             ..Default::default()
@@ -330,7 +329,12 @@ async fn assert_metadata_contract(
         thread_id,
         ThreadMetadataPatch {
             git_info: Some(GitInfoPatch {
-                origin_url: Some(Some("https://example.com/not-a-repository.git".to_string())),
+                origin_url: Some(Some(
+                    "https://example.com/not-a-repository.git"
+                        .to_string()
+                        .try_into()
+                        .expect("valid git origin URL"),
+                )),
                 ..Default::default()
             }),
             ..Default::default()

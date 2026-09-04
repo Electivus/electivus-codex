@@ -1258,29 +1258,16 @@ impl PostgresFixture {
         } else {
             r"C:\Users\msilvane\git\scrape-golden"
         };
-        let template = TurnContextItem {
-            turn_id: Some("foreign-host-context".to_string()),
-            cwd: AbsolutePathBuf::try_from(cwd.to_path_buf())?.into(),
-            workspace_roots: None,
-            current_date: None,
-            timezone: None,
-            approval_policy: codex_protocol::protocol::AskForApproval::Never,
-            approvals_reviewer: None,
-            sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess.into(),
-            permission_profile: None,
-            active_permission_profile: None,
-            network: None,
-            file_system_sandbox_policy: None,
-            model: "mock-model".to_string(),
-            comp_hash: None,
-            personality: None,
-            collaboration_mode: None,
-            multi_agent_version: None,
-            multi_agent_mode: None,
-            realtime_active: None,
-            effort: None,
-            summary: codex_protocol::config_types::ReasoningSummary::Auto,
-        };
+        let sandbox_policy: codex_protocol::DurableSandboxPolicy =
+            codex_protocol::protocol::SandboxPolicy::DangerFullAccess.into();
+        let template: TurnContextItem = serde_json::from_value(json!({
+            "turn_id": "foreign-host-context",
+            "cwd": AbsolutePathBuf::try_from(cwd.to_path_buf())?,
+            "approval_policy": codex_protocol::protocol::AskForApproval::Never,
+            "sandbox_policy": sandbox_policy,
+            "model": "mock-model",
+            "summary": codex_protocol::config_types::ReasoningSummary::Auto,
+        }))?;
         writer
             .resume_thread(store::ResumeThreadParams {
                 thread_id,

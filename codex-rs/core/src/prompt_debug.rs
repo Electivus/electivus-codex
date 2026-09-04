@@ -100,7 +100,7 @@ pub(crate) async fn build_prompt_input_from_session(
     }
 
     let history = sess.clone_history().await;
-    let prompt_input = history.for_prompt(&step_context.model_info.input_modalities);
+    let prompt_input = history.for_prompt(&step_context.settings.model_info.input_modalities);
     let base_instructions = sess.get_base_instructions().await;
     let prompt = build_prompt(prompt_input, step_context.as_ref(), base_instructions);
 

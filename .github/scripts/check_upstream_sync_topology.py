@@ -18,6 +18,7 @@ from upstream_sync_attempt import (
     _is_ancestor,
     _merge_tree,
     _read_chain_at,
+    _release_lineage_advances,
     _run_git,
     _verify_prepared,
     synchronization_release_commit,
@@ -128,11 +129,11 @@ def _validate_synchronization_topology(
             _require_commit(
                 repo, candidate.previous_release_commit, "manifest predecessor"
             )
-            if not _is_ancestor(
+            if not _release_lineage_advances(
                 repo, candidate.previous_release_commit, candidate.release.commit
             ):
                 raise TopologyError(
-                    "manifest predecessor is not an ancestor of its release commit"
+                    "manifest release does not advance from its predecessor"
                 )
 
     try:
@@ -151,11 +152,11 @@ def _validate_synchronization_topology(
                 candidate.previous_release_commit,
                 "fork manifest predecessor",
             )
-            if not _is_ancestor(
+            if not _release_lineage_advances(
                 repo, candidate.previous_release_commit, candidate.release.commit
             ):
                 raise TopologyError(
-                    "fork manifest predecessor is not an ancestor of its release commit"
+                    "fork manifest release does not advance from its predecessor"
                 )
 
     try:

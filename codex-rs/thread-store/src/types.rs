@@ -4,7 +4,9 @@ use std::sync::Arc;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_app_server_protocol::CodexErrorInfo;
+use codex_app_server_protocol::ThreadTimelineEntry;
 use codex_protocol::DurablePermissionProfile;
+use codex_protocol::SanitizedGitUrl;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -120,6 +122,10 @@ pub(crate) fn initial_session_meta_item(
             session_id: params.session_id,
             id: params.thread_id,
             forked_from_id: params.forked_from_id,
+            forked_from_ordinal_exclusive: params
+                .forked_from_id
+                .and(params.history_base)
+                .map(|base| base.end_ordinal_exclusive),
             parent_thread_id: params.parent_thread_id,
             timestamp,
             cwd: params.metadata.cwd.clone().unwrap_or_default(),
@@ -617,6 +623,22 @@ pub struct ItemPage {
     pub backwards_cursor: Option<String>,
 }
 
+/// Parameters for reading a bounded mixed thread timeline.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListTimelineParams {
+    pub thread_id: ThreadId,
+    pub cursor: Option<String>,
+    pub page_size: usize,
+}
+
+/// Ordinary items, realtime facts, and the session state preceding their page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimelinePage {
+    pub items: Vec<ThreadTimelineEntry>,
+    pub next_cursor: Option<String>,
+    pub active_realtime_session_at_page_start: Option<String>,
+}
+
 /// Parameters for searching visible message occurrences within one paginated thread.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchThreadOccurrencesParams {
@@ -767,7 +789,7 @@ pub struct GitInfoPatch {
         skip_serializing_if = "Option::is_none",
         with = "optional_option"
     )]
-    pub origin_url: ClearableField<String>,
+    pub origin_url: ClearableField<SanitizedGitUrl>,
 }
 
 impl GitInfoPatch {

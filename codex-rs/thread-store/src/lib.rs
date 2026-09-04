@@ -49,11 +49,14 @@ mod search_thread_occurrences_contract_tests;
 #[path = "search_threads_contract_tests.rs"]
 mod search_threads_contract_tests;
 mod store;
+#[cfg(test)]
+mod test_support;
 mod thread_metadata_sync;
 mod thread_sections;
 mod types;
 
 pub use codex_state::MAX_QUEUE_ITEMS;
+pub use codex_state::ProjectSortKey;
 pub use codex_state::QueuedUserSubmissionRecord;
 pub use error::ThreadStoreError;
 pub use error::ThreadStoreResult;
@@ -112,6 +115,7 @@ pub use types::ItemPage;
 pub use types::ItemSortKey;
 pub use types::ListItemsParams;
 pub use types::ListThreadsParams;
+pub use types::ListTimelineParams;
 pub use types::ListTurnsParams;
 pub use types::LoadThreadHistoryParams;
 pub use types::MoveThreadToSectionParams;
@@ -143,5 +147,6 @@ pub use types::ThreadPersistenceMetadata;
 pub use types::ThreadRelationFilter;
 pub use types::ThreadSearchPage;
 pub use types::ThreadSortKey;
+pub use types::TimelinePage;
 pub use types::TurnPage;
 pub use types::UpdateThreadMetadataParams;

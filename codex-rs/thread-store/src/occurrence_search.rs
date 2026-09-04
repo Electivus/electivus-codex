@@ -43,22 +43,9 @@ pub(crate) fn searchable_text(item: &ThreadItem) -> Option<Cow<'_, str>> {
             let text = markdown_to_search_text(text);
             (!text.is_empty()).then_some(Cow::Owned(text))
         }
-        ThreadItem::HookPrompt { .. }
-        | ThreadItem::Plan { .. }
-        | ThreadItem::Reasoning { .. }
-        | ThreadItem::CommandExecution { .. }
-        | ThreadItem::FileChange { .. }
-        | ThreadItem::McpToolCall { .. }
-        | ThreadItem::DynamicToolCall { .. }
-        | ThreadItem::CollabAgentToolCall { .. }
-        | ThreadItem::SubAgentActivity { .. }
-        | ThreadItem::WebSearch(_)
-        | ThreadItem::ImageView { .. }
-        | ThreadItem::Sleep(_)
-        | ThreadItem::ImageGeneration(_)
-        | ThreadItem::EnteredReviewMode { .. }
-        | ThreadItem::ExitedReviewMode { .. }
-        | ThreadItem::ContextCompaction { .. } => None,
+        // Only user and agent messages contribute searchable text. New item kinds remain
+        // non-searchable until their text semantics are defined explicitly.
+        _ => None,
     }
 }
 
