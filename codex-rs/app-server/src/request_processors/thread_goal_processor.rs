@@ -1,3 +1,6 @@
+use super::thread_input::DIRECT_INPUT_TO_MULTI_AGENT_V2_SUBAGENT_ERROR;
+use super::thread_input::can_accept_direct_input;
+use super::thread_input::ensure_direct_input_allowed;
 use super::*;
 use codex_goal_extension::GoalObjectiveUpdate;
 use codex_goal_extension::GoalPreviewUpdate;
@@ -6,8 +9,16 @@ use codex_goal_extension::GoalServiceError;
 use codex_goal_extension::GoalSetRequest;
 use codex_goal_extension::GoalTokenBudgetUpdate;
 use codex_protocol::error::CodexErrorDetails;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
 use codex_protocol::protocol::ThreadSettingsSnapshot;
+use codex_rollout::RolloutRecorder;
+
+enum GoalAccess {
+    Read,
+    Mutate,
+}
 
 #[derive(Clone)]
 pub(crate) struct ThreadGoalRequestProcessor {
@@ -121,7 +132,9 @@ impl ThreadGoalRequestProcessor {
         }
 
         let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
-        let state_db = self.state_db_for_materialized_thread(thread_id).await?;
+        let state_db = self
+            .state_db_for_materialized_thread(thread_id, GoalAccess::Mutate)
+            .await?;
         self.reconcile_thread_goal_rollout(thread_id, &state_db)
             .await?;
         let max_goal_token_budget = match self.thread_manager.get_thread(thread_id).await {
@@ -166,7 +179,7 @@ impl ThreadGoalRequestProcessor {
                     // rollout. Once materialized, normal settings updates own this event.
                     let persisted_settings = thread.thread_settings_snapshot().await;
                     let items = [
-                        thread_settings_applied_item(persisted_settings.clone()),
+                        thread_settings_applied_item(thread_id, persisted_settings.clone()),
                         outcome.thread_goal_updated_item(),
                     ];
                     match thread.append_rollout_items(&items).await {
@@ -179,6 +192,7 @@ impl ThreadGoalRequestProcessor {
                             } else {
                                 thread
                                     .append_rollout_items(&[thread_settings_applied_item(
+                                        thread_id,
                                         current_settings,
                                     )])
                                     .await
@@ -219,7 +233,9 @@ impl ThreadGoalRequestProcessor {
         }
 
         let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
-        let state_db = self.state_db_for_materialized_thread(thread_id).await?;
+        let state_db = self
+            .state_db_for_materialized_thread(thread_id, GoalAccess::Read)
+            .await?;
         let goal = self
             .goal_service
             .get_thread_goal(state_db.thread_goals(), thread_id)
@@ -239,7 +255,9 @@ impl ThreadGoalRequestProcessor {
         }
 
         let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
-        let state_db = self.state_db_for_materialized_thread(thread_id).await?;
+        let state_db = self
+            .state_db_for_materialized_thread(thread_id, GoalAccess::Mutate)
+            .await?;
         self.reconcile_thread_goal_rollout(thread_id, &state_db)
             .await?;
 
@@ -267,8 +285,13 @@ impl ThreadGoalRequestProcessor {
     async fn state_db_for_materialized_thread(
         &self,
         thread_id: ThreadId,
+        access: GoalAccess,
     ) -> Result<StateDbHandle, JSONRPCErrorError> {
+        let is_mutation = matches!(access, GoalAccess::Mutate);
         if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
+            if is_mutation {
+                ensure_direct_input_allowed(thread.as_ref()).await?;
+            }
             if let Some(state_db) = thread.state_db() {
                 if thread.rollout_path().is_none() && state_db.uses_local_rollout_history() {
                     return Err(invalid_request(format!(
@@ -287,16 +310,56 @@ impl ThreadGoalRequestProcessor {
             .clone()
             .filter(|state_db| !state_db.uses_local_rollout_history())
         {
+            // Runtime-state projections do not carry multi-agent version metadata. Mutations
+            // must inspect canonical history so unloaded PostgreSQL children follow resume's
+            // latest-version and legacy TurnContext fallback rules.
             match self
                 .thread_manager
                 .read_stored_thread(StoreReadThreadParams {
                     thread_id,
                     include_archived: true,
-                    include_history: false,
+                    include_history: is_mutation,
                 })
                 .await
             {
-                Ok(_) => return Ok(state_db),
+                Ok(stored_thread) => {
+                    if is_mutation {
+                        let history = stored_thread.history.ok_or_else(|| {
+                            internal_error(format!(
+                                "failed to read thread ownership: persisted history missing for {thread_id}"
+                            ))
+                        })?;
+                        let session_meta = history.items.iter().find_map(|item| match item {
+                            RolloutItem::SessionMeta(session_meta) => Some(&session_meta.meta),
+                            _ => None,
+                        });
+                        let Some(session_meta) = session_meta else {
+                            return Err(internal_error(format!(
+                                "failed to read thread ownership: session metadata missing for {thread_id}"
+                            )));
+                        };
+                        if session_meta.id != thread_id {
+                            return Err(invalid_request(
+                                "thread metadata does not match requested id",
+                            ));
+                        }
+                        let source = session_meta.source.clone();
+                        let initial_history = InitialHistory::Resumed(ResumedHistory {
+                            conversation_id: stored_thread.thread_id,
+                            history: Arc::new(history.items),
+                            rollout_path: stored_thread.rollout_path,
+                        });
+                        if !can_accept_direct_input(
+                            initial_history.get_multi_agent_version(),
+                            &source,
+                        ) {
+                            return Err(invalid_request(
+                                DIRECT_INPUT_TO_MULTI_AGENT_V2_SUBAGENT_ERROR,
+                            ));
+                        }
+                    }
+                    return Ok(state_db);
+                }
                 Err(error) if matches!(error.details(), CodexErrorDetails::ThreadNotFound(_)) => {
                     return Err(invalid_request(format!("thread not found: {thread_id}")));
                 }
@@ -307,7 +370,7 @@ impl ThreadGoalRequestProcessor {
                 }
             }
         } else {
-            codex_rollout::find_thread_path_by_id_str(
+            let rollout_path = codex_rollout::find_thread_path_by_id_str(
                 &self.config.codex_home,
                 &thread_id.to_string(),
                 self.state_db.as_deref(),
@@ -317,6 +380,38 @@ impl ThreadGoalRequestProcessor {
                 internal_error(format!("failed to locate thread id {thread_id}: {err}"))
             })?
             .ok_or_else(|| invalid_request(format!("thread not found: {thread_id}")))?;
+            if is_mutation {
+                let session_meta = codex_rollout::read_session_meta_line(&rollout_path)
+                    .await
+                    .map_err(|err| {
+                        internal_error(format!("failed to read thread ownership: {err}"))
+                    })?;
+                if session_meta.meta.id != thread_id {
+                    return Err(invalid_request(
+                        "thread metadata does not match requested id",
+                    ));
+                }
+                if matches!(
+                    session_meta.meta.source,
+                    SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+                ) {
+                    // Match resume's latest version metadata, including legacy TurnContext
+                    // fallback, rather than trusting only the initial session header.
+                    let history = RolloutRecorder::get_rollout_history(&rollout_path)
+                        .await
+                        .map_err(|err| {
+                            internal_error(format!("failed to read thread ownership: {err}"))
+                        })?;
+                    if !can_accept_direct_input(
+                        history.get_multi_agent_version(),
+                        &session_meta.meta.source,
+                    ) {
+                        return Err(invalid_request(
+                            DIRECT_INPUT_TO_MULTI_AGENT_V2_SUBAGENT_ERROR,
+                        ));
+                    }
+                }
+            }
         }
 
         self.state_db
@@ -377,7 +472,10 @@ impl ThreadGoalRequestProcessor {
     }
 
     pub(crate) async fn emit_thread_goal_snapshot(&self, thread_id: ThreadId) {
-        let state_db = match self.state_db_for_materialized_thread(thread_id).await {
+        let state_db = match self
+            .state_db_for_materialized_thread(thread_id, GoalAccess::Read)
+            .await
+        {
             Ok(state_db) => state_db,
             Err(err) => {
                 warn!(
@@ -459,9 +557,15 @@ impl ThreadGoalRequestProcessor {
     }
 }
 
-fn thread_settings_applied_item(thread_settings: ThreadSettingsSnapshot) -> RolloutItem {
+fn thread_settings_applied_item(
+    thread_id: ThreadId,
+    thread_settings: ThreadSettingsSnapshot,
+) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
-        ThreadSettingsAppliedEvent { thread_settings },
+        ThreadSettingsAppliedEvent {
+            thread_id: Some(thread_id),
+            thread_settings,
+        },
     ))
 }
 

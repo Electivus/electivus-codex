@@ -1,6 +1,9 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
+use crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS;
+use crate::exec_policy::prompt_is_rejected_by_policy;
 use crate::function_tool::FunctionCallError;
 use crate::maybe_emit_implicit_skill_invocation;
 use crate::tools::context::ExecCommandToolOutput;
@@ -39,6 +42,7 @@ use codex_sandboxing::SandboxManager;
 use codex_sandboxing::SandboxType;
 use codex_sandboxing::SandboxablePreference;
 use codex_shell_command::shell_detect::detect_shell_type;
+use codex_tools::JsonSchema;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 use codex_utils_output_truncation::approx_token_count;
@@ -58,21 +62,31 @@ pub(crate) struct ExecCommandHandlerOptions {
     pub(crate) exec_permission_approvals_enabled: bool,
     pub(crate) include_environment_id: bool,
     pub(crate) include_shell_parameter: bool,
+    pub(crate) include_windows_shell_guidance: bool,
     pub(crate) tool_execution: codex_config::ToolExecutionPolicy,
+}
+
+#[derive(Clone, Copy)]
+enum ExecCommandLifetime {
+    Interactive,
+    OneShot,
 }
 
 pub struct ExecCommandHandler {
     options: ExecCommandHandlerOptions,
+    lifetime: ExecCommandLifetime,
 }
 
 impl Default for ExecCommandHandler {
     fn default() -> Self {
         Self {
+            lifetime: ExecCommandLifetime::Interactive,
             options: ExecCommandHandlerOptions {
                 allow_login_shell: false,
                 exec_permission_approvals_enabled: false,
                 include_environment_id: false,
                 include_shell_parameter: true,
+                include_windows_shell_guidance: cfg!(windows),
                 tool_execution: codex_config::ToolExecutionPolicy::default(),
             },
         }
@@ -81,7 +95,17 @@ impl Default for ExecCommandHandler {
 
 impl ExecCommandHandler {
     pub(crate) fn new(options: ExecCommandHandlerOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            lifetime: ExecCommandLifetime::Interactive,
+        }
+    }
+
+    pub(crate) fn one_shot(options: ExecCommandHandlerOptions) -> Self {
+        Self {
+            options,
+            lifetime: ExecCommandLifetime::OneShot,
+        }
     }
 }
 
@@ -91,7 +115,7 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
     }
 
     fn spec(&self) -> ToolSpec {
-        create_exec_command_tool_with_environment_id(
+        let spec = create_exec_command_tool_with_environment_id(
             CommandToolOptions {
                 allow_login_shell: self.options.allow_login_shell,
                 exec_permission_approvals_enabled: self.options.exec_permission_approvals_enabled,
@@ -99,14 +123,22 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
             },
             self.options.include_environment_id,
             self.options.include_shell_parameter,
-        )
+            self.options.include_windows_shell_guidance,
+        );
+        match self.lifetime {
+            ExecCommandLifetime::Interactive => spec,
+            ExecCommandLifetime::OneShot => one_shot_exec_command_spec(spec),
+        }
     }
 
     fn supports_parallel_tool_calls(&self) -> bool {
         true
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(self.handle_call(invocation))
     }
 }
@@ -120,6 +152,7 @@ impl ExecCommandHandler {
             session,
             turn,
             step_context,
+            cancellation_token,
             tracker,
             call_id,
             payload,
@@ -136,8 +169,12 @@ impl ExecCommandHandler {
         };
 
         let manager: &UnifiedExecProcessManager = &session.services.unified_exec_manager;
-        let context =
-            UnifiedExecContext::new(session.clone(), step_context.clone(), call_id.clone());
+        let context = UnifiedExecContext::new(
+            session.clone(),
+            step_context.clone(),
+            cancellation_token,
+            call_id.clone(),
+        );
         let environment_args: ExecCommandEnvironmentArgs = parse_arguments(&arguments)?;
         let Some(turn_environment) = resolve_tool_environment(
             &step_context.environments,
@@ -167,7 +204,7 @@ impl ExecCommandHandler {
             && SandboxManager::new().select_initial(
                 turn_environment.permission_profile(),
                 SandboxablePreference::Auto,
-                turn.windows_sandbox_level,
+                turn_environment.config().windows_sandbox_level,
                 turn.network.is_some(),
             ) != SandboxType::None;
         // `to_abs_path()` alone cannot identify foreign drive paths: `file:///C:/repo` is
@@ -249,8 +286,9 @@ impl ExecCommandHandler {
         let command_for_display = codex_shell_command::parse_command::shlex_join(&command);
 
         let ExecCommandArgs {
-            tty,
+            mut tty,
             yield_time_ms,
+            timeout_ms,
             max_output_tokens,
             sandbox_permissions: _,
             additional_permissions,
@@ -258,16 +296,42 @@ impl ExecCommandHandler {
             prefix_rule,
             ..
         } = args;
-        let resolved_yield = resolve_yield_timing(
-            turn.config.tool_execution,
-            if tty {
-                YieldTimingClass::InteractiveExec
-            } else {
-                YieldTimingClass::Global
-            },
-            yield_time_ms,
-        );
-        let timing_adjustment = adjustment_message(TimingParameter::Yield, resolved_yield);
+        let (completion_timeout, resolved_yield) = match self.lifetime {
+            ExecCommandLifetime::Interactive => (
+                None,
+                resolve_yield_timing(
+                    turn.config.tool_execution,
+                    if tty {
+                        YieldTimingClass::InteractiveExec
+                    } else {
+                        YieldTimingClass::Global
+                    },
+                    yield_time_ms,
+                ),
+            ),
+            ExecCommandLifetime::OneShot => {
+                tty = false;
+                (
+                    Some(Duration::from_millis(
+                        timeout_ms.unwrap_or(DEFAULT_EXEC_COMMAND_TIMEOUT_MS),
+                    )),
+                    // One-shot execution uses completion_timeout as its deadline and does not
+                    // expose yield_time_ms. Keep the request field populated for the shared
+                    // executor without applying the interactive timing policy to it.
+                    resolve_yield_timing(
+                        turn.config.tool_execution,
+                        YieldTimingClass::Global,
+                        /*requested_ms*/ None,
+                    ),
+                )
+            }
+        };
+        let timing_adjustment = match self.lifetime {
+            ExecCommandLifetime::Interactive => {
+                adjustment_message(TimingParameter::Yield, resolved_yield)
+            }
+            ExecCommandLifetime::OneShot => None,
+        };
 
         let exec_permission_approvals_enabled =
             session.features().enabled(Feature::ExecPermissionApprovals);
@@ -288,16 +352,13 @@ impl ExecCommandHandler {
 
         // Sticky turn permissions have already been approved, so they should
         // continue through the normal exec approval flow for the command.
+        let approval_policy = context.step_context.settings.approval_policy();
         if effective_additional_permissions
             .sandbox_permissions
             .requests_sandbox_override()
             && !effective_additional_permissions.permissions_preapproved
-            && !matches!(
-                context.step_context.turn.approval_policy(),
-                codex_protocol::protocol::AskForApproval::OnRequest
-            )
+            && prompt_is_rejected_by_policy(approval_policy, /*prompt_is_rule*/ false).is_some()
         {
-            let approval_policy = context.step_context.turn.approval_policy();
             manager.release_process_id(process_id).await;
             return Err(FunctionCallError::RespondToModel(format!(
                 "approval policy is {approval_policy:?}; reject command — you cannot ask for escalated permissions if the approval policy is {approval_policy:?}"
@@ -313,7 +374,7 @@ impl ExecCommandHandler {
             || {
                 normalize_and_validate_additional_permissions(
                     additional_permissions_allowed,
-                    context.step_context.turn.approval_policy(),
+                    approval_policy,
                     effective_additional_permissions.sandbox_permissions,
                     effective_additional_permissions.additional_permissions,
                     effective_additional_permissions.permissions_preapproved,
@@ -336,6 +397,7 @@ impl ExecCommandHandler {
             turn_environment.clone(),
             context.session.clone(),
             Arc::clone(&context.step_context),
+            context.cancellation_token.clone(),
             Some(&tracker),
             &context.call_id,
             "exec_command",
@@ -353,7 +415,7 @@ impl ExecCommandHandler {
                 chunk_id: String::new(),
                 wall_time: std::time::Duration::ZERO,
                 raw_output: output.into_text().into_bytes(),
-                truncation_policy: turn.model_info.truncation_policy.into(),
+                truncation_policy: turn.model_info().truncation_policy.into(),
                 max_output_tokens,
                 process_id: None,
                 exit_code: None,
@@ -365,32 +427,34 @@ impl ExecCommandHandler {
         }
 
         emit_unified_exec_tty_metric(&turn.session_telemetry, tty);
-        match manager
-            .exec_command(
-                ExecCommandRequest {
-                    command,
-                    shell_type,
-                    hook_command: hook_command.clone(),
-                    process_id,
-                    yield_time_ms: resolved_yield.effective_ms,
-                    max_output_tokens,
-                    cwd,
-                    sandbox_cwd: native_environment_cwd,
-                    turn_environment: turn_environment.clone(),
-                    shell_mode,
-                    network: context.step_context.turn.network.clone(),
-                    tty,
-                    sandbox_permissions: effective_additional_permissions.sandbox_permissions,
-                    additional_permissions: normalized_additional_permissions,
-                    additional_permissions_preapproved: effective_additional_permissions
-                        .permissions_preapproved,
-                    justification,
-                    prefix_rule,
-                },
-                &context,
-            )
-            .await
-        {
+        let request = ExecCommandRequest {
+            command,
+            shell_type,
+            hook_command: hook_command.clone(),
+            process_id,
+            yield_time_ms: resolved_yield.effective_ms,
+            max_output_tokens,
+            cwd,
+            sandbox_cwd: native_environment_cwd,
+            turn_environment: turn_environment.clone(),
+            shell_mode,
+            network: context.step_context.turn.network.clone(),
+            tty,
+            sandbox_permissions: effective_additional_permissions.sandbox_permissions,
+            additional_permissions: normalized_additional_permissions,
+            additional_permissions_preapproved: effective_additional_permissions
+                .permissions_preapproved,
+            justification,
+            prefix_rule,
+        };
+        let result = match completion_timeout {
+            Some(timeout) => {
+                UnifiedExecProcessManager::exec_command_to_completion(request, &context, timeout)
+                    .await
+            }
+            None => manager.exec_command(request, &context).await,
+        };
+        match result {
             Ok(mut response) => {
                 response.timing_adjustment = timing_adjustment;
                 Ok(boxed_tool_output(response))
@@ -409,7 +473,7 @@ impl ExecCommandHandler {
                     chunk_id: generate_chunk_id(),
                     wall_time: output.duration,
                     raw_output: output_text.into_bytes(),
-                    truncation_policy: turn.model_info.truncation_policy.into(),
+                    truncation_policy: turn.model_info().truncation_policy.into(),
                     max_output_tokens,
                     // Sandbox denial is terminal, so there is no live
                     // process for write_stdin to resume.
@@ -430,6 +494,35 @@ impl ExecCommandHandler {
             )),
         }
     }
+}
+
+fn one_shot_exec_command_spec(spec: ToolSpec) -> ToolSpec {
+    let ToolSpec::Function(mut spec) = spec else {
+        unreachable!("exec_command has a function schema");
+    };
+    spec.description = spec.description.replacen(
+        "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
+        "Runs a command to completion and returns its output. The process is terminated on timeout or cancellation and cannot be resumed.",
+        1,
+    );
+    let properties = spec.parameters.properties.get_or_insert_default();
+    properties.remove("tty");
+    properties.remove("yield_time_ms");
+    properties.insert(
+        "timeout_ms".to_string(),
+        JsonSchema::number(Some(
+            "Maximum command runtime. Defaults to 10000 ms.".to_string(),
+        )),
+    );
+    if let Some(output_properties) = spec
+        .output_schema
+        .as_mut()
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        output_properties.remove("session_id");
+    }
+    ToolSpec::Function(spec)
 }
 
 impl CoreToolRuntime for ExecCommandHandler {

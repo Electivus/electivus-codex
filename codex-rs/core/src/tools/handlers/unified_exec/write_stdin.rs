@@ -7,11 +7,14 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolExecutor;
+use crate::tools::sandboxing::ToolError;
 use crate::tools::timing::TimingParameter;
 use crate::tools::timing::YieldTimingClass;
 use crate::tools::timing::adjustment_message;
 use crate::tools::timing::error_with_timing_adjustment;
 use crate::tools::timing::resolve_yield_timing;
+use crate::unified_exec::UnifiedExecContext;
+use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::WriteStdinInteractionEvent;
 use crate::unified_exec::WriteStdinRequest;
 use codex_tools::ToolName;
@@ -62,7 +65,10 @@ impl ToolExecutor<ToolInvocation> for WriteStdinHandler {
         true
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(self.handle_call(invocation))
     }
 }
@@ -75,6 +81,9 @@ impl WriteStdinHandler {
         let ToolInvocation {
             session,
             turn,
+            step_context,
+            cancellation_token,
+            call_id,
             payload,
             ..
         } = invocation;
@@ -98,26 +107,40 @@ impl WriteStdinHandler {
             },
             args.yield_time_ms,
         );
+        let context =
+            UnifiedExecContext::new(session.clone(), step_context, cancellation_token, call_id);
         let mut response = session
             .services
             .unified_exec_manager
-            .write_stdin(WriteStdinRequest {
-                process_id: args.session_id,
-                input: &args.chars,
-                yield_time_ms: resolved_yield.effective_ms,
-                max_output_tokens: args.max_output_tokens,
-                truncation_policy: turn.model_info.truncation_policy.into(),
-                interaction_event: Some(WriteStdinInteractionEvent {
-                    session: &session,
-                    turn: &turn,
-                }),
-            })
+            .write_stdin(
+                &context,
+                WriteStdinRequest {
+                    process_id: args.session_id,
+                    input: &args.chars,
+                    yield_time_ms: resolved_yield.effective_ms,
+                    max_output_tokens: args.max_output_tokens,
+                    truncation_policy: turn.model_info().truncation_policy.into(),
+                    interaction_event: Some(WriteStdinInteractionEvent {
+                        session: &session,
+                        turn: &turn,
+                    }),
+                },
+            )
             .await
             .map_err(|err| {
+                let message = match err {
+                    UnifiedExecError::StdinApproval(ToolError::Rejected(reason)) => {
+                        format!("write_stdin rejected: {reason}")
+                    }
+                    UnifiedExecError::StdinApproval(ToolError::Codex(err)) => {
+                        format!("write_stdin approval failed: {err}")
+                    }
+                    err => format!("write_stdin failed: {err}"),
+                };
                 FunctionCallError::RespondToModel(error_with_timing_adjustment(
                     TimingParameter::Yield,
                     resolved_yield,
-                    format!("write_stdin failed: {err}"),
+                    message,
                 ))
             })?;
         response.timing_adjustment = adjustment_message(TimingParameter::Yield, resolved_yield);

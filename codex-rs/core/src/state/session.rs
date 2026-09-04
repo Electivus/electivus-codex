@@ -13,6 +13,7 @@ use super::auto_compact_window::AutoCompactWindow;
 use super::auto_compact_window::AutoCompactWindowIds;
 use super::auto_compact_window::AutoCompactWindowSnapshot;
 use crate::context_manager::ContextManager;
+use crate::context_manager::HistoryReplacement;
 use crate::session::PreviousTurnSettings;
 use crate::session::session::SessionConfiguration;
 use crate::session::time_reminder::CurrentTimeReminderState;
@@ -128,24 +129,16 @@ impl SessionState {
         self.auto_compact_window.clear_prefill();
     }
 
-    pub(crate) fn replace_compacted_annotated_history(
+    pub(crate) fn replace_annotated_history(
         &mut self,
         items: Vec<ResponseItemEnvelope>,
         reference_context_item: Option<TurnContextItem>,
+        replacement: HistoryReplacement,
     ) {
-        // This entry point always starts a compacted history window.
-        self.history.replace_annotated(items);
-        self.history
-            .set_reference_context_item(reference_context_item);
-        self.auto_compact_window.clear_prefill();
-    }
-
-    pub(crate) fn replace_replayed_annotated_history(
-        &mut self,
-        items: Vec<ResponseItemEnvelope>,
-        reference_context_item: Option<TurnContextItem>,
-    ) {
-        self.history.replace_annotated_replayed(items);
+        match replacement {
+            HistoryReplacement::Compaction => self.history.replace_compacted(items),
+            HistoryReplacement::ReplayedReset => self.history.replace_annotated_replayed(items),
+        }
         self.history
             .set_reference_context_item(reference_context_item);
         self.auto_compact_window.clear_prefill();

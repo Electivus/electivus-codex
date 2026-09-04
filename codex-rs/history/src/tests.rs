@@ -72,7 +72,7 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
             item: response_item.clone(),
             metadata: Some(CodexHarnessMetadata {
                 client_authored: true,
-                ..Default::default()
+                fallback_token_limit_override: Some(20_000),
             }),
         }),
     };
@@ -85,7 +85,7 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
             "ordinal": 7,
             "type": "response_item",
             "payload": response_item,
-            "metadata": { "client_authored": true },
+            "metadata": { "client_authored": true, "fallback_token_limit_override": 20_000 },
         })
     );
     assert_eq!(serialized["payload"].get("metadata"), None);
@@ -98,7 +98,7 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
         envelope.metadata,
         Some(CodexHarnessMetadata {
             client_authored: true,
-            ..Default::default()
+            fallback_token_limit_override: Some(20_000),
         })
     );
     Ok(())
@@ -372,6 +372,16 @@ fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
             "type": "event_msg",
             "payload": { "type": "warning", "message": "heads up" },
         }),
+        json!({
+            "type": "realtime_item",
+            "payload": {
+                "id": "segment-1",
+                "realtime_session_id": "session-1",
+                "type": "transcript_segment",
+                "role": "assistant",
+                "text": "hello",
+            },
+        }),
     ];
 
     for expected in fixtures {
@@ -386,7 +396,7 @@ fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
 fn rollout_item_schema_matches_tagged_payload_and_sibling_metadata() -> Result<()> {
     let schema = serde_json::to_value(schemars::schema_for!(RolloutItem))?;
     let variants = schema["oneOf"].as_array().expect("rollout variants");
-    assert_eq!(variants.len(), 9);
+    assert_eq!(variants.len(), 10);
 
     for variant in variants {
         let required = variant["required"].as_array().expect("required fields");

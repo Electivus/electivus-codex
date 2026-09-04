@@ -2169,6 +2169,7 @@ impl CodexClient {
         params: CommandExecutionRequestApprovalParams,
     ) -> Result<()> {
         let CommandExecutionRequestApprovalParams {
+            kind: _,
             thread_id,
             turn_id,
             item_id,

@@ -68,7 +68,10 @@ impl ToolExecutor<ToolInvocation> for CodeModeWaitHandler {
         create_wait_tool(self.yield_time)
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(self.handle_call(invocation))
     }
 }
@@ -91,6 +94,7 @@ impl CodeModeWaitHandler {
             session.services.analytics_events_client.clone(),
             session.thread_id.to_string(),
             turn.sub_id.clone(),
+            turn.turn_metadata_state.clone(),
             call_id.clone(),
             WAIT_TOOL_NAME,
         );
@@ -104,6 +108,7 @@ impl CodeModeWaitHandler {
                 })?;
                 let exec = ExecContext { session, turn };
                 let started_at = std::time::Instant::now();
+                telemetry.cell_id = Some(args.cell_id.clone());
                 let cell_id = codex_code_mode::CellId::new(args.cell_id);
                 let (wait_response, resolved_yield) = if args.terminate {
                     (
@@ -182,12 +187,18 @@ impl CodeModeWaitHandler {
                             },
                         );
                 }
+                if let Some(code_mode_host_duration) = wait_response.code_mode_host_duration() {
+                    telemetry.record_code_mode_host_duration(code_mode_host_duration);
+                }
                 exec.session.services.elicitations.wait_until_clear().await;
+                let wall_time = wait_response
+                    .code_mode_host_duration()
+                    .unwrap_or_else(|| started_at.elapsed());
                 let mut output = handle_runtime_response(
                     &exec,
                     wait_response.into(),
                     args.max_tokens,
-                    started_at,
+                    wall_time,
                 )
                 .await
                 .map_err(|err| {

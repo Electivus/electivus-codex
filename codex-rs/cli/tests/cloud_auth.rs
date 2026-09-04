@@ -1,10 +1,5 @@
 //! Exercise Cloud credential isolation through the CLI using a synthetic login.
 
-// The release adds the base-URL validation exercised below. Keep this future
-// test out of the pre-release main checkpoint; the exact Catch-up replaces
-// this declaration with the active upstream test and implementation together.
-#![cfg(any())]
-
 use anyhow::Result;
 use predicates::str::contains;
 use serde_json::json;

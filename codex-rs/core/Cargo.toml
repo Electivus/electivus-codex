@@ -25,6 +25,7 @@ chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["derive"] }
 codex-analytics = { workspace = true }
 codex-agent-graph-store = { workspace = true }
+codex-agent-roles = { workspace = true }
 # Keep core dependency reconciliation explicit during upstream syncs.
 codex-api = { workspace = true }
 codex-app-server-protocol = { workspace = true }
@@ -52,6 +53,7 @@ codex-models-manager = { workspace = true }
 codex-shell-command = { workspace = true }
 codex-execpolicy = { workspace = true }
 codex-git-utils = { workspace = true }
+codex-guardian-context = { workspace = true }
 codex-history = { workspace = true }
 codex-hooks = { workspace = true }
 codex-http-client = { workspace = true }
@@ -148,6 +150,7 @@ codex-home = { workspace = true }
 codex-otel = { workspace = true }
 codex-test-binary-support = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
+codex-utils-redacted-string = { workspace = true }
 codex-web-search-extension = { workspace = true }
 core_test_support = { workspace = true }
 ctor = { workspace = true }
@@ -172,13 +175,5 @@ wiremock = { workspace = true }
 zstd = { workspace = true }
 
 [package.metadata.cargo-shear]
-# `codex-utils-cache` is consumed by the upstream history implementation after synchronization.
-ignored = ["codex-utils-cache", "openssl-sys"]
-# These suite modules are pre-adjusted for the synchronization Catch-up, where
-# the Baseline links them from `tests/suite/mod.rs`.
-ignored-paths = [
-    "tests/remote_env_windows/*.rs",
-    "tests/suite/rollout_compression.rs",
-    "tests/suite/settings_commits.rs",
-    "tests/suite/settings_constraints.rs",
-]
+ignored = ["openssl-sys"]
+ignored-paths = ["tests/remote_env_windows/*.rs"]

@@ -1,8 +1,10 @@
 use crate::context::ContextualUserFragment;
+use codex_context_fragments::RenderedFragment;
 use codex_model_context::estimate_response_item_model_visible_bytes;
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
@@ -23,6 +25,26 @@ enum MessageGroup {
     Mergeable,
 }
 
+pub(crate) fn build_rendered_message(fragments: Vec<RenderedFragment>) -> Option<ResponseItem> {
+    let role = fragments.first()?.role();
+    debug_assert!(fragments.iter().all(|fragment| fragment.role() == role));
+    let (content, content_item_kinds): (Vec<_>, Vec<_>) = fragments
+        .into_iter()
+        .map(|fragment| fragment.into_parts().1.into_parts())
+        .unzip();
+
+    Some(ResponseItem::Message {
+        id: None,
+        role: role.to_string(),
+        content,
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            content_item_kinds: Some(content_item_kinds),
+            ..Default::default()
+        }),
+    })
+}
+
 #[derive(Clone, Copy)]
 enum TextContentKind {
     Input,
@@ -36,6 +58,12 @@ impl TextContentKind {
             Self::Output => ContentItem::OutputText { text },
         }
     }
+}
+
+#[derive(Clone)]
+struct MessageContent {
+    content: ContentItem,
+    kind: Option<ContentItemKind>,
 }
 
 struct MessageTemplate {
@@ -87,54 +115,41 @@ impl MessageTemplate {
         }
     }
 
-    fn into_items(self, content_groups: Vec<Vec<ContentItem>>) -> Vec<ResponseItem> {
+    fn into_items(self, content_groups: Vec<Vec<MessageContent>>) -> Vec<ResponseItem> {
+        let preserve_content_item_kinds = self
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.content_item_kinds.as_ref())
+            .is_some();
         let mut id = self.id.clone();
         content_groups
             .into_iter()
-            .map(|content| {
+            .map(|content_group| {
+                let (content, content_item_kinds): (Vec<_>, Vec<_>) = content_group
+                    .into_iter()
+                    .map(|content| (content.content, content.kind))
+                    .unzip();
                 let mut item = self.item(content);
+                if preserve_content_item_kinds
+                    && let ResponseItem::Message {
+                        internal_chat_message_metadata_passthrough: metadata,
+                        ..
+                    } = &mut item
+                {
+                    metadata.get_or_insert_default().content_item_kinds = Some(
+                        content_item_kinds
+                            .into_iter()
+                            .map(|kind| {
+                                kind.unwrap_or_else(|| ContentItemKind("unknown".to_string()))
+                            })
+                            .collect(),
+                    );
+                }
                 item.set_id(id.take());
                 item
             })
             .collect()
     }
-}
-
-pub(crate) fn build_developer_update_item(text_sections: Vec<String>) -> Option<ResponseItem> {
-    build_text_message("developer", text_sections)
-}
-
-pub(crate) fn build_contextual_user_message(text_sections: Vec<String>) -> Option<ResponseItem> {
-    build_text_message("user", text_sections)
-}
-
-pub(crate) fn merge_contextual_fragments(
-    fragments: Vec<Box<dyn ContextualUserFragment>>,
-) -> Vec<ResponseItem> {
-    let mut messages: Vec<(&str, MessageGroup, Vec<String>)> = Vec::with_capacity(fragments.len());
-    for fragment in fragments {
-        let role = fragment.role();
-        let group = if fragment.requires_separate_message() {
-            MessageGroup::Standalone
-        } else {
-            MessageGroup::Mergeable
-        };
-        let text = fragment.render();
-        match messages.last_mut() {
-            Some((previous_role, previous_group, text_sections))
-                if *previous_role == role
-                    && *previous_group == MessageGroup::Mergeable
-                    && group == MessageGroup::Mergeable =>
-            {
-                text_sections.push(text);
-            }
-            _ => messages.push((role, group, vec![text])),
-        }
-    }
-    messages
-        .into_iter()
-        .filter_map(|(role, _, text_sections)| build_text_message(role, text_sections))
-        .collect()
 }
 
 /// Losslessly projects splittable messages while preserving their ordered UTF-8 text.
@@ -179,14 +194,34 @@ pub(crate) fn split_model_context_item_to_limit(item: ResponseItem) -> Vec<Respo
 }
 
 fn split_message(template: MessageTemplate, content: Vec<ContentItem>) -> Vec<ResponseItem> {
+    let content_item_kinds = template
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.content_item_kinds.as_ref());
     let content = content
         .into_iter()
-        .flat_map(|content| split_oversized_text_content(&template, content))
+        .enumerate()
+        .flat_map(|(index, content)| {
+            let kind = content_item_kinds.map(|kinds| {
+                kinds
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| ContentItemKind("unknown".to_string()))
+            });
+            split_oversized_text_content(&template, content)
+                .into_iter()
+                .map(move |content| MessageContent {
+                    content,
+                    kind: kind.clone(),
+                })
+        })
         .collect::<Vec<_>>();
     let empty_item_bytes = estimate_response_item_model_visible_bytes(&template.item(Vec::new()));
     let content_groups =
         group_content_by_model_visible_bytes(content, empty_item_bytes, |content| {
-            estimate_response_item_model_visible_bytes(&template.item(vec![content.clone()]))
+            estimate_response_item_model_visible_bytes(
+                &template.item(vec![content.content.clone()]),
+            )
         });
     template.into_items(content_groups)
 }
@@ -237,23 +272,6 @@ fn group_content_by_model_visible_bytes<T>(
         content_groups.push(current_group);
     }
     content_groups
-}
-
-fn build_text_message(role: &str, text_sections: Vec<String>) -> Option<ResponseItem> {
-    if text_sections.is_empty() {
-        return None;
-    }
-
-    Some(ResponseItem::Message {
-        id: None,
-        role: role.to_string(),
-        content: text_sections
-            .into_iter()
-            .map(|text| ContentItem::InputText { text })
-            .collect(),
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    })
 }
 
 fn split_oversized_text_content(
@@ -356,4 +374,34 @@ fn split_oversized_agent_text_content(
         remaining = &remaining[end..];
     }
     chunks
+}
+
+pub(crate) fn merge_contextual_fragments(
+    fragments: Vec<Box<dyn ContextualUserFragment>>,
+) -> Vec<ResponseItem> {
+    let mut messages: Vec<(&str, MessageGroup, Vec<RenderedFragment>)> =
+        Vec::with_capacity(fragments.len());
+    for fragment in fragments {
+        let group = if fragment.requires_separate_message() {
+            MessageGroup::Standalone
+        } else {
+            MessageGroup::Mergeable
+        };
+        let rendered = fragment.render_fragment();
+        let role = rendered.role();
+        match messages.last_mut() {
+            Some((previous_role, previous_group, rendered_fragments))
+                if *previous_role == role
+                    && *previous_group == MessageGroup::Mergeable
+                    && group == MessageGroup::Mergeable =>
+            {
+                rendered_fragments.push(rendered);
+            }
+            _ => messages.push((role, group, vec![rendered])),
+        }
+    }
+    messages
+        .into_iter()
+        .filter_map(|(_, _, fragments)| build_rendered_message(fragments))
+        .collect()
 }

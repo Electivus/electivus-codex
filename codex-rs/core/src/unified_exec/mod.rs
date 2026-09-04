@@ -2,6 +2,7 @@
 //!
 //! Responsibilities
 //! - Manages interactive processes (create, reuse, buffer output with caps).
+//! - Supports completion-only calls that terminate on timeout or cancellation.
 //! - Uses the shared ToolOrchestrator to handle approval, sandbox selection, and
 //!   retry semantics in a single, descriptive flow.
 //! - Spawns the PTY from a sandbox-transformed `ExecRequest`; on sandbox denial,
@@ -35,6 +36,7 @@ use codex_utils_path_uri::PathUri;
 use rand::Rng;
 use rand::rng;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::sandboxing::SandboxPermissions;
 use crate::session::session::Session;
@@ -48,10 +50,12 @@ use codex_core_plugins::PluginMetricsSidecar;
 mod async_watcher;
 mod errors;
 mod head_tail_buffer;
+mod oneshot;
 mod process;
 mod process_manager;
 mod process_state;
 mod shell_snapshot;
+mod stdin_approval;
 
 pub(crate) fn set_deterministic_process_ids_for_tests(enabled: bool) {
     process_manager::set_deterministic_process_ids_for_tests(enabled);
@@ -63,6 +67,8 @@ pub(crate) use process::NoopSpawnLifecycle;
 pub(crate) use process::SpawnLifecycle;
 pub(crate) use process::SpawnLifecycleHandle;
 pub(crate) use process::UnifiedExecProcess;
+pub(crate) use stdin_approval::TerminalPermissions;
+pub(crate) use stdin_approval::TerminalSandboxSource;
 
 pub(crate) const DEFAULT_MAX_OUTPUT_TOKENS: usize = 10_000;
 pub(crate) const UNIFIED_EXEC_OUTPUT_MAX_BYTES: usize = 1024 * 1024; // 1 MiB
@@ -72,14 +78,21 @@ pub(crate) const MAX_UNIFIED_EXEC_PROCESSES: usize = 64;
 pub(crate) struct UnifiedExecContext {
     pub session: Arc<Session>,
     pub step_context: Arc<StepContext>,
+    pub cancellation_token: CancellationToken,
     pub call_id: String,
 }
 
 impl UnifiedExecContext {
-    pub fn new(session: Arc<Session>, step_context: Arc<StepContext>, call_id: String) -> Self {
+    pub fn new(
+        session: Arc<Session>,
+        step_context: Arc<StepContext>,
+        cancellation_token: CancellationToken,
+        call_id: String,
+    ) -> Self {
         Self {
             session,
             step_context,
+            cancellation_token,
             call_id,
         }
     }
@@ -167,6 +180,8 @@ struct ProcessEntry {
     initial_exec_command_active: Arc<std::sync::atomic::AtomicBool>,
     hook_command: String,
     tty: bool,
+    environment_id: String,
+    permissions: TerminalPermissions,
     network_approval: Option<DeferredNetworkApproval>,
     session: Weak<Session>,
     last_used: tokio::time::Instant,

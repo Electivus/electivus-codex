@@ -1,5 +1,9 @@
+//! Model history and bounded original evidence for approval review.
+//! Compaction replaces only model history; explicit resets also replace retained evidence.
+
 use crate::context::ContextualUserFragment;
 use crate::context::ModelSwitchInstructions;
+use crate::context::world_state::PersistentModeState;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::normalize;
@@ -7,18 +11,24 @@ use crate::context_manager::replay::MAX_REPLAY_HISTORY_BYTES;
 use crate::context_manager::replay::MAX_REPLAY_HISTORY_ITEMS;
 use crate::context_manager::replay::process_replayed_annotated_item;
 use crate::context_manager::replay::process_replayed_item;
-use crate::context_manager::replay::truncate_output_item;
 use crate::event_mapping::has_non_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_user_message_content;
 use crate::session::turn_context::TurnContext;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_context_fragments::set_annotated_content;
+use codex_context_fragments::to_annotated_content;
 use codex_extension_api::ConversationHistorySnapshot;
+use codex_guardian_context::SectionHistory;
+use codex_guardian_context::TranscriptHistory;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -27,12 +37,18 @@ use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::WorldStateItem;
 use codex_utils_audio::estimate_audio_token_count;
+use codex_utils_cache::BlockingLruCache;
+use codex_utils_cache::sha1_digest;
 use codex_utils_output_truncation::TruncationPolicy;
+use codex_utils_output_truncation::approx_bytes_for_tokens;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::truncate_function_output_items_with_policy;
+use codex_utils_output_truncation::truncate_function_output_payload as truncate_function_output_payload_in_place;
 use codex_utils_output_truncation::truncate_text;
+use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 pub(crate) use codex_model_context::estimate_response_item_token_count as estimate_item_token_count;
 
@@ -42,8 +58,12 @@ pub(crate) struct ContextManager {
     /// The oldest items are at the beginning of the vector. Snapshots share the vector until a
     /// caller needs to mutate it, avoiding deep copies for read-only history consumers.
     items: Arc<Vec<ResponseItemEnvelope>>,
+    /// Starts at the first compaction; ordinary history snapshots need no second payload copy.
+    review_history: Option<TranscriptHistory>,
     /// Bumped whenever history is rewritten, such as compaction or rollback.
     history_version: u64,
+    /// Monotonic user-input/reset revision, independent of compaction's history generation.
+    user_message_revision: u64,
     token_info: Option<TokenUsageInfo>,
     /// Reference context snapshot used for diffing and producing model-visible
     /// settings update items.
@@ -68,9 +88,38 @@ pub(crate) struct ContextManager {
 
 struct SharedConversationHistory {
     items: Arc<Vec<ResponseItemEnvelope>>,
+    review_history: Option<TranscriptHistory>,
+    history_version: u64,
+    user_message_revision: u64,
+}
+
+pub(crate) enum HistoryReplacement {
+    Compaction,
+    ReplayedReset,
 }
 
 impl ConversationHistorySnapshot for SharedConversationHistory {
+    fn review_items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
+        match &self.review_history {
+            Some(history) => history.items(),
+            None => self.items(),
+        }
+    }
+
+    fn review_history_version(&self) -> u64 {
+        self.review_history
+            .as_ref()
+            .map_or(self.history_version, TranscriptHistory::generation)
+    }
+
+    fn history_version(&self) -> u64 {
+        self.history_version
+    }
+
+    fn user_message_revision(&self) -> u64 {
+        self.user_message_revision
+    }
+
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
         Box::new(
             self.items
@@ -91,7 +140,9 @@ impl ContextManager {
     pub(crate) fn new() -> Self {
         Self {
             items: Arc::new(Vec::new()),
+            review_history: None,
             history_version: 0,
+            user_message_revision: 0,
             token_info: TokenUsageInfo::new_or_append(
                 &None, &None, /*model_context_window*/ None,
             ),
@@ -105,6 +156,9 @@ impl ContextManager {
     pub(crate) fn conversation_history_snapshot(&self) -> Arc<dyn ConversationHistorySnapshot> {
         Arc::new(SharedConversationHistory {
             items: Arc::clone(&self.items),
+            review_history: self.review_history.clone(),
+            history_version: self.history_version,
+            user_message_revision: self.user_message_revision,
         })
     }
 
@@ -165,7 +219,7 @@ impl ContextManager {
         self.record_items_with_metadata(items.into_iter().map(|item| (item, None)), policy);
     }
 
-    /// Records history envelopes while preserving their history-only metadata.
+    /// Records output while preserving its history-only metadata.
     pub(crate) fn record_annotated_items(
         &mut self,
         items: &[ResponseItemEnvelope],
@@ -190,11 +244,34 @@ impl ContextManager {
                 continue;
             }
 
-            let processed = ResponseItemEnvelope {
-                item: Self::process_item(item, policy),
+            let mut processed = ResponseItemEnvelope {
+                item: item.clone(),
                 metadata: metadata.cloned(),
             };
+            if let ResponseItem::FunctionCallOutput { output, .. }
+            | ResponseItem::CustomToolCallOutput { output, .. } = &mut processed.item
+            {
+                // The override already includes the tool's serialization allowance.
+                let policy = metadata
+                    .and_then(|metadata| metadata.fallback_token_limit_override)
+                    .map(TruncationPolicy::Tokens)
+                    .unwrap_or(policy * 1.2);
+                truncate_function_output_payload_in_place(
+                    output,
+                    policy,
+                    estimate_audio_token_count,
+                );
+            }
+            if let Some(review_history) = &mut self.review_history
+                && !matches!(item, ResponseItem::Message { role, content, .. }
+                if role == "user" && is_contextual_user_message_content(content))
+            {
+                review_history.record(&processed.item);
+            }
             Arc::make_mut(&mut self.items).push(processed);
+            if crate::context::is_user_authorization_message(item) {
+                self.user_message_revision = self.user_message_revision.saturating_add(1);
+            }
         }
     }
 
@@ -262,8 +339,10 @@ impl ContextManager {
     // Estimate token usage using byte-based heuristics from the truncation helpers.
     // This is a coarse lower bound, not a tokenizer-accurate count.
     pub(crate) fn estimate_token_count(&self, turn_context: &TurnContext) -> Option<i64> {
-        let model_info = &turn_context.model_info;
-        let personality = turn_context.personality.or(turn_context.config.personality);
+        let model_info = &turn_context.model_info();
+        let personality = turn_context
+            .personality()
+            .or(turn_context.config.personality);
         let base_instructions = BaseInstructions {
             text: model_info.get_model_instructions(personality),
             provenance: None,
@@ -310,6 +389,32 @@ impl ContextManager {
     }
 
     pub(crate) fn replace_annotated(&mut self, items: Vec<ResponseItemEnvelope>) {
+        self.user_message_revision = self.user_message_revision.saturating_add(1);
+        if let Some(review_history) = &mut self.review_history {
+            review_history.reset(items.iter().map(|item| &item.item).filter(|item| {
+                !matches!(item, ResponseItem::Message { role, content, .. }
+                    if role == "user" && is_contextual_user_message_content(content))
+            }));
+        }
+        self.items = Arc::new(items);
+        self.history_version = self.history_version.saturating_add(1);
+        self.world_state_baseline = None;
+        self.replay_prefix_items = 0;
+        self.replayed_history = false;
+    }
+
+    /// Compaction changes the model's history without changing the user's authorization.
+    pub(crate) fn replace_compacted(&mut self, items: Vec<ResponseItemEnvelope>) {
+        if self.review_history.is_none() {
+            let mut retained = TranscriptHistory::new(self.history_version.saturating_add(1));
+            for item in self.raw_items().filter(|item| {
+                !matches!(item, ResponseItem::Message { role, content, .. }
+                    if role == "user" && is_contextual_user_message_content(content))
+            }) {
+                retained.record(item);
+            }
+            self.review_history = Some(retained);
+        }
         self.items = Arc::new(items);
         self.history_version = self.history_version.saturating_add(1);
         self.world_state_baseline = None;
@@ -455,17 +560,21 @@ impl ContextManager {
         {
             retained_items.retain_mut(|item| {
                 if item.turn_id() == Some(first_turn_id)
-                    && let ResponseItem::Message { role, content, .. } = &mut item.item
-                    && role == "developer"
+                    && matches!(&item.item, ResponseItem::Message { role, .. } if role == "developer")
                 {
+                    let Some(mut content) = to_annotated_content(&mut item.item) else {
+                        return false;
+                    };
                     content.retain(|content| {
+                        // Rebuild these from the next step's model and effort after rollback.
                         !matches!(
-                            content,
+                            content.content(),
                             ContentItem::InputText { text }
                                 if ModelSwitchInstructions::matches_text(text)
+                                    || PersistentModeState::matches_text(text)
                         )
                     });
-                    !content.is_empty()
+                    !content.is_empty() && set_annotated_content(&mut item.item, content).is_some()
                 } else {
                     true
                 }
@@ -590,30 +699,6 @@ impl ContextManager {
         normalize::remove_orphan_outputs(items);
         enforce_replay_limits(items);
         Arc::unwrap_or_clone(self.items)
-    }
-
-    fn process_item(item: &ResponseItem, policy: TruncationPolicy) -> ResponseItem {
-        let policy_with_serialization_budget = policy * 1.2;
-        match item {
-            ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. } => {
-                truncate_output_item(item, policy_with_serialization_budget)
-            }
-            ResponseItem::AdditionalTools { .. }
-            | ResponseItem::Message { .. }
-            | ResponseItem::AgentMessage { .. }
-            | ResponseItem::Reasoning { .. }
-            | ResponseItem::LocalShellCall { .. }
-            | ResponseItem::FunctionCall { .. }
-            | ResponseItem::ToolSearchCall { .. }
-            | ResponseItem::ToolSearchOutput { .. }
-            | ResponseItem::WebSearchCall { .. }
-            | ResponseItem::ImageGenerationCall { .. }
-            | ResponseItem::CustomToolCall { .. }
-            | ResponseItem::Compaction { .. }
-            | ResponseItem::CompactionTrigger { .. }
-            | ResponseItem::ContextCompaction { .. }
-            | ResponseItem::Other => item.clone(),
-        }
     }
 
     /// Walk backward from a rollback cut and trim contiguous pre-turn context-update items.
@@ -745,6 +830,97 @@ fn is_api_message(message: &ResponseItem) -> bool {
         | ResponseItem::ContextCompaction { .. } => true,
         ResponseItem::CompactionTrigger { .. } => false,
         ResponseItem::Other => false,
+    }
+}
+
+/// Approximate model-visible byte cost for one image input.
+///
+/// The shared model-context estimator owns full response-item accounting. This
+/// helper remains here because remote compaction image budgeting needs the
+/// decoded original-detail image estimate.
+const RESIZED_IMAGE_BYTES_ESTIMATE: i64 = 7373;
+const ORIGINAL_IMAGE_PATCH_SIZE: u32 = 32;
+const ORIGINAL_IMAGE_MAX_PATCHES: usize = 10_000;
+const ORIGINAL_IMAGE_ESTIMATE_CACHE_SIZE: usize = 32;
+
+static ORIGINAL_IMAGE_ESTIMATE_CACHE: LazyLock<BlockingLruCache<[u8; 20], Option<i64>>> =
+    LazyLock::new(|| {
+        BlockingLruCache::new(
+            NonZeroUsize::new(ORIGINAL_IMAGE_ESTIMATE_CACHE_SIZE).unwrap_or(NonZeroUsize::MIN),
+        )
+    });
+
+fn parse_base64_image_data_url(url: &str) -> Option<&str> {
+    parse_base64_data_url(url, "image/")
+}
+
+fn parse_base64_data_url<'a>(url: &'a str, media_type_prefix: &str) -> Option<&'a str> {
+    if !url
+        .get(.."data:".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+    {
+        return None;
+    }
+    let comma_index = url.find(',')?;
+    let metadata = &url[..comma_index];
+    let payload = &url[comma_index + 1..];
+    let metadata_without_scheme = &metadata["data:".len()..];
+    let mut metadata_parts = metadata_without_scheme.split(';');
+    let mime_type = metadata_parts.next().unwrap_or_default();
+    let has_base64_marker = metadata_parts.any(|part| part.eq_ignore_ascii_case("base64"));
+    if !mime_type
+        .get(..media_type_prefix.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(media_type_prefix))
+        || !has_base64_marker
+    {
+        return None;
+    }
+    Some(payload)
+}
+
+fn estimate_original_image_bytes(image_url: &str) -> Option<i64> {
+    let key = sha1_digest(image_url.as_bytes());
+    ORIGINAL_IMAGE_ESTIMATE_CACHE.get_or_insert_with(key, || {
+        let payload = match parse_base64_image_data_url(image_url) {
+            Some(payload) => payload,
+            None => {
+                tracing::trace!("skipping original-detail estimate for non-base64 image data URL");
+                return None;
+            }
+        };
+        let bytes = match BASE64_STANDARD.decode(payload) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::trace!("failed to decode original-detail image payload: {error}");
+                return None;
+            }
+        };
+        let dynamic = match image::load_from_memory(&bytes) {
+            Ok(dynamic) => dynamic,
+            Err(error) => {
+                tracing::trace!("failed to decode original-detail image bytes: {error}");
+                return None;
+            }
+        };
+        let width = i64::from(dynamic.width());
+        let height = i64::from(dynamic.height());
+        let patch_size = i64::from(ORIGINAL_IMAGE_PATCH_SIZE);
+        let patches_wide = width.saturating_add(patch_size.saturating_sub(1)) / patch_size;
+        let patches_high = height.saturating_add(patch_size.saturating_sub(1)) / patch_size;
+        let patch_count = patches_wide.saturating_mul(patches_high);
+        let patch_count = usize::try_from(patch_count).unwrap_or(usize::MAX);
+        let patch_count = patch_count.min(ORIGINAL_IMAGE_MAX_PATCHES);
+        Some(i64::try_from(approx_bytes_for_tokens(patch_count)).unwrap_or(i64::MAX))
+    })
+}
+
+/// Shared image estimate, excluding the data URL prefix and message framing.
+pub(crate) fn estimate_image_bytes(image_url: &str, detail: Option<ImageDetail>) -> i64 {
+    match detail {
+        Some(ImageDetail::Original) => {
+            estimate_original_image_bytes(image_url).unwrap_or(RESIZED_IMAGE_BYTES_ESTIMATE)
+        }
+        _ => RESIZED_IMAGE_BYTES_ESTIMATE,
     }
 }
 

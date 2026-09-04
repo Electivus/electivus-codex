@@ -48,7 +48,10 @@ impl ToolExecutor<ToolInvocation> for TestHandler {
         })
     }
 
-    fn handle(&self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async {
             Ok(
                 Box::new(FunctionToolOutput::from_text("ok".to_string(), Some(true)))
@@ -97,6 +100,7 @@ impl codex_code_mode::CodeModeSession for MissingCellCodeModeSession {
         Box::pin(async move {
             Ok(codex_code_mode::WaitOutcome::MissingCell(
                 codex_code_mode::RuntimeResponse::Result {
+                    code_mode_host_duration: None,
                     error_text: Some(format!("exec cell {cell_id} not found")),
                     cell_id,
                     content_items: Vec::new(),
@@ -277,8 +281,11 @@ async fn dispatch_lifecycle_trace_records_incompatible_payload_failures() -> any
 async fn missing_code_mode_wait_traces_only_the_wait_tool_call() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let (mut session, turn) = make_session_and_context().await;
-    session.services.code_mode_service =
-        CodeModeService::new(Arc::new(MissingCellCodeModeSessionProvider));
+    session.services.code_mode_service = CodeModeService::new(
+        Arc::new(MissingCellCodeModeSessionProvider),
+        &turn.config.code_mode,
+        session.services.executed_tool_calls.clone(),
+    );
     attach_test_trace(&mut session, &turn, temp.path())?;
 
     let registry = ToolRegistry::with_handler_for_test(Arc::new(CodeModeWaitHandler::default()));
