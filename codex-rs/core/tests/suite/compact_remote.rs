@@ -1440,12 +1440,12 @@ async fn remote_compact_v2_charges_retained_images_to_token_budget(
     )
     .await?;
     let codex = &harness.test().codex;
-    // Each original-detail image costs 10,000 estimated patch tokens.
+    // Each original-detail image costs 9,801 estimated patch tokens.
     let image_inputs = (1..=8)
         .map(|number| {
             let image = image::ImageBuffer::from_pixel(
-                /*width*/ 3200,
-                /*height*/ 3200,
+                /*width*/ 3168,
+                /*height*/ 3168,
                 image::Luma([number as u8]),
             );
             let mut bytes = std::io::Cursor::new(Vec::new());

@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use codex_protocol::ThreadId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
-use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
@@ -13,7 +12,6 @@ use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::SandboxPolicy;
@@ -21,7 +19,6 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::TurnCompleteEvent;
-use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
@@ -568,29 +565,12 @@ fn completed_user_message(thread_id: ThreadId, turn_id: &str) -> RolloutItem {
 }
 
 fn turn_context(cwd: &Path, turn_id: &str) -> RolloutItem {
-    RolloutItem::TurnContext(TurnContextItem {
-        turn_id: Some(turn_id.to_string()),
-        cwd: PathUri::from_host_native_path(cwd).expect("absolute contract cwd"),
-        workspace_roots: None,
-        current_date: None,
-        timezone: None,
-        approval_policy: AskForApproval::Never,
-        approvals_reviewer: None,
-        sandbox_policy: SandboxPolicy::new_read_only_policy().into(),
-        permission_profile: None,
-        active_permission_profile: None,
-        network: None,
-        file_system_sandbox_policy: None,
-        model: "contract-model".to_string(),
-        comp_hash: None,
-        personality: None,
-        collaboration_mode: None,
-        multi_agent_version: None,
-        multi_agent_mode: None,
-        realtime_active: None,
-        effort: None,
-        summary: ReasoningSummary::Auto,
-    })
+    RolloutItem::TurnContext(crate::test_support::turn_context_item(
+        turn_id,
+        PathUri::from_host_native_path(cwd).expect("absolute contract cwd"),
+        SandboxPolicy::new_read_only_policy(),
+        "contract-model",
+    ))
 }
 
 fn create_thread_params(

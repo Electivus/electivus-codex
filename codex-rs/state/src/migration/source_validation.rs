@@ -21,12 +21,17 @@ pub(super) async fn validate_database_schema(
     pool: &sqlx::SqlitePool,
     tables: &[String],
 ) -> anyhow::Result<()> {
+    let thread_history_version = crate::migrations::THREAD_HISTORY_MIGRATOR
+        .migrations
+        .last()
+        .context("thread history migrator must contain at least one migration")?
+        .version;
     let (version, required_tables) = match label {
-        "state DB" => (53, STATE_TABLES),
+        "state DB" => (55, STATE_TABLES),
         "log DB" => (2, "_sqlx_migrations,logs"),
         "goals DB" => (3, GOALS_TABLES),
         "memories DB" => (1, "_sqlx_migrations,jobs,stage1_outputs"),
-        "thread history DB" => (4, THREAD_HISTORY_TABLES),
+        "thread history DB" => (thread_history_version, THREAD_HISTORY_TABLES),
         "queue DB" => (2, QUEUE_TABLES),
         _ => anyhow::bail!("unknown SQLite database `{label}`"),
     };
@@ -34,6 +39,12 @@ pub(super) async fn validate_database_schema(
         required_tables
             .split(',')
             .all(|required| tables.iter().any(|table| table == required)),
+        "SQLite {label} has an incompatible schema; restore a current, complete source database before retrying"
+    );
+    anyhow::ensure!(
+        label != "thread history DB"
+            || thread_history_version < 5
+            || tables.iter().any(|table| table == "thread_realtime_items"),
         "SQLite {label} has an incompatible schema; restore a current, complete source database before retrying"
     );
     let current_version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")

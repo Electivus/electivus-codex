@@ -271,7 +271,7 @@ impl Serialize for ResponsesApiTools {
     }
 }
 
-#[derive(Debug, Serialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Clone, PartialEq, Default)]
 pub struct ResponsesApiRequest {
     pub model: String,
     #[serde(skip_serializing_if = "String::is_empty")]

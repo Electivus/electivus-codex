@@ -413,16 +413,11 @@ async fn snapshot(
 }
 
 fn session_meta_id(lines: &[RolloutLine]) -> Option<ThreadId> {
-    lines.iter().find_map(|line| match &line.item {
-        RolloutItem::SessionMeta(meta) => Some(meta.meta.id),
-        RolloutItem::ResponseItem(_)
-        | RolloutItem::InterAgentCommunication(_)
-        | RolloutItem::InterAgentCommunicationMetadata { .. }
-        | RolloutItem::Compacted(_)
-        | RolloutItem::TurnContext(_)
-        | RolloutItem::WorldState(_)
-        | RolloutItem::SecurityRiskScore(_)
-        | RolloutItem::EventMsg(_) => None,
+    lines.iter().find_map(|line| {
+        let RolloutItem::SessionMeta(meta) = &line.item else {
+            return None;
+        };
+        Some(meta.meta.id)
     })
 }
 
@@ -535,16 +530,11 @@ async fn read_thread_snapshot(
         canonical_history
             .lines
             .iter()
-            .find_map(|line| match &line.item {
-                RolloutItem::SessionMeta(meta) => Some(&meta.meta),
-                RolloutItem::ResponseItem(_)
-                | RolloutItem::InterAgentCommunication(_)
-                | RolloutItem::InterAgentCommunicationMetadata { .. }
-                | RolloutItem::Compacted(_)
-                | RolloutItem::TurnContext(_)
-                | RolloutItem::WorldState(_)
-                | RolloutItem::SecurityRiskScore(_)
-                | RolloutItem::EventMsg(_) => None,
+            .find_map(|line| {
+                let RolloutItem::SessionMeta(meta) = &line.item else {
+                    return None;
+                };
+                Some(&meta.meta)
             })
             .and_then(|meta| meta.dynamic_tools.clone())
             .unwrap_or_default()

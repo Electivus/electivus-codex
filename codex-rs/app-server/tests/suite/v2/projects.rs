@@ -110,6 +110,7 @@ async fn projects_list_by_recency_and_preserve_metadata_timestamps() -> Result<(
                         section_id: None,
                         project_id: Some(Some(expected.id.clone())),
                         cwd: None,
+                        project_cwd: None,
                         use_state_db_only: true,
                         search_term: None,
                         parent_thread_id: None,

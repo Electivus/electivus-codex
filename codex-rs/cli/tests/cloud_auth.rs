@@ -40,6 +40,7 @@ async fn cloud_list_only_allows_trusted_credential_destinations() -> Result<()> 
             .env_remove("CODEX_ACCESS_TOKEN")
             .env_remove("OPENAI_API_KEY")
             .env_remove("CODEX_CLOUD_TASKS_MODE")
+            .env_remove("RUST_BACKTRACE")
             .env("NO_PROXY", "127.0.0.1,localhost")
             .env("no_proxy", "127.0.0.1,localhost")
             .timeout(std::time::Duration::from_secs(15));

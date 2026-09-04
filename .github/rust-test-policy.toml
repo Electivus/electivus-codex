@@ -243,3 +243,9 @@ packages = [
 'codex-rs/utils/absolute-path/src/lib.rs::from_absolute_path_with_removed_current_dir_child::ignore' = "helper-process"
 'codex-rs/windows-sandbox-rs/src/unified_exec/tests.rs::legacy_tty_cmd_default_desktop_emits_output_and_accepts_input::ignore="TODO: legacy ConPTY cmd.exe exits with STATUS_DLL_INIT_FAILED in CI"' = "out-of-boundary-platform"
 'codex-rs/windows-sandbox-rs/src/unified_exec/tests.rs::legacy_tty_cmd_emits_output_and_accepts_input::ignore="TODO: legacy ConPTY cmd.exe exits with STATUS_DLL_INIT_FAILED in CI"' = "out-of-boundary-platform"
+
+# Exact classifications for ignores expected from an in-flight upstream sync.
+# The tracking URL keeps absent entries attributable until the source arrives.
+[pending_upstream_ignores]
+"codex-rs/app-server/tests/suite/v2/turn_start.rs::managed_network_sandbox_probe::ignore=\"invoked through app-server's managed network sandbox\"" = "helper-process|https://github.com/Electivus/electivus-codex/pull/207"
+'codex-rs/linux-sandbox/tests/suite/managed_proxy.rs::handoff_client::ignore="invoked inside the managed proxy sandbox"' = "helper-process|https://github.com/Electivus/electivus-codex/pull/207"

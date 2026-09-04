@@ -268,12 +268,14 @@ V8 topology validator instead of expanding the fork's Full Rust platform scope.
 
 Every full-Rust nextest shard treats its JUnit XML as a required result, including when the nextest command fails.
 `check_nextest_junit.py` fails closed on missing, malformed, or wrong-root reports; nonzero failure/error counts;
-testcase failures; and the retry elements `flakyFailure`, `flakyError`, `rerunFailure`, and `rerunError`, with or
-without XML namespaces. A retry-assisted pass therefore stays red while logs and JUnit artifacts are uploaded.
-The PostgreSQL archive consumer uses the same checker and explicit outcome composition as the four ordinary
-consumers, and additionally requires exactly 110 executed JUnit testcases. Producer Cargo timings and all five
-consumers' JUnit durations and failure diagnostics remain available as artifacts and job logs. The former
-standalone PostgreSQL Merge-gate job is retired because eligible changes now reuse this x64 Cargo archive path.
+and testcase failures. The four ordinary shards and PostgreSQL archive consumer allow the retry elements
+`flakyFailure`, `flakyError`, `rerunFailure`, and `rerunError`, with or without XML namespaces, when the test
+ultimately passes within nextest's configured retry limit. Such a recovered retry stays visible in the logs and
+uploaded JUnit artifact without making the job red. The PostgreSQL consumer additionally requires exactly 110
+executed JUnit testcases. Producer Cargo timings and all five consumers' JUnit durations and failure diagnostics
+remain available as artifacts and job logs. The former standalone PostgreSQL Merge-gate job is retired because
+eligible changes now reuse this x64 Cargo archive path. The separate test-reactivation certification below remains
+retry-free and treats retry evidence as a failure.
 
 `rust-test-policy.toml` inventories tracked Rust test ignores by source path, following test function, and normalized
 attribute or condition. New, changed, duplicate, stale, or unclassified occurrences fail repository checks. Review
@@ -324,6 +326,11 @@ The allowed ignore categories have these narrow boundaries:
 | `specialized-environment`  | PostgreSQL 18 or another named process-contract environment. |
 | `pending-behavior-change`  | Only two inherited compaction follow-up expectations.        |
 | `temporary-certification`  | Only the two #89 tests named in `rust-test-policy.toml`.     |
+
+`pending_upstream_ignores` preclassifies exact ignore identities that are expected from an
+in-flight upstream Synchronization but do not exist on the frozen fork baseline yet. Each value
+uses `<category>|<GitHub issue or pull request URL>`. Pending entries classify the ignore when it
+arrives, must use an ordinary allowed category, and cannot duplicate an active `ignores` entry.
 
 `quarantined-checks.toml` starts empty. Each record needs an exact `check_identity`, narrow `scope`, evidence,
 justification, an existing workflow and top-level job, an exact GitHub issue or pull-request URL, and TOML dates.

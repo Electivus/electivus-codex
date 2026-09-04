@@ -48,6 +48,7 @@ class TestCertificationTopologyTests(unittest.TestCase):
             ("manifest lifecycle", 1, verifier.replace("issues.extend(verify_retained_reports(manifest, args.manifest.parent))", "pass")),
             ("temporary policy", 3, policy.replace("stale Rust ignore classification", "stale entry ignored")),
             ("ordinary reactivation path", 5, platform.replace('--partition "hash:${{ matrix.shard }}/4"', '--run-ignored=only\n            --partition "hash:${{ matrix.shard }}/4"', 1)),
+            ("ordinary reactivation path", 5, platform.replace("--allow-retries", "--reject-skipped", 1)),
             ("repository check", 2, repo_checks.replace("check_test_certification_topology.py", "missing_certification_topology.py")),
         )
         for expected, index, changed in cases:

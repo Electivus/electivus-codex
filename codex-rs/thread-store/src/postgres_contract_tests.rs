@@ -40,6 +40,8 @@ use crate::UpdateThreadMetadataParams;
 const TEST_DATABASE_URL_ENV: &str = "CODEX_TEST_POSTGRES_URL";
 static NEXT_SCHEMA_ID: AtomicU64 = AtomicU64::new(0);
 
+// The destination is `String` before the catch-up and `SanitizedGitUrl` after it.
+#[allow(clippy::useless_conversion)]
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
 async fn postgres_contract_metadata_updates_and_repairs_from_canonical_history()
@@ -81,7 +83,12 @@ async fn postgres_contract_metadata_updates_and_repairs_from_canonical_history()
                 git_info: Some(GitInfoPatch {
                     sha: Some(Some("abc123".to_string())),
                     branch: Some(Some("main".to_string())),
-                    origin_url: Some(Some("ssh://git@example.com/acme/codex.git".to_string())),
+                    origin_url: Some(Some(
+                        "ssh://git@example.com/acme/codex.git"
+                            .to_string()
+                            .try_into()
+                            .expect("valid contract git origin URL"),
+                    )),
                 }),
                 memory_mode: Some(ThreadMemoryMode::Disabled),
                 ..Default::default()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject failed or retry-assisted nextest JUnit reports."""
+"""Reject failed nextest JUnit reports, optionally allowing recovered retries."""
 
 import argparse
 from pathlib import Path
@@ -19,7 +19,9 @@ def _local_name(tag: str) -> str:
 def inspect_report(
     report: Path,
     expected_testcases: int | None = None,
+    *,
     reject_skipped: bool = False,
+    allow_retries: bool = False,
 ) -> list[str]:
     if not report.is_file():
         return [f"required JUnit report is missing or not a regular file: {report}"]
@@ -54,7 +56,9 @@ def inspect_report(
         identity = f"{classname}::{name}" if classname else name
         for child in element:
             child_name = _local_name(child.tag)
-            signal_elements = RETRY_ELEMENTS | FAILURE_ELEMENTS | (SKIP_ELEMENTS if reject_skipped else set())
+            signal_elements = FAILURE_ELEMENTS | (SKIP_ELEMENTS if reject_skipped else set())
+            if not allow_retries:
+                signal_elements |= RETRY_ELEMENTS
             if child_name not in signal_elements:
                 continue
             kind = "retry" if child_name in RETRY_ELEMENTS else "skip" if child_name in SKIP_ELEMENTS else "failure"
@@ -72,9 +76,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("report", type=Path, help="required nextest JUnit XML")
     parser.add_argument("--expected-testcases", type=int)
     parser.add_argument("--reject-skipped", action="store_true")
+    parser.add_argument(
+        "--allow-retries",
+        action="store_true",
+        help="accept tests that passed within nextest's configured retry limit",
+    )
     args = parser.parse_args(argv)
     report = args.report
-    issues = inspect_report(report, args.expected_testcases, args.reject_skipped)
+    issues = inspect_report(
+        report,
+        args.expected_testcases,
+        reject_skipped=args.reject_skipped,
+        allow_retries=args.allow_retries,
+    )
     if issues:
         print("nextest JUnit policy failed:\n" + "\n".join(f"- {issue}" for issue in issues), file=sys.stderr)
         return 1

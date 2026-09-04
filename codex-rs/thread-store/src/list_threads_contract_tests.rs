@@ -1028,6 +1028,8 @@ async fn update_listing_metadata(
     Ok(())
 }
 
+// The destination is `String` before the catch-up and `SanitizedGitUrl` after it.
+#[allow(clippy::useless_conversion)]
 async fn set_repository_origin(
     store: &dyn ThreadStore,
     thread_id: ThreadId,
@@ -1038,7 +1040,12 @@ async fn set_repository_origin(
             thread_id,
             patch: ThreadMetadataPatch {
                 git_info: Some(crate::GitInfoPatch {
-                    origin_url: Some(Some(origin_url.to_string())),
+                    origin_url: Some(Some(
+                        origin_url
+                            .to_string()
+                            .try_into()
+                            .expect("contract git origin URL should be valid"),
+                    )),
                     ..Default::default()
                 }),
                 ..Default::default()

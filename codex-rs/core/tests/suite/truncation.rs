@@ -868,7 +868,16 @@ async fn call_mcp_echo(
     let call_id = "rmcp-output";
     let server_name = "rmcp";
     let namespace = format!("mcp__{server_name}");
-    let args_json = json!({ "message": "a".repeat(message_bytes) });
+    let args_json = if message_bytes == 0 {
+        json!({ "message": "" })
+    } else {
+        assert_eq!(
+            message_bytes % 2,
+            0,
+            "test messages must have an even byte length"
+        );
+        json!({ "message": "aa", "repeat": message_bytes / 2 })
+    };
 
     mount_sse_once(
         server,

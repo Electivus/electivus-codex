@@ -12,6 +12,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use core_test_support::streaming_sse::StreamingSseChunk;
@@ -227,9 +228,10 @@ async fn compaction_checkpoints_settings_changed_during_its_model_request() -> R
     )
     .await?;
     let expected = test.codex.thread_settings_snapshot().await;
+    let updated_cwd_uri = PathUri::from_abs_path(&updated_cwd_path);
     assert_eq!(
         (&expected.cwd, expected.model.as_str()),
-        (&updated_cwd_path, COMMITTED_MODEL)
+        (&updated_cwd_uri, COMMITTED_MODEL)
     );
     release_compaction.send(()).expect("compaction is waiting");
     wait_for_event(&test.codex, |event| {

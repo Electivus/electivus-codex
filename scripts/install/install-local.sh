@@ -350,10 +350,10 @@ verify_builder_owned_manifest_files() {
 resolve_installer_owned_lockfile() {
   start_supervised_child \
     lockfile \
-    cargo metadata \
-    --manifest-path "$versioned_manifest" \
-    --format-version 1 \
-    --no-deps >/dev/null
+    cargo update \
+    --quiet \
+    --workspace \
+    --manifest-path "$versioned_manifest"
   lockfile_status=0
   wait_for_active_child || lockfile_status=$?
   if [ "$lockfile_status" -ne 0 ]; then
