@@ -2795,7 +2795,6 @@ dependencies = [
  "codex-login",
  "codex-mcp",
  "codex-memories-read",
- "codex-model-context",
  "codex-model-provider",
  "codex-model-provider-info",
  "codex-models-manager",
@@ -3794,21 +3793,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codex-model-context"
-version = "0.0.0"
-dependencies = [
- "base64 0.22.1",
- "codex-protocol",
- "codex-utils-audio",
- "codex-utils-cache",
- "codex-utils-string",
- "image",
- "pretty_assertions",
- "serde_json",
- "tracing",
-]
-
-[[package]]
 name = "codex-model-provider"
 version = "0.0.0"
 dependencies = [
@@ -4399,7 +4383,6 @@ dependencies = [
  "codex-extension-items",
  "codex-git-utils",
  "codex-install-context",
- "codex-model-context",
  "codex-otel",
  "codex-protocol",
  "codex-rollout",

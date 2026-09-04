@@ -174,7 +174,6 @@
       <sourceFolder url="file://$MODULE_DIR$/codex-rs/windows-sandbox-rs/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/codex-rs/ext/history-notes/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/codex-rs/ext/history-notes/tests" isTestSource="true" />
-      <sourceFolder url="file://$MODULE_DIR$/codex-rs/model-context/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/codex-rs/skills/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/codex-rs/utils/pty/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/codex-rs/target" />

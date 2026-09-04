@@ -87,7 +87,7 @@ async fn postgres_contract_latest_model_context_matches_public_store_contract()
 
 #[tokio::test]
 #[ignore = "requires CODEX_TEST_POSTGRES_URL pointing to PostgreSQL 18"]
-async fn postgres_contract_model_context_accepts_large_presentation_rows_only()
+async fn postgres_contract_model_context_preserves_large_rows_and_session_metadata()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = PostgresThreadStoreFixture::new("model_context_item_cap")?;
     fixture.migrate().await?;
@@ -191,18 +191,21 @@ async fn postgres_contract_model_context_accepts_large_presentation_rows_only()
         provenance: None,
     };
     store.create_thread(oversized_session_meta_params).await?;
-    let oversized_session_meta_error = store
+    let oversized_session_meta_context = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id: oversized_session_meta_thread_id,
             include_archived: false,
         })
-        .await
-        .expect_err("oversized base instructions must be rejected");
-    assert!(
-        oversized_session_meta_error
-            .to_string()
-            .contains("an individual model-visible history item exceeds 10000 estimated tokens")
-    );
+        .await?;
+    assert!(matches!(
+        oversized_session_meta_context.items.first(),
+        Some(RolloutItem::SessionMeta(meta))
+            if meta
+                .meta
+                .base_instructions
+                .as_ref()
+                .is_some_and(|instructions| instructions.text.len() == 50_000)
+    ));
 
     let many_tools_thread_id = ThreadId::from_string("0198c4cf-8587-7d32-8d1c-2c14d331f041")?;
     let mut many_tools_params =
@@ -218,18 +221,17 @@ async fn postgres_contract_model_context_accepts_large_presentation_rows_only()
         })
         .collect();
     store.create_thread(many_tools_params).await?;
-    let many_tools_error = store
+    let many_tools_context = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id: many_tools_thread_id,
             include_archived: false,
         })
-        .await
-        .expect_err("oversized dynamic tool metadata must be rejected");
-    assert!(
-        many_tools_error
-            .to_string()
-            .contains("an individual model-visible history item exceeds 10000 estimated tokens")
-    );
+        .await?;
+    assert!(matches!(
+        many_tools_context.items.first(),
+        Some(RolloutItem::SessionMeta(meta))
+            if meta.meta.dynamic_tools.as_ref().is_some_and(|tools| tools.len() == 6_000)
+    ));
 
     pool.close().await;
     fixture.cleanup().await

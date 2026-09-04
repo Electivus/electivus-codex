@@ -1,4 +1,4 @@
-//! Shared estimation of model-visible response item size.
+//! Estimates the model-visible token cost of response items.
 
 use std::num::NonZeroUsize;
 use std::sync::LazyLock;
@@ -14,12 +14,42 @@ use codex_protocol::models::ResponseItem;
 use codex_utils_audio::estimate_audio_token_count;
 use codex_utils_cache::BlockingLruCache;
 use codex_utils_cache::sha1_digest;
+use codex_utils_output_truncation::approx_bytes_for_tokens;
+use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
 
-use codex_utils_string::approx_bytes_for_tokens;
-use codex_utils_string::approx_tokens_from_byte_count;
+fn estimate_reasoning_length(encoded_len: usize) -> usize {
+    encoded_len
+        .saturating_mul(3)
+        .checked_div(4)
+        .unwrap_or(0)
+        .saturating_sub(650)
+}
 
-const RESIZED_IMAGE_BYTES_ESTIMATE: i64 = 7_373;
+fn estimate_encrypted_function_output_length(encoded_len: usize) -> usize {
+    encoded_len.saturating_mul(9).div_ceil(16)
+}
+
+/// Returns the same coarse, model-visible token estimate used for full history estimates.
+///
+/// Ordinary items are JSON-serialized, so callers estimating many items should reuse these
+/// results instead of repeatedly estimating the full history.
+pub(crate) fn estimate_item_token_count(item: &ResponseItem) -> i64 {
+    let model_visible_bytes = estimate_response_item_model_visible_bytes(item);
+    approx_tokens_from_byte_count_i64(model_visible_bytes)
+}
+
+/// Approximate model-visible byte cost for one image input.
+///
+/// The estimator later converts bytes to tokens using a 4-bytes/token heuristic
+/// with ceiling division, so 7,373 bytes maps to approximately 1,844 tokens.
+const RESIZED_IMAGE_BYTES_ESTIMATE: i64 = 7373;
+// See https://platform.openai.com/docs/guides/images-vision#calculating-costs.
+// Use a direct 32px patch count only for `detail: "original"`;
+// all other image inputs continue to use `RESIZED_IMAGE_BYTES_ESTIMATE`.
 const ORIGINAL_IMAGE_PATCH_SIZE: u32 = 32;
+// See https://platform.openai.com/docs/guides/images-vision#model-sizing-behavior.
+// Keep this hard-coded for now; move it into model capabilities if the patch
+// budget starts changing often across model releases.
 const ORIGINAL_IMAGE_MAX_PATCHES: usize = 10_000;
 const ORIGINAL_IMAGE_ESTIMATE_CACHE_SIZE: usize = 32;
 
@@ -30,8 +60,7 @@ static ORIGINAL_IMAGE_ESTIMATE_CACHE: LazyLock<BlockingLruCache<[u8; 20], Option
         )
     });
 
-/// Returns the model-visible byte estimate used to enforce per-item and total request limits.
-pub fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
+fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
     match item {
         item @ ResponseItem::Reasoning {
             encrypted_content: Some(content),
@@ -57,6 +86,9 @@ pub fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
                 audio_data_url_estimate_adjustment(item);
             let (encrypted_payload_bytes, encrypted_replacement_bytes) =
                 encrypted_function_output_estimate_adjustment(item);
+            // Replace raw base64 payload bytes with per-modality estimates.
+            // We intentionally preserve the data URL prefix and JSON
+            // wrapper bytes already included in `raw`.
             let raw = raw
                 .saturating_sub(image_payload_bytes)
                 .saturating_add(image_replacement_bytes)
@@ -68,34 +100,25 @@ pub fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
     }
 }
 
-/// Returns the coarse token estimate corresponding to the model-visible byte estimate.
-pub fn estimate_response_item_token_count(item: &ResponseItem) -> i64 {
-    let bytes = estimate_response_item_model_visible_bytes(item);
-    if bytes <= 0 {
-        return 0;
-    }
-    i64::try_from(approx_tokens_from_byte_count(
-        usize::try_from(bytes).unwrap_or(usize::MAX),
-    ))
-    .unwrap_or(i64::MAX)
-}
-
-fn estimate_reasoning_length(encoded_len: usize) -> usize {
-    encoded_len
-        .saturating_mul(3)
-        .checked_div(4)
-        .unwrap_or(0)
-        .saturating_sub(650)
-}
-
-fn estimate_encrypted_function_output_length(encoded_len: usize) -> usize {
-    encoded_len.saturating_mul(9).div_ceil(16)
-}
-
 fn serialized_response_item_bytes(item: &ResponseItem) -> i64 {
     serde_json::to_string(item)
         .map(|serialized| i64::try_from(serialized.len()).unwrap_or(i64::MAX))
         .unwrap_or(i64::MAX)
+}
+
+/// Returns the base64 payload byte length for inline image data URLs that are
+/// eligible for token-estimation discounting.
+///
+/// We only discount payloads for `data:image/...;base64,...` URLs (case
+/// insensitive markers) and leave everything else at raw serialized size.
+fn parse_base64_image_data_url(url: &str) -> Option<&str> {
+    parse_base64_data_url(url, "image/")
+}
+
+/// Returns the base64 payload for inline audio data URLs that are eligible for
+/// token-estimation discounting.
+fn parse_base64_audio_data_url(url: &str) -> Option<&str> {
+    parse_base64_data_url(url, "audio/")
 }
 
 fn parse_base64_data_url<'a>(url: &'a str, media_type_prefix: &str) -> Option<&'a str> {
@@ -108,6 +131,9 @@ fn parse_base64_data_url<'a>(url: &'a str, media_type_prefix: &str) -> Option<&'
     let comma_index = url.find(',')?;
     let metadata = &url[..comma_index];
     let payload = &url[comma_index + 1..];
+    // Parse the media type and parameters without decoding. This keeps the
+    // estimator cheap while ensuring we only apply modality heuristics to
+    // appropriately typed base64 data URLs.
     let metadata_without_scheme = &metadata["data:".len()..];
     let mut metadata_parts = metadata_without_scheme.split(';');
     let mime_type = metadata_parts.next().unwrap_or_default();
@@ -115,8 +141,10 @@ fn parse_base64_data_url<'a>(url: &'a str, media_type_prefix: &str) -> Option<&'
     if !mime_type
         .get(..media_type_prefix.len())
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(media_type_prefix))
-        || !has_base64_marker
     {
+        return None;
+    }
+    if !has_base64_marker {
         return None;
     }
     Some(payload)
@@ -125,7 +153,7 @@ fn parse_base64_data_url<'a>(url: &'a str, media_type_prefix: &str) -> Option<&'
 fn estimate_original_image_bytes(image_url: &str) -> Option<i64> {
     let key = sha1_digest(image_url.as_bytes());
     ORIGINAL_IMAGE_ESTIMATE_CACHE.get_or_insert_with(key, || {
-        let payload = match parse_base64_data_url(image_url, "image/") {
+        let payload = match parse_base64_image_data_url(image_url) {
             Some(payload) => payload,
             None => {
                 tracing::trace!("skipping original-detail estimate for non-base64 image data URL");
@@ -158,11 +186,16 @@ fn estimate_original_image_bytes(image_url: &str) -> Option<i64> {
     })
 }
 
+/// Scans one response item for discount-eligible inline image data URLs and
+/// returns:
+/// - total base64 payload bytes to subtract from raw serialized size
+/// - total replacement byte estimate for those images
 fn image_data_url_estimate_adjustment(item: &ResponseItem) -> (i64, i64) {
     let mut payload_bytes = 0i64;
     let mut replacement_bytes = 0i64;
+
     let mut accumulate = |image_url: &str, detail: Option<ImageDetail>| {
-        if let Some(payload_len) = parse_base64_data_url(image_url, "image/").map(str::len) {
+        if let Some(payload_len) = parse_base64_image_data_url(image_url).map(str::len) {
             payload_bytes =
                 payload_bytes.saturating_add(i64::try_from(payload_len).unwrap_or(i64::MAX));
             replacement_bytes = replacement_bytes.saturating_add(match detail {
@@ -196,14 +229,19 @@ fn image_data_url_estimate_adjustment(item: &ResponseItem) -> (i64, i64) {
         }
         _ => {}
     }
+
     (payload_bytes, replacement_bytes)
 }
 
+/// Scans one response item for inline base64 audio data URLs and returns:
+/// - total base64 payload bytes to subtract from raw serialized size
+/// - total replacement byte estimate for those audio inputs
 fn audio_data_url_estimate_adjustment(item: &ResponseItem) -> (i64, i64) {
     let mut payload_bytes = 0i64;
     let mut replacement_bytes = 0i64;
+
     let mut accumulate = |audio_url: &str| {
-        if let Some(payload_len) = parse_base64_data_url(audio_url, "audio/").map(str::len) {
+        if let Some(payload_len) = parse_base64_audio_data_url(audio_url).map(str::len) {
             payload_bytes =
                 payload_bytes.saturating_add(i64::try_from(payload_len).unwrap_or(i64::MAX));
             replacement_bytes = replacement_bytes.saturating_add(
@@ -235,6 +273,7 @@ fn audio_data_url_estimate_adjustment(item: &ResponseItem) -> (i64, i64) {
         }
         _ => {}
     }
+
     (payload_bytes, replacement_bytes)
 }
 
@@ -274,9 +313,10 @@ fn encrypted_function_output_estimate_adjustment(item: &ResponseItem) -> (i64, i
         }
         _ => {}
     }
+
     (payload_bytes, replacement_bytes)
 }
 
 #[cfg(test)]
-#[path = "model_visible_tests.rs"]
+#[path = "model_visible_estimator_tests.rs"]
 mod tests;

@@ -7,10 +7,6 @@ use crate::context::world_state::PersistentModeState;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::normalize;
-use crate::context_manager::replay::MAX_REPLAY_HISTORY_BYTES;
-use crate::context_manager::replay::MAX_REPLAY_HISTORY_ITEMS;
-use crate::context_manager::replay::process_replayed_annotated_item;
-use crate::context_manager::replay::process_replayed_item;
 use crate::event_mapping::has_non_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_user_message_content;
@@ -50,7 +46,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::LazyLock;
 
-pub(crate) use codex_model_context::estimate_response_item_token_count as estimate_item_token_count;
+use super::model_visible_estimator::estimate_item_token_count;
 
 /// Transcript of thread history
 #[derive(Debug, Clone, Default)]
@@ -78,12 +74,6 @@ pub(crate) struct ContextManager {
     reference_context_item: Option<TurnContextItem>,
     /// World state most recently appended to model-visible history.
     world_state_baseline: Option<WorldStateSnapshot>,
-    /// Number of leading items restored from durable replay. Request construction may trim only
-    /// this prefix when later model-visible request components consume the remaining budget.
-    replay_prefix_items: usize,
-    /// Whether this history was reconstructed from durable storage, including an empty model-
-    /// visible replay whose metadata must still be bounded at request construction.
-    replayed_history: bool,
 }
 
 struct SharedConversationHistory {
@@ -148,8 +138,6 @@ impl ContextManager {
             ),
             reference_context_item: None,
             world_state_baseline: None,
-            replay_prefix_items: 0,
-            replayed_history: false,
         }
     }
 
@@ -290,21 +278,8 @@ impl ContextManager {
         mut self,
         input_modalities: &[InputModality],
     ) -> Vec<ResponseItemEnvelope> {
-        let contains_only_replay =
-            self.replayed_history && self.replay_prefix_items >= self.items.len();
         self.normalize_history(input_modalities);
-        if contains_only_replay {
-            enforce_replay_limits(Arc::make_mut(&mut self.items));
-        }
         Arc::unwrap_or_clone(self.items)
-    }
-
-    pub(crate) fn replay_prefix_items(&self) -> usize {
-        self.replay_prefix_items.min(self.items.len())
-    }
-
-    pub(crate) fn is_replayed_history(&self) -> bool {
-        self.replayed_history
     }
 
     /// Iterates over raw response items without exposing their history envelopes.
@@ -375,10 +350,7 @@ impl ContextManager {
             // If the removed item participates in a call/output pair, also remove
             // its corresponding counterpart to keep the invariants intact without
             // running a full normalization pass.
-            let removed_items = 1 + usize::from(
-                normalize::remove_corresponding_for(items, &removed.item).is_some(),
-            );
-            self.replay_prefix_items = self.replay_prefix_items.saturating_sub(removed_items);
+            normalize::remove_corresponding_for(items, &removed.item);
             self.world_state_baseline = None;
         }
     }
@@ -399,8 +371,6 @@ impl ContextManager {
         self.items = Arc::new(items);
         self.history_version = self.history_version.saturating_add(1);
         self.world_state_baseline = None;
-        self.replay_prefix_items = 0;
-        self.replayed_history = false;
     }
 
     /// Compaction changes the model's history without changing the user's authorization.
@@ -418,36 +388,15 @@ impl ContextManager {
         self.items = Arc::new(items);
         self.history_version = self.history_version.saturating_add(1);
         self.world_state_baseline = None;
-        self.replay_prefix_items = 0;
-        self.replayed_history = false;
     }
 
     #[cfg(test)]
     pub(crate) fn replace_replayed(&mut self, items: Vec<ResponseItem>) {
         self.replace(items);
-        self.replay_prefix_items = self.items.len();
-        self.replayed_history = true;
     }
 
     pub(crate) fn replace_annotated_replayed(&mut self, items: Vec<ResponseItemEnvelope>) {
         self.replace_annotated(items);
-        self.replay_prefix_items = self.items.len();
-        self.replayed_history = true;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn replace_with_policy(&mut self, items: &[ResponseItem], policy: TruncationPolicy) {
-        let start = items.len().saturating_sub(MAX_REPLAY_HISTORY_ITEMS);
-        let processed = items
-            .get(start..)
-            .unwrap_or_default()
-            .iter()
-            .filter(|item| is_api_message(item))
-            .filter_map(|item| process_replayed_item(item, policy))
-            .collect();
-        self.replace(processed);
-        self.replay_prefix_items = self.items.len();
-        self.replayed_history = true;
     }
 
     pub(crate) fn replace_annotated_with_policy(
@@ -455,23 +404,19 @@ impl ContextManager {
         items: &[ResponseItemEnvelope],
         policy: TruncationPolicy,
     ) {
-        let start = items.len().saturating_sub(MAX_REPLAY_HISTORY_ITEMS);
         let processed = items
-            .get(start..)
-            .unwrap_or_default()
             .iter()
             .filter(|envelope| is_api_message(&envelope.item))
-            .filter_map(|envelope| {
-                process_replayed_annotated_item(&envelope.item, envelope.metadata.as_ref(), policy)
-                    .map(|item| ResponseItemEnvelope {
-                        item,
-                        metadata: envelope.metadata.clone(),
-                    })
+            .map(|envelope| ResponseItemEnvelope {
+                item: Self::process_replayed_annotated_item(
+                    &envelope.item,
+                    envelope.metadata.as_ref(),
+                    policy,
+                ),
+                metadata: envelope.metadata.clone(),
             })
             .collect();
         self.replace_annotated(processed);
-        self.replay_prefix_items = self.items.len();
-        self.replayed_history = true;
     }
 
     pub(crate) fn record_replayed_items<'a>(
@@ -479,15 +424,11 @@ impl ContextManager {
         items: impl IntoIterator<Item = &'a ResponseItem>,
         policy: TruncationPolicy,
     ) {
-        let remaining = MAX_REPLAY_HISTORY_ITEMS.saturating_sub(self.items.len());
         let processed_items = items
             .into_iter()
             .filter(|item| is_api_message(item))
-            .filter_map(|item| process_replayed_item(item, policy).map(ResponseItemEnvelope::new))
-            .take(remaining);
+            .map(|item| ResponseItemEnvelope::new(Self::process_item(item, policy)));
         Arc::make_mut(&mut self.items).extend(processed_items);
-        self.replay_prefix_items = self.items.len();
-        self.replayed_history = true;
     }
 
     pub(crate) fn record_replayed_annotated_items(
@@ -495,21 +436,18 @@ impl ContextManager {
         items: &[ResponseItemEnvelope],
         policy: TruncationPolicy,
     ) {
-        let remaining = MAX_REPLAY_HISTORY_ITEMS.saturating_sub(self.items.len());
         let processed_items = items
             .iter()
             .filter(|envelope| is_api_message(&envelope.item))
-            .filter_map(|envelope| {
-                process_replayed_annotated_item(&envelope.item, envelope.metadata.as_ref(), policy)
-                    .map(|item| ResponseItemEnvelope {
-                        item,
-                        metadata: envelope.metadata.clone(),
-                    })
-            })
-            .take(remaining);
+            .map(|envelope| ResponseItemEnvelope {
+                item: Self::process_replayed_annotated_item(
+                    &envelope.item,
+                    envelope.metadata.as_ref(),
+                    policy,
+                ),
+                metadata: envelope.metadata.clone(),
+            });
         Arc::make_mut(&mut self.items).extend(processed_items);
-        self.replay_prefix_items = self.items.len();
-        self.replayed_history = true;
     }
 
     /// Drop the last `num_turns` instruction turns from this history.
@@ -534,13 +472,9 @@ impl ContextManager {
         }
 
         let snapshot = self.items.clone();
-        let replay_prefix_items = self.replay_prefix_items;
-        let replayed_history = self.replayed_history;
         let user_positions = user_message_positions(&snapshot);
         let Some(&first_instruction_turn_idx) = user_positions.first() else {
             self.replace_annotated(Arc::unwrap_or_clone(snapshot));
-            self.replay_prefix_items = replay_prefix_items.min(self.items.len());
-            self.replayed_history = replayed_history;
             return;
         };
 
@@ -581,10 +515,7 @@ impl ContextManager {
             });
         }
 
-        let retained_replay_items = replay_prefix_items.min(retained_items.len());
         self.replace_annotated(retained_items);
-        self.replay_prefix_items = retained_replay_items;
-        self.replayed_history = replayed_history;
     }
 
     pub(crate) fn update_token_info(
@@ -697,10 +628,75 @@ impl ContextManager {
         let items = Arc::make_mut(&mut self.items);
         normalize::ensure_call_outputs_present(items);
         normalize::remove_orphan_outputs(items);
-        enforce_replay_limits(items);
         Arc::unwrap_or_clone(self.items)
     }
 
+    fn process_replayed_annotated_item(
+        item: &ResponseItem,
+        metadata: Option<&CodexHarnessMetadata>,
+        policy: TruncationPolicy,
+    ) -> ResponseItem {
+        let output_policy = metadata
+            .and_then(|metadata| metadata.fallback_token_limit_override)
+            .map(TruncationPolicy::Tokens)
+            .unwrap_or(policy * 1.2);
+        Self::process_item_with_output_policy(item, output_policy)
+    }
+
+    fn process_item(item: &ResponseItem, policy: TruncationPolicy) -> ResponseItem {
+        Self::process_item_with_output_policy(item, policy * 1.2)
+    }
+
+    fn process_item_with_output_policy(
+        item: &ResponseItem,
+        output_policy: TruncationPolicy,
+    ) -> ResponseItem {
+        match item {
+            ResponseItem::FunctionCallOutput {
+                id,
+                call_id,
+                name,
+                namespace,
+                output,
+                internal_chat_message_metadata_passthrough: metadata,
+            } => ResponseItem::FunctionCallOutput {
+                id: id.clone(),
+                call_id: call_id.clone(),
+                name: name.clone(),
+                namespace: namespace.clone(),
+                output: truncate_function_output_payload(output, output_policy),
+                internal_chat_message_metadata_passthrough: metadata.clone(),
+            },
+            ResponseItem::CustomToolCallOutput {
+                id,
+                call_id,
+                name,
+                output,
+                internal_chat_message_metadata_passthrough: metadata,
+            } => ResponseItem::CustomToolCallOutput {
+                id: id.clone(),
+                call_id: call_id.clone(),
+                name: name.clone(),
+                output: truncate_function_output_payload(output, output_policy),
+                internal_chat_message_metadata_passthrough: metadata.clone(),
+            },
+            ResponseItem::AdditionalTools { .. }
+            | ResponseItem::Message { .. }
+            | ResponseItem::AgentMessage { .. }
+            | ResponseItem::Reasoning { .. }
+            | ResponseItem::LocalShellCall { .. }
+            | ResponseItem::FunctionCall { .. }
+            | ResponseItem::ToolSearchCall { .. }
+            | ResponseItem::ToolSearchOutput { .. }
+            | ResponseItem::WebSearchCall { .. }
+            | ResponseItem::ImageGenerationCall { .. }
+            | ResponseItem::CustomToolCall { .. }
+            | ResponseItem::Compaction { .. }
+            | ResponseItem::CompactionTrigger { .. }
+            | ResponseItem::ContextCompaction { .. }
+            | ResponseItem::Other => item.clone(),
+        }
+    }
     /// Walk backward from a rollback cut and trim contiguous pre-turn context-update items.
     ///
     /// Returns the adjusted cut index after removing contextual developer/user items immediately
@@ -749,46 +745,6 @@ impl ContextManager {
     }
 }
 
-fn enforce_replay_limits(items: &mut Vec<ResponseItemEnvelope>) {
-    while let Some(index) = items.iter().position(|envelope| {
-        estimate_item_token_count(&envelope.item) > 10_000
-            && !matches!(
-                envelope.item,
-                ResponseItem::Message { .. }
-                    | ResponseItem::AgentMessage { .. }
-                    | ResponseItem::Reasoning { .. }
-                    | ResponseItem::Compaction { .. }
-                    | ResponseItem::ContextCompaction { .. }
-            )
-    }) {
-        let removed = items.remove(index);
-        normalize::remove_corresponding_for(items, &removed.item);
-    }
-
-    let mut serialized_bytes = items.iter().fold(0u64, |total, item| {
-        total.saturating_add(serialized_response_item_bytes_u64(&item.item))
-    });
-    while items.len() > MAX_REPLAY_HISTORY_ITEMS || serialized_bytes > MAX_REPLAY_HISTORY_BYTES {
-        let removed = items.remove(0);
-        serialized_bytes =
-            serialized_bytes.saturating_sub(serialized_response_item_bytes_u64(&removed.item));
-        if let Some(corresponding) = normalize::remove_corresponding_for(items, &removed.item) {
-            serialized_bytes = serialized_bytes
-                .saturating_sub(serialized_response_item_bytes_u64(&corresponding.item));
-        }
-    }
-}
-
-fn serialized_response_item_bytes_u64(item: &ResponseItem) -> u64 {
-    u64::try_from(serialized_response_item_bytes(item)).unwrap_or(u64::MAX)
-}
-
-fn serialized_response_item_bytes(item: &ResponseItem) -> i64 {
-    serde_json::to_string(item)
-        .map(|serialized| i64::try_from(serialized.len()).unwrap_or(i64::MAX))
-        .unwrap_or(i64::MAX)
-}
-
 pub(crate) fn truncate_function_output_payload(
     output: &FunctionCallOutputPayload,
     policy: TruncationPolicy,
@@ -808,9 +764,6 @@ pub(crate) fn truncate_function_output_payload(
     }
 }
 
-/// API messages include every non-system item (user/assistant messages, reasoning,
-/// tool calls, tool outputs, shell calls, web-search calls, and image-generation
-/// calls).
 fn is_api_message(message: &ResponseItem) -> bool {
     match message {
         ResponseItem::Message { role, .. } => role.as_str() != "system",

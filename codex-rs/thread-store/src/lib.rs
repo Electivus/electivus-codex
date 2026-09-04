@@ -21,9 +21,6 @@ mod metadata_contract_tests;
 #[path = "model_context_contract_tests.rs"]
 mod model_context_contract_tests;
 mod occurrence_search;
-#[cfg(test)]
-#[path = "paginated_model_context_contract_tests.rs"]
-mod paginated_model_context_contract_tests;
 mod postgres;
 #[cfg(test)]
 #[path = "postgres_contract_tests.rs"]

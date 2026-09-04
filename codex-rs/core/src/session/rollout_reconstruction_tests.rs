@@ -5,7 +5,6 @@ use super::tests::make_session_and_context;
 use super::tests::raw_history_items;
 use crate::context::CompactionSummary;
 use crate::context::ContextualUserFragment;
-use crate::context_manager::estimate_item_token_count;
 use codex_history::CompactedItem;
 use codex_history::InitialHistory;
 use codex_history::ResponseItemEnvelope;
@@ -152,7 +151,7 @@ async fn reconstruct_history_discards_oversized_item_superseded_by_compaction() 
 }
 
 #[tokio::test]
-async fn reconstruct_history_bounds_large_output_in_compaction_replacement() {
+async fn reconstruct_history_applies_output_truncation_to_compaction_replacement() {
     let (session, turn_context) = make_session_and_context().await;
     let call_id = "large-compacted-output";
     let rollout_items = vec![RolloutItem::Compacted(CompactedItem {
@@ -192,7 +191,6 @@ async fn reconstruct_history_bounds_large_output_in_compaction_replacement() {
         .iter()
         .find(|item| matches!(&item.item, ResponseItem::FunctionCallOutput { .. }))
         .expect("compaction replacement should retain the paired output");
-    assert!(estimate_item_token_count(&output.item) <= 10_000);
     let ResponseItem::FunctionCallOutput { output, .. } = &output.item else {
         unreachable!("filtered for function output")
     };
