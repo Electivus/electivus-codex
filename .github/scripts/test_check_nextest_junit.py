@@ -20,16 +20,30 @@ class NextestJunitTests(unittest.TestCase):
             result = policy.main([str(report), *args])
         return result, output.getvalue()
 
-    def test_every_retry_element_is_rejected_by_local_name_and_identity(self) -> None:
+    def test_every_retry_element_is_strict_by_default_but_can_be_allowed(self) -> None:
         for element in policy.RETRY_ELEMENTS:
             with self.subTest(element=element):
-                result, output = self.run_xml(
-                    '<testsuites xmlns:j="urn:jenkins" failures="0" errors="0"><testsuite '
-                    'name="suite"><testcase classname="crate::module" name="recovered">'
-                    f'<j:{element} message="failed first attempt" /></testcase></testsuite></testsuites>'
+                xml = (
+                    '<testsuites xmlns:j="urn:jenkins" failures="0" errors="0">'
+                    '<testsuite name="suite"><testcase classname="crate::module" '
+                    f'name="recovered"><j:{element} message="failed first attempt" />'
+                    "</testcase></testsuite></testsuites>"
                 )
+                result, output = self.run_xml(xml)
                 self.assertEqual(1, result)
                 self.assertIn(f"crate::module::recovered: retry evidence <{element}>", output)
+                allowed_result, allowed_output = self.run_xml(xml, "--allow-retries")
+                self.assertEqual(0, allowed_result)
+                self.assertIn("policy passed", allowed_output)
+
+    def test_allow_retries_does_not_allow_a_final_failure(self) -> None:
+        result, output = self.run_xml(
+            '<testsuites failures="1"><testsuite><testcase name="failed">'
+            '<failure message="still failing" /></testcase></testsuite></testsuites>',
+            "--allow-retries",
+        )
+        self.assertEqual(1, result)
+        self.assertIn("still failing", output)
 
     def test_success_and_invalid_report_shapes(self) -> None:
         cases = (
